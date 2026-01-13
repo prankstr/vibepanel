@@ -321,7 +321,7 @@ impl QuickSettingsWindow {
         outer.set_margin_bottom(4);
         outer.set_margin_start(4);
         outer.set_margin_end(4);
-        SurfaceStyleManager::global().apply_surface_styles(&outer, true);
+        SurfaceStyleManager::global().apply_surface_styles(&outer, true, None);
 
         let content = GtkBox::new(Orientation::Vertical, 0);
         content.add_css_class(qs::CONTROL_CENTER);

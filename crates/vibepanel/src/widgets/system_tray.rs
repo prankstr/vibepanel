@@ -35,6 +35,8 @@ pub struct SystemTrayConfig {
     pub max_icons: usize,
     /// Icon size for pixmap icons (in pixels).
     pub pixmap_icon_size: i32,
+    /// Custom background color for this widget.
+    pub color: Option<String>,
 }
 
 impl Default for SystemTrayConfig {
@@ -48,6 +50,7 @@ impl Default for SystemTrayConfig {
         Self {
             max_icons: DEFAULT_MAX_ICONS,
             pixmap_icon_size,
+            color: None,
         }
     }
 }
@@ -75,6 +78,7 @@ impl WidgetConfig for SystemTrayConfig {
         Self {
             max_icons,
             pixmap_icon_size,
+            color: entry.color.clone(),
         }
     }
 }
@@ -102,7 +106,7 @@ pub struct SystemTrayWidget {
 impl SystemTrayWidget {
     /// Create a new system tray widget.
     pub fn new(config: SystemTrayConfig) -> Self {
-        let base = BaseWidget::new(&[widget::TRAY]);
+        let base = BaseWidget::new(&[widget::TRAY], config.color.clone());
 
         let state = Rc::new(RefCell::new(WidgetState {
             config,
@@ -519,6 +523,15 @@ fn toggle_menu(state: &Rc<RefCell<WidgetState>>, identifier: &str, parent: &Widg
         container.add_css_class(widget::TRAY_MENU);
         container.add_css_class(surface::POPOVER);
         container.add_css_class(surface::WIDGET_MENU_CONTENT);
+
+        // Apply surface styling with color override from widget config
+        let color_override = state_clone.borrow().config.color.clone();
+        SurfaceStyleManager::global().apply_surface_styles(
+            &container,
+            true,
+            color_override.as_deref(),
+        );
+
         popover.set_child(Some(&container));
 
         // Set up menu state

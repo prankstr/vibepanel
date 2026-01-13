@@ -16,6 +16,12 @@ use crate::services::tooltip::TooltipManager;
 use crate::styles::{class, surface};
 use tracing::debug;
 
+// GTK 4.10 deprecated widget-scoped style contexts but didn't provide a replacement.
+// We need widget-scoped CSS for per-widget color customization.
+// This import is used for StyleContextExt::add_provider().
+#[allow(deprecated)]
+use gtk4::prelude::StyleContextExt;
+
 /// Minimum distance from screen edge before switching alignment (in pixels).
 const EDGE_MARGIN: i32 = 8;
 
@@ -95,14 +101,22 @@ pub struct MenuHandle {
     popover: Popover,
     builder: Rc<dyn Fn() -> gtk4::Widget>,
     parent: GtkBox,
+    /// Custom background color inherited from the parent widget.
+    color: Rc<RefCell<Option<String>>>,
 }
 
 impl MenuHandle {
-    fn new(popover: Popover, builder: Rc<dyn Fn() -> gtk4::Widget>, parent: GtkBox) -> Self {
+    fn new(
+        popover: Popover,
+        builder: Rc<dyn Fn() -> gtk4::Widget>,
+        parent: GtkBox,
+        color: Rc<RefCell<Option<String>>>,
+    ) -> Self {
         Self {
             popover,
             builder,
             parent,
+            color,
         }
     }
 
@@ -118,7 +132,13 @@ impl MenuHandle {
         content.add_css_class(surface::WIDGET_MENU_CONTENT);
 
         // Apply surface styling to the content container rather than the Popover shell.
-        SurfaceStyleManager::global().apply_surface_styles(&content, true);
+        // If the parent widget has a custom color, pass it as an override.
+        let color_override = self.color.borrow();
+        SurfaceStyleManager::global().apply_surface_styles(
+            &content,
+            true,
+            color_override.as_deref(),
+        );
 
         self.popover.set_child(Some(&content));
 
@@ -198,6 +218,8 @@ pub struct BaseWidget {
     container: GtkBox,
     content: GtkBox,
     menus: Rc<RefCell<HashMap<String, Rc<MenuHandle>>>>,
+    /// Custom background color for this widget and its popovers.
+    color: Rc<RefCell<Option<String>>>,
     _gesture_click: GestureClick,
 }
 
@@ -209,12 +231,21 @@ impl BaseWidget {
     /// - Always adds the `widget` CSS class.
     /// - Creates an inner `.content` box for consistent padding/margins.
     /// - Applies any additional CSS classes passed in `extra_classes`.
-    pub fn new(extra_classes: &[&str]) -> Self {
+    /// - If `color` is provided, applies custom background color to the widget.
+    pub fn new(extra_classes: &[&str], color: Option<String>) -> Self {
         let container = GtkBox::new(Orientation::Horizontal, 0);
         container.add_css_class(class::WIDGET);
         for cls in extra_classes {
             container.add_css_class(cls);
         }
+
+        // Apply custom color if provided
+        if let Some(ref c) = color {
+            apply_widget_color(&container, c);
+        }
+
+        // Store color for popover inheritance
+        let color_rc = Rc::new(RefCell::new(color));
 
         // Create inner content box for consistent padding/margins via CSS
         // Spacing between children is controlled via CSS (see bar.rs .widget > .content)
@@ -256,6 +287,7 @@ impl BaseWidget {
             container,
             content,
             menus,
+            color: color_rc,
             _gesture_click: gesture_click,
         }
     }
@@ -326,10 +358,65 @@ impl BaseWidget {
         configure_popover(&popover);
 
         let builder_rc: Rc<dyn Fn() -> gtk4::Widget> = Rc::new(builder);
-        let handle = Rc::new(MenuHandle::new(popover, builder_rc, self.container.clone()));
+        let handle = Rc::new(MenuHandle::new(
+            popover,
+            builder_rc,
+            self.container.clone(),
+            self.color.clone(),
+        ));
         self.menus
             .borrow_mut()
             .insert(name.to_string(), handle.clone());
         handle
     }
+}
+
+/// Apply a custom background color to a widget via scoped CSS.
+///
+/// This is a standalone function that can be called from the WidgetFactory
+/// after widget construction, without needing access to the BaseWidget internals.
+///
+/// The widget must have the `.widget` CSS class for the selector to match.
+/// The global `widget_opacity` setting is applied to the color.
+///
+/// # Arguments
+/// * `widget` - The GTK widget to style (should be a box with `.widget` class)
+/// * `color` - A valid CSS color (hex like "#f5c2e7")
+pub fn apply_widget_color(widget: &impl IsA<gtk4::Widget>, color: &str) {
+    let opacity = ConfigManager::global().widget_opacity();
+
+    // Apply opacity to the color using color-mix (same approach as ThemePalette)
+    let bg_color = if opacity <= 0.0 {
+        "transparent".to_string()
+    } else if opacity >= 1.0 {
+        color.to_string()
+    } else {
+        let opacity_percent = (opacity * 100.0).round() as u32;
+        format!(
+            "color-mix(in srgb, {} {}%, transparent)",
+            color, opacity_percent
+        )
+    };
+
+    let css = format!(
+        r#"
+        box.widget {{
+            background-color: {};
+        }}
+        "#,
+        bg_color
+    );
+
+    let provider = gtk4::CssProvider::new();
+    provider.load_from_string(&css);
+
+    // Apply scoped CSS to this widget's style context.
+    // NOTE: style_context() and add_provider() are deprecated in GTK 4.10+
+    // but GTK provides no replacement for widget-scoped CSS. See surfaces.rs
+    // for detailed explanation of why we use this pattern.
+    #[allow(deprecated)]
+    widget
+        .as_ref()
+        .style_context()
+        .add_provider(&provider, gtk4::STYLE_PROVIDER_PRIORITY_USER + 5);
 }

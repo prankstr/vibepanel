@@ -43,6 +43,8 @@ pub struct WindowTitleConfig {
     pub show_icon: bool,
     /// Whether to uppercase the title.
     pub uppercase: bool,
+    /// Custom background color for this widget.
+    pub color: Option<String>,
 }
 
 impl WidgetConfig for WindowTitleConfig {
@@ -110,6 +112,7 @@ impl WidgetConfig for WindowTitleConfig {
             max_chars,
             show_icon,
             uppercase,
+            color: entry.color.clone(),
         }
     }
 }
@@ -123,6 +126,7 @@ impl Default for WindowTitleConfig {
             max_chars: DEFAULT_MAX_CHARS,
             show_icon: DEFAULT_SHOW_ICON,
             uppercase: DEFAULT_UPPERCASE,
+            color: None,
         }
     }
 }
@@ -140,7 +144,7 @@ impl WindowTitleWidget {
     /// used to filter window title updates to only show windows on this monitor.
     /// If `None`, the widget shows the globally focused window regardless of monitor.
     pub fn new(config: WindowTitleConfig, output_id: Option<String>) -> Self {
-        let base = BaseWidget::new(&[wgt::WINDOW_TITLE]);
+        let base = BaseWidget::new(&[wgt::WINDOW_TITLE], config.color.clone());
 
         // Use the content box provided by BaseWidget (has .content CSS class)
         let content = base.content();
@@ -503,6 +507,7 @@ mod tests {
         WidgetEntry {
             name: name.to_string(),
             options,
+            color: None,
         }
     }
 

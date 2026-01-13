@@ -44,6 +44,7 @@ label link:active {
     padding: 4px;
     margin-top: -8px;
     border-radius: 50%;
+    color: var(--color-foreground-primary);
 }
 
 .vp-popover-icon-btn:hover {
@@ -381,6 +382,7 @@ button.vp-btn-link:hover,
 calendar.view {{
     background: transparent;
     border: none;
+    color: var(--color-foreground-primary);
 }}
 
 calendar.view grid {{

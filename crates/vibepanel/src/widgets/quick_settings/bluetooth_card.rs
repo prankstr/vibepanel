@@ -273,7 +273,7 @@ fn create_bluetooth_action_widget(dev: &BluetoothDevice) -> gtk4::Widget {
         content_box.append(&action);
 
         panel.append(&content_box);
-        SurfaceStyleManager::global().apply_surface_styles(&panel, true);
+        SurfaceStyleManager::global().apply_surface_styles(&panel, true, None);
 
         popover.set_child(Some(&panel));
         popover.set_parent(btn);

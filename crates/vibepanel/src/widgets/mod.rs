@@ -14,22 +14,42 @@
 //! ```ignore
 //! pub struct MyWidgetConfig {
 //!     pub some_option: bool,
+//!     /// Custom background color for this widget (inherited from WidgetEntry).
+//!     pub color: Option<String>,
 //! }
 //!
 //! impl WidgetConfig for MyWidgetConfig {
 //!     fn from_entry(entry: &WidgetEntry) -> Self {
+//!         warn_unknown_options("my_widget", entry, &["some_option"]);
 //!         let some_option = entry
 //!             .options
 //!             .get("some_option")
 //!             .and_then(|v| v.as_bool())
 //!             .unwrap_or(true);
-//!         Self { some_option }
+//!         Self {
+//!             some_option,
+//!             color: entry.color.clone(),  // Always clone color from entry
+//!         }
 //!     }
 //! }
 //!
 //! impl Default for MyWidgetConfig {
 //!     fn default() -> Self {
-//!         Self { some_option: true }
+//!         Self {
+//!             some_option: true,
+//!             color: None,
+//!         }
+//!     }
+//! }
+//! ```
+//!
+//! When constructing the widget, pass the color to `BaseWidget::new()`:
+//!
+//! ```ignore
+//! impl MyWidget {
+//!     pub fn new(config: MyWidgetConfig) -> Self {
+//!         let base = BaseWidget::new(&[widget::MY_WIDGET], config.color.clone());
+//!         // ... rest of widget construction
 //!     }
 //! }
 //! ```
@@ -60,7 +80,7 @@ pub mod quick_settings;
 pub use base::BaseWidget;
 pub use battery::{BatteryConfig, BatteryWidget};
 pub use clock::{ClockConfig, ClockWidget};
-pub use notification::NotificationWidget;
+pub use notification::{NotificationConfig, NotificationWidget};
 pub use osd::OsdOverlay;
 pub use quick_settings::QuickSettingsWindowHandle;
 pub use quick_settings::{QuickSettingsConfig, QuickSettingsWidget};
@@ -83,28 +103,43 @@ use vibepanel_core::config::WidgetEntry;
 /// All widget configs should implement this trait to provide a consistent
 /// interface for constructing configuration from TOML entries and defaulting.
 ///
+/// # Color Field
+///
+/// All widget configs should include a `color: Option<String>` field and copy it
+/// from `entry.color.clone()` in `from_entry()`. This enables per-widget background
+/// color customization. The color should be passed to `BaseWidget::new()` during
+/// widget construction so it applies to both the widget and its popovers.
+///
 /// # Example
 ///
 /// ```ignore
 /// #[derive(Debug, Clone)]
 /// pub struct MyWidgetConfig {
 ///     pub enabled: bool,
+///     pub color: Option<String>,
 /// }
 ///
 /// impl WidgetConfig for MyWidgetConfig {
 ///     fn from_entry(entry: &WidgetEntry) -> Self {
+///         warn_unknown_options("my_widget", entry, &["enabled"]);
 ///         let enabled = entry
 ///             .options
 ///             .get("enabled")
 ///             .and_then(|v| v.as_bool())
 ///             .unwrap_or(true);
-///         Self { enabled }
+///         Self {
+///             enabled,
+///             color: entry.color.clone(),
+///         }
 ///     }
 /// }
 ///
 /// impl Default for MyWidgetConfig {
 ///     fn default() -> Self {
-///         Self { enabled: true }
+///         Self {
+///             enabled: true,
+///             color: None,
+///         }
 ///     }
 /// }
 /// ```
@@ -113,6 +148,7 @@ pub trait WidgetConfig: Sized + Default {
     ///
     /// Implementations should extract options from `entry.options` and
     /// fall back to sensible defaults for missing or invalid values.
+    /// Always include `color: entry.color.clone()` to support per-widget colors.
     fn from_entry(entry: &WidgetEntry) -> Self;
 }
 
@@ -212,7 +248,8 @@ impl WidgetFactory {
                 })
             }
             "notifications" => {
-                let notification = NotificationWidget::new();
+                let cfg = NotificationConfig::from_entry(entry);
+                let notification = NotificationWidget::new(cfg);
                 let root = notification.widget().clone().upcast::<Widget>();
                 Some(BuiltWidget {
                     widget: root,

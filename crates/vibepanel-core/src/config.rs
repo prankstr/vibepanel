@@ -769,6 +769,7 @@ impl WidgetPlacement {
 /// ```toml
 /// [widgets.clock]
 /// format = "%H:%M"
+/// color = "#f5c2e7"
 ///
 /// [widgets.battery]
 /// disabled = true
@@ -779,6 +780,11 @@ pub struct WidgetOptions {
     /// If true, this widget is hidden from all sections where it would appear.
     #[serde(default)]
     pub disabled: bool,
+
+    /// Background color override for this widget (hex like "#f5c2e7").
+    /// If invalid or not set, uses the theme's default widget background.
+    #[serde(default)]
+    pub color: Option<String>,
 
     /// Widget-specific options (format, show_icon, etc.).
     #[serde(flatten)]
@@ -796,6 +802,10 @@ pub struct WidgetEntry {
 
     /// Merged widget-specific options from `[widgets.<name>]`.
     pub options: HashMap<String, toml::Value>,
+
+    /// Background color override (hex like "#f5c2e7").
+    /// None means use theme default.
+    pub color: Option<String>,
 }
 
 impl WidgetEntry {
@@ -804,14 +814,29 @@ impl WidgetEntry {
         Self {
             name: name.into(),
             options: HashMap::new(),
+            color: None,
         }
     }
 
     /// Create a widget entry with options from WidgetOptions.
     pub fn with_options(name: impl Into<String>, widget_options: &WidgetOptions) -> Self {
+        let name = name.into();
+
+        // Validate color if provided - warn on invalid hex colors
+        if let Some(ref color) = widget_options.color
+            && crate::theme::parse_hex_color(color).is_none()
+        {
+            tracing::warn!(
+                "Invalid color '{}' for widget '{}' - expected hex color like '#ff0000' or '#f00'",
+                color,
+                name
+            );
+        }
+
         Self {
-            name: name.into(),
+            name,
             options: widget_options.options.clone(),
+            color: widget_options.color.clone(),
         }
     }
 }

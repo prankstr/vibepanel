@@ -32,6 +32,8 @@ pub struct UpdatesConfig {
     pub check_interval: u64,
     /// Override terminal emulator detection.
     pub terminal: Option<String>,
+    /// Custom background color for this widget.
+    pub color: Option<String>,
 }
 
 impl WidgetConfig for UpdatesConfig {
@@ -54,6 +56,7 @@ impl WidgetConfig for UpdatesConfig {
         Self {
             check_interval,
             terminal,
+            color: entry.color.clone(),
         }
     }
 }
@@ -63,6 +66,7 @@ impl Default for UpdatesConfig {
         Self {
             check_interval: DEFAULT_CHECK_INTERVAL,
             terminal: None,
+            color: None,
         }
     }
 }
@@ -82,7 +86,7 @@ pub struct UpdatesWidget {
 impl UpdatesWidget {
     /// Create a new updates widget with the given configuration.
     pub fn new(config: UpdatesConfig) -> Self {
-        let base = BaseWidget::new(&[widget::UPDATES]);
+        let base = BaseWidget::new(&[widget::UPDATES], config.color);
         base.set_tooltip("Updates: checking...");
 
         let icon_handle = base.add_icon("software-update-available", &[widget::UPDATES_ICON]);
@@ -197,6 +201,7 @@ mod tests {
         let entry = WidgetEntry {
             name: "updates".to_string(),
             options: Default::default(),
+            color: None,
         };
         let config = UpdatesConfig::from_entry(&entry);
 
@@ -216,6 +221,7 @@ mod tests {
         let entry = WidgetEntry {
             name: "updates".to_string(),
             options,
+            color: None,
         };
         let config = UpdatesConfig::from_entry(&entry);
 

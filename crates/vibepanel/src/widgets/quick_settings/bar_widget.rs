@@ -72,6 +72,8 @@ impl Default for QuickSettingsCardsConfig {
 pub struct QuickSettingsConfig {
     /// Which cards to show in the Quick Settings panel.
     pub cards: QuickSettingsCardsConfig,
+    /// Custom background color for this widget.
+    pub color: Option<String>,
 }
 
 impl WidgetConfig for QuickSettingsConfig {
@@ -109,6 +111,7 @@ impl WidgetConfig for QuickSettingsConfig {
                 brightness: get_bool("brightness"),
                 power: get_bool("power"),
             },
+            color: entry.color.clone(),
         }
     }
 }
@@ -121,7 +124,7 @@ pub struct QuickSettingsWidget {
 impl QuickSettingsWidget {
     pub fn new(cfg: QuickSettingsConfig, qs_window: QuickSettingsWindowHandle) -> Self {
         let cards = &cfg.cards;
-        let base = BaseWidget::new(&[widget::QUICK_SETTINGS]);
+        let base = BaseWidget::new(&[widget::QUICK_SETTINGS], cfg.color);
 
         // Build icons only for enabled cards (order: Audio, Bluetooth, Wi-Fi, VPN)
         // Audio icon

@@ -20,16 +20,32 @@ use std::collections::HashSet;
 use std::rc::Rc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::debug;
+use vibepanel_core::config::WidgetEntry;
 
 use crate::services::icons::IconHandle;
 use crate::services::notification::{NotificationService, URGENCY_CRITICAL};
 use crate::services::tooltip::TooltipManager;
 use crate::styles::widget;
-use crate::widgets::BaseWidget;
 use crate::widgets::base::MenuHandle;
+use crate::widgets::{BaseWidget, WidgetConfig};
 
 use super::notification_popover::{ClosePopoverCallback, build_popover_content};
 use super::notification_toast::NotificationToastManager;
+
+/// Configuration for the notification widget.
+#[derive(Debug, Clone, Default)]
+pub struct NotificationConfig {
+    /// Custom background color for this widget.
+    pub color: Option<String>,
+}
+
+impl WidgetConfig for NotificationConfig {
+    fn from_entry(entry: &WidgetEntry) -> Self {
+        Self {
+            color: entry.color.clone(),
+        }
+    }
+}
 
 /// Shared inner state for the notification widget.
 ///
@@ -261,8 +277,8 @@ pub struct NotificationWidget {
 
 impl NotificationWidget {
     /// Create a new notification widget.
-    pub fn new() -> Self {
-        let base = BaseWidget::new(&[widget::NOTIFICATION]);
+    pub fn new(config: NotificationConfig) -> Self {
+        let base = BaseWidget::new(&[widget::NOTIFICATION], config.color);
 
         // Create an overlay for badge on top of icon
         let overlay = Overlay::new();
@@ -390,6 +406,6 @@ impl NotificationWidget {
 
 impl Default for NotificationWidget {
     fn default() -> Self {
-        Self::new()
+        Self::new(NotificationConfig::default())
     }
 }

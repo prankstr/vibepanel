@@ -224,7 +224,7 @@ impl OsdOverlay {
         }
 
         // Apply theme surface styles for consistent popover appearance.
-        SurfaceStyleManager::global().apply_surface_styles(&container, true);
+        SurfaceStyleManager::global().apply_surface_styles(&container, true, None);
 
         // Child OSD widget.
         let osd_widget = OsdWidget::new(orientation, 24);

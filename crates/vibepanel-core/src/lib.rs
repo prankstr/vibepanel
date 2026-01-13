@@ -13,4 +13,4 @@ pub mod theme;
 
 pub use config::{Config, ConfigLoadResult, DEFAULT_CONFIG_TOML};
 pub use error::{Error, Result};
-pub use theme::{AccentSource, SurfaceStyles, ThemePalette, ThemeSizes};
+pub use theme::{AccentSource, SurfaceStyles, ThemePalette, ThemeSizes, parse_hex_color};

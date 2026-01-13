@@ -292,7 +292,17 @@ impl SurfaceStyleManager {
     ///
     /// The styles are applied with high priority to override GTK themes
     /// (like Tokyo Night) that may interfere with custom styling.
-    pub fn apply_surface_styles(&self, widget: &impl IsA<gtk4::Widget>, with_padding: bool) {
+    ///
+    /// # Arguments
+    /// * `widget` - The widget to style
+    /// * `with_padding` - Whether to apply padding to the widget
+    /// * `color_override` - Optional background color override (e.g., from parent widget)
+    pub fn apply_surface_styles(
+        &self,
+        widget: &impl IsA<gtk4::Widget>,
+        with_padding: bool,
+        color_override: Option<&str>,
+    ) {
         let widget = widget.as_ref();
 
         let styles = self.styles.borrow();
@@ -301,6 +311,9 @@ impl SurfaceStyleManager {
         } else {
             String::new()
         };
+
+        // Use color override if provided, otherwise use theme default
+        let bg = color_override.unwrap_or(&styles.background_color);
 
         // Build CSS targeting the widget's CSS name
         // For Popover, we need to target both the popover and its contents
@@ -345,9 +358,10 @@ popover.widget-menu.background > arrow {{
 popover.widget-menu *,
 popover.widget-menu.background * {{
     font-family: inherit;
+    color: inherit;
 }}
 "#,
-                bg = styles.background_color,
+                bg = bg,
                 radius = styles.border_radius,
                 font = styles.font_family,
                 fg = styles.text_color,
@@ -380,10 +394,11 @@ popover.widget-menu.background * {{
 
 {selector} * {{
     font-family: inherit;
+    color: inherit;
 }}
 "#,
                 selector = selector,
-                bg = styles.background_color,
+                bg = bg,
                 radius = styles.border_radius,
                 font = styles.font_family,
                 fg = styles.text_color,

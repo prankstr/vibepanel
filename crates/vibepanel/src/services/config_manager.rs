@@ -141,6 +141,11 @@ impl ConfigManager {
         self.config.borrow().bar.popover_offset
     }
 
+    /// Get the widget opacity from the current theme configuration.
+    pub fn widget_opacity(&self) -> f64 {
+        self.config.borrow().theme.widget_opacity
+    }
+
     /// Start watching the config file for changes.
     ///
     /// This spawns a background thread that monitors the config file. When changes

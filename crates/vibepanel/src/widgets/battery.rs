@@ -40,6 +40,8 @@ pub struct BatteryConfig {
     pub show_percentage: bool,
     /// Whether to show an icon.
     pub show_icon: bool,
+    /// Custom background color for this widget.
+    pub color: Option<String>,
 }
 
 impl WidgetConfig for BatteryConfig {
@@ -61,6 +63,7 @@ impl WidgetConfig for BatteryConfig {
         Self {
             show_percentage,
             show_icon,
+            color: entry.color.clone(),
         }
     }
 }
@@ -70,6 +73,7 @@ impl Default for BatteryConfig {
         Self {
             show_percentage: DEFAULT_SHOW_PERCENTAGE,
             show_icon: DEFAULT_SHOW_ICON,
+            color: None,
         }
     }
 }
@@ -93,7 +97,7 @@ pub struct BatteryWidget {
 impl BatteryWidget {
     /// Create a new battery widget with the given configuration.
     pub fn new(config: BatteryConfig) -> Self {
-        let base = BaseWidget::new(&[widget::BATTERY]);
+        let base = BaseWidget::new(&[widget::BATTERY], config.color);
 
         // Initial tooltip until the first snapshot arrives.
         base.set_tooltip("Battery: unknown");
@@ -406,6 +410,7 @@ mod tests {
         let entry = WidgetEntry {
             name: "battery".to_string(),
             options: Default::default(),
+            color: None,
         };
         let config = BatteryConfig::from_entry(&entry);
         assert!(config.show_percentage);
