@@ -35,6 +35,8 @@ pub(super) struct NotificationToast {
     timeout_source: RefCell<Option<SourceId>>,
     current_margin_top: Cell<i32>,
     animation_source: RefCell<Option<SourceId>>,
+    /// Actual rendered height, measured after window is mapped
+    height: Cell<i32>,
 }
 
 impl NotificationToast {
@@ -47,7 +49,8 @@ impl NotificationToast {
         on_dismiss: ToastCallback,
         on_action: ToastActionCallback,
         on_timeout: ToastCallback,
-        stack_index: usize,
+        on_height_measured: ToastCallback,
+        initial_margin_top: i32,
     ) -> Rc<Self> {
         let window = Window::builder()
             .application(app)
@@ -70,8 +73,7 @@ impl NotificationToast {
         window.set_anchor(Edge::Bottom, false);
         window.set_anchor(Edge::Left, false);
 
-        let margin_top = Self::calculate_margin(stack_index);
-        window.set_margin(Edge::Top, margin_top);
+        window.set_margin(Edge::Top, initial_margin_top);
         window.set_margin(Edge::Right, TOAST_MARGIN_RIGHT);
 
         let notification_id = notification.id;
@@ -79,8 +81,9 @@ impl NotificationToast {
             window,
             notification_id,
             timeout_source: RefCell::new(None),
-            current_margin_top: Cell::new(margin_top),
+            current_margin_top: Cell::new(initial_margin_top),
             animation_source: RefCell::new(None),
+            height: Cell::new(TOAST_ESTIMATED_HEIGHT),
         });
 
         toast.build_content(notification, on_dismiss.clone(), on_action);
@@ -130,11 +133,26 @@ impl NotificationToast {
             *toast.timeout_source.borrow_mut() = Some(source_id);
         }
 
-        toast
-    }
+        // Measure actual height after window is mapped and laid out.
+        // We use idle_add to defer measurement until after GTK has completed layout.
+        let toast_weak = Rc::downgrade(&toast);
+        let notification_id = notification.id;
+        toast.window.connect_map(move |win| {
+            let win_clone = win.clone();
+            let toast_weak = toast_weak.clone();
+            let on_height_measured = on_height_measured.clone();
+            glib::idle_add_local_once(move || {
+                let height = win_clone.height();
+                if let Some(toast) = toast_weak.upgrade()
+                    && height > 0
+                {
+                    toast.height.set(height);
+                    on_height_measured(notification_id);
+                }
+            });
+        });
 
-    fn calculate_margin(stack_index: usize) -> i32 {
-        TOAST_MARGIN_TOP + (stack_index as i32) * (TOAST_ESTIMATED_HEIGHT + TOAST_GAP)
+        toast
     }
 
     fn build_content(
@@ -304,14 +322,18 @@ impl NotificationToast {
         self.window.present();
     }
 
+    /// Get the measured height of this toast (or estimated if not yet measured)
+    pub fn height(&self) -> i32 {
+        self.height.get()
+    }
+
     fn cancel_animation(&self) {
         if let Some(source_id) = self.animation_source.borrow_mut().take() {
             source_id.remove();
         }
     }
 
-    pub fn update_stack_position(self: &Rc<Self>, stack_index: usize, animate: bool) {
-        let target_margin = Self::calculate_margin(stack_index);
+    pub fn update_margin_top(self: &Rc<Self>, target_margin: i32, animate: bool) {
         let current = self.current_margin_top.get();
 
         if !animate || current == target_margin {
@@ -400,7 +422,18 @@ impl NotificationToastManager {
             self.remove_toast(notification.id);
         }
 
-        let stack_index = self.toast_order.borrow().len();
+        // Calculate initial margin from existing toasts
+        let initial_margin = {
+            let order = self.toast_order.borrow();
+            let toasts = self.toasts.borrow();
+            let mut y_offset = TOAST_MARGIN_TOP;
+            for &id in order.iter() {
+                if let Some(toast) = toasts.get(&id) {
+                    y_offset += toast.height() + TOAST_GAP;
+                }
+            }
+            y_offset
+        };
 
         let manager = Rc::clone(self);
         let on_dismiss: Rc<dyn Fn(u32)> = Rc::new(move |id| {
@@ -413,13 +446,20 @@ impl NotificationToastManager {
             manager_for_timeout.remove_toast(id);
         });
 
+        // When toast height is measured, reposition all toasts
+        let manager_for_height = Rc::clone(self);
+        let on_height_measured: Rc<dyn Fn(u32)> = Rc::new(move |_id| {
+            manager_for_height.reposition_toasts();
+        });
+
         let toast = NotificationToast::new(
             app,
             notification,
             on_dismiss,
             Rc::clone(&self.on_action),
             on_timeout,
-            stack_index,
+            on_height_measured,
+            initial_margin,
         );
 
         self.toasts
@@ -450,9 +490,11 @@ impl NotificationToastManager {
     fn reposition_toasts(&self) {
         let order = self.toast_order.borrow();
         let toasts = self.toasts.borrow();
-        for (index, &id) in order.iter().enumerate() {
+        let mut y_offset = TOAST_MARGIN_TOP;
+        for &id in order.iter() {
             if let Some(toast) = toasts.get(&id) {
-                toast.update_stack_position(index, true);
+                toast.update_margin_top(y_offset, true);
+                y_offset += toast.height() + TOAST_GAP;
             }
         }
     }
