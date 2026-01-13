@@ -23,7 +23,7 @@ use crate::services::surfaces::SurfaceStyleManager;
 use crate::styles::{button, color, notification as notif};
 
 use super::notification_common::{
-    TOAST_ESTIMATED_HEIGHT, TOAST_GAP, TOAST_MARGIN_RIGHT, TOAST_MARGIN_TOP,
+    POPOVER_WIDTH, TOAST_ESTIMATED_HEIGHT, TOAST_GAP, TOAST_MARGIN_RIGHT, TOAST_MARGIN_TOP,
     TOAST_TIMEOUT_CRITICAL_MS, TOAST_TIMEOUT_MS, create_notification_image_widget,
     sanitize_body_markup,
 };
@@ -53,6 +53,7 @@ impl NotificationToast {
             .application(app)
             .decorated(false)
             .resizable(false)
+            .default_width(POPOVER_WIDTH)
             .build();
 
         window.add_css_class(notif::TOAST);
