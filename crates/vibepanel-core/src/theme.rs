@@ -405,7 +405,7 @@ impl ThemePalette {
 }}
 "#,
             bar_bg_with_opacity = self.bar_background_with_opacity(),
-            widget_bg = self.widget_background,
+            widget_bg = self.widget_background_with_opacity(),
             fg_primary = self.foreground_primary,
             fg_muted = self.foreground_muted,
             fg_subtle = self.foreground_subtle,
@@ -465,6 +465,27 @@ impl ThemePalette {
             format!(
                 "color-mix(in srgb, {} {}%, transparent)",
                 self.bar_background, opacity_percent
+            )
+        }
+    }
+
+    /// Generate widget background CSS value with opacity applied.
+    ///
+    /// For opacity 0, returns "transparent".
+    /// For opacity 1, returns the raw background color.
+    /// For values in between, uses color-mix to blend with transparent.
+    fn widget_background_with_opacity(&self) -> String {
+        if self.widget_opacity <= 0.0 {
+            "transparent".to_string()
+        } else if self.widget_opacity >= 1.0 {
+            self.widget_background.clone()
+        } else {
+            // Use color-mix to apply opacity to the background
+            // This works for both hex colors and GTK CSS variables like @view_bg_color
+            let opacity_percent = (self.widget_opacity * 100.0).round() as u32;
+            format!(
+                "color-mix(in srgb, {} {}%, transparent)",
+                self.widget_background, opacity_percent
             )
         }
     }
