@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0](https://github.com/prankstr/vibepanel/compare/v0.2.1...v0.3.0) (2026-01-14)
+
+
+### Features
+
+* add per-widget background color configuration ([#5](https://github.com/prankstr/vibepanel/issues/5)) ([58c9be2](https://github.com/prankstr/vibepanel/commit/58c9be217bc40f669a64c04a528aedbe39df696a))
+* configurable icon weight with live reload ([60c45fd](https://github.com/prankstr/vibepanel/commit/60c45fd9d84b68191386fc0b4584b6ff674cf78b))
+* simplify section configuration and add spacer widget ([#7](https://github.com/prankstr/vibepanel/issues/7)) ([1fbcac2](https://github.com/prankstr/vibepanel/commit/1fbcac22754d1dfd8d7c36a00172e5e3d6826a26))
+
+
+### Bug Fixes
+
+* apply widget_opacity config to widget backgrounds ([#4](https://github.com/prankstr/vibepanel/issues/4)) ([b856257](https://github.com/prankstr/vibepanel/commit/b856257f699e99f2653d22c3ab7686e10a1a064d))
+* center number labels in workspace indicator pills ([720a24a](https://github.com/prankstr/vibepanel/commit/720a24a33efddcf85205a885676f9d6d7bd70f1a))
+* **ci:** use simple release type with custom jsonpath for workspace version ([2395bea](https://github.com/prankstr/vibepanel/commit/2395beaef9302cc09e83113a2e71e914d6c0f887))
+* **css:** apply consistent radius to tooltips and popover menus ([5665300](https://github.com/prankstr/vibepanel/commit/56653009c8ec192aeee793e41582c094f63f096e))
+* make accent text color respect dark/light mode ([2a947f3](https://github.com/prankstr/vibepanel/commit/2a947f31c869640aedf515244a2f883e136510ae))
+* make tooltips slightly transparant ([bf4ce98](https://github.com/prankstr/vibepanel/commit/bf4ce98de27f02ca2aab1b46b4b80055ed5fb451))
+* restore notification toast truncation and improve stacking ([#6](https://github.com/prankstr/vibepanel/issues/6)) ([e1d5f79](https://github.com/prankstr/vibepanel/commit/e1d5f791c8a3a96eed3a647b26e59e8bc07db548))
+* unify group island background color ([474239a](https://github.com/prankstr/vibepanel/commit/474239a4e259333b5e763d096a8ea0c70dd11c00))
+
 ## [0.2.1] - 2025-01-07
 
 ### Fixed
