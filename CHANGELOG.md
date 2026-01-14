@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.3.0](https://github.com/prankstr/vibepanel/compare/v0.2.1...v0.3.0) (2026-01-14)
 
 
+### ⚠ BREAKING CHANGES
+* **config:** Section configuration has been simplified. The `center_left` and `center_right` sections have been removed. To place widgets adjacent to the notch with notch mode, use the regular left and right sections together with the new spacer widget.
+
 ### Features
 
 * add per-widget background color configuration ([#5](https://github.com/prankstr/vibepanel/issues/5)) ([58c9be2](https://github.com/prankstr/vibepanel/commit/58c9be217bc40f669a64c04a528aedbe39df696a))
