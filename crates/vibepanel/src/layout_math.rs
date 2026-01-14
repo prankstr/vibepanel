@@ -71,8 +71,10 @@ pub struct CenterPriorityAllocation {
 /// * `interior` - Total usable width (after edge margins)
 /// * `spacing` - Gap between adjacent sections
 /// * `left` - Size requirements for left section (None if not present)
+/// * `left_expand` - Whether left section should expand to fill available space
 /// * `center` - Size requirements for center section
 /// * `right` - Size requirements for right section (None if not present)
+/// * `right_expand` - Whether right section should expand to fill available space
 ///
 /// # Returns
 ///
@@ -81,8 +83,10 @@ pub fn compute_center_priority_allocation(
     interior: i32,
     spacing: i32,
     left: Option<SectionSizes>,
+    left_expand: bool,
     center: SectionSizes,
     right: Option<SectionSizes>,
+    right_expand: bool,
 ) -> CenterPriorityAllocation {
     // Calculate center width and position (anchored to true center)
     let center_width = clamp_width(interior, center.min, center.natural);
@@ -96,11 +100,19 @@ pub fn compute_center_priority_allocation(
     let right_budget = (interior - center_end - gap_right).max(0);
 
     // Calculate widths
-    let (left_min, left_nat) = left.map_or((0, 0), |s| (s.min, s.natural));
-    let (right_min, right_nat) = right.map_or((0, 0), |s| (s.min, s.natural));
-
-    let left_width = clamp_width(left_budget, left_min, left_nat);
-    let right_width = clamp_width(right_budget, right_min, right_nat);
+    // If section has an expander (like a flexible spacer), give it full budget
+    // so GTK's Box can distribute space to hexpand children.
+    // Otherwise, clamp to natural size for normal layout behavior.
+    let left_width = match (left, left_expand) {
+        (Some(_), true) => left_budget,
+        (Some(s), false) => clamp_width(left_budget, s.min, s.natural),
+        (None, _) => 0,
+    };
+    let right_width = match (right, right_expand) {
+        (Some(_), true) => right_budget,
+        (Some(s), false) => clamp_width(right_budget, s.min, s.natural),
+        (None, _) => 0,
+    };
 
     // Calculate positions
     let left_x = 0;
@@ -226,11 +238,13 @@ mod tests {
             400,
             8,
             None,
+            false,
             SectionSizes {
                 min: 50,
                 natural: 100,
             },
             None,
+            false,
         );
 
         assert_eq!(alloc.center_width, 100);
@@ -238,8 +252,9 @@ mod tests {
     }
 
     #[test]
-    fn test_center_priority_with_left_and_right() {
+    fn test_center_priority_with_left_and_right_no_expand() {
         // 400px interior, center 100px, left and right each want 100px
+        // Without expand, sections get clamped to natural size
         let alloc = compute_center_priority_allocation(
             400,
             8,
@@ -247,6 +262,7 @@ mod tests {
                 min: 50,
                 natural: 100,
             }),
+            false,
             SectionSizes {
                 min: 50,
                 natural: 100,
@@ -255,17 +271,84 @@ mod tests {
                 min: 50,
                 natural: 100,
             }),
+            false,
         );
 
         // Center at 150-250
         assert_eq!(alloc.center_width, 100);
         assert_eq!(alloc.center_x, 150);
 
-        // Left gets budget of 150 - 8 = 142, but only needs 100
+        // Left gets clamped to natural size (100)
         assert_eq!(alloc.left_width, 100);
         assert_eq!(alloc.left_x, 0);
 
-        // Right gets budget of 400 - 250 - 8 = 142, but only needs 100
+        // Right gets clamped to natural size (100), positioned at right edge
+        assert_eq!(alloc.right_width, 100);
+        assert_eq!(alloc.right_x, 300); // 400 - 100
+    }
+
+    #[test]
+    fn test_center_priority_with_left_and_right_both_expand() {
+        // 400px interior, center 100px, left and right each want 100px
+        // With expand, sections get full budget
+        let alloc = compute_center_priority_allocation(
+            400,
+            8,
+            Some(SectionSizes {
+                min: 50,
+                natural: 100,
+            }),
+            true,
+            SectionSizes {
+                min: 50,
+                natural: 100,
+            },
+            Some(SectionSizes {
+                min: 50,
+                natural: 100,
+            }),
+            true,
+        );
+
+        // Center at 150-250
+        assert_eq!(alloc.center_width, 100);
+        assert_eq!(alloc.center_x, 150);
+
+        // Left gets full budget of 150 - 8 = 142
+        assert_eq!(alloc.left_width, 142);
+        assert_eq!(alloc.left_x, 0);
+
+        // Right gets full budget of 400 - 250 - 8 = 142
+        assert_eq!(alloc.right_width, 142);
+        assert_eq!(alloc.right_x, 258); // 400 - 142
+    }
+
+    #[test]
+    fn test_center_priority_left_expand_only() {
+        // Only left section has expander
+        let alloc = compute_center_priority_allocation(
+            400,
+            8,
+            Some(SectionSizes {
+                min: 50,
+                natural: 100,
+            }),
+            true, // left expands
+            SectionSizes {
+                min: 50,
+                natural: 100,
+            },
+            Some(SectionSizes {
+                min: 50,
+                natural: 100,
+            }),
+            false, // right does not expand
+        );
+
+        // Left gets full budget
+        assert_eq!(alloc.left_width, 142);
+
+        // Right gets clamped to natural
         assert_eq!(alloc.right_width, 100);
         assert_eq!(alloc.right_x, 300); // 400 - 100
     }
@@ -274,6 +357,7 @@ mod tests {
     fn test_center_priority_constrained() {
         // 200px interior, center wants 100px, left wants 80px, right wants 80px
         // Budget for each side: (200 - 100) / 2 - 8 = 42px
+        // Without expand, sections are clamped (42 < 80, so they get 42)
         let alloc = compute_center_priority_allocation(
             200,
             8,
@@ -281,6 +365,7 @@ mod tests {
                 min: 30,
                 natural: 80,
             }),
+            false,
             SectionSizes {
                 min: 50,
                 natural: 100,
@@ -289,13 +374,14 @@ mod tests {
                 min: 30,
                 natural: 80,
             }),
+            false,
         );
 
         // Center should be at 50-150
         assert_eq!(alloc.center_width, 100);
         assert_eq!(alloc.center_x, 50);
 
-        // Left and right get constrained
+        // Left and right get clamped to budget (42px each)
         assert_eq!(alloc.left_width, 42); // budget: 50 - 8 = 42
         assert_eq!(alloc.right_width, 42); // budget: 200 - 150 - 8 = 42
     }
@@ -306,11 +392,13 @@ mod tests {
             400,
             8,
             None,
+            false,
             SectionSizes {
                 min: 50,
                 natural: 100,
             },
             None,
+            false,
         );
 
         assert_eq!(alloc.center_width, 100);

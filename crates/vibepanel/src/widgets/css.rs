@@ -190,6 +190,7 @@ popover.widget-menu.background > contents {
 /// Generate all widget CSS.
 pub fn widget_css(config: &Config) -> String {
     let outer_margin = config.bar.outer_margin;
+    let widget_spacing = config.bar.widget_spacing;
 
     format!(
         r#"
@@ -234,6 +235,17 @@ sectioned-bar.bar {{
 .widget > .content > *:not(:last-child),
 .widget-group > .content .content > *:not(:last-child) {{
     margin-right: var(--spacing-widget-gap);
+}}
+
+/* Section widget spacing via margins (Box spacing=0 to allow spacer to have no gaps) */
+.bar-section--left > *:not(:last-child):not(.spacer),
+.bar-section--right > *:not(:last-child):not(.spacer) {{
+    margin-right: {widget_spacing}px;
+}}
+
+/* Spacer widget - no margins so it doesn't create extra gaps */
+.spacer {{
+    min-width: 0;
 }}
 
 /* ===== WORKSPACE ===== */

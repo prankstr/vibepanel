@@ -73,6 +73,8 @@ pub fn create_bar_window(
     let bar_box = SectionedBar::new(
         config.bar.widget_spacing as i32,
         config.bar.section_edge_margin as i32,
+        config.widgets.left_has_expander(),
+        config.widgets.right_has_expander(),
     );
     bar_box.add_css_class(class::BAR);
     bar_box.set_hexpand(true);
@@ -122,9 +124,14 @@ pub fn create_bar_window(
     let left_section = create_section("left", config, state, &qs_handle, Some(output_id));
     bar_box.set_start_widget(Some(&left_section));
 
-    // Create center section (with optional notch spacer)
-    let center_section = create_center_section(config, state, &qs_handle, Some(output_id));
-    bar_box.set_center_widget(Some(&center_section));
+    // Create center section only if notch is enabled or there are center widgets
+    // Without a center widget, the layout manager uses linear allocation
+    let has_center_content =
+        config.bar.notch_enabled || !config.widgets.resolved_center().is_empty();
+    if has_center_content {
+        let center_section = create_center_section(config, state, &qs_handle, Some(output_id));
+        bar_box.set_center_widget(Some(&center_section));
+    }
 
     // Create right section
     let right_section = create_section("right", config, state, &qs_handle, Some(output_id));
@@ -232,8 +239,10 @@ fn create_section(
 ) -> gtk4::Box {
     let section = gtk4::Box::new(
         gtk4::Orientation::Horizontal,
-        config.bar.widget_spacing as i32,
+        0, // Spacing handled via CSS margins to allow spacer widget to have no gaps
     );
+    // Clip overflowing content to prevent widgets from rendering beyond section bounds
+    section.set_overflow(gtk4::Overflow::Hidden);
     let section_class = match position {
         "left" => class::BAR_SECTION_LEFT,
         "right" => class::BAR_SECTION_RIGHT,
@@ -275,53 +284,22 @@ fn create_center_section(
     section.add_css_class(class::BAR_SECTION_CENTER);
 
     if config.bar.notch_enabled {
-        // Notch mode: create left-center, notch spacer, right-center layout
-        let left_center = gtk4::Box::new(
-            gtk4::Orientation::Horizontal,
-            config.bar.widget_spacing as i32,
-        );
-        left_center.add_css_class(class::BAR_SECTION_CENTER_LEFT);
-
+        // Notch mode: center section is just a fixed-width empty spacer for the notch.
+        // Users place widgets adjacent to the notch using the spacer widget in left/right sections.
         let notch_width = config.bar.effective_notch_width();
-        let notch_spacer = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
-        notch_spacer.add_css_class(class::NOTCH_SPACER);
-        notch_spacer.set_size_request(notch_width as i32, -1);
-
-        let right_center = gtk4::Box::new(
-            gtk4::Orientation::Horizontal,
-            config.bar.widget_spacing as i32,
-        );
-        right_center.add_css_class(class::BAR_SECTION_CENTER_RIGHT);
-
-        // Build center-left widgets
-        let mut left_count = 0;
-        for item in &config.widgets.resolved_center_left() {
-            left_count += build_widget_or_group(item, &left_center, state, qs_handle, output_id);
-        }
-
-        // Build center-right widgets
-        let mut right_count = 0;
-        for item in &config.widgets.resolved_center_right() {
-            right_count += build_widget_or_group(item, &right_center, state, qs_handle, output_id);
-        }
-
-        section.append(&left_center);
-        section.append(&notch_spacer);
-        section.append(&right_center);
+        section.set_size_request(notch_width as i32, -1);
 
         debug!(
-            "Notch mode: {}px spacer{}, {} center-left widget(s), {} center-right widget(s)",
+            "Notch mode: {}px center spacer{}",
             notch_width,
             if config.bar.notch_width == 0 {
                 " (auto)"
             } else {
                 ""
-            },
-            left_count,
-            right_count
+            }
         );
     } else {
-        // Non-notch mode: simple centered section
+        // Non-notch mode: simple centered section with widgets
         let mut widget_count = 0;
         for item in &config.widgets.resolved_center() {
             widget_count += build_widget_or_group(item, &section, state, qs_handle, output_id);

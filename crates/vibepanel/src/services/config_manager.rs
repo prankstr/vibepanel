@@ -483,12 +483,6 @@ fn widget_names(config: &Config) -> Vec<String> {
     for w in &config.widgets.center {
         names.extend(format_item("center", w));
     }
-    for w in &config.widgets.center_left {
-        names.extend(format_item("center_left", w));
-    }
-    for w in &config.widgets.center_right {
-        names.extend(format_item("center_right", w));
-    }
     for w in &config.widgets.right {
         names.extend(format_item("right", w));
     }

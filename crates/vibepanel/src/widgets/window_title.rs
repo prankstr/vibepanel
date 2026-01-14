@@ -175,7 +175,6 @@ impl WindowTitleWidget {
         let label = Label::new(Some(&config.empty_text));
         label.add_css_class(wgt::WINDOW_TITLE_LABEL);
         label.set_xalign(0.0);
-        label.set_hexpand(true);
         // Always use ellipsization at the end so long titles
         // show "…" instead of being hard-clipped by section bounds.
         label.set_ellipsize(gtk4::pango::EllipsizeMode::End);

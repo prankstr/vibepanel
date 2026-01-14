@@ -66,6 +66,7 @@ mod notification_common;
 mod notification_popover;
 mod notification_toast;
 mod osd;
+mod spacer;
 mod system_popover;
 mod system_tray;
 mod updates;
@@ -85,6 +86,7 @@ pub use notification::{NotificationConfig, NotificationWidget};
 pub use osd::OsdOverlay;
 pub use quick_settings::QuickSettingsWindowHandle;
 pub use quick_settings::{QuickSettingsConfig, QuickSettingsWidget};
+pub use spacer::{SpacerConfig, SpacerWidget};
 pub use system_tray::{SystemTrayConfig, SystemTrayWidget};
 pub use updates::{UpdatesConfig, UpdatesWidget};
 pub use window_title::{WindowTitleConfig, WindowTitleWidget};
@@ -302,6 +304,15 @@ impl WidgetFactory {
                 Some(BuiltWidget {
                     widget: root,
                     handle: Box::new(memory),
+                })
+            }
+            "spacer" => {
+                let cfg = SpacerConfig::from_entry(entry);
+                let spacer = SpacerWidget::new(cfg);
+                let root = spacer.widget().clone().upcast::<Widget>();
+                Some(BuiltWidget {
+                    widget: root,
+                    handle: Box::new(spacer),
                 })
             }
             name => {

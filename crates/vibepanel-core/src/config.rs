@@ -286,27 +286,14 @@ impl Config {
 
         // Validate center widget configuration based on notch mode
         let has_center = !self.widgets.center.is_empty();
-        let has_center_split =
-            !self.widgets.center_left.is_empty() || !self.widgets.center_right.is_empty();
 
-        if self.bar.notch_enabled {
-            // In notch mode, must use center_left/center_right, not center
-            if has_center {
-                errors.push(
-                    "widgets.center: cannot be used when notch_enabled=true; \
-                     use center_left and center_right instead"
-                        .to_string(),
-                );
-            }
-        } else {
-            // Without notch, must use center, not center_left/center_right
-            if has_center_split {
-                errors.push(
-                    "widgets.center_left/center_right: cannot be used when notch_enabled=false; \
-                     use center instead"
-                        .to_string(),
-                );
-            }
+        if self.bar.notch_enabled && has_center {
+            // In notch mode, center section is reserved for the notch spacer
+            errors.push(
+                "widgets.center: cannot be used when notch_enabled=true; \
+                 use spacer widget in left/right sections to place widgets near the notch"
+                    .to_string(),
+            );
         }
 
         if errors.is_empty() {
@@ -330,6 +317,21 @@ impl Config {
                 "widgets.{}: config defined but widget not used in any section (possible typo?)",
                 name
             ));
+        }
+
+        // Check for spacer widgets in center section (they have no effect there)
+        for placement in &self.widgets.center {
+            for name in placement.widget_names() {
+                let base_name = name.split(':').next().unwrap_or(name);
+                if base_name == "spacer" {
+                    warnings.push(
+                        "widgets.center: spacer widget has no effect in center section; \
+                         use spacer in left/right sections to push widgets toward the center"
+                            .to_string(),
+                    );
+                    break;
+                }
+            }
         }
 
         warnings
@@ -366,23 +368,11 @@ impl Config {
         }
 
         if self.bar.notch_enabled {
-            // Show center_left and center_right
             lines.push(format!(
-                "  center_left: {} widget(s)",
-                count_widgets(&self.widgets.center_left)
+                "  center: notch spacer ({}px)",
+                self.bar.effective_notch_width()
             ));
-            for name in format_widget_section(&self.widgets.center_left) {
-                lines.push(format!("    - {}", name));
-            }
-            lines.push(format!(
-                "  center_right: {} widget(s)",
-                count_widgets(&self.widgets.center_right)
-            ));
-            for name in format_widget_section(&self.widgets.center_right) {
-                lines.push(format!("    - {}", name));
-            }
         } else {
-            // Show center
             lines.push(format!(
                 "  center: {} widget(s)",
                 count_widgets(&self.widgets.center)
@@ -553,17 +543,10 @@ pub struct WidgetsConfig {
     /// Each entry is a widget name string or a group of widget names.
     pub left: Vec<WidgetPlacement>,
 
-    /// Widgets in the center section (used when notch_enabled = false).
+    /// Widgets in the center section.
     /// Each entry is a widget name string or a group of widget names.
+    /// Note: Cannot be used when notch_enabled = true (center is reserved for notch spacer).
     pub center: Vec<WidgetPlacement>,
-
-    /// Widgets in the center-left section (used when notch_enabled = true).
-    /// Each entry is a widget name string or a group of widget names.
-    pub center_left: Vec<WidgetPlacement>,
-
-    /// Widgets in the center-right section (used when notch_enabled = true).
-    /// Each entry is a widget name string or a group of widget names.
-    pub center_right: Vec<WidgetPlacement>,
 
     /// Widgets in the right section.
     /// Each entry is a widget name string or a group of widget names.
@@ -583,8 +566,6 @@ impl Default for WidgetsConfig {
         Self {
             left: Vec::new(),
             center: Vec::new(),
-            center_left: Vec::new(),
-            center_right: Vec::new(),
             right: Vec::new(),
             border_radius: 40,
             widget_configs: HashMap::new(),
@@ -607,18 +588,64 @@ impl WidgetsConfig {
         self.widget_configs.get(name)
     }
 
+    /// Parse inline argument from widget name.
+    ///
+    /// Supports syntax like `"spacer:50"` where the part after the colon is the inline arg.
+    /// Empty args (e.g., `"spacer:"`) are treated as None.
+    ///
+    /// Returns `(base_name, inline_arg)`.
+    ///
+    /// # Examples
+    /// - `"spacer"` -> `("spacer", None)`
+    /// - `"spacer:50"` -> `("spacer", Some("50"))`
+    /// - `"spacer:"` -> `("spacer", None)`
+    fn parse_inline_arg(name: &str) -> (&str, Option<&str>) {
+        if let Some(pos) = name.find(':') {
+            let arg = &name[pos + 1..];
+            let arg = if arg.is_empty() { None } else { Some(arg) };
+            (&name[..pos], arg)
+        } else {
+            (name, None)
+        }
+    }
+
     /// Resolve a single widget name to a WidgetEntry, applying options from config.
     /// Returns None if the widget is disabled.
+    ///
+    /// Supports inline spacer width syntax like "spacer:50".
+    /// This is intentionally special-cased: the inline value is parsed and injected
+    /// into the resolved entry as `options["width"]`.
     fn resolve_widget(&self, name: &str) -> Option<WidgetEntry> {
-        if self.is_disabled(name) {
+        let (base_name, inline_arg) = Self::parse_inline_arg(name);
+
+        if self.is_disabled(base_name) {
             return None;
         }
 
-        let entry = if let Some(opts) = self.get_options(name) {
-            WidgetEntry::with_options(name, opts)
+        let mut entry = if let Some(opts) = self.get_options(base_name) {
+            WidgetEntry::with_options(base_name, opts)
         } else {
-            WidgetEntry::new(name)
+            WidgetEntry::new(base_name)
         };
+
+        if base_name == "spacer"
+            && let Some(arg) = inline_arg
+            && !arg.is_empty()
+        {
+            match arg.parse::<i64>() {
+                Ok(width) if width > 0 => {
+                    entry
+                        .options
+                        .insert("width".to_string(), toml::Value::Integer(width));
+                }
+                _ => {
+                    tracing::warn!(
+                        "Invalid spacer width '{}' - expected a positive integer",
+                        arg
+                    );
+                }
+            }
+        }
 
         Some(entry)
     }
@@ -661,31 +688,69 @@ impl WidgetsConfig {
         self.resolve_section(&self.center)
     }
 
-    /// Get resolved widgets for the center-left section.
-    pub fn resolved_center_left(&self) -> Vec<WidgetOrGroup> {
-        self.resolve_section(&self.center_left)
-    }
-
-    /// Get resolved widgets for the center-right section.
-    pub fn resolved_center_right(&self) -> Vec<WidgetOrGroup> {
-        self.resolve_section(&self.center_right)
-    }
-
     /// Get resolved widgets for the right section.
     pub fn resolved_right(&self) -> Vec<WidgetOrGroup> {
         self.resolve_section(&self.right)
     }
 
+    /// Check if a widget name refers to a flexible (expandable) spacer.
+    ///
+    /// Returns `true` only for spacer widgets that will expand to fill available space.
+    /// Returns `false` for:
+    /// - Non-spacer widgets
+    /// - Disabled spacers
+    /// - Spacers with fixed width (via inline arg like `"spacer:50"` or TOML `width` option)
+    fn is_flexible_spacer(&self, name: &str) -> bool {
+        let (base_name, inline_arg) = Self::parse_inline_arg(name);
+
+        if base_name != "spacer" || self.is_disabled(base_name) {
+            return false;
+        }
+
+        // Fixed width via inline arg (e.g., "spacer:50")
+        if inline_arg.is_some() {
+            return false;
+        }
+
+        // Fixed width via TOML options (e.g., [widgets.spacer] width = 50)
+        if let Some(opts) = self.get_options(base_name)
+            && opts.options.contains_key("width")
+        {
+            return false;
+        }
+
+        true
+    }
+
+    /// Check if a section contains any expandable widgets (like spacer without fixed width).
+    ///
+    /// A flexible spacer ("spacer" or "spacer:") expands to fill available space,
+    /// while a fixed spacer ("spacer:50" or with `width` in options) has a fixed width.
+    ///
+    /// Disabled widgets are not considered expanders.
+    pub fn section_has_expander(&self, section: &[WidgetPlacement]) -> bool {
+        section.iter().any(|placement| {
+            placement
+                .widget_names()
+                .iter()
+                .any(|name| self.is_flexible_spacer(name))
+        })
+    }
+
+    /// Check if the left section contains an expandable widget.
+    pub fn left_has_expander(&self) -> bool {
+        self.section_has_expander(&self.left)
+    }
+
+    /// Check if the right section contains an expandable widget.
+    pub fn right_has_expander(&self) -> bool {
+        self.section_has_expander(&self.right)
+    }
+
     /// Get all widget names referenced in any placement array.
     pub fn all_referenced_widgets(&self) -> std::collections::HashSet<String> {
         let mut names = std::collections::HashSet::new();
-        for section in [
-            &self.left,
-            &self.center,
-            &self.center_left,
-            &self.center_right,
-            &self.right,
-        ] {
+        for section in [&self.left, &self.center, &self.right] {
             for placement in section {
                 for name in placement.widget_names() {
                     names.insert(name.to_string());
@@ -1442,22 +1507,6 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_center_split_with_notch_ok() {
-        let mut config = Config::default();
-        config.bar.notch_enabled = true;
-        config
-            .widgets
-            .center_left
-            .push(WidgetPlacement::Single("clock".to_string()));
-        config
-            .widgets
-            .center_right
-            .push(WidgetPlacement::Single("battery".to_string()));
-
-        assert!(config.validate().is_ok());
-    }
-
-    #[test]
     fn test_validate_center_with_notch_error() {
         let mut config = Config::default();
         config.bar.notch_enabled = true;
@@ -1476,21 +1525,17 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_center_split_without_notch_error() {
+    fn test_validate_notch_mode_empty_center_ok() {
+        // Notch mode with empty center section is valid
         let mut config = Config::default();
-        config.bar.notch_enabled = false;
+        config.bar.notch_enabled = true;
+        // No widgets in center - this is correct for notch mode
         config
             .widgets
-            .center_left
+            .left
             .push(WidgetPlacement::Single("clock".to_string()));
 
-        let result = config.validate();
-        assert!(result.is_err());
-
-        let err = result.unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("center_left"));
-        assert!(msg.contains("notch_enabled=false"));
+        assert!(config.validate().is_ok());
     }
 
     #[test]
@@ -1698,5 +1743,138 @@ mod tests {
 
         let unreferenced = config.widgets.unreferenced_configs();
         assert!(unreferenced.contains(&"clokc".to_string()));
+    }
+
+    #[test]
+    fn test_section_has_expander_flexible_spacer() {
+        let section = vec![WidgetPlacement::Single("spacer".to_string())];
+        let config = WidgetsConfig::default();
+        assert!(config.section_has_expander(&section));
+    }
+
+    #[test]
+    fn test_section_has_expander_fixed_spacer() {
+        // "spacer:50" with arg is NOT expandable
+        let section = vec![WidgetPlacement::Single("spacer:50".to_string())];
+        let config = WidgetsConfig::default();
+        assert!(!config.section_has_expander(&section));
+    }
+
+    #[test]
+    fn test_section_has_expander_empty_arg() {
+        // "spacer:" with empty arg IS expandable (matches resolve_widget behavior)
+        let section = vec![WidgetPlacement::Single("spacer:".to_string())];
+        let config = WidgetsConfig::default();
+        assert!(config.section_has_expander(&section));
+    }
+
+    #[test]
+    fn test_section_has_expander_no_spacer() {
+        let section = vec![
+            WidgetPlacement::Single("clock".to_string()),
+            WidgetPlacement::Single("battery".to_string()),
+        ];
+        let config = WidgetsConfig::default();
+        assert!(!config.section_has_expander(&section));
+    }
+
+    #[test]
+    fn test_section_has_expander_in_group() {
+        // Spacer in a group should still be detected
+        let section = vec![WidgetPlacement::Group {
+            group: vec!["clock".to_string(), "spacer".to_string()],
+        }];
+        let config = WidgetsConfig::default();
+        assert!(config.section_has_expander(&section));
+    }
+
+    #[test]
+    fn test_section_has_expander_mixed() {
+        // Mix of regular widgets and flexible spacer
+        let section = vec![
+            WidgetPlacement::Single("workspace".to_string()),
+            WidgetPlacement::Single("window_title".to_string()),
+            WidgetPlacement::Single("spacer".to_string()),
+            WidgetPlacement::Single("clock".to_string()),
+        ];
+        let config = WidgetsConfig::default();
+        assert!(config.section_has_expander(&section));
+    }
+
+    #[test]
+    fn test_section_has_expander_disabled_spacer() {
+        // Disabled spacer should NOT count as expander
+        let section = vec![
+            WidgetPlacement::Single("workspace".to_string()),
+            WidgetPlacement::Single("spacer".to_string()),
+        ];
+
+        let mut config = WidgetsConfig::default();
+        config.widget_configs.insert(
+            "spacer".to_string(),
+            WidgetOptions {
+                disabled: true,
+                ..Default::default()
+            },
+        );
+
+        assert!(!config.section_has_expander(&section));
+    }
+
+    #[test]
+    fn test_section_has_expander_width_in_options() {
+        // Spacer with width defined in TOML options should NOT count as expander
+        let section = vec![
+            WidgetPlacement::Single("workspace".to_string()),
+            WidgetPlacement::Single("spacer".to_string()),
+        ];
+
+        let mut config = WidgetsConfig::default();
+        let mut options = HashMap::new();
+        options.insert("width".to_string(), toml::Value::Integer(50));
+        config.widget_configs.insert(
+            "spacer".to_string(),
+            WidgetOptions {
+                options,
+                ..Default::default()
+            },
+        );
+
+        assert!(!config.section_has_expander(&section));
+    }
+
+    #[test]
+    fn test_resolve_widget_spacer_inline_width_injects_option() {
+        let config = WidgetsConfig::default();
+        let entry = config.resolve_widget("spacer:50").unwrap();
+
+        assert_eq!(entry.name, "spacer");
+        assert_eq!(entry.options.get("width"), Some(&toml::Value::Integer(50)));
+    }
+
+    #[test]
+    fn test_resolve_widget_spacer_inline_overrides_config_width() {
+        let mut config = WidgetsConfig::default();
+        let mut options = HashMap::new();
+        options.insert("width".to_string(), toml::Value::Integer(100));
+        config.widget_configs.insert(
+            "spacer".to_string(),
+            WidgetOptions {
+                options,
+                ..Default::default()
+            },
+        );
+
+        let entry = config.resolve_widget("spacer:50").unwrap();
+        assert_eq!(entry.options.get("width"), Some(&toml::Value::Integer(50)));
+    }
+
+    #[test]
+    fn test_resolve_widget_spacer_invalid_inline_width_warns_and_ignores() {
+        let config = WidgetsConfig::default();
+        let entry = config.resolve_widget("spacer:nope").unwrap();
+
+        assert_eq!(entry.name, "spacer");
+        assert!(!entry.options.contains_key("width"));
     }
 }

@@ -191,7 +191,6 @@ fn create_indicators(
         label.add_css_class(widget::WORKSPACE_INDICATOR);
         label.add_css_class(state::CLICKABLE);
         label.set_valign(Align::Center);
-        label.set_hexpand(true);
         label.set_xalign(0.5);
         label.set_ellipsize(EllipsizeMode::End);
         label.set_single_line_mode(true);

@@ -58,15 +58,6 @@ pub mod class {
 
     /// Bar section center (`.bar-section--center`).
     pub const BAR_SECTION_CENTER: &str = "bar-section--center";
-
-    /// Bar section center-left (`.bar-section--center-left`).
-    pub const BAR_SECTION_CENTER_LEFT: &str = "bar-section--center-left";
-
-    /// Bar section center-right (`.bar-section--center-right`).
-    pub const BAR_SECTION_CENTER_RIGHT: &str = "bar-section--center-right";
-
-    /// Notch spacer (`.notch-spacer`).
-    pub const NOTCH_SPACER: &str = "notch-spacer";
 }
 
 /// Foreground/text color classes.
@@ -319,6 +310,10 @@ pub mod qs {
 
 /// Widget-specific CSS classes.
 pub mod widget {
+    // Spacer
+    /// Spacer widget (`.spacer`).
+    pub const SPACER: &str = "spacer";
+
     // Clock
     /// Clock widget (`.clock`).
     pub const CLOCK: &str = "clock";

@@ -265,31 +265,6 @@ fn test_validation_rejects_notch_enabled_with_center_widgets() {
 }
 
 #[test]
-fn test_validation_rejects_notch_disabled_with_center_split_widgets() {
-    // When notch_enabled=false, using widgets.center_left/center_right should be rejected
-    let toml = r#"
-        [bar]
-        notch_enabled = false
-        
-        [widgets]
-        center_left = ["clock"]
-    "#;
-
-    let config: Config = toml::from_str(toml).unwrap();
-    let result = config.validate();
-
-    assert!(
-        result.is_err(),
-        "notch_enabled=false with widgets.center_left should fail"
-    );
-    let err = result.unwrap_err().to_string();
-    assert!(
-        err.contains("center_left") || err.contains("center_right"),
-        "Error should mention center_left/center_right"
-    );
-}
-
-#[test]
 fn test_validation_accepts_valid_enum_values() {
     // Test all valid enum combinations
     let toml = r#"
@@ -314,7 +289,7 @@ fn test_validation_accepts_valid_enum_values() {
         .validate()
         .expect("Valid config should pass validation");
 
-    // Also test other valid values
+    // Also test other valid values (notch mode with left/right sections)
     let toml2 = r#"
         [bar]
         notch_enabled = true
@@ -329,7 +304,8 @@ fn test_validation_accepts_valid_enum_values() {
         position = "top"
         
         [widgets]
-        center_left = ["clock"]
+        left = ["clock"]
+        right = ["battery"]
     "#;
 
     let config2: Config = toml::from_str(toml2).unwrap();

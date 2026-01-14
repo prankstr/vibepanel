@@ -24,6 +24,8 @@ mod imp {
     pub struct CenterPriorityLayout {
         pub spacing: Cell<i32>,
         pub edge_margin: Cell<i32>,
+        pub left_expand: Cell<bool>,
+        pub right_expand: Cell<bool>,
         // Last allocation positions and widths for snapshot/clipping
         pub last_left_x: Cell<i32>,
         pub last_left_width: Cell<i32>,
@@ -188,8 +190,10 @@ mod imp {
                 interior,
                 spacing,
                 left_sizes,
+                self.left_expand.get(),
                 center_sizes,
                 right_sizes,
+                self.right_expand.get(),
             );
 
             // Record last allocation for snapshot/clipping
@@ -242,10 +246,12 @@ glib::wrapper! {
 }
 
 impl CenterPriorityLayout {
-    pub fn new(spacing: i32, edge_margin: i32) -> Self {
+    pub fn new(spacing: i32, edge_margin: i32, left_expand: bool, right_expand: bool) -> Self {
         let obj: Self = glib::Object::builder().build();
         obj.imp().spacing.set(spacing);
         obj.imp().edge_margin.set(edge_margin);
+        obj.imp().left_expand.set(left_expand);
+        obj.imp().right_expand.set(right_expand);
         obj
     }
 
@@ -256,11 +262,19 @@ impl CenterPriorityLayout {
     pub fn set_edge_margin(&self, edge_margin: i32) {
         self.imp().edge_margin.set(edge_margin);
     }
+
+    pub fn set_left_expand(&self, expand: bool) {
+        self.imp().left_expand.set(expand);
+    }
+
+    pub fn set_right_expand(&self, expand: bool) {
+        self.imp().right_expand.set(expand);
+    }
 }
 
 impl Default for CenterPriorityLayout {
     fn default() -> Self {
-        Self::new(8, 12)
+        Self::new(8, 12, false, false)
     }
 }
 
@@ -334,9 +348,9 @@ glib::wrapper! {
 }
 
 impl SectionedBar {
-    pub fn new(spacing: i32, edge_margin: i32) -> Self {
+    pub fn new(spacing: i32, edge_margin: i32, left_expand: bool, right_expand: bool) -> Self {
         let obj: Self = glib::Object::builder().build();
-        let layout = CenterPriorityLayout::new(spacing, edge_margin);
+        let layout = CenterPriorityLayout::new(spacing, edge_margin, left_expand, right_expand);
         obj.set_layout_manager(Some(layout));
         obj
     }
@@ -389,6 +403,6 @@ impl SectionedBar {
 
 impl Default for SectionedBar {
     fn default() -> Self {
-        Self::new(8, 12)
+        Self::new(8, 12, false, false)
     }
 }
