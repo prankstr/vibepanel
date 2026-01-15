@@ -981,11 +981,11 @@ impl QuickSettingsWindow {
         // Get bar dimensions from config
         let config_mgr = ConfigManager::global();
         let bar_size = config_mgr.bar_size() as i32;
-        let outer_margin = config_mgr.bar_outer_margin() as i32;
+        let screen_margin = config_mgr.screen_margin() as i32;
         let popover_offset = config_mgr.popover_offset() as i32;
 
         // Calculate and apply top margin
-        let top_margin = calculate_qs_top_margin(anchor_y, bar_size, outer_margin, popover_offset);
+        let top_margin = calculate_qs_top_margin(anchor_y, bar_size, screen_margin, popover_offset);
         self.window.set_margin(Edge::Top, top_margin);
 
         if anchor_x > 0 {
@@ -1209,9 +1209,9 @@ impl QuickSettingsWindowHandle {
 /// This is the pure math extracted from `update_position` for testing.
 ///
 /// # Arguments
-/// * `anchor_y` - Widget bottom Y from bar_widget (includes outer_margin adjustment)
+/// * `anchor_y` - Widget bottom Y from bar_widget (includes screen_margin adjustment)
 /// * `bar_size` - Bar height in pixels
-/// * `outer_margin` - Bar's outer margin from config
+/// * `screen_margin` - Bar's screen margin from config
 /// * `popover_offset` - Desired gap between bar and popover from config
 ///
 /// # Returns
@@ -1219,13 +1219,13 @@ impl QuickSettingsWindowHandle {
 fn calculate_qs_top_margin(
     anchor_y: i32,
     bar_size: i32,
-    outer_margin: i32,
+    screen_margin: i32,
     popover_offset: i32,
 ) -> i32 {
-    // The bar occupies: outer_margin (top) + bar_size + outer_margin (bottom padding)
-    let bar_total_height = bar_size + 2 * outer_margin;
+    // The bar occupies: screen_margin (top) + bar_size + screen_margin (bottom padding)
+    let bar_total_height = bar_size + 2 * screen_margin;
 
-    // anchor_y from bar_widget already includes outer_margin offset
+    // anchor_y from bar_widget already includes screen_margin offset
     // Subtract bar_total_height to get actual screen position, then add popover_offset
     let top_margin = anchor_y - bar_total_height + popover_offset;
     top_margin.max(0)
@@ -1237,17 +1237,17 @@ mod tests {
 
     #[test]
     fn test_qs_top_margin_typical_config() {
-        // Typical config: bar_size=32, outer_margin=4, popover_offset=1
-        // anchor_y from bar_widget = (widget_bottom_in_window) + outer_margin
-        // Widget bottom in window ≈ outer_margin + bar_size = 4 + 32 = 36
+        // Typical config: bar_size=32, screen_margin=4, popover_offset=1
+        // anchor_y from bar_widget = (widget_bottom_in_window) + screen_margin
+        // Widget bottom in window ≈ screen_margin + bar_size = 4 + 32 = 36
         // So anchor_y ≈ 36 + 4 = 40
 
         let anchor_y = 40;
         let bar_size = 32;
-        let outer_margin = 4;
+        let screen_margin = 4;
         let popover_offset = 1;
 
-        let margin = calculate_qs_top_margin(anchor_y, bar_size, outer_margin, popover_offset);
+        let margin = calculate_qs_top_margin(anchor_y, bar_size, screen_margin, popover_offset);
 
         // bar_total_height = 32 + 8 = 40
         // top_margin = 40 - 40 + 1 = 1
@@ -1258,10 +1258,10 @@ mod tests {
     fn test_qs_top_margin_larger_offset() {
         let anchor_y = 40;
         let bar_size = 32;
-        let outer_margin = 4;
+        let screen_margin = 4;
         let popover_offset = 8;
 
-        let margin = calculate_qs_top_margin(anchor_y, bar_size, outer_margin, popover_offset);
+        let margin = calculate_qs_top_margin(anchor_y, bar_size, screen_margin, popover_offset);
 
         // top_margin = 40 - 40 + 8 = 8
         assert_eq!(margin, 8);
@@ -1271,10 +1271,10 @@ mod tests {
     fn test_qs_top_margin_zero_offset() {
         let anchor_y = 40;
         let bar_size = 32;
-        let outer_margin = 4;
+        let screen_margin = 4;
         let popover_offset = 0;
 
-        let margin = calculate_qs_top_margin(anchor_y, bar_size, outer_margin, popover_offset);
+        let margin = calculate_qs_top_margin(anchor_y, bar_size, screen_margin, popover_offset);
 
         // top_margin = 40 - 40 + 0 = 0
         assert_eq!(margin, 0);
@@ -1285,24 +1285,24 @@ mod tests {
         // Edge case: if anchor_y is unexpectedly small
         let anchor_y = 30; // Less than bar_total_height
         let bar_size = 32;
-        let outer_margin = 4;
+        let screen_margin = 4;
         let popover_offset = 1;
 
-        let margin = calculate_qs_top_margin(anchor_y, bar_size, outer_margin, popover_offset);
+        let margin = calculate_qs_top_margin(anchor_y, bar_size, screen_margin, popover_offset);
 
         // top_margin = 30 - 40 + 1 = -9, clamped to 0
         assert_eq!(margin, 0);
     }
 
     #[test]
-    fn test_qs_top_margin_no_outer_margin() {
-        // Config with no outer margin
+    fn test_qs_top_margin_no_screen_margin() {
+        // Config with no screen margin
         let anchor_y = 32; // Just bar_size
         let bar_size = 32;
-        let outer_margin = 0;
+        let screen_margin = 0;
         let popover_offset = 4;
 
-        let margin = calculate_qs_top_margin(anchor_y, bar_size, outer_margin, popover_offset);
+        let margin = calculate_qs_top_margin(anchor_y, bar_size, screen_margin, popover_offset);
 
         // bar_total_height = 32 + 0 = 32
         // top_margin = 32 - 32 + 4 = 4

@@ -62,17 +62,17 @@ pub fn create_bar_window(
 
     // Set margins from config (legacy behavior)
     // We keep window margins at 0 for left/right so the bar window
-    // fills the monitor width; outer_margin is applied inside the
+    // fills the monitor width; screen_margin is applied inside the
     // bar content instead.
-    let margin = config.bar.outer_margin as i32;
+    let margin = config.bar.screen_margin as i32;
     window.set_margin(Edge::Top, 0);
     window.set_margin(Edge::Left, 0);
     window.set_margin(Edge::Right, 0);
 
     // Create the bar container using SectionedBar for proper left/center/right layout
     let bar_box = SectionedBar::new(
-        config.bar.widget_spacing as i32,
-        config.bar.section_edge_margin as i32,
+        config.bar.spacing as i32,
+        config.bar.inset as i32,
         config.widgets.left_has_expander(),
         config.widgets.right_has_expander(),
     );
@@ -155,7 +155,7 @@ pub fn create_bar_window(
     info!(
         "Bar window created: size={}px, margin={}px, monitor={:?}, widgets={}",
         config.bar.size,
-        config.bar.outer_margin,
+        config.bar.screen_margin,
         monitor.connector(),
         state.handle_count()
     );
@@ -277,10 +277,7 @@ fn create_center_section(
     qs_handle: &crate::widgets::QuickSettingsWindowHandle,
     output_id: Option<&str>,
 ) -> gtk4::Box {
-    let section = gtk4::Box::new(
-        gtk4::Orientation::Horizontal,
-        config.bar.widget_spacing as i32,
-    );
+    let section = gtk4::Box::new(gtk4::Orientation::Horizontal, config.bar.spacing as i32);
     section.add_css_class(class::BAR_SECTION_CENTER);
 
     if config.bar.notch_enabled {

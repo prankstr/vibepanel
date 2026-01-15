@@ -189,8 +189,8 @@ popover.widget-menu.background > contents {
 
 /// Generate all widget CSS.
 pub fn widget_css(config: &Config) -> String {
-    let outer_margin = config.bar.outer_margin;
-    let widget_spacing = config.bar.widget_spacing;
+    let screen_margin = config.bar.screen_margin;
+    let spacing = config.bar.spacing;
 
     format!(
         r#"
@@ -209,8 +209,8 @@ pub fn widget_css(config: &Config) -> String {
 }}
 
 .bar-shell-inner {{
-    padding-left: {outer_margin}px;
-    padding-right: {outer_margin}px;
+    padding-left: {screen_margin}px;
+    padding-right: {screen_margin}px;
 }}
 
 /* Bar container - the visible bar */
@@ -240,7 +240,7 @@ sectioned-bar.bar {{
 /* Section widget spacing via margins (Box spacing=0 to allow spacer to have no gaps) */
 .bar-section--left > *:not(:last-child):not(.spacer),
 .bar-section--right > *:not(:last-child):not(.spacer) {{
-    margin-right: {widget_spacing}px;
+    margin-right: {spacing}px;
 }}
 
 /* Spacer widget - no margins so it doesn't create extra gaps */

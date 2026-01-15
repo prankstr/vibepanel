@@ -131,9 +131,9 @@ impl ConfigManager {
         self.config.borrow().bar.size
     }
 
-    /// Get the bar outer margin from the current configuration.
-    pub fn bar_outer_margin(&self) -> u32 {
-        self.config.borrow().bar.outer_margin
+    /// Get the bar screen margin from the current configuration.
+    pub fn screen_margin(&self) -> u32 {
+        self.config.borrow().bar.screen_margin
     }
 
     /// Get the popover offset (gap between widget and popover) from the current configuration.
@@ -402,27 +402,24 @@ fn config_structure_changed(old: &Config, new: &Config) -> bool {
         return true;
     }
 
-    if old.bar.outer_margin != new.bar.outer_margin {
+    if old.bar.screen_margin != new.bar.screen_margin {
         debug!(
-            "bar.outer_margin changed ({} -> {})",
-            old.bar.outer_margin, new.bar.outer_margin
+            "bar.screen_margin changed ({} -> {})",
+            old.bar.screen_margin, new.bar.screen_margin
         );
         return true;
     }
 
-    if old.bar.widget_spacing != new.bar.widget_spacing {
+    if old.bar.spacing != new.bar.spacing {
         debug!(
-            "bar.widget_spacing changed ({} -> {})",
-            old.bar.widget_spacing, new.bar.widget_spacing
+            "bar.spacing changed ({} -> {})",
+            old.bar.spacing, new.bar.spacing
         );
         return true;
     }
 
-    if old.bar.section_edge_margin != new.bar.section_edge_margin {
-        debug!(
-            "bar.section_edge_margin changed ({} -> {})",
-            old.bar.section_edge_margin, new.bar.section_edge_margin
-        );
+    if old.bar.inset != new.bar.inset {
+        debug!("bar.inset changed ({} -> {})", old.bar.inset, new.bar.inset);
         return true;
     }
 

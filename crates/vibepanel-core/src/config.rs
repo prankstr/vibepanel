@@ -340,8 +340,8 @@ impl Config {
 
         lines.push("Bar Configuration:".to_string());
         lines.push(format!("  size: {}px", self.bar.size));
-        lines.push(format!("  widget_spacing: {}px", self.bar.widget_spacing));
-        lines.push(format!("  outer_margin: {}px", self.bar.outer_margin));
+        lines.push(format!("  spacing: {}px", self.bar.spacing));
+        lines.push(format!("  screen_margin: {}px", self.bar.screen_margin));
         lines.push(format!(
             "  notch: {} (width: {}px)",
             if self.bar.notch_enabled {
@@ -451,13 +451,13 @@ pub struct BarConfig {
     pub size: u32,
 
     /// Spacing between widgets in pixels.
-    pub widget_spacing: u32,
+    pub spacing: u32,
 
     /// Distance from screen edge to bar window in pixels.
-    pub outer_margin: u32,
+    pub screen_margin: u32,
 
     /// Distance from bar edge to first/last section in pixels.
-    pub section_edge_margin: u32,
+    pub inset: u32,
 
     /// Whether notch mode is enabled.
     pub notch_enabled: bool,
@@ -492,9 +492,9 @@ impl Default for BarConfig {
     fn default() -> Self {
         Self {
             size: 32,
-            widget_spacing: 8,
-            outer_margin: 4,
-            section_edge_margin: 8,
+            spacing: 8,
+            screen_margin: 4,
+            inset: 8,
             notch_enabled: false,
             notch_width: 0,
             border_radius: 30,
@@ -1142,7 +1142,7 @@ mod tests {
     fn test_default_config() {
         let config = Config::default();
         assert_eq!(config.bar.size, 32);
-        assert_eq!(config.bar.outer_margin, 4);
+        assert_eq!(config.bar.screen_margin, 4);
         assert_eq!(config.bar.background_opacity, 0.0);
         assert_eq!(config.widgets.background_opacity, 1.0);
         assert_eq!(config.workspace.backend, "auto");
@@ -1197,7 +1197,7 @@ mod tests {
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.bar.size, 40);
         // Struct defaults should be applied
-        assert_eq!(config.bar.outer_margin, 4);
+        assert_eq!(config.bar.screen_margin, 4);
         // Without merge, widgets are empty (struct default)
         assert!(config.widgets.left.is_empty());
     }
@@ -1216,7 +1216,7 @@ mod tests {
         assert_eq!(config.bar.size, 40);
 
         // Default values from embedded config should be inherited
-        assert_eq!(config.bar.outer_margin, 4);
+        assert_eq!(config.bar.screen_margin, 4);
 
         // Widgets should come from embedded defaults, not be empty
         assert!(
