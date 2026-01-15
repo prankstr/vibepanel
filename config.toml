@@ -14,6 +14,7 @@
 [bar]
 size = 32
 border_radius = 30
+background_opacity = 0.0  # 0.0 = transparent (islands), 1.0 = solid
 
 [widgets]
 left = ["workspace", "window_title"]
@@ -28,6 +29,7 @@ right = [
   "notifications",
 ]
 border_radius = 40
+background_opacity = 1.0
 
 # Per-widget options use [widgets.<name>] sections.
 # Example:
@@ -39,17 +41,16 @@ border_radius = 40
 #
 # See documentation for all widget options.
 
-[icons]
-theme = "material"  # "material" or "gtk"
-
 [workspace]
 backend = "auto"  # "auto", "hyprland", "niri", "mango"
 
 [theme]
 mode = "dark"        # "auto", "dark", "light", "gtk"
 accent = "#adabe0"   # "gtk", "none", or hex color
-bar_opacity = 0.0    # 0.0 = transparent (islands), 1.0 = solid
-widget_opacity = 1.0
+
+[theme.icons]
+theme = "material"  # "material" or "gtk"
+weight = 400        # Material icon stroke weight (100-700)
 
 [osd]
 enabled = true

@@ -526,23 +526,23 @@ impl ThemePalette {
             )
         };
 
-        // Bar background - user can override with explicit color in theme.bar_background_color
+        // Bar background - user can override with explicit color in bar.background_color
         self.bar_background = config
-            .theme
-            .bar_background_color
+            .bar
+            .background_color
             .clone()
             .unwrap_or(default_bar_bg);
 
-        // Widget background - user can override with explicit color in theme.widget_background_color
+        // Widget background - user can override with explicit color in widgets.background_color
         self.widget_background = config
-            .theme
-            .widget_background_color
+            .widgets
+            .background_color
             .clone()
             .unwrap_or(default_widget_bg);
 
-        // Opacities from theme config
-        self.bar_opacity = config.theme.bar_opacity;
-        self.widget_opacity = config.theme.widget_opacity;
+        // Opacities from bar/widgets config
+        self.bar_opacity = config.bar.background_opacity;
+        self.widget_opacity = config.widgets.background_opacity;
 
         // Resolve is_dark_mode
         // For GTK mode, we assume dark for overlay calculations since we can't query GTK's actual colors at build time

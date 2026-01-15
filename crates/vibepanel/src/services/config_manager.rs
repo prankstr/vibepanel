@@ -143,7 +143,7 @@ impl ConfigManager {
 
     /// Get the widget opacity from the current theme configuration.
     pub fn widget_opacity(&self) -> f64 {
-        self.config.borrow().theme.widget_opacity
+        self.config.borrow().widgets.background_opacity
     }
 
     /// Start watching the config file for changes.
@@ -309,17 +309,18 @@ impl ConfigManager {
         info!("Applying new configuration...");
 
         // Update icons theme and/or weight
-        if old_config.icons.theme != new_config.icons.theme
-            || old_config.icons.weight != new_config.icons.weight
+        if old_config.theme.icons.theme != new_config.theme.icons.theme
+            || old_config.theme.icons.weight != new_config.theme.icons.weight
         {
             info!(
                 "Icon config changed: theme {} -> {}, weight {} -> {}",
-                old_config.icons.theme,
-                new_config.icons.theme,
-                old_config.icons.weight,
-                new_config.icons.weight
+                old_config.theme.icons.theme,
+                new_config.theme.icons.theme,
+                old_config.theme.icons.weight,
+                new_config.theme.icons.weight
             );
-            IconsService::global().reconfigure(&new_config.icons.theme, new_config.icons.weight);
+            IconsService::global()
+                .reconfigure(&new_config.theme.icons.theme, new_config.theme.icons.weight);
         }
 
         // Update theme/palette if theme config changed
@@ -378,10 +379,10 @@ impl ConfigManager {
 fn config_theme_changed(old: &Config, new: &Config) -> bool {
     old.theme.mode != new.theme.mode
         || old.theme.accent != new.theme.accent
-        || old.theme.bar_background_color != new.theme.bar_background_color
-        || old.theme.bar_opacity != new.theme.bar_opacity
-        || old.theme.widget_background_color != new.theme.widget_background_color
-        || old.theme.widget_opacity != new.theme.widget_opacity
+        || old.bar.background_color != new.bar.background_color
+        || old.bar.background_opacity != new.bar.background_opacity
+        || old.widgets.background_color != new.widgets.background_color
+        || old.widgets.background_opacity != new.widgets.background_opacity
         || old.theme.states.success != new.theme.states.success
         || old.theme.states.warning != new.theme.states.warning
         || old.theme.states.urgent != new.theme.states.urgent
@@ -527,7 +528,7 @@ mod tests {
         let old = Config::default();
         let mut new = Config::default();
 
-        new.theme.bar_opacity = 0.5;
+        new.bar.background_opacity = 0.5;
         assert!(config_theme_changed(&old, &new));
     }
 

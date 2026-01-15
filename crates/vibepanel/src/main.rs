@@ -451,12 +451,12 @@ fn run_gtk_app(config: Config, config_source: Option<PathBuf>) -> ExitCode {
         // Initialize theming services with config values
         // IconsService must be initialized before widgets are created
         services::icons::IconsService::init_global(
-            &config_for_activate.icons.theme,
-            config_for_activate.icons.weight,
+            &config_for_activate.theme.icons.theme,
+            config_for_activate.theme.icons.weight,
         );
         debug!(
             "Icons service initialized with theme: {}, weight: {}",
-            config_for_activate.icons.theme, config_for_activate.icons.weight
+            config_for_activate.theme.icons.theme, config_for_activate.theme.icons.weight
         );
 
         // Initialize theming-related services with theme-derived styles
