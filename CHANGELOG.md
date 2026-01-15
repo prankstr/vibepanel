@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0](https://github.com/prankstr/vibepanel/compare/v0.4.0...v0.5.0) (2026-01-15)
+
+
+### ⚠ BREAKING CHANGES
+
+* window_title.format removed. Use template instead.
+* [workspace] config section removed. Use [advanced].compositor instead.
+* **css:** CSS class renamed from `.notification` to `.notifications`
+
+### Features
+
+* **css:** improve CSS customizability for Quick Settings and surfaces ([0a72720](https://github.com/prankstr/vibepanel/commit/0a72720a516516f5fb63fcc81de2611465ba8e23))
+
+
+### Bug Fixes
+
+* **ci:** pass tag_name to release workflow to fix GitHub Releases ([c87e024](https://github.com/prankstr/vibepanel/commit/c87e02447645899a6e511747f62345ee5de22c19))
+* **css:** quick settings window inherits widget color ([0a72720](https://github.com/prankstr/vibepanel/commit/0a72720a516516f5fb63fcc81de2611465ba8e23))
+* **css:** rename notification widget class to notifications ([0a72720](https://github.com/prankstr/vibepanel/commit/0a72720a516516f5fb63fcc81de2611465ba8e23))
+* **css:** use CSS variable for popover background ([0a72720](https://github.com/prankstr/vibepanel/commit/0a72720a516516f5fb63fcc81de2611465ba8e23))
+* **css:** use CSS variable for surface text color ([0a72720](https://github.com/prankstr/vibepanel/commit/0a72720a516516f5fb63fcc81de2611465ba8e23))
+* **docs:** remove undocumented package_manager option from updates widget ([1927090](https://github.com/prankstr/vibepanel/commit/1927090dd0cf34bb8b6524344bc40ae848e4ab54))
+
+
+### Code Refactoring
+
+* move [workspace] config to [advanced].compositor ([1927090](https://github.com/prankstr/vibepanel/commit/1927090dd0cf34bb8b6524344bc40ae848e4ab54))
+* remove window_title.format option ([1927090](https://github.com/prankstr/vibepanel/commit/1927090dd0cf34bb8b6524344bc40ae848e4ab54))
+
 ## [0.4.0](https://github.com/prankstr/vibepanel/compare/v0.3.0...v0.4.0) (2026-01-15)
 
 
