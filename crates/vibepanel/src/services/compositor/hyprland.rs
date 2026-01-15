@@ -217,7 +217,7 @@ impl HyprlandBackend {
             // Initialize per_output entries for all known monitors
             for (mon_name, &active_ws) in monitor_ws.iter() {
                 let per_output = snapshot.per_output.entry(mon_name.clone()).or_default();
-                per_output.active_workspace = Some(active_ws);
+                per_output.active_workspace.insert(active_ws);
             }
 
             for ws in workspaces {
@@ -254,7 +254,7 @@ impl HyprlandBackend {
             if let Some(ref focused) = *focused_mon
                 && let Some(&active_ws) = monitor_ws.get(focused)
             {
-                snapshot.active_workspace = Some(active_ws);
+                snapshot.active_workspace.insert(active_ws);
             }
         }
 
@@ -280,7 +280,7 @@ impl HyprlandBackend {
             let focused_mon = self.focused_monitor.read();
 
             // Track previous state to detect changes
-            let previous_active = snapshot.active_workspace;
+            let previous_active = snapshot.active_workspace.clone();
             let old_occupied = snapshot.occupied_workspaces.clone();
 
             snapshot.occupied_workspaces.clear();
@@ -290,7 +290,7 @@ impl HyprlandBackend {
             // Initialize per_output entries for all known monitors
             for (mon_name, &active_ws) in monitor_ws.iter() {
                 let per_output = snapshot.per_output.entry(mon_name.clone()).or_default();
-                per_output.active_workspace = Some(active_ws);
+                per_output.active_workspace.insert(active_ws);
             }
 
             for ws in workspaces {
@@ -327,10 +327,11 @@ impl HyprlandBackend {
             if let Some(ref focused) = *focused_mon
                 && let Some(&active_ws) = monitor_ws.get(focused)
             {
-                snapshot.active_workspace = Some(active_ws);
-            } else if snapshot.active_workspace.is_none() {
+                snapshot.active_workspace.clear();
+                snapshot.active_workspace.insert(active_ws);
+            } else if snapshot.active_workspace.is_empty() {
                 // Restore previous active workspace if we couldn't determine current
-                snapshot.active_workspace = previous_active;
+                snapshot.active_workspace = previous_active.clone();
             }
 
             let occupied_changed = snapshot.occupied_workspaces != old_occupied;
@@ -360,8 +361,9 @@ impl HyprlandBackend {
         let focused_mon = self.focused_monitor.read().clone();
 
         let mut snapshot = self.workspace_snapshot.write();
-        let old_active = snapshot.active_workspace;
-        let changed = old_active != Some(ws_id);
+        let old_active = snapshot.active_workspace.clone();
+        // Changed if: (a) new workspace wasn't already active, or (b) multiple were active
+        let changed = !old_active.contains(&ws_id) || old_active.len() != 1;
 
         trace!(
             "update_active_workspace: ws_id={}, old_active={:?}, focused_mon={:?}, changed={}",
@@ -369,7 +371,8 @@ impl HyprlandBackend {
         );
 
         if changed {
-            snapshot.active_workspace = Some(ws_id);
+            snapshot.active_workspace.clear();
+            snapshot.active_workspace.insert(ws_id);
 
             // Update per-monitor tracking to stay in sync
             if let Some(ref mon_name) = focused_mon {
@@ -379,11 +382,9 @@ impl HyprlandBackend {
                     .insert(mon_name.clone(), ws_id);
 
                 // Update per_output active workspace (create entry if needed)
-                snapshot
-                    .per_output
-                    .entry(mon_name.clone())
-                    .or_default()
-                    .active_workspace = Some(ws_id);
+                let per_output = snapshot.per_output.entry(mon_name.clone()).or_default();
+                per_output.active_workspace.clear();
+                per_output.active_workspace.insert(ws_id);
             } else {
                 warn!(
                     "update_active_workspace: focused_mon is None, per_output NOT updated! \
@@ -549,11 +550,15 @@ impl HyprlandBackend {
                     let monitor_ws = self.monitor_workspaces.read();
                     if let Some(&ws_id) = monitor_ws.get(mon_name) {
                         let mut snapshot = self.workspace_snapshot.write();
-                        if snapshot.active_workspace != Some(ws_id) {
-                            snapshot.active_workspace = Some(ws_id);
+                        if !snapshot.active_workspace.contains(&ws_id)
+                            || snapshot.active_workspace.len() != 1
+                        {
+                            snapshot.active_workspace.clear();
+                            snapshot.active_workspace.insert(ws_id);
                             // Also update per_output active workspace
                             if let Some(per_output) = snapshot.per_output.get_mut(mon_name) {
-                                per_output.active_workspace = Some(ws_id);
+                                per_output.active_workspace.clear();
+                                per_output.active_workspace.insert(ws_id);
                             }
                             workspace_changed = true;
                         }

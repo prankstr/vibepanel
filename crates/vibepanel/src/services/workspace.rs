@@ -44,7 +44,7 @@ impl Workspace {
         Self {
             id: meta.id,
             name: meta.name.clone(),
-            active: snapshot.active_workspace == Some(meta.id),
+            active: snapshot.active_workspace.contains(&meta.id),
             occupied: snapshot.occupied_workspaces.contains(&meta.id),
             urgent: snapshot.urgent_workspaces.contains(&meta.id),
             window_count: snapshot.window_counts.get(&meta.id).copied(),
@@ -67,13 +67,13 @@ impl Workspace {
         // Use per-output state if available, otherwise fall back to global
         let (active, occupied, window_count) = if let Some(state) = per_output {
             (
-                state.active_workspace == Some(meta.id),
+                state.active_workspace.contains(&meta.id),
                 state.occupied_workspaces.contains(&meta.id),
                 state.window_counts.get(&meta.id).copied(),
             )
         } else {
             (
-                snapshot.active_workspace == Some(meta.id),
+                snapshot.active_workspace.contains(&meta.id),
                 snapshot.occupied_workspaces.contains(&meta.id),
                 snapshot.window_counts.get(&meta.id).copied(),
             )
@@ -97,8 +97,10 @@ impl Workspace {
 /// with window counts and active state tailored to that output.
 #[derive(Debug, Clone)]
 pub struct PerOutputWorkspaces {
-    /// Currently active workspace ID on this output.
-    pub active_workspace: Option<i32>,
+    /// Currently active workspace IDs on this output.
+    /// Most compositors have a single active workspace, but MangoWC/DWL
+    /// supports viewing multiple tags simultaneously.
+    pub active_workspace: HashSet<i32>,
     /// Workspaces relevant to this output with per-output state.
     /// For MangoWC: all workspaces with per-output window counts.
     /// For Niri: only workspaces that belong to this output.
@@ -110,8 +112,10 @@ pub struct PerOutputWorkspaces {
 /// This is a GTK-friendly view of the workspace state.
 #[derive(Debug, Clone)]
 pub struct WorkspaceServiceSnapshot {
-    /// Currently active workspace ID.
-    pub active_workspace: Option<i32>,
+    /// Currently active workspace IDs.
+    /// Most compositors have a single active workspace, but MangoWC/DWL
+    /// supports viewing multiple tags simultaneously.
+    pub active_workspace: HashSet<i32>,
     /// Set of occupied workspace IDs.
     #[allow(dead_code)] // Part of public API for future use
     pub occupied_workspaces: HashSet<i32>,
@@ -247,14 +251,14 @@ impl WorkspaceService {
             per_output.insert(
                 output_name.clone(),
                 PerOutputWorkspaces {
-                    active_workspace: output_state.active_workspace,
+                    active_workspace: output_state.active_workspace.clone(),
                     workspaces: output_workspaces,
                 },
             );
         }
 
         WorkspaceServiceSnapshot {
-            active_workspace: snapshot.active_workspace,
+            active_workspace: snapshot.active_workspace.clone(),
             occupied_workspaces: snapshot.occupied_workspaces.clone(),
             window_counts: snapshot.window_counts.clone(),
             workspaces,
@@ -266,5 +270,153 @@ impl WorkspaceService {
 impl Drop for WorkspaceService {
     fn drop(&mut self) {
         debug!("WorkspaceService dropped");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::compositor::types::PerOutputState;
+
+    fn make_meta(id: i32) -> WorkspaceMeta {
+        WorkspaceMeta {
+            id,
+            name: id.to_string(),
+            output: None,
+        }
+    }
+
+    #[test]
+    fn test_workspace_from_meta_no_active() {
+        let snapshot = WorkspaceSnapshot::default();
+        let meta = make_meta(1);
+
+        let ws = Workspace::from_meta(&meta, &snapshot);
+
+        assert_eq!(ws.id, 1);
+        assert!(!ws.active);
+        assert!(!ws.occupied);
+        assert!(!ws.urgent);
+    }
+
+    #[test]
+    fn test_workspace_from_meta_single_active() {
+        let mut snapshot = WorkspaceSnapshot::default();
+        snapshot.active_workspace.insert(2);
+
+        // Workspace 2 should be active
+        let ws2 = Workspace::from_meta(&make_meta(2), &snapshot);
+        assert!(ws2.active);
+
+        // Workspace 1 should not be active
+        let ws1 = Workspace::from_meta(&make_meta(1), &snapshot);
+        assert!(!ws1.active);
+
+        // Workspace 3 should not be active
+        let ws3 = Workspace::from_meta(&make_meta(3), &snapshot);
+        assert!(!ws3.active);
+    }
+
+    #[test]
+    fn test_workspace_from_meta_multiple_active() {
+        // Multi-tag view: workspaces 1, 3, 5 are all active
+        let mut snapshot = WorkspaceSnapshot::default();
+        snapshot.active_workspace.insert(1);
+        snapshot.active_workspace.insert(3);
+        snapshot.active_workspace.insert(5);
+
+        // All three should be marked active
+        assert!(Workspace::from_meta(&make_meta(1), &snapshot).active);
+        assert!(Workspace::from_meta(&make_meta(3), &snapshot).active);
+        assert!(Workspace::from_meta(&make_meta(5), &snapshot).active);
+
+        // Others should not be active
+        assert!(!Workspace::from_meta(&make_meta(2), &snapshot).active);
+        assert!(!Workspace::from_meta(&make_meta(4), &snapshot).active);
+    }
+
+    #[test]
+    fn test_workspace_from_meta_occupied_and_urgent() {
+        let mut snapshot = WorkspaceSnapshot::default();
+        snapshot.occupied_workspaces.insert(1);
+        snapshot.occupied_workspaces.insert(2);
+        snapshot.urgent_workspaces.insert(2);
+        snapshot.window_counts.insert(1, 3);
+        snapshot.window_counts.insert(2, 1);
+
+        let ws1 = Workspace::from_meta(&make_meta(1), &snapshot);
+        assert!(ws1.occupied);
+        assert!(!ws1.urgent);
+        assert_eq!(ws1.window_count, Some(3));
+
+        let ws2 = Workspace::from_meta(&make_meta(2), &snapshot);
+        assert!(ws2.occupied);
+        assert!(ws2.urgent);
+        assert_eq!(ws2.window_count, Some(1));
+
+        let ws3 = Workspace::from_meta(&make_meta(3), &snapshot);
+        assert!(!ws3.occupied);
+        assert!(!ws3.urgent);
+        assert_eq!(ws3.window_count, None);
+    }
+
+    #[test]
+    fn test_workspace_from_meta_per_output_single_active() {
+        let mut snapshot = WorkspaceSnapshot::default();
+
+        // Set up per-output state for "eDP-1"
+        let mut per_output_state = PerOutputState::default();
+        per_output_state.active_workspace.insert(2);
+        per_output_state.occupied_workspaces.insert(2);
+        per_output_state.window_counts.insert(2, 5);
+        snapshot
+            .per_output
+            .insert("eDP-1".to_string(), per_output_state);
+
+        // Workspace 2 should be active on eDP-1
+        let ws2 = Workspace::from_meta_per_output(&make_meta(2), &snapshot, "eDP-1");
+        assert!(ws2.active);
+        assert!(ws2.occupied);
+        assert_eq!(ws2.window_count, Some(5));
+
+        // Workspace 1 should not be active on eDP-1
+        let ws1 = Workspace::from_meta_per_output(&make_meta(1), &snapshot, "eDP-1");
+        assert!(!ws1.active);
+    }
+
+    #[test]
+    fn test_workspace_from_meta_per_output_multiple_active() {
+        // Multi-tag view on a specific output
+        let mut snapshot = WorkspaceSnapshot::default();
+
+        let mut per_output_state = PerOutputState::default();
+        per_output_state.active_workspace.insert(1);
+        per_output_state.active_workspace.insert(3);
+        per_output_state.active_workspace.insert(5);
+        snapshot
+            .per_output
+            .insert("DP-1".to_string(), per_output_state);
+
+        // All three should be active on DP-1
+        assert!(Workspace::from_meta_per_output(&make_meta(1), &snapshot, "DP-1").active);
+        assert!(Workspace::from_meta_per_output(&make_meta(3), &snapshot, "DP-1").active);
+        assert!(Workspace::from_meta_per_output(&make_meta(5), &snapshot, "DP-1").active);
+
+        // Others should not be active
+        assert!(!Workspace::from_meta_per_output(&make_meta(2), &snapshot, "DP-1").active);
+        assert!(!Workspace::from_meta_per_output(&make_meta(4), &snapshot, "DP-1").active);
+    }
+
+    #[test]
+    fn test_workspace_from_meta_per_output_fallback_to_global() {
+        // When per-output state doesn't exist, should fall back to global
+        let mut snapshot = WorkspaceSnapshot::default();
+        snapshot.active_workspace.insert(1);
+        snapshot.occupied_workspaces.insert(1);
+
+        // No per-output state for "HDMI-1", should use global
+        let ws = Workspace::from_meta_per_output(&make_meta(1), &snapshot, "HDMI-1");
+        assert!(ws.active);
+        assert!(ws.occupied);
     }
 }

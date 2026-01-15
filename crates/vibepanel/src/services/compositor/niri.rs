@@ -161,7 +161,7 @@ impl NiriBackend {
         snapshot.occupied_workspaces.clear();
         snapshot.urgent_workspaces.clear();
         snapshot.window_counts.clear();
-        snapshot.active_workspace = None;
+        snapshot.active_workspace.clear();
         snapshot.per_output.clear();
 
         for ws in workspaces {
@@ -207,7 +207,7 @@ impl NiriBackend {
                 .unwrap_or(false);
 
             if is_focused {
-                snapshot.active_workspace = Some(idx);
+                snapshot.active_workspace.insert(idx);
             }
 
             if ws
@@ -228,7 +228,7 @@ impl NiriBackend {
 
                 // is_active means visible on this output, is_focused means globally focused
                 if is_active {
-                    per_out.active_workspace = Some(idx);
+                    per_out.active_workspace.insert(idx);
                 }
             }
         }
@@ -449,8 +449,9 @@ impl NiriBackend {
                     let mut snapshot = shared.workspace_snapshot.write();
 
                     // Update global active workspace if this is the focused one
-                    if is_focused && snapshot.active_workspace != Some(idx) {
-                        snapshot.active_workspace = Some(idx);
+                    if is_focused && !snapshot.active_workspace.contains(&idx) {
+                        snapshot.active_workspace.clear();
+                        snapshot.active_workspace.insert(idx);
                         workspace_changed = true;
                     }
 
@@ -458,9 +459,10 @@ impl NiriBackend {
                     // WorkspaceActivated fires when a workspace becomes visible on its output
                     if let Some(out_name) = id_to_output.get(&ws_id)
                         && let Some(per_out) = snapshot.per_output.get_mut(out_name)
-                        && per_out.active_workspace != Some(idx)
+                        && !per_out.active_workspace.contains(&idx)
                     {
-                        per_out.active_workspace = Some(idx);
+                        per_out.active_workspace.clear();
+                        per_out.active_workspace.insert(idx);
                         workspace_changed = true;
                     }
                 }

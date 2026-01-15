@@ -4,7 +4,7 @@
 //! Clicking on a workspace indicator switches to that workspace.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use gtk4::gdk::BUTTON_PRIMARY;
@@ -242,14 +242,15 @@ fn update_indicators(
     output_id: Option<&str>,
 ) {
     // Get the workspace list to use - either per-output or global
-    let (workspaces, active_workspace, source): (&[Workspace], Option<i32>, &str) = if let Some(
+    let (workspaces, active_workspaces, source): (&[Workspace], &HashSet<i32>, &str) = if let Some(
         output,
-    ) = output_id
+    ) =
+        output_id
     {
         if let Some(per_output) = snapshot.per_output.get(output) {
             (
                 &per_output.workspaces,
-                per_output.active_workspace,
+                &per_output.active_workspace,
                 "per_output",
             )
         } else {
@@ -261,18 +262,18 @@ fn update_indicators(
             );
             (
                 &snapshot.workspaces,
-                snapshot.active_workspace,
+                &snapshot.active_workspace,
                 "global_fallback",
             )
         }
     } else {
         // No output_id specified, use global data
-        (&snapshot.workspaces, snapshot.active_workspace, "global")
+        (&snapshot.workspaces, &snapshot.active_workspace, "global")
     };
 
     trace!(
-        "workspace widget: source={}, output_id={:?}, active_workspace={:?}",
-        source, output_id, active_workspace
+        "workspace widget: source={}, output_id={:?}, active_workspaces={:?}",
+        source, output_id, active_workspaces
     );
 
     // Determine which workspaces to display (occupied + active)
@@ -285,12 +286,11 @@ fn update_indicators(
 
     trace!(
         "workspace widget: occupied_ids={:?}, adding active={:?}",
-        display_ids, active_workspace
+        display_ids, active_workspaces
     );
 
-    if let Some(active) = active_workspace {
-        display_ids.insert(active);
-    }
+    // Add all active workspaces to display (supports multi-tag view)
+    display_ids.extend(active_workspaces.iter());
 
     // Filter to only display relevant workspaces
     let display_workspaces: Vec<_> = workspaces

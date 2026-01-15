@@ -46,8 +46,10 @@ pub struct WorkspaceMeta {
 /// MangoWC's per-output window counts, or Niri's per-monitor workspaces).
 #[derive(Debug, Clone, Default)]
 pub struct PerOutputState {
-    /// Active workspace ID on this output.
-    pub active_workspace: Option<i32>,
+    /// Active workspace IDs on this output.
+    /// Most compositors have a single active workspace, but MangoWC/DWL
+    /// supports viewing multiple tags simultaneously.
+    pub active_workspace: HashSet<i32>,
     /// Set of workspace IDs that have windows on this output.
     pub occupied_workspaces: HashSet<i32>,
     /// Number of windows per workspace on this output.
@@ -60,8 +62,10 @@ pub struct PerOutputState {
 /// updated atomically when the compositor signals changes.
 #[derive(Debug, Clone, Default)]
 pub struct WorkspaceSnapshot {
-    /// Currently active/focused workspace ID (None if unknown).
-    pub active_workspace: Option<i32>,
+    /// Currently active/focused workspace IDs.
+    /// Most compositors have a single active workspace, but MangoWC/DWL
+    /// supports viewing multiple tags simultaneously.
+    pub active_workspace: HashSet<i32>,
     /// Set of workspace IDs that have windows.
     pub occupied_workspaces: HashSet<i32>,
     /// Set of workspace IDs marked as urgent.
@@ -229,7 +233,7 @@ mod tests {
     #[test]
     fn test_workspace_snapshot_default() {
         let snapshot = WorkspaceSnapshot::default();
-        assert_eq!(snapshot.active_workspace, None);
+        assert!(snapshot.active_workspace.is_empty());
         assert!(snapshot.occupied_workspaces.is_empty());
         assert!(snapshot.urgent_workspaces.is_empty());
     }
@@ -250,5 +254,63 @@ mod tests {
             ..Default::default()
         };
         assert!(!with_app_id.is_empty());
+    }
+
+    #[test]
+    fn test_per_output_state_no_active() {
+        let state = PerOutputState::default();
+        assert!(state.active_workspace.is_empty());
+        assert!(!state.active_workspace.contains(&1));
+    }
+
+    #[test]
+    fn test_per_output_state_single_active() {
+        // Single active workspace (typical Niri/Hyprland case)
+        let mut state = PerOutputState::default();
+        state.active_workspace.insert(2);
+
+        assert!(state.active_workspace.contains(&2));
+        assert!(!state.active_workspace.contains(&1));
+        assert!(!state.active_workspace.contains(&3));
+        assert_eq!(state.active_workspace.len(), 1);
+    }
+
+    #[test]
+    fn test_per_output_state_multiple_active() {
+        // Multiple active workspaces (Mango/DWL multi-tag case)
+        let mut state = PerOutputState::default();
+        state.active_workspace.insert(1);
+        state.active_workspace.insert(3);
+        state.active_workspace.insert(5);
+
+        assert!(state.active_workspace.contains(&1));
+        assert!(state.active_workspace.contains(&3));
+        assert!(state.active_workspace.contains(&5));
+        assert!(!state.active_workspace.contains(&2));
+        assert!(!state.active_workspace.contains(&4));
+        assert_eq!(state.active_workspace.len(), 3);
+    }
+
+    #[test]
+    fn test_workspace_snapshot_single_active() {
+        let mut snapshot = WorkspaceSnapshot::default();
+        snapshot.active_workspace.insert(1);
+
+        assert!(snapshot.active_workspace.contains(&1));
+        assert!(!snapshot.active_workspace.contains(&2));
+        assert_eq!(snapshot.active_workspace.len(), 1);
+    }
+
+    #[test]
+    fn test_workspace_snapshot_multiple_active() {
+        // Multi-tag view scenario
+        let mut snapshot = WorkspaceSnapshot::default();
+        snapshot.active_workspace.insert(1);
+        snapshot.active_workspace.insert(3);
+
+        assert!(snapshot.active_workspace.contains(&1));
+        assert!(snapshot.active_workspace.contains(&3));
+        assert!(!snapshot.active_workspace.contains(&2));
+        assert_eq!(snapshot.active_workspace.len(), 2);
     }
 }

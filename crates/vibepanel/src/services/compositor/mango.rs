@@ -242,7 +242,13 @@ impl WaylandState {
         // Clear previous per-output state for this output
         per_output.window_counts.clear();
         per_output.occupied_workspaces.clear();
-        per_output.active_workspace = None;
+        per_output.active_workspace.clear();
+
+        // Clear global active workspace if this is the focused output
+        // (will be rebuilt from the active tags below)
+        if is_focused_output {
+            self.snapshot.active_workspace.clear();
+        }
 
         // Handle tag updates - store per-output state
         for &(tag, is_active, is_urgent, clients, _focused) in &frame_tags {
@@ -255,12 +261,12 @@ impl WaylandState {
                 per_output.occupied_workspaces.insert(workspace_id);
             }
             if is_active {
-                per_output.active_workspace = Some(workspace_id);
+                per_output.active_workspace.insert(workspace_id);
             }
 
             // Update global active workspace (only for focused output)
             if is_active && is_focused_output {
-                self.snapshot.active_workspace = Some(workspace_id);
+                self.snapshot.active_workspace.insert(workspace_id);
             }
 
             // Urgent is global (any output can trigger urgency)
@@ -310,7 +316,9 @@ impl WaylandState {
                 WindowInfo {
                     title: output.last_title.clone(),
                     app_id: output.last_appid.clone(),
-                    workspace_id: self.snapshot.active_workspace,
+                    // In multi-tag view, the focused window could be on any of the visible tags.
+                    // We pick an arbitrary one since WindowInfo only holds a single workspace_id.
+                    workspace_id: self.snapshot.active_workspace.iter().next().copied(),
                     output: Some(output_name.clone()),
                 }
             } else {
