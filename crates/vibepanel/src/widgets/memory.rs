@@ -55,7 +55,7 @@ pub struct MemoryConfig {
     /// Display format for memory usage.
     pub format: MemoryFormat,
     /// Custom background color for this widget.
-    pub color: Option<String>,
+    pub background_color: Option<String>,
 }
 
 impl WidgetConfig for MemoryConfig {
@@ -78,7 +78,7 @@ impl WidgetConfig for MemoryConfig {
         Self {
             show_icon,
             format,
-            color: entry.color.clone(),
+            background_color: entry.background_color.clone(),
         }
     }
 }
@@ -88,7 +88,7 @@ impl Default for MemoryConfig {
         Self {
             show_icon: DEFAULT_SHOW_ICON,
             format: MemoryFormat::default(),
-            color: None,
+            background_color: None,
         }
     }
 }
@@ -111,7 +111,7 @@ pub struct MemoryWidget {
 impl MemoryWidget {
     /// Create a new Memory widget with the given configuration.
     pub fn new(config: MemoryConfig) -> Self {
-        let base = BaseWidget::new(&[widget::MEMORY], config.color.clone());
+        let base = BaseWidget::new(&[widget::MEMORY], config.background_color.clone());
 
         base.set_tooltip("Memory: unknown");
 
@@ -238,7 +238,7 @@ mod tests {
         let entry = WidgetEntry {
             name: "memory".to_string(),
             options: Default::default(),
-            color: None,
+            background_color: None,
         };
         let config = MemoryConfig::from_entry(&entry);
         assert!(config.show_icon);
@@ -257,7 +257,7 @@ mod tests {
         let entry = WidgetEntry {
             name: "memory".to_string(),
             options,
-            color: None,
+            background_color: None,
         };
         let config = MemoryConfig::from_entry(&entry);
         assert!(!config.show_icon);

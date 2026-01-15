@@ -194,9 +194,9 @@ fn build_widget_or_group(
             island.add_css_class(class::WIDGET);
             island.add_css_class(class::WIDGET_GROUP);
 
-            // Apply first widget's color to the group island for unified background
+            // Apply first widget's background_color to the group island for unified background
             if let Some(first_entry) = group.first()
-                && let Some(ref color) = first_entry.color
+                && let Some(ref color) = first_entry.background_color
             {
                 apply_widget_color(&island, color);
             }

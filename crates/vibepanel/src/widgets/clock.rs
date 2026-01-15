@@ -29,7 +29,7 @@ pub struct ClockConfig {
     /// Whether to show week numbers in the calendar popover.
     pub show_week_numbers: bool,
     /// Custom background color for this widget.
-    pub color: Option<String>,
+    pub background_color: Option<String>,
 }
 
 impl WidgetConfig for ClockConfig {
@@ -52,7 +52,7 @@ impl WidgetConfig for ClockConfig {
         Self {
             format,
             show_week_numbers,
-            color: entry.color.clone(),
+            background_color: entry.background_color.clone(),
         }
     }
 }
@@ -62,7 +62,7 @@ impl Default for ClockConfig {
         Self {
             format: DEFAULT_FORMAT.to_string(),
             show_week_numbers: true,
-            color: None,
+            background_color: None,
         }
     }
 }
@@ -84,7 +84,7 @@ pub struct ClockWidget {
 impl ClockWidget {
     /// Create a new clock widget with the given configuration.
     pub fn new(config: ClockConfig) -> Self {
-        let base = BaseWidget::new(&[wgt::CLOCK], config.color);
+        let base = BaseWidget::new(&[wgt::CLOCK], config.background_color);
 
         let label = base.add_label(Some("--:--"), &[wgt::CLOCK_LABEL]);
 
@@ -174,7 +174,7 @@ mod tests {
         WidgetEntry {
             name: name.to_string(),
             options,
-            color: None,
+            background_color: None,
         }
     }
 

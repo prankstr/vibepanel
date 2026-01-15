@@ -15,7 +15,7 @@
 //! pub struct MyWidgetConfig {
 //!     pub some_option: bool,
 //!     /// Custom background color for this widget (inherited from WidgetEntry).
-//!     pub color: Option<String>,
+//!     pub background_color: Option<String>,
 //! }
 //!
 //! impl WidgetConfig for MyWidgetConfig {
@@ -28,7 +28,7 @@
 //!             .unwrap_or(true);
 //!         Self {
 //!             some_option,
-//!             color: entry.color.clone(),  // Always clone color from entry
+//!             background_color: entry.background_color.clone(),  // Always clone background_color from entry
 //!         }
 //!     }
 //! }
@@ -37,18 +37,18 @@
 //!     fn default() -> Self {
 //!         Self {
 //!             some_option: true,
-//!             color: None,
+//!             background_color: None,
 //!         }
 //!     }
 //! }
 //! ```
 //!
-//! When constructing the widget, pass the color to `BaseWidget::new()`:
+//! When constructing the widget, pass the background_color to `BaseWidget::new()`:
 //!
 //! ```ignore
 //! impl MyWidget {
 //!     pub fn new(config: MyWidgetConfig) -> Self {
-//!         let base = BaseWidget::new(&[widget::MY_WIDGET], config.color.clone());
+//!         let base = BaseWidget::new(&[widget::MY_WIDGET], config.background_color.clone());
 //!         // ... rest of widget construction
 //!     }
 //! }
@@ -106,11 +106,11 @@ use vibepanel_core::config::WidgetEntry;
 /// All widget configs should implement this trait to provide a consistent
 /// interface for constructing configuration from TOML entries and defaulting.
 ///
-/// # Color Field
+/// # Background Color Field
 ///
-/// All widget configs should include a `color: Option<String>` field and copy it
-/// from `entry.color.clone()` in `from_entry()`. This enables per-widget background
-/// color customization. The color should be passed to `BaseWidget::new()` during
+/// All widget configs should include a `background_color: Option<String>` field and copy it
+/// from `entry.background_color.clone()` in `from_entry()`. This enables per-widget background
+/// color customization. The background_color should be passed to `BaseWidget::new()` during
 /// widget construction so it applies to both the widget and its popovers.
 ///
 /// # Example
@@ -119,7 +119,7 @@ use vibepanel_core::config::WidgetEntry;
 /// #[derive(Debug, Clone)]
 /// pub struct MyWidgetConfig {
 ///     pub enabled: bool,
-///     pub color: Option<String>,
+///     pub background_color: Option<String>,
 /// }
 ///
 /// impl WidgetConfig for MyWidgetConfig {
@@ -132,7 +132,7 @@ use vibepanel_core::config::WidgetEntry;
 ///             .unwrap_or(true);
 ///         Self {
 ///             enabled,
-///             color: entry.color.clone(),
+///             background_color: entry.background_color.clone(),
 ///         }
 ///     }
 /// }
@@ -141,7 +141,7 @@ use vibepanel_core::config::WidgetEntry;
 ///     fn default() -> Self {
 ///         Self {
 ///             enabled: true,
-///             color: None,
+///             background_color: None,
 ///         }
 ///     }
 /// }
@@ -151,7 +151,7 @@ pub trait WidgetConfig: Sized + Default {
     ///
     /// Implementations should extract options from `entry.options` and
     /// fall back to sensible defaults for missing or invalid values.
-    /// Always include `color: entry.color.clone()` to support per-widget colors.
+    /// Always include `background_color: entry.background_color.clone()` to support per-widget colors.
     fn from_entry(entry: &WidgetEntry) -> Self;
 }
 

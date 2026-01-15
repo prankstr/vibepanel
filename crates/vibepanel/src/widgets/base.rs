@@ -102,7 +102,7 @@ pub struct MenuHandle {
     builder: Rc<dyn Fn() -> gtk4::Widget>,
     parent: GtkBox,
     /// Custom background color inherited from the parent widget.
-    color: Rc<RefCell<Option<String>>>,
+    background_color: Rc<RefCell<Option<String>>>,
 }
 
 impl MenuHandle {
@@ -110,13 +110,13 @@ impl MenuHandle {
         popover: Popover,
         builder: Rc<dyn Fn() -> gtk4::Widget>,
         parent: GtkBox,
-        color: Rc<RefCell<Option<String>>>,
+        background_color: Rc<RefCell<Option<String>>>,
     ) -> Self {
         Self {
             popover,
             builder,
             parent,
-            color,
+            background_color,
         }
     }
 
@@ -133,7 +133,7 @@ impl MenuHandle {
 
         // Apply surface styling to the content container rather than the Popover shell.
         // If the parent widget has a custom color, pass it as an override.
-        let color_override = self.color.borrow();
+        let color_override = self.background_color.borrow();
         SurfaceStyleManager::global().apply_surface_styles(
             &content,
             true,
@@ -219,7 +219,7 @@ pub struct BaseWidget {
     content: GtkBox,
     menus: Rc<RefCell<HashMap<String, Rc<MenuHandle>>>>,
     /// Custom background color for this widget and its popovers.
-    color: Rc<RefCell<Option<String>>>,
+    background_color: Rc<RefCell<Option<String>>>,
     _gesture_click: GestureClick,
 }
 
@@ -231,8 +231,8 @@ impl BaseWidget {
     /// - Always adds the `widget` CSS class.
     /// - Creates an inner `.content` box for consistent padding/margins.
     /// - Applies any additional CSS classes passed in `extra_classes`.
-    /// - If `color` is provided, applies custom background color to the widget.
-    pub fn new(extra_classes: &[&str], color: Option<String>) -> Self {
+    /// - If `background_color` is provided, applies custom background color to the widget.
+    pub fn new(extra_classes: &[&str], background_color: Option<String>) -> Self {
         let container = GtkBox::new(Orientation::Horizontal, 0);
         container.add_css_class(class::WIDGET);
         for cls in extra_classes {
@@ -240,12 +240,12 @@ impl BaseWidget {
         }
 
         // Apply custom color if provided
-        if let Some(ref c) = color {
+        if let Some(ref c) = background_color {
             apply_widget_color(&container, c);
         }
 
         // Store color for popover inheritance
-        let color_rc = Rc::new(RefCell::new(color));
+        let background_color_rc = Rc::new(RefCell::new(background_color));
 
         // Create inner content box for consistent padding/margins via CSS
         // Spacing between children is controlled via CSS (see bar.rs .widget > .content)
@@ -287,7 +287,7 @@ impl BaseWidget {
             container,
             content,
             menus,
-            color: color_rc,
+            background_color: background_color_rc,
             _gesture_click: gesture_click,
         }
     }
@@ -362,7 +362,7 @@ impl BaseWidget {
             popover,
             builder_rc,
             self.container.clone(),
-            self.color.clone(),
+            self.background_color.clone(),
         ));
         self.menus
             .borrow_mut()

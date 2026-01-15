@@ -36,13 +36,13 @@ use super::notification_toast::NotificationToastManager;
 #[derive(Debug, Clone, Default)]
 pub struct NotificationConfig {
     /// Custom background color for this widget.
-    pub color: Option<String>,
+    pub background_color: Option<String>,
 }
 
 impl WidgetConfig for NotificationConfig {
     fn from_entry(entry: &WidgetEntry) -> Self {
         Self {
-            color: entry.color.clone(),
+            background_color: entry.background_color.clone(),
         }
     }
 }
@@ -278,7 +278,7 @@ pub struct NotificationWidget {
 impl NotificationWidget {
     /// Create a new notification widget.
     pub fn new(config: NotificationConfig) -> Self {
-        let base = BaseWidget::new(&[widget::NOTIFICATION], config.color);
+        let base = BaseWidget::new(&[widget::NOTIFICATION], config.background_color);
 
         // Create an overlay for badge on top of icon
         let overlay = Overlay::new();

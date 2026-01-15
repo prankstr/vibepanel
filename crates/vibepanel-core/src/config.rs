@@ -874,7 +874,7 @@ pub struct WidgetOptions {
     /// Background color override for this widget (hex like "#f5c2e7").
     /// If invalid or not set, uses the theme's default widget background.
     #[serde(default)]
-    pub color: Option<String>,
+    pub background_color: Option<String>,
 
     /// Widget-specific options (format, show_icon, etc.).
     #[serde(flatten)]
@@ -895,7 +895,7 @@ pub struct WidgetEntry {
 
     /// Background color override (hex like "#f5c2e7").
     /// None means use theme default.
-    pub color: Option<String>,
+    pub background_color: Option<String>,
 }
 
 impl WidgetEntry {
@@ -904,7 +904,7 @@ impl WidgetEntry {
         Self {
             name: name.into(),
             options: HashMap::new(),
-            color: None,
+            background_color: None,
         }
     }
 
@@ -912,12 +912,12 @@ impl WidgetEntry {
     pub fn with_options(name: impl Into<String>, widget_options: &WidgetOptions) -> Self {
         let name = name.into();
 
-        // Validate color if provided - warn on invalid hex colors
-        if let Some(ref color) = widget_options.color
+        // Validate background_color if provided - warn on invalid hex colors
+        if let Some(ref color) = widget_options.background_color
             && crate::theme::parse_hex_color(color).is_none()
         {
             tracing::warn!(
-                "Invalid color '{}' for widget '{}' - expected hex color like '#ff0000' or '#f00'",
+                "Invalid background_color '{}' for widget '{}' - expected hex color like '#ff0000' or '#f00'",
                 color,
                 name
             );
@@ -926,7 +926,7 @@ impl WidgetEntry {
         Self {
             name,
             options: widget_options.options.clone(),
-            color: widget_options.color.clone(),
+            background_color: widget_options.background_color.clone(),
         }
     }
 }

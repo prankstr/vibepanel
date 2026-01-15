@@ -100,7 +100,7 @@ mod tests {
         WidgetEntry {
             name: "spacer".to_string(),
             options,
-            color: None,
+            background_color: None,
         }
     }
 
