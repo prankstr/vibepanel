@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.1](https://github.com/prankstr/vibepanel/compare/v0.5.0...v0.5.1) (2026-01-16)
+
+
+### Bug Fixes
+
+* better battery icon thresholds ([ddb3277](https://github.com/prankstr/vibepanel/commit/ddb3277550d9f35a22e3adf68fb92c2b968a44d5))
+* IconHandle CSS class tracking survives theme switches ([264de22](https://github.com/prankstr/vibepanel/commit/264de22cbb8c6d29ea197ec975137d69f1c0fd07))
+* **readme:** identity crisis solved for now ([447d5ad](https://github.com/prankstr/vibepanel/commit/447d5adba147ed722f1d54ad8a30094262b82890))
+* use Pango API for font registration instead of fontconfig FFI ([dfc7589](https://github.com/prankstr/vibepanel/commit/dfc75890191c82df56c68febaaf46e6b936c1230))
+
 ## [0.5.0](https://github.com/prankstr/vibepanel/compare/v0.4.0...v0.5.0) (2026-01-15)
 
 
