@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.2](https://github.com/prankstr/vibepanel/compare/v0.5.1...v0.5.2) (2026-01-17)
+
+
+### Features
+
+* add AUR and Copr packaging automation ([872ffc9](https://github.com/prankstr/vibepanel/commit/872ffc9878e80873a41196915635c7d46784ccdb))
+* **quick_settings:** add per-row accordions and height-limited scroll ([1f7d6b4](https://github.com/prankstr/vibepanel/commit/1f7d6b4b13a9f1b007eb70a1ca7a529c5b8710ab))
+
+
+### Bug Fixes
+
+* **bar:** improve monitor hot-plug behaviour, no more flickering ([84ccd9d](https://github.com/prankstr/vibepanel/commit/84ccd9de0282bc8c36236ad486e1b99e97615bb3))
+* **quick_settings:** hide brightness when unavailable ([3bbb869](https://github.com/prankstr/vibepanel/commit/3bbb869172bd0a76f2850a8aabee1ad3e0fb8c09))
+
 ## [0.5.1](https://github.com/prankstr/vibepanel/compare/v0.5.0...v0.5.1) (2026-01-16)
 
 
