@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.3](https://github.com/prankstr/vibepanel/compare/v0.5.2...v0.5.3) (2026-01-18)
+
+
+### Bug Fixes
+
+* **layout:** prioritize right section in linear alloc ([68cd50b](https://github.com/prankstr/vibepanel/commit/68cd50b9d8333e2d8e45a18b1685c2c90f7ba976))
+* **quick_settings:** clearer hover effect on action buttons ([6d17e33](https://github.com/prankstr/vibepanel/commit/6d17e33e6a97f24ed013714ee17abcb0480716af))
+* **quick_settings:** remove hover effect on updates card when no updates ([496501b](https://github.com/prankstr/vibepanel/commit/496501b76621d3029b49e83083a2d222e2022368))
+
 ## [0.5.2](https://github.com/prankstr/vibepanel/compare/v0.5.1...v0.5.2) (2026-01-17)
 
 
