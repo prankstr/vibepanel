@@ -745,6 +745,144 @@ pub mod tooltip {
     pub const LABEL: &str = "vibepanel-tooltip-label";
 }
 
+/// Media widget classes (MPRIS media player control).
+pub mod media {
+    // Bar widget
+    /// Media widget container (`.media`).
+    pub const WIDGET: &str = "media";
+
+    /// Media icon (play/pause state indicator) (`.media-icon`).
+    pub const ICON: &str = "media-icon";
+
+    /// Player icon (app icon like Spotify, Firefox) (`.media-player-icon`).
+    pub const PLAYER_ICON: &str = "media-player-icon";
+
+    /// Media text label in bar (`.media-label`).
+    pub const LABEL: &str = "media-label";
+
+    /// Small album art thumbnail in bar (`.media-art-small`).
+    pub const ART_SMALL: &str = "media-art-small";
+
+    /// Controls container (`.media-controls`).
+    pub const CONTROLS: &str = "media-controls";
+
+    /// Control button (`.media-control-btn`).
+    pub const CONTROL_BTN: &str = "media-control-btn";
+
+    /// Playing state (`.media-playing`).
+    pub const PLAYING: &str = "media-playing";
+
+    /// Paused state (`.media-paused`).
+    pub const PAUSED: &str = "media-paused";
+
+    /// Stopped state (`.media-stopped`).
+    pub const STOPPED: &str = "media-stopped";
+
+    // Shared popover/window content
+    /// Media content container (`.media-content`).
+    pub const CONTENT: &str = "media-content";
+
+    /// Large album art (`.media-art`).
+    pub const ART: &str = "media-art";
+
+    /// Album art placeholder when no art available (`.media-art-placeholder`).
+    pub const ART_PLACEHOLDER: &str = "media-art-placeholder";
+
+    /// Track title label (`.media-track-title`).
+    pub const TRACK_TITLE: &str = "media-track-title";
+
+    /// Artist label (`.media-artist`).
+    pub const ARTIST: &str = "media-artist";
+
+    /// Album label (`.media-album`).
+    pub const ALBUM: &str = "media-album";
+
+    /// Primary control button (play/pause) (`.media-control-btn-primary`).
+    pub const CONTROL_BTN_PRIMARY: &str = "media-control-btn-primary";
+
+    /// Seek bar container (`.media-seek`).
+    pub const SEEK: &str = "media-seek";
+
+    /// Seek slider (`.media-seek-slider`).
+    pub const SEEK_SLIDER: &str = "media-seek-slider";
+
+    /// Position/duration labels container (`.media-time`).
+    pub const TIME: &str = "media-time";
+
+    /// Position label (`.media-position`).
+    pub const POSITION: &str = "media-position";
+
+    /// Duration label (`.media-duration`).
+    pub const DURATION: &str = "media-duration";
+
+    /// Volume slider container (`.media-volume`).
+    pub const VOLUME: &str = "media-volume";
+
+    /// Volume slider (`.media-volume-slider`).
+    pub const VOLUME_SLIDER: &str = "media-volume-slider";
+
+    /// Volume icon (`.media-volume-icon`).
+    pub const VOLUME_ICON: &str = "media-volume-icon";
+
+    /// Pop-out button (`.media-popout-btn`).
+    pub const POPOUT_BTN: &str = "media-popout-btn";
+
+    /// Player selector dropdown (`.media-player-selector`).
+    pub const PLAYER_SELECTOR: &str = "media-player-selector";
+
+    /// Player name label (`.media-player-name`).
+    pub const PLAYER_NAME: &str = "media-player-name";
+
+    // Pop-out window
+    /// Pop-out window (`.media-window`).
+    pub const WINDOW: &str = "media-window";
+
+    /// Window header/drag area (`.media-window-header`).
+    pub const WINDOW_HEADER: &str = "media-window-header";
+
+    /// Window drag handle (`.media-window-drag`).
+    pub const WINDOW_DRAG: &str = "media-window-drag";
+
+    /// Window close button (`.media-window-close`).
+    pub const WINDOW_CLOSE: &str = "media-window-close";
+
+    /// Window dock button (return to popover) (`.media-window-dock`).
+    pub const WINDOW_DOCK: &str = "media-window-dock";
+
+    // Popover
+    /// Media popover (`.media-popover`).
+    pub const POPOVER: &str = "media-popover";
+
+    // Empty state
+    /// No player available state (`.media-empty`).
+    pub const EMPTY: &str = "media-empty";
+
+    /// Empty state icon (`.media-empty-icon`).
+    pub const EMPTY_ICON: &str = "media-empty-icon";
+
+    /// Empty state label (`.media-empty-label`).
+    pub const EMPTY_LABEL: &str = "media-empty-label";
+
+    // Icon names (freedesktop naming convention)
+    // These are used with IconHandle and BaseWidget.add_icon(), which map
+    // freedesktop names to Material Symbols font glyphs internally.
+
+    /// Icon for paused/stopped state (shows play button).
+    pub const ICON_PLAY: &str = "media-playback-start";
+
+    /// Icon for playing state (shows pause button).
+    pub const ICON_PAUSE: &str = "media-playback-pause";
+
+    /// Icon for skipping to next track.
+    pub const ICON_NEXT: &str = "media-skip-forward";
+
+    /// Icon for skipping to previous track.
+    pub const ICON_PREVIOUS: &str = "media-skip-backward";
+
+    /// Generic audio/music icon (fallback when player icon unavailable).
+    pub const ICON_AUDIO_GENERIC: &str = "audio-x-generic";
+}
+
 /// System resource popover classes (shared by CPU and Memory widgets).
 pub mod system_popover {
     /// System popover container (`.system-popover`).

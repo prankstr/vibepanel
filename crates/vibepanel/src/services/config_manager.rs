@@ -125,6 +125,17 @@ impl ConfigManager {
         palette.sizes.clone()
     }
 
+    /// Get the pill radius (used for rounded indicators, thumbnails, etc.).
+    ///
+    /// This is derived from the widget border radius configuration.
+    /// Used by CSS variable generation in ThemePalette.
+    #[allow(dead_code)]
+    pub fn radius_pill(&self) -> u32 {
+        let config = self.config.borrow();
+        let palette = ThemePalette::from_config(&config);
+        palette.radius_pill
+    }
+
     /// Get the bar size (height) from the current configuration.
     pub fn bar_size(&self) -> u32 {
         self.config.borrow().bar.size

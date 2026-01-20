@@ -265,12 +265,28 @@ impl BaseWidget {
         let gesture_click = GestureClick::new();
         {
             let menus_for_cb = menus.clone();
-            gesture_click.connect_pressed(move |gesture, n_press, _x, _y| {
+            gesture_click.connect_pressed(move |gesture, n_press, x, y| {
                 debug!(
                     "BaseWidget click: n_press={}, button={}",
                     n_press,
                     gesture.current_button()
                 );
+
+                // Check if the click target is a button - if so, let the button handle it
+                if let Some(widget) = gesture.widget()
+                    && let Some(target) = widget.pick(x, y, gtk4::PickFlags::DEFAULT)
+                {
+                    // Walk up from target to find if it's inside a button
+                    let mut current: Option<gtk4::Widget> = Some(target);
+                    while let Some(w) = current {
+                        if w.downcast_ref::<gtk4::Button>().is_some() {
+                            debug!("BaseWidget click: target is a Button, skipping popover toggle");
+                            return;
+                        }
+                        current = w.parent();
+                    }
+                }
+
                 if n_press == 1 && gesture.current_button() == 1 {
                     if let Some((_name, menu)) = menus_for_cb.borrow().iter().next() {
                         debug!("Toggling first menu from BaseWidget click");

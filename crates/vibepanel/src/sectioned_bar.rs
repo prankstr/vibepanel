@@ -196,6 +196,16 @@ mod imp {
                 self.right_expand.get(),
             );
 
+            tracing::debug!(
+                "CenterPriorityLayout: interior={}, left_expand={}, left_budget={}, left_alloc_width={}, center_x={}, center_width={}",
+                interior,
+                self.left_expand.get(),
+                (alloc.center_x - spacing).max(0),
+                alloc.left_width,
+                alloc.center_x,
+                alloc.center_width
+            );
+
             // Record last allocation for snapshot/clipping
             self.last_left_x.set(edge + alloc.left_x);
             self.last_left_width.set(alloc.left_width);

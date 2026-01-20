@@ -18,6 +18,7 @@
 //! - **idle_inhibitor**: System idle/sleep prevention
 //! - **state**: Persistent state storage (DND, VPN last used, notification history)
 //! - **system**: CPU, memory, and system resource monitoring
+//! - **media**: MPRIS media player control and monitoring
 
 pub mod audio;
 pub mod bar_manager;
@@ -29,6 +30,7 @@ pub mod compositor;
 pub mod config_manager;
 pub mod icons;
 pub mod idle_inhibitor;
+pub mod media;
 pub mod network;
 pub mod notification;
 pub mod osd_ipc;

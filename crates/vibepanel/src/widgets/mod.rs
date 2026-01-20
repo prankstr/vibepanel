@@ -60,12 +60,18 @@ mod battery_popover;
 mod calendar_popover;
 mod clock;
 mod cpu;
+mod marquee_label;
+mod media;
+mod media_popover;
+mod media_utils;
+mod media_window;
 mod memory;
 mod notifications;
 mod notifications_common;
 mod notifications_popover;
 mod notifications_toast;
 mod osd;
+mod rounded_picture;
 mod spacer;
 mod system_popover;
 mod tray;
@@ -82,6 +88,7 @@ pub use base::BaseWidget;
 pub use base::apply_widget_color;
 pub use battery::{BatteryConfig, BatteryWidget};
 pub use clock::{ClockConfig, ClockWidget};
+pub use media::{MediaConfig, MediaWidget};
 pub use notifications::{NotificationsConfig, NotificationsWidget};
 pub use osd::OsdOverlay;
 pub use quick_settings::QuickSettingsWindowHandle;
@@ -310,6 +317,15 @@ impl WidgetFactory {
                 Some(BuiltWidget {
                     widget: root,
                     handle: Box::new(memory),
+                })
+            }
+            "media" => {
+                let cfg = MediaConfig::from_entry(entry);
+                let media = MediaWidget::new(cfg);
+                let root = media.widget().clone().upcast::<Widget>();
+                Some(BuiltWidget {
+                    widget: root,
+                    handle: Box::new(media),
                 })
             }
             "spacer" => {

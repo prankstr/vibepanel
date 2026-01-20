@@ -994,6 +994,148 @@ window.quick-settings-window {{
             padding: 4px 0;
         }}
 
+        /* ===== MARQUEE LABEL ===== */
+
+        /* Note: Overflow is handled by the GtkBox widget with set_overflow(Hidden),
+           not CSS. Text wrapping is controlled via Label properties in Rust code. */
+
+        /* ===== MEDIA WIDGET ===== */
+
+        /* Album art thumbnail - RoundedPicture handles corner clipping via GSK */
+        .media-art-small {{
+            /* Size controlled via set_pixel_size() in Rust */
+        }}
+
+        /* Add spacing after art only when followed by other elements */
+        .media-art-small:not(:last-child) {{
+            margin-right: 8px;
+        }}
+
+        /* Player icon (app icon like Spotify, Firefox) in bar */
+        .media-player-icon {{
+            min-width: var(--icon-size);
+            min-height: var(--icon-size);
+        }}
+
+        /* Add spacing after icons only when followed by other elements */
+        .media-player-icon:not(:last-child) {{
+            margin-right: 8px;
+        }}
+
+        .media-icon:not(:last-child) {{
+            margin-right: 4px;
+        }}
+
+        /* Inline playback controls in bar */
+        .media-widget .media-controls {{
+            padding: 0;
+            margin-left: 4px;
+        }}
+
+        .media-widget .media-control-btn {{
+            padding: 2px;
+            min-width: var(--icon-size);
+            min-height: var(--icon-size);
+            border-radius: var(--radius-sm);
+        }}
+
+        .media-widget .media-control-btn:hover {{
+            background: var(--color-card-overlay-hover);
+        }}
+
+        .media-label,
+        .media-title {{
+            font-size: var(--font-size);
+        }}
+
+        /* Popover styling */
+        .media-popover {{
+            padding: 16px;
+            min-width: 280px;
+        }}
+
+        .media-player-name {{
+            font-size: var(--font-size-sm);
+        }}
+
+        /* Album art in popover - large, centered */
+        .media-art {{
+            border-radius: var(--radius-card);
+            background: var(--color-card-overlay);
+        }}
+
+        .media-art-placeholder {{
+            background: var(--color-card-overlay);
+        }}
+
+        .media-empty-icon {{
+            font-size: 3em;
+            opacity: 0.3;
+        }}
+
+        .media-track-title {{
+            font-size: var(--font-size-lg);
+            font-weight: 500;
+        }}
+
+        .media-artist,
+        .media-album {{
+            font-size: var(--font-size-sm);
+        }}
+
+        /* Playback controls */
+        .media-controls {{
+            padding: 8px 0;
+        }}
+
+        .media-control-btn {{
+            padding: 8px;
+            border-radius: 50%;
+        }}
+
+        .media-control-btn:hover {{
+            background: var(--color-card-overlay-hover);
+        }}
+
+        .media-control-btn-primary {{
+            padding: 12px;
+        }}
+
+        /* Seek bar */
+        .media-seek {{
+            margin-top: 8px;
+        }}
+
+        .media-seek-slider trough {{
+            min-height: 4px;
+        }}
+
+        .media-time {{
+            font-size: var(--font-size-xs);
+        }}
+
+        /* Volume control */
+        .media-volume {{
+            padding-top: 8px;
+        }}
+
+        .media-volume-slider {{
+            margin-left: 8px;
+        }}
+
+        .media-volume-slider trough {{
+            min-height: 4px;
+        }}
+
+        .media-popout-btn {{
+            padding: 4px;
+        }}
+
+        .media-popout-btn:hover {{
+            background: var(--color-card-overlay-hover);
+            border-radius: var(--radius-widget);
+        }}
+
         /* ===== SYSTEM POPOVER ===== */
 
         .system-popover {{

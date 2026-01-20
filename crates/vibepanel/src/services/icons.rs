@@ -232,6 +232,29 @@ pub fn material_symbol_name(icon_name: &str) -> &str {
         "system-lock-screen-symbolic" => "lock",
         "system-log-out-symbolic" => "logout",
 
+        // Media playback controls
+        "media-playback-start" => "play_arrow",
+        "media-playback-pause" => "pause",
+        "media-playback-stop" => "stop",
+        "media-skip-backward" => "skip_previous",
+        "media-skip-forward" => "skip_next",
+        "media-seek-backward" => "fast_rewind",
+        "media-seek-forward" => "fast_forward",
+        "media-playlist-repeat" => "repeat",
+        "media-playlist-shuffle" => "shuffle",
+        "media-playback-start-symbolic" => "play_arrow",
+        "media-playback-pause-symbolic" => "pause",
+        "media-playback-stop-symbolic" => "stop",
+        "media-skip-backward-symbolic" => "skip_previous",
+        "media-skip-forward-symbolic" => "skip_next",
+        "media-seek-backward-symbolic" => "fast_rewind",
+        "media-seek-forward-symbolic" => "fast_forward",
+        "media-playlist-repeat-symbolic" => "repeat",
+        "media-playlist-shuffle-symbolic" => "shuffle",
+        // Pop-out / open external window
+        "window-new-symbolic" => "open_in_new",
+        "view-fullscreen-symbolic" => "fullscreen",
+
         // Fallback: pass through unchanged (allows Material ligature names directly)
         _ => icon_name,
     }
@@ -634,6 +657,41 @@ pub fn gtk_icon_candidates(logical: &str) -> &'static [&'static str] {
             "application-exit-symbolic",
         ],
 
+        // Media playback controls
+        "media-playback-start" => &["media-playback-start-symbolic", "media-playback-start"],
+        "media-playback-pause" => &["media-playback-pause-symbolic", "media-playback-pause"],
+        "media-playback-stop" => &["media-playback-stop-symbolic", "media-playback-stop"],
+        "media-skip-backward" => &["media-skip-backward-symbolic", "media-skip-backward"],
+        "media-skip-forward" => &["media-skip-forward-symbolic", "media-skip-forward"],
+        "media-seek-backward" => &["media-seek-backward-symbolic", "media-seek-backward"],
+        "media-seek-forward" => &["media-seek-forward-symbolic", "media-seek-forward"],
+        "media-playlist-repeat" => &["media-playlist-repeat-symbolic", "media-playlist-repeat"],
+        "media-playlist-shuffle" => &["media-playlist-shuffle-symbolic", "media-playlist-shuffle"],
+        "media-playback-start-symbolic" => {
+            &["media-playback-start-symbolic", "media-playback-start"]
+        }
+        "media-playback-pause-symbolic" => {
+            &["media-playback-pause-symbolic", "media-playback-pause"]
+        }
+        "media-playback-stop-symbolic" => &["media-playback-stop-symbolic", "media-playback-stop"],
+        "media-skip-backward-symbolic" => &["media-skip-backward-symbolic", "media-skip-backward"],
+        "media-skip-forward-symbolic" => &["media-skip-forward-symbolic", "media-skip-forward"],
+        "media-seek-backward-symbolic" => &["media-seek-backward-symbolic", "media-seek-backward"],
+        "media-seek-forward-symbolic" => &["media-seek-forward-symbolic", "media-seek-forward"],
+        "media-playlist-repeat-symbolic" => {
+            &["media-playlist-repeat-symbolic", "media-playlist-repeat"]
+        }
+        "media-playlist-shuffle-symbolic" => {
+            &["media-playlist-shuffle-symbolic", "media-playlist-shuffle"]
+        }
+        // Pop-out / open external window
+        "window-new-symbolic" => &[
+            "window-new-symbolic",
+            "window-new",
+            "view-fullscreen-symbolic",
+        ],
+        "view-fullscreen-symbolic" => &["view-fullscreen-symbolic", "view-fullscreen"],
+
         // Unknown: treat as already-a-GTK-name, return as single-element slice
         // We use a static slice with a placeholder that will be replaced at runtime
         _ => &[],
@@ -861,6 +919,30 @@ pub fn get_app_icon_name(app_id: &str) -> String {
     });
 
     icon_name
+}
+
+/// Set an Image widget's icon from an app ID (e.g., "firefox", "spotify").
+///
+/// This function resolves the app ID to a themed icon name using desktop entries,
+/// then sets the icon on the provided Image widget. Unlike `IconHandle`, this
+/// always uses GTK's icon theme system, which is appropriate for app icons.
+///
+/// Falls back to "audio-x-generic" if no icon can be found.
+pub fn set_image_from_app_id(image: &Image, app_id: &str) {
+    let icon_name = get_app_icon_name(app_id);
+    if icon_name.is_empty() {
+        // Try the app_id directly as an icon name (some apps use their name)
+        let display = gtk4::gdk::Display::default().expect("No display");
+        let icon_theme = IconTheme::for_display(&display);
+        if icon_theme.has_icon(app_id) {
+            image.set_icon_name(Some(app_id));
+        } else {
+            // Fall back to generic music icon
+            image.set_icon_name(Some("audio-x-generic"));
+        }
+    } else {
+        image.set_icon_name(Some(&icon_name));
+    }
 }
 
 /// Describes which backend type should be used for icons.
