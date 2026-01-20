@@ -758,11 +758,18 @@ impl Drop for MediaWidget {
 ///   Used directly with `IconsService::create_icon()`. These are the raw icon names
 ///   from the Material Symbols font.
 fn update_widgets_from_snapshot_impl(ctx: &WidgetUpdateContext<'_>, snapshot: &MediaSnapshot) {
-    // Handle unavailable state
-    if !snapshot.available {
+    let has_metadata = snapshot
+        .metadata
+        .title
+        .as_ref()
+        .is_some_and(|t| !t.trim().is_empty());
+    let should_hide = !snapshot.available
+        || (snapshot.playback_status == PlaybackStatus::Stopped && !has_metadata);
+
+    if should_hide {
         debug!(
-            "media widget snapshot unavailable: empty_text='{}'",
-            ctx.empty_text
+            "media widget hidden: available={}, status={:?}, has_metadata={}, empty_text='{}'",
+            snapshot.available, snapshot.playback_status, has_metadata, ctx.empty_text
         );
         if ctx.empty_text.is_empty() {
             // Hide widget entirely
@@ -802,13 +809,13 @@ fn update_widgets_from_snapshot_impl(ctx: &WidgetUpdateContext<'_>, snapshot: &M
         return;
     }
 
-    // Show widget when player is available
+    // Show widget when player has meaningful content
     debug!(
-        "media widget snapshot available: player={:?} title={:?} artist={:?} art_url={:?}",
+        "media widget visible: player={:?} status={:?} title={:?} artist={:?}",
         snapshot.player_name,
+        snapshot.playback_status,
         snapshot.metadata.title,
         snapshot.metadata.artist,
-        snapshot.metadata.art_url
     );
     ctx.container.set_visible(true);
 

@@ -207,68 +207,55 @@ impl MediaService {
         INSTANCE.with(|s| s.clone())
     }
 
-    /// Register a callback to be invoked whenever the media snapshot changes.
+    /// Select the best player from available players.
     ///
-    /// Returns a `CallbackId` that can be used to unregister the callback via `disconnect()`.
+    /// Priority order:
+    /// 1. Keep current player if it's still in the list and is playing/paused with metadata
+    /// 2. Otherwise, pick a different player (prefer any player over a stopped one with no metadata)
+    ///
+    /// Returns `None` if no players available, or the best candidate's bus name.
     fn pick_best_player(&self, players: &[String]) -> Option<String> {
-        // Choose the best candidate rather than just `players.first()`.
-        //
-        // Common scenario: a Chromium-based app exposes an MPRIS player for calls
-        // (e.g. Slack/Meet) but provides no track metadata, while another player
-        // (e.g. Firefox/Spotify) is actually playing media.
-        //
-        // Heuristic: prefer players with non-empty title metadata, otherwise
-        // fall back to stable ordering.
+        if players.is_empty() {
+            return None;
+        }
+
         let current_snapshot = self.snapshot.borrow();
 
-        let mut candidates: Vec<(i32, &String)> = players
-            .iter()
-            .map(|bus_name| {
-                let mut score = 0;
+        // Keep current player if still valid and has meaningful state
+        if let Some(current_bus) = &current_snapshot.player_bus_name
+            && players.contains(current_bus)
+        {
+            // Keep it if playing, or paused with metadata
+            let has_metadata = current_snapshot
+                .metadata
+                .title
+                .as_ref()
+                .is_some_and(|t| !t.trim().is_empty());
+            let dominated = current_snapshot.playback_status == PlaybackStatus::Playing
+                || (current_snapshot.playback_status == PlaybackStatus::Paused && has_metadata);
 
-                if Some(bus_name) == current_snapshot.player_bus_name.as_ref() {
-                    score += 5;
+            if dominated {
+                return Some(current_bus.clone());
+            }
 
-                    // If the current snapshot already has a track title, strongly prefer it.
-                    if current_snapshot
-                        .metadata
-                        .title
-                        .as_ref()
-                        .is_some_and(|t| !t.trim().is_empty())
-                    {
-                        score += 100;
-                    }
+            // Current player is stopped/empty - try to find a different one
+            // (The new player might be better, we won't know until we connect to it)
+            for player in players {
+                if player != current_bus {
+                    debug!(
+                        "Current player {} is stopped/empty, switching to {}",
+                        current_bus, player
+                    );
+                    return Some(player.clone());
                 }
+            }
 
-                // If the current snapshot already has a track title, keep it.
-                if current_snapshot
-                    .metadata
-                    .title
-                    .as_ref()
-                    .is_some_and(|t| !t.trim().is_empty())
-                    && Some(bus_name) == current_snapshot.player_bus_name.as_ref()
-                {
-                    score += 100;
-                }
+            // No other players, stick with current (widget will hide it)
+            return Some(current_bus.clone());
+        }
 
-                // Prefer obvious music/media apps over browsers.
-                let lower = bus_name.to_lowercase();
-                if lower.contains("spotify") {
-                    score += 20;
-                }
-                if lower.contains("firefox") {
-                    score += 10;
-                }
-                if lower.contains("chromium") {
-                    score -= 5;
-                }
-
-                (score, bus_name)
-            })
-            .collect();
-
-        candidates.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(b.1)));
-        candidates.first().map(|(_, name)| (*name).clone())
+        // No current player or it disappeared, pick first available
+        players.first().cloned()
     }
 
     pub fn connect<F>(&self, callback: F) -> CallbackId
@@ -424,26 +411,33 @@ impl MediaService {
                     snapshot.available_players = players.clone();
                 }
 
-                // If we don't have an active player, or the active player disappeared,
-                // select a new one
+                // Determine best player and switch if needed
                 let current_player = this.snapshot.borrow().player_bus_name.clone();
-                let need_new_player = current_player.is_none()
-                    || current_player
-                        .as_ref()
-                        .map(|p| !players.contains(p))
-                        .unwrap_or(true);
+                let best_player = this.pick_best_player(&players);
 
-                if need_new_player {
-                    if let Some(player) = this.pick_best_player(&players) {
-                        this.select_player(&player);
-                    } else {
+                match (&current_player, &best_player) {
+                    (_, None) => {
                         // No players available
                         this.clear_player();
                     }
-                } else {
-                    // Just notify about updated player list
-                    let snapshot = this.snapshot.borrow().clone();
-                    this.callbacks.notify(&snapshot);
+                    (None, Some(player)) => {
+                        // No current player, select new one
+                        this.select_player(player);
+                    }
+                    (Some(current), Some(best)) if current != best => {
+                        // Switch to better player
+                        debug!("Switching from {} to {}", current, best);
+                        this.select_player(best);
+                    }
+                    (Some(current), Some(_)) if !players.contains(current) => {
+                        // Current player disappeared, select new one
+                        this.select_player(best_player.as_ref().unwrap());
+                    }
+                    _ => {
+                        // Just notify about updated player list
+                        let snapshot = this.snapshot.borrow().clone();
+                        this.callbacks.notify(&snapshot);
+                    }
                 }
             },
         );
@@ -648,6 +642,26 @@ impl MediaService {
             } else {
                 self.stop_position_polling();
             }
+        }
+
+        // If current player became stopped with no metadata, try to find a better one
+        // This handles the case where e.g. a Slack call ends while music is playing elsewhere
+        let should_try_switch = {
+            let snapshot = self.snapshot.borrow();
+            let has_metadata = snapshot
+                .metadata
+                .title
+                .as_ref()
+                .is_some_and(|t| !t.trim().is_empty());
+            snapshot.playback_status == PlaybackStatus::Stopped
+                && !has_metadata
+                && snapshot.available_players.len() > 1
+        };
+
+        if should_try_switch {
+            debug!("Current player stopped with no metadata, re-evaluating players");
+            self.discover_players();
+            return; // discover_players will notify
         }
 
         // Notify after releasing the borrow
