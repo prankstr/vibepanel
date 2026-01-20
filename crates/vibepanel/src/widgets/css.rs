@@ -1028,14 +1028,10 @@ window.quick-settings-window {{
 
         /* Inline playback controls in bar */
         .media-widget .media-controls {{
-            padding: 0;
             margin-left: 4px;
         }}
 
         .media-widget .media-control-btn {{
-            padding: 2px;
-            min-width: var(--icon-size);
-            min-height: var(--icon-size);
             border-radius: var(--radius-sm);
         }}
 
@@ -1083,12 +1079,14 @@ window.quick-settings-window {{
             font-size: var(--font-size-sm);
         }}
 
-        /* Playback controls */
-        .media-controls {{
+        /* Playback controls in popover/window */
+        .media-popover .media-controls,
+        .media-window .media-controls {{
             padding: 8px 0;
         }}
 
-        .media-control-btn {{
+        .media-popover .media-control-btn,
+        .media-window .media-control-btn {{
             padding: 8px;
             border-radius: 50%;
         }}
