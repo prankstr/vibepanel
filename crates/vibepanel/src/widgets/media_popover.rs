@@ -20,6 +20,7 @@ use crate::services::icons::{IconHandle, IconsService};
 use crate::services::media::{MediaService, MediaSnapshot, PlaybackStatus, format_duration};
 use crate::services::tooltip::TooltipManager;
 use crate::styles::{button, color, icon, media, surface};
+use crate::widgets::marquee_label::MarqueeLabel;
 use crate::widgets::rounded_picture::RoundedPicture;
 
 /// Size of album art in the popover (pixels).
@@ -42,9 +43,9 @@ struct ArtState {
 #[derive(Clone)]
 pub struct MediaPopoverController {
     // Track info
-    title_label: Label,
-    artist_label: Label,
-    album_label: Label,
+    title_label: Rc<MarqueeLabel>,
+    artist_label: Rc<MarqueeLabel>,
+    album_label: Rc<MarqueeLabel>,
 
     // Album art
     art_picture: RoundedPicture,
@@ -70,14 +71,14 @@ impl MediaPopoverController {
     /// Update all UI elements from the latest media snapshot.
     pub fn update_from_snapshot(&self, snapshot: &MediaSnapshot) {
         // Track info
-        self.title_label.set_label(
+        self.title_label.set_text(
             snapshot
                 .metadata
                 .title
                 .as_deref()
                 .unwrap_or("No track playing"),
         );
-        self.artist_label.set_label(
+        self.artist_label.set_text(
             snapshot
                 .metadata
                 .artist
@@ -85,7 +86,7 @@ impl MediaPopoverController {
                 .unwrap_or("Unknown artist"),
         );
         self.album_label
-            .set_label(snapshot.metadata.album.as_deref().unwrap_or(""));
+            .set_text(snapshot.metadata.album.as_deref().unwrap_or(""));
 
         // Album art
         self.update_album_art(snapshot);
@@ -306,28 +307,28 @@ pub fn build_media_popover_with_controller() -> (Widget, MediaPopoverController)
     track_info.set_halign(Align::Center);
     track_info.set_margin_bottom(16);
 
-    let title_label = Label::new(Some("No track playing"));
-    title_label.add_css_class(media::TRACK_TITLE);
-    title_label.set_halign(Align::Center);
-    title_label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+    let title_label = Rc::new(MarqueeLabel::new());
+    title_label.set_text("No track playing");
     title_label.set_max_width_chars(18);
-    track_info.append(&title_label);
+    title_label.label().add_css_class(media::TRACK_TITLE);
+    title_label.widget().set_halign(Align::Center);
+    track_info.append(title_label.widget());
 
-    let artist_label = Label::new(Some("Unknown artist"));
-    artist_label.add_css_class(media::ARTIST);
-    artist_label.add_css_class(color::MUTED);
-    artist_label.set_halign(Align::Center);
-    artist_label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+    let artist_label = Rc::new(MarqueeLabel::new());
+    artist_label.set_text("Unknown artist");
     artist_label.set_max_width_chars(18);
-    track_info.append(&artist_label);
+    artist_label.label().add_css_class(media::ARTIST);
+    artist_label.label().add_css_class(color::MUTED);
+    artist_label.widget().set_halign(Align::Center);
+    track_info.append(artist_label.widget());
 
-    let album_label = Label::new(Some(""));
-    album_label.add_css_class(media::ALBUM);
-    album_label.add_css_class(color::MUTED);
-    album_label.set_halign(Align::Center);
-    album_label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+    let album_label = Rc::new(MarqueeLabel::new());
+    album_label.set_text("");
     album_label.set_max_width_chars(18);
-    track_info.append(&album_label);
+    album_label.label().add_css_class(media::ALBUM);
+    album_label.label().add_css_class(color::MUTED);
+    album_label.widget().set_halign(Align::Center);
+    track_info.append(album_label.widget());
 
     info_section.append(&track_info);
 

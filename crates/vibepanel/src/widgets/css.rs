@@ -1047,6 +1047,7 @@ window.quick-settings-window {{
         /* Popover styling */
         .media-popover {{
             padding: 16px;
+            min-width: 340px;
         }}
 
         /* Popout button */

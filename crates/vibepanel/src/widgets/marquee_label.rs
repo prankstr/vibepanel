@@ -197,6 +197,11 @@ mod imp {
                 return;
             };
 
+            // Skip allocation if dimensions are invalid
+            if width <= 0 || height <= 0 {
+                return;
+            }
+
             // Get the label's natural width (full text width)
             let (_, nat_req) = label.preferred_size();
             let text_width = nat_req.width();
@@ -209,14 +214,17 @@ mod imp {
                 .translate(&gtk4::graphene::Point::new(-offset as f32, 0.0));
             label.allocate(text_width.max(width), height, baseline, Some(transform));
 
-            // For seamless loop mode, position the second label to appear from the right
-            if state.scroll_mode == ScrollMode::Loop
-                && let Some(label2) = self.label2.borrow().as_ref()
-            {
-                // Second label appears at: text_width + gap - offset
-                // When offset = 0, label2 is off-screen to the right
-                // As offset increases, label2 slides in from the right
-                let label2_x = text_width as f32 + SCROLL_GAP as f32 - offset as f32;
+            // Always allocate label2 (even if off-screen) to avoid snapshot warnings
+            if let Some(label2) = self.label2.borrow().as_ref() {
+                let label2_x = if state.scroll_mode == ScrollMode::Loop {
+                    // Second label appears at: text_width + gap - offset
+                    // When offset = 0, label2 is off-screen to the right
+                    // As offset increases, label2 slides in from the right
+                    text_width as f32 + SCROLL_GAP as f32 - offset as f32
+                } else {
+                    // For non-loop mode, place off-screen to the right
+                    (width + text_width) as f32
+                };
                 let transform2 = gtk4::gsk::Transform::new()
                     .translate(&gtk4::graphene::Point::new(label2_x, 0.0));
                 label2.allocate(text_width.max(width), height, baseline, Some(transform2));
@@ -423,7 +431,9 @@ impl MarqueeLabel {
             let mut s = state.borrow_mut();
             s.offset = 0.0;
         }
-        self.container.queue_allocate();
+        if self.container.is_mapped() {
+            self.container.queue_allocate();
+        }
 
         // Schedule check after layout
         let state = self.container.state();
@@ -555,7 +565,9 @@ fn start_animation(state: &Rc<RefCell<MarqueeState>>, container: &MarqueeContain
                 }
                 ScrollState::Scrolling => {
                     s.offset += s.scroll_speed;
-                    container.queue_allocate();
+                    if container.is_mapped() {
+                        container.queue_allocate();
+                    }
 
                     if s.offset >= s.scroll_distance {
                         match s.scroll_mode {
@@ -568,7 +580,9 @@ fn start_animation(state: &Rc<RefCell<MarqueeState>>, container: &MarqueeContain
                             ScrollMode::Loop => {
                                 // Seamless loop - immediately reset, no pause
                                 s.offset = 0.0;
-                                container.queue_allocate();
+                                if container.is_mapped() {
+                                    container.queue_allocate();
+                                }
                                 debug!("Marquee: loop reset");
                             }
                         }
@@ -585,7 +599,9 @@ fn start_animation(state: &Rc<RefCell<MarqueeState>>, container: &MarqueeContain
                 }
                 ScrollState::ScrollingBack => {
                     s.offset -= s.scroll_speed;
-                    container.queue_allocate();
+                    if container.is_mapped() {
+                        container.queue_allocate();
+                    }
 
                     if s.offset <= 0.0 {
                         s.offset = 0.0;
