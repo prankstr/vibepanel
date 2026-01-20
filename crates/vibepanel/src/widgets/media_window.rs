@@ -282,10 +282,11 @@ where
 
     // Dock button (return to popover)
     let dock_icon = icons.create_icon("dock_to_bottom", &[icon::ICON]);
+    dock_icon.widget().set_halign(Align::Center);
+    dock_icon.widget().set_valign(Align::Center);
     let dock_btn = Button::new();
     dock_btn.set_child(Some(&dock_icon.widget()));
     dock_btn.add_css_class(media::WINDOW_DOCK);
-    dock_btn.add_css_class(button::GHOST);
     dock_btn.set_tooltip_text(Some("Dock to panel"));
     dock_btn.connect_clicked(clone!(
         #[weak]
@@ -299,10 +300,11 @@ where
 
     // Close button
     let close_icon = icons.create_icon("close", &[icon::ICON]);
+    close_icon.widget().set_halign(Align::Center);
+    close_icon.widget().set_valign(Align::Center);
     let close_btn = Button::new();
     close_btn.set_child(Some(&close_icon.widget()));
     close_btn.add_css_class(media::WINDOW_CLOSE);
-    close_btn.add_css_class(button::GHOST);
     close_btn.set_tooltip_text(Some("Close"));
     close_btn.connect_clicked(clone!(
         #[weak]

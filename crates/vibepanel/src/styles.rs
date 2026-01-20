@@ -800,6 +800,9 @@ pub mod media {
     /// Primary control button (play/pause) (`.media-control-btn-primary`).
     pub const CONTROL_BTN_PRIMARY: &str = "media-control-btn-primary";
 
+    /// Primary control button icon - larger size (`.media-primary-icon`).
+    pub const PRIMARY_ICON: &str = "media-primary-icon";
+
     /// Seek bar container (`.media-seek`).
     pub const SEEK: &str = "media-seek";
 
@@ -823,9 +826,6 @@ pub mod media {
 
     /// Volume icon (`.media-volume-icon`).
     pub const VOLUME_ICON: &str = "media-volume-icon";
-
-    /// Pop-out button (`.media-popout-btn`).
-    pub const POPOUT_BTN: &str = "media-popout-btn";
 
     /// Player selector dropdown (`.media-player-selector`).
     pub const PLAYER_SELECTOR: &str = "media-player-selector";

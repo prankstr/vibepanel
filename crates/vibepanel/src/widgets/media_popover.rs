@@ -1,24 +1,41 @@
 //! Media popover - detailed media player controls and track information.
 //!
 //! Provides a popover with:
-//! - Album art display
-//! - Track metadata (title, artist, album)
+//! - Album art display (left side)
+//! - Track metadata (title, artist, album) on the right
 //! - Playback controls (prev, play/pause, next)
 //! - Seek bar with position/duration
-//! - Volume slider
-//! - Pop-out button to open standalone window
-//! - Player selector when multiple players available
 
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use gtk4::gdk::Texture;
+use gtk4::gio;
 use gtk4::glib;
 use gtk4::prelude::*;
-use gtk4::{Align, Box as GtkBox, Button, Label, Orientation, Scale, Separator, Widget};
+use gtk4::{Align, Box as GtkBox, Button, Label, Orientation, Scale, Widget};
+use tracing::debug;
 
 use crate::services::icons::{IconHandle, IconsService};
 use crate::services::media::{MediaService, MediaSnapshot, PlaybackStatus, format_duration};
 use crate::styles::{button, color, icon, media, surface};
+use crate::widgets::rounded_picture::RoundedPicture;
+
+/// Size of album art in the popover (pixels).
+const POPOVER_ART_SIZE: i32 = 140;
+
+/// Corner radius for album art (pixels).
+const POPOVER_ART_RADIUS: f32 = 8.0;
+
+/// State for tracking album art loading to avoid redundant loads.
+struct ArtState {
+    /// Current art URL being displayed (or loading).
+    current_url: Option<String>,
+    /// Generation counter to handle race conditions in async art loading.
+    generation: u64,
+    /// Cancellable for in-flight art loading operations.
+    cancellable: gio::Cancellable,
+}
 
 /// Controller owning the media popover UI elements and update logic.
 #[derive(Clone)]
@@ -27,7 +44,11 @@ pub struct MediaPopoverController {
     title_label: Label,
     artist_label: Label,
     album_label: Label,
-    player_name_label: Label,
+
+    // Album art
+    art_picture: RoundedPicture,
+    art_placeholder_box: GtkBox,
+    art_state: Rc<RefCell<ArtState>>,
 
     // Playback controls
     play_pause_btn: Button,
@@ -40,13 +61,8 @@ pub struct MediaPopoverController {
     position_label: Label,
     duration_label: Label,
 
-    // Volume
-    volume_scale: Scale,
-    volume_icon: IconHandle,
-
     // State
     is_seeking: Rc<RefCell<bool>>,
-    is_volume_changing: Rc<RefCell<bool>>,
 }
 
 impl MediaPopoverController {
@@ -69,8 +85,9 @@ impl MediaPopoverController {
         );
         self.album_label
             .set_label(snapshot.metadata.album.as_deref().unwrap_or(""));
-        self.player_name_label
-            .set_label(snapshot.player_name.as_deref().unwrap_or("No player"));
+
+        // Album art
+        self.update_album_art(snapshot);
 
         // Play/pause button icon
         let icon_name = match snapshot.playback_status {
@@ -102,23 +119,132 @@ impl MediaPopoverController {
             self.position_label.set_label(&format_duration(position));
             self.duration_label.set_label(&format_duration(length));
         }
+    }
 
-        // Volume - only update if not currently being dragged
-        if !*self.is_volume_changing.borrow() {
-            self.volume_scale.set_value(snapshot.volume);
+    /// Update album art from snapshot, loading asynchronously if URL changed.
+    fn update_album_art(&self, snapshot: &MediaSnapshot) {
+        let art_url = snapshot.metadata.art_url.as_deref();
 
-            // Update volume icon based on level
-            let volume_icon_name = if snapshot.volume <= 0.0 {
-                "audio-volume-muted"
-            } else if snapshot.volume < 0.33 {
-                "audio-volume-low"
-            } else if snapshot.volume < 0.66 {
-                "audio-volume-medium"
-            } else {
-                "audio-volume-high"
-            };
-            self.volume_icon.set_icon(volume_icon_name);
+        let mut state = self.art_state.borrow_mut();
+
+        // Check if URL changed
+        if state.current_url.as_deref() == art_url {
+            return; // No change
         }
+
+        // Cancel any in-flight loading
+        state.cancellable.cancel();
+        state.cancellable = gio::Cancellable::new();
+        state.generation += 1;
+        state.current_url = art_url.map(String::from);
+
+        let generation = state.generation;
+        let cancellable = state.cancellable.clone();
+        drop(state); // Release borrow before async work
+
+        if let Some(url) = art_url {
+            // Load album art
+            self.load_album_art(url, generation, &cancellable);
+        } else {
+            // No art URL - show placeholder
+            self.show_placeholder();
+        }
+    }
+
+    /// Load album art from URL asynchronously.
+    fn load_album_art(&self, url: &str, generation: u64, cancellable: &gio::Cancellable) {
+        let url_string = url.to_string();
+        let art_picture = self.art_picture.clone();
+        let art_placeholder_box = self.art_placeholder_box.clone();
+        let art_state = self.art_state.clone();
+        let cancellable = cancellable.clone();
+
+        if url.starts_with("file://") || url.starts_with("http://") || url.starts_with("https://") {
+            let file = gio::File::for_uri(url);
+            let cancellable_for_read = cancellable.clone();
+
+            file.read_async(
+                glib::Priority::DEFAULT,
+                Some(&cancellable_for_read),
+                move |result| {
+                    // Validate generation before processing
+                    if art_state.borrow().generation != generation {
+                        return;
+                    }
+
+                    match result {
+                        Ok(stream) => {
+                            Self::load_texture_from_stream(
+                                stream.upcast(),
+                                &art_picture,
+                                &art_placeholder_box,
+                                &art_state,
+                                &url_string,
+                                generation,
+                                &cancellable,
+                            );
+                        }
+                        Err(e) => {
+                            if !e.matches(gio::IOErrorEnum::Cancelled) {
+                                debug!("Failed to load album art from {}: {}", url_string, e);
+                            }
+                            // Show placeholder on error
+                            art_picture.set_visible(false);
+                            art_placeholder_box.set_visible(true);
+                        }
+                    }
+                },
+            );
+        } else {
+            debug!("Unknown album art URL scheme: {}", url);
+            self.show_placeholder();
+        }
+    }
+
+    /// Load texture from stream and apply to picture widget.
+    fn load_texture_from_stream(
+        stream: gio::InputStream,
+        art_picture: &RoundedPicture,
+        art_placeholder_box: &GtkBox,
+        art_state: &Rc<RefCell<ArtState>>,
+        url: &str,
+        generation: u64,
+        cancellable: &gio::Cancellable,
+    ) {
+        let art_picture = art_picture.clone();
+        let art_placeholder_box = art_placeholder_box.clone();
+        let art_state = art_state.clone();
+        let url = url.to_string();
+
+        gtk4::gdk_pixbuf::Pixbuf::from_stream_async(&stream, Some(cancellable), move |result| {
+            // Validate generation before applying
+            if art_state.borrow().generation != generation {
+                return;
+            }
+
+            match result {
+                Ok(pixbuf) => {
+                    let texture = Texture::for_pixbuf(&pixbuf);
+                    art_picture.set_paintable(Some(&texture));
+                    art_picture.set_visible(true);
+                    art_placeholder_box.set_visible(false);
+                    debug!("Loaded popover album art from {}", url);
+                }
+                Err(e) => {
+                    if !e.matches(gio::IOErrorEnum::Cancelled) {
+                        debug!("Failed to decode album art from {}: {}", url, e);
+                    }
+                    art_picture.set_visible(false);
+                    art_placeholder_box.set_visible(true);
+                }
+            }
+        });
+    }
+
+    /// Show the placeholder icon instead of album art.
+    fn show_placeholder(&self) {
+        self.art_picture.set_visible(false);
+        self.art_placeholder_box.set_visible(true);
     }
 }
 
@@ -131,76 +257,135 @@ pub fn build_media_popover_with_controller() -> (Widget, MediaPopoverController)
     let snapshot = media_service.snapshot();
     let icons = IconsService::global();
 
-    // Main container
-    let container = GtkBox::new(Orientation::Vertical, 12);
+    // Main container - vertical layout
+    let container = GtkBox::new(Orientation::Vertical, 8);
     container.add_css_class(media::POPOVER);
     container.add_css_class(surface::POPOVER);
     container.add_css_class(surface::NO_FOCUS);
 
-    // Header with player name
-    let header = GtkBox::new(Orientation::Horizontal, 8);
-    let player_name_label = Label::new(None);
-    player_name_label.add_css_class(media::PLAYER_NAME);
-    player_name_label.add_css_class(color::MUTED);
-    player_name_label.set_halign(Align::Start);
-    player_name_label.set_hexpand(true);
-    header.append(&player_name_label);
+    // Main content area - horizontal: album art (left) + info section (right)
+    let content_row = GtkBox::new(Orientation::Horizontal, 12);
+    content_row.add_css_class(media::CONTENT);
 
-    // Pop-out button (placeholder for now)
-    let popout_icon = icons.create_icon("open_in_new", &[icon::ICON]);
-    let popout_btn = Button::new();
-    popout_btn.set_child(Some(&popout_icon.widget()));
-    popout_btn.add_css_class(media::POPOUT_BTN);
-    popout_btn.add_css_class(button::GHOST);
-    popout_btn.set_tooltip_text(Some("Open in window"));
-    header.append(&popout_btn);
+    // Album art container (holds both picture and placeholder, stacked)
+    let art_container = GtkBox::new(Orientation::Vertical, 0);
+    art_container.set_size_request(POPOVER_ART_SIZE, POPOVER_ART_SIZE);
+    art_container.set_valign(Align::Center);
 
-    container.append(&header);
+    // Album art picture (initially hidden until art loads)
+    let art_picture = RoundedPicture::new();
+    art_picture.set_pixel_size(POPOVER_ART_SIZE);
+    art_picture.set_corner_radius(POPOVER_ART_RADIUS);
+    art_picture.add_css_class(media::ART);
+    art_picture.set_visible(false);
+    art_container.append(&art_picture);
 
-    // Album art placeholder (we'll add actual art loading later)
-    let art_box = GtkBox::new(Orientation::Vertical, 0);
-    art_box.add_css_class(media::ART);
-    art_box.add_css_class(media::ART_PLACEHOLDER);
-    art_box.set_size_request(200, 200);
-    art_box.set_halign(Align::Center);
+    // Placeholder icon (visible when no art)
+    let art_placeholder_box = GtkBox::new(Orientation::Vertical, 0);
+    art_placeholder_box.add_css_class(media::ART);
+    art_placeholder_box.add_css_class(media::ART_PLACEHOLDER);
+    art_placeholder_box.set_size_request(POPOVER_ART_SIZE, POPOVER_ART_SIZE);
 
-    let art_icon = icons.create_icon("album", &[media::EMPTY_ICON]);
-    art_icon.widget().set_valign(Align::Center);
-    art_icon.widget().set_vexpand(true);
-    art_box.append(&art_icon.widget());
+    let art_placeholder_icon = icons.create_icon("album", &[media::EMPTY_ICON]);
+    art_placeholder_icon.widget().set_valign(Align::Center);
+    art_placeholder_icon.widget().set_vexpand(true);
+    art_placeholder_icon.widget().set_halign(Align::Center);
+    art_placeholder_icon.widget().set_hexpand(true);
+    art_placeholder_box.append(&art_placeholder_icon.widget());
+    art_container.append(&art_placeholder_box);
 
-    container.append(&art_box);
+    content_row.append(&art_container);
 
-    // Track info section
-    let info_section = GtkBox::new(Orientation::Vertical, 4);
-    info_section.set_halign(Align::Center);
+    // Right side: info section with track info and controls
+    let info_section = GtkBox::new(Orientation::Vertical, 0);
+
+    // Track info (near bottom, close to controls)
+    let track_info = GtkBox::new(Orientation::Vertical, 4);
+    track_info.set_valign(Align::End);
+    track_info.set_vexpand(true);
+    track_info.set_hexpand(true);
+    track_info.set_halign(Align::Center);
+    track_info.set_margin_bottom(16);
 
     let title_label = Label::new(Some("No track playing"));
     title_label.add_css_class(media::TRACK_TITLE);
     title_label.set_halign(Align::Center);
     title_label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
-    title_label.set_max_width_chars(30);
-    info_section.append(&title_label);
+    title_label.set_max_width_chars(18);
+    track_info.append(&title_label);
 
     let artist_label = Label::new(Some("Unknown artist"));
     artist_label.add_css_class(media::ARTIST);
     artist_label.add_css_class(color::MUTED);
     artist_label.set_halign(Align::Center);
     artist_label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
-    artist_label.set_max_width_chars(30);
-    info_section.append(&artist_label);
+    artist_label.set_max_width_chars(18);
+    track_info.append(&artist_label);
 
     let album_label = Label::new(Some(""));
     album_label.add_css_class(media::ALBUM);
     album_label.add_css_class(color::MUTED);
     album_label.set_halign(Align::Center);
     album_label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
-    album_label.set_max_width_chars(30);
-    info_section.append(&album_label);
+    album_label.set_max_width_chars(18);
+    track_info.append(&album_label);
 
-    container.append(&info_section);
+    info_section.append(&track_info);
 
-    // Seek bar section
+    // Playback controls (bottom of info section, centered)
+    let controls = GtkBox::new(Orientation::Horizontal, 8);
+    controls.add_css_class(media::CONTROLS);
+    controls.set_halign(Align::Center);
+
+    // Previous button
+    let prev_icon = icons.create_icon("skip_previous", &[icon::ICON]);
+    prev_icon.widget().set_halign(Align::Center);
+    prev_icon.widget().set_valign(Align::Center);
+    let prev_btn = Button::new();
+    prev_btn.set_child(Some(&prev_icon.widget()));
+    prev_btn.add_css_class(media::CONTROL_BTN);
+    prev_btn.add_css_class(button::COMPACT);
+    prev_btn.set_tooltip_text(Some("Previous"));
+    prev_btn.connect_clicked(|_| {
+        MediaService::global().previous();
+    });
+    controls.append(&prev_btn);
+
+    // Play/pause button
+    let play_pause_icon =
+        icons.create_icon("media-playback-start", &[icon::ICON, media::PRIMARY_ICON]);
+    play_pause_icon.widget().set_halign(Align::Center);
+    play_pause_icon.widget().set_valign(Align::Center);
+    let play_pause_btn = Button::new();
+    play_pause_btn.set_child(Some(&play_pause_icon.widget()));
+    play_pause_btn.add_css_class(media::CONTROL_BTN);
+    play_pause_btn.add_css_class(media::CONTROL_BTN_PRIMARY);
+    play_pause_btn.add_css_class(button::COMPACT);
+    play_pause_btn.set_tooltip_text(Some("Play/Pause"));
+    play_pause_btn.connect_clicked(|_| {
+        MediaService::global().play_pause();
+    });
+    controls.append(&play_pause_btn);
+
+    // Next button
+    let next_icon = icons.create_icon("skip_next", &[icon::ICON]);
+    next_icon.widget().set_halign(Align::Center);
+    next_icon.widget().set_valign(Align::Center);
+    let next_btn = Button::new();
+    next_btn.set_child(Some(&next_icon.widget()));
+    next_btn.add_css_class(media::CONTROL_BTN);
+    next_btn.add_css_class(button::COMPACT);
+    next_btn.set_tooltip_text(Some("Next"));
+    next_btn.connect_clicked(|_| {
+        MediaService::global().next();
+    });
+    controls.append(&next_btn);
+
+    info_section.append(&controls);
+    content_row.append(&info_section);
+    container.append(&content_row);
+
+    // Seek bar section (under controls)
     let seek_section = GtkBox::new(Orientation::Vertical, 4);
     seek_section.add_css_class(media::SEEK);
 
@@ -259,103 +444,21 @@ pub fn build_media_popover_with_controller() -> (Widget, MediaPopoverController)
     seek_section.append(&time_row);
     container.append(&seek_section);
 
-    // Playback controls
-    let controls = GtkBox::new(Orientation::Horizontal, 16);
-    controls.add_css_class(media::CONTROLS);
-    controls.set_halign(Align::Center);
-
-    // Previous button
-    let prev_icon = icons.create_icon("skip_previous", &[icon::ICON]);
-    let prev_btn = Button::new();
-    prev_btn.set_child(Some(&prev_icon.widget()));
-    prev_btn.add_css_class(media::CONTROL_BTN);
-    prev_btn.add_css_class(button::GHOST);
-    prev_btn.set_tooltip_text(Some("Previous"));
-    prev_btn.connect_clicked(|_| {
-        MediaService::global().previous();
-    });
-    controls.append(&prev_btn);
-
-    // Play/pause button
-    let play_pause_icon = icons.create_icon("media-playback-start", &[icon::ICON]);
-    let play_pause_btn = Button::new();
-    play_pause_btn.set_child(Some(&play_pause_icon.widget()));
-    play_pause_btn.add_css_class(media::CONTROL_BTN);
-    play_pause_btn.add_css_class(media::CONTROL_BTN_PRIMARY);
-    play_pause_btn.add_css_class(button::ACCENT);
-    play_pause_btn.set_tooltip_text(Some("Play/Pause"));
-    play_pause_btn.connect_clicked(|_| {
-        MediaService::global().play_pause();
-    });
-    controls.append(&play_pause_btn);
-
-    // Next button
-    let next_icon = icons.create_icon("skip_next", &[icon::ICON]);
-    let next_btn = Button::new();
-    next_btn.set_child(Some(&next_icon.widget()));
-    next_btn.add_css_class(media::CONTROL_BTN);
-    next_btn.add_css_class(button::GHOST);
-    next_btn.set_tooltip_text(Some("Next"));
-    next_btn.connect_clicked(|_| {
-        MediaService::global().next();
-    });
-    controls.append(&next_btn);
-
-    container.append(&controls);
-
-    // Separator
-    let separator = Separator::new(Orientation::Horizontal);
-    container.append(&separator);
-
-    // Volume section
-    let volume_section = GtkBox::new(Orientation::Horizontal, 8);
-    volume_section.add_css_class(media::VOLUME);
-
-    let volume_icon = icons.create_icon("audio-volume-high", &[media::VOLUME_ICON]);
-    volume_section.append(&volume_icon.widget());
-
-    let is_volume_changing = Rc::new(RefCell::new(false));
-    let volume_scale = Scale::with_range(Orientation::Horizontal, 0.0, 1.0, 0.01);
-    volume_scale.add_css_class(media::VOLUME_SLIDER);
-    volume_scale.set_draw_value(false);
-    volume_scale.set_hexpand(true);
-    volume_scale.set_value(1.0);
-
-    // Track volume change start
-    {
-        let is_vol_clone = is_volume_changing.clone();
-        volume_scale.connect_change_value(move |_, _, _| {
-            *is_vol_clone.borrow_mut() = true;
-            glib::Propagation::Proceed
-        });
-    }
-
-    // Apply volume when changed
-    {
-        let is_vol_clone = is_volume_changing.clone();
-        let volume_scale_clone = volume_scale.clone();
-        volume_scale.connect_value_changed(move |_| {
-            if *is_vol_clone.borrow() {
-                let volume = volume_scale_clone.value();
-                MediaService::global().set_volume(volume);
-                // Reset flag after short delay
-                let is_vol_for_timeout = is_vol_clone.clone();
-                glib::timeout_add_local_once(std::time::Duration::from_millis(100), move || {
-                    *is_vol_for_timeout.borrow_mut() = false;
-                });
-            }
-        });
-    }
-
-    volume_section.append(&volume_scale);
-    container.append(&volume_section);
+    // Initialize art state
+    let art_state = Rc::new(RefCell::new(ArtState {
+        current_url: None,
+        generation: 0,
+        cancellable: gio::Cancellable::new(),
+    }));
 
     // Build controller
     let controller = MediaPopoverController {
         title_label,
         artist_label,
         album_label,
-        player_name_label,
+        art_picture,
+        art_placeholder_box,
+        art_state,
         play_pause_btn,
         play_pause_icon,
         prev_btn,
@@ -363,10 +466,7 @@ pub fn build_media_popover_with_controller() -> (Widget, MediaPopoverController)
         seek_scale,
         position_label,
         duration_label,
-        volume_scale,
-        volume_icon,
         is_seeking,
-        is_volume_changing,
     };
 
     // Initial update

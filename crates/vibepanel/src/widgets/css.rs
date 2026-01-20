@@ -1047,14 +1047,9 @@ window.quick-settings-window {{
         /* Popover styling */
         .media-popover {{
             padding: 16px;
-            min-width: 280px;
         }}
 
-        .media-player-name {{
-            font-size: var(--font-size-sm);
-        }}
-
-        /* Album art in popover - large, centered */
+        /* Album art in popover/window */
         .media-art {{
             border-radius: var(--radius-card);
             background: var(--color-card-overlay);
@@ -1080,39 +1075,85 @@ window.quick-settings-window {{
         }}
 
         /* Playback controls in popover/window */
-        .media-popover .media-controls,
+        .media-popover .media-controls {{
+            padding: 0;
+        }}
+
         .media-window .media-controls {{
             padding: 8px 0;
         }}
 
         .media-popover .media-control-btn,
         .media-window .media-control-btn {{
-            padding: 8px;
+            background: transparent;
+            border: none;
+            box-shadow: none;
+            min-width: 32px;
+            min-height: 32px;
+            padding: 0;
             border-radius: 50%;
         }}
 
-        .media-control-btn:hover {{
+        .media-popover .media-control-btn:hover,
+        .media-window .media-control-btn:hover {{
             background: var(--color-card-overlay-hover);
         }}
 
-        .media-control-btn-primary {{
-            padding: 12px;
+        /* Primary button (play/pause) - slightly larger with accent background */
+        .media-popover .media-control-btn.media-control-btn-primary,
+        .media-window .media-control-btn.media-control-btn-primary {{
+            min-width: 40px;
+            min-height: 40px;
+            background: var(--color-accent-primary);
+            color: var(--color-accent-text, #fff);
+        }}
+
+        .media-popover .media-control-btn.media-control-btn-primary:hover,
+        .media-window .media-control-btn.media-control-btn-primary:hover {{
+            opacity: 0.85;
+            background: var(--color-accent-primary);
         }}
 
         /* Seek bar */
         .media-seek {{
-            margin-top: 8px;
+            margin-top: 4px;
         }}
 
         .media-seek-slider trough {{
-            min-height: 4px;
+            min-height: var(--slider-height);
+            border-radius: calc(var(--slider-height) / 2);
+            background-color: var(--color-slider-track);
+        }}
+
+        .media-seek-slider highlight {{
+            background-image: image(var(--color-accent-slider, var(--color-accent-primary)));
+            background-color: var(--color-accent-slider, var(--color-accent-primary));
+            border: none;
+            min-height: var(--slider-height);
+            border-radius: calc(var(--slider-height) / 2);
+        }}
+
+        .media-seek-slider slider {{
+            min-width: 16px;
+            min-height: 16px;
+            margin: -5px;
+            padding: 0;
+            background-color: var(--color-accent-primary);
+            border-radius: 50%;
+            border: none;
+            box-shadow: none;
+            transition: transform 100ms ease-out;
+        }}
+
+        .media-seek-slider slider:active {{
+            transform: scale(1.15);
         }}
 
         .media-time {{
             font-size: var(--font-size-xs);
         }}
 
-        /* Volume control */
+        /* Volume control (used in media window) */
         .media-volume {{
             padding-top: 8px;
         }}
@@ -1122,16 +1163,50 @@ window.quick-settings-window {{
         }}
 
         .media-volume-slider trough {{
-            min-height: 4px;
+            min-height: var(--slider-height);
+            border-radius: calc(var(--slider-height) / 2);
+            background-color: var(--color-slider-track);
         }}
 
-        .media-popout-btn {{
-            padding: 4px;
+        .media-volume-slider highlight {{
+            background-image: image(var(--color-accent-slider, var(--color-accent-primary)));
+            background-color: var(--color-accent-slider, var(--color-accent-primary));
+            border: none;
+            min-height: var(--slider-height);
+            border-radius: calc(var(--slider-height) / 2);
         }}
 
-        .media-popout-btn:hover {{
+        .media-volume-slider slider {{
+            min-width: 16px;
+            min-height: 16px;
+            margin: -5px;
+            padding: 0;
+            background-color: var(--color-accent-primary);
+            border-radius: 50%;
+            border: none;
+            box-shadow: none;
+            transition: transform 100ms ease-out;
+        }}
+
+        .media-volume-slider slider:active {{
+            transform: scale(1.15);
+        }}
+
+        /* Window header buttons (dock/close) */
+        button.media-window-dock,
+        button.media-window-close {{
+            min-width: 28px;
+            min-height: 28px;
+            padding: 0;
+            border-radius: 50%;
+            background: transparent;
+            border: none;
+            box-shadow: none;
+        }}
+
+        button.media-window-dock:hover,
+        button.media-window-close:hover {{
             background: var(--color-card-overlay-hover);
-            border-radius: var(--radius-widget);
         }}
 
         /* ===== SYSTEM POPOVER ===== */
