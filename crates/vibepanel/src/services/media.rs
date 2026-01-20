@@ -210,6 +210,67 @@ impl MediaService {
     /// Register a callback to be invoked whenever the media snapshot changes.
     ///
     /// Returns a `CallbackId` that can be used to unregister the callback via `disconnect()`.
+    fn pick_best_player(&self, players: &[String]) -> Option<String> {
+        // Choose the best candidate rather than just `players.first()`.
+        //
+        // Common scenario: a Chromium-based app exposes an MPRIS player for calls
+        // (e.g. Slack/Meet) but provides no track metadata, while another player
+        // (e.g. Firefox/Spotify) is actually playing media.
+        //
+        // Heuristic: prefer players with non-empty title metadata, otherwise
+        // fall back to stable ordering.
+        let current_snapshot = self.snapshot.borrow();
+
+        let mut candidates: Vec<(i32, &String)> = players
+            .iter()
+            .map(|bus_name| {
+                let mut score = 0;
+
+                if Some(bus_name) == current_snapshot.player_bus_name.as_ref() {
+                    score += 5;
+
+                    // If the current snapshot already has a track title, strongly prefer it.
+                    if current_snapshot
+                        .metadata
+                        .title
+                        .as_ref()
+                        .is_some_and(|t| !t.trim().is_empty())
+                    {
+                        score += 100;
+                    }
+                }
+
+                // If the current snapshot already has a track title, keep it.
+                if current_snapshot
+                    .metadata
+                    .title
+                    .as_ref()
+                    .is_some_and(|t| !t.trim().is_empty())
+                    && Some(bus_name) == current_snapshot.player_bus_name.as_ref()
+                {
+                    score += 100;
+                }
+
+                // Prefer obvious music/media apps over browsers.
+                let lower = bus_name.to_lowercase();
+                if lower.contains("spotify") {
+                    score += 20;
+                }
+                if lower.contains("firefox") {
+                    score += 10;
+                }
+                if lower.contains("chromium") {
+                    score -= 5;
+                }
+
+                (score, bus_name)
+            })
+            .collect();
+
+        candidates.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(b.1)));
+        candidates.first().map(|(_, name)| (*name).clone())
+    }
+
     pub fn connect<F>(&self, callback: F) -> CallbackId
     where
         F: Fn(&MediaSnapshot) + 'static,
@@ -373,8 +434,8 @@ impl MediaService {
                         .unwrap_or(true);
 
                 if need_new_player {
-                    if let Some(player) = players.first() {
-                        this.select_player(player);
+                    if let Some(player) = this.pick_best_player(&players) {
+                        this.select_player(&player);
                     } else {
                         // No players available
                         this.clear_player();

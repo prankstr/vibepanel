@@ -760,6 +760,10 @@ impl Drop for MediaWidget {
 fn update_widgets_from_snapshot_impl(ctx: &WidgetUpdateContext<'_>, snapshot: &MediaSnapshot) {
     // Handle unavailable state
     if !snapshot.available {
+        debug!(
+            "media widget snapshot unavailable: empty_text='{}'",
+            ctx.empty_text
+        );
         if ctx.empty_text.is_empty() {
             // Hide widget entirely
             ctx.container.set_visible(false);
@@ -799,6 +803,13 @@ fn update_widgets_from_snapshot_impl(ctx: &WidgetUpdateContext<'_>, snapshot: &M
     }
 
     // Show widget when player is available
+    debug!(
+        "media widget snapshot available: player={:?} title={:?} artist={:?} art_url={:?}",
+        snapshot.player_name,
+        snapshot.metadata.title,
+        snapshot.metadata.artist,
+        snapshot.metadata.art_url
+    );
     ctx.container.set_visible(true);
 
     // Update CSS state classes
@@ -898,23 +909,28 @@ fn update_widgets_from_snapshot_impl(ctx: &WidgetUpdateContext<'_>, snapshot: &M
     // Render text from template.
     // Each run is consecutive text elements; any widget splits runs.
     if !ctx.text_labels.is_empty() {
-        // Hide everything by default; we'll show labels with text.
-        for label in ctx.text_labels {
-            label.set_visible(false);
-        }
-
         let runs = compute_text_runs(ctx.template_elements);
-        for (run_idx, element_range) in runs.into_iter().enumerate() {
+        debug!("media widget template runs={}", runs.len());
+
+        for (run_idx, element_range) in runs.iter().cloned().enumerate() {
             if let Some(marquee) = ctx.text_labels.get(run_idx) {
                 let rendered =
                     render_text_from_elements(&ctx.template_elements[element_range], snapshot);
                 let cleaned = clean_rendered_text(&rendered);
                 if cleaned.is_empty() {
+                    marquee.set_text("");
                     marquee.set_visible(false);
                 } else {
                     marquee.set_text(&cleaned);
                     marquee.set_visible(true);
                 }
+            }
+        }
+
+        // Hide any leftover labels (e.g. if template changed and has fewer runs).
+        for idx in runs.len()..ctx.text_labels.len() {
+            if let Some(marquee) = ctx.text_labels.get(idx) {
+                marquee.set_visible(false);
             }
         }
     }
