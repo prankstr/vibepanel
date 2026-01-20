@@ -579,7 +579,10 @@ impl MediaWidget {
         {
             let config_mgr = ConfigManager::global();
             let art_size = (config_mgr.bar_size() as f64 * ART_DISPLAY_SCALE) as i32;
-            let corner_radius = config_mgr.radius_pill() as f32;
+            // Scale corner radius with widget_radius_percent: 0% = square, 50%+ = circle
+            // At 50%, radius = 50% of size = half the size = fully round
+            let radius_percent = (config_mgr.widget_radius_percent() as f32 / 100.0).min(0.5);
+            let corner_radius = art_size as f32 * radius_percent;
 
             let picture = RoundedPicture::new();
             picture.set_pixel_size(art_size);

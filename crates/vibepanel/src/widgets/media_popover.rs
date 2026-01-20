@@ -16,6 +16,7 @@ use gtk4::prelude::*;
 use gtk4::{Align, Box as GtkBox, Button, Label, Orientation, Overlay, Scale, Widget};
 use tracing::debug;
 
+use crate::services::config_manager::ConfigManager;
 use crate::services::icons::{IconHandle, IconsService};
 use crate::services::media::{MediaService, MediaSnapshot, PlaybackStatus, format_duration};
 use crate::services::tooltip::TooltipManager;
@@ -25,9 +26,6 @@ use crate::widgets::rounded_picture::RoundedPicture;
 
 /// Size of album art in the popover (pixels).
 const POPOVER_ART_SIZE: i32 = 140;
-
-/// Corner radius for album art (pixels).
-const POPOVER_ART_RADIUS: f32 = 8.0;
 
 /// State for tracking album art loading to avoid redundant loads.
 struct ArtState {
@@ -272,10 +270,13 @@ pub fn build_media_popover_with_controller() -> (Widget, MediaPopoverController)
     art_container.set_valign(Align::Center);
 
     // Album art picture (initially hidden until art loads)
+    // Use 80% of widget_border_radius for inner element (slightly smaller than popover corners)
+    let config_mgr = ConfigManager::global();
+    let corner_radius = config_mgr.widget_border_radius() as f32 * 0.8;
+
     let art_picture = RoundedPicture::new();
     art_picture.set_pixel_size(POPOVER_ART_SIZE);
-    art_picture.set_corner_radius(POPOVER_ART_RADIUS);
-    art_picture.add_css_class(media::ART);
+    art_picture.set_corner_radius(corner_radius);
     art_picture.set_visible(false);
     art_container.append(&art_picture);
 

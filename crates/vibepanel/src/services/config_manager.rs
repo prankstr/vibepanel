@@ -136,6 +136,23 @@ impl ConfigManager {
         palette.radius_pill
     }
 
+    /// Get the widget border radius (used for rounded corners on widgets, images, etc.).
+    ///
+    /// This is derived from the widget border radius configuration percentage.
+    pub fn widget_border_radius(&self) -> u32 {
+        let config = self.config.borrow();
+        let palette = ThemePalette::from_config(&config);
+        palette.widget_border_radius
+    }
+
+    /// Get the raw widget border radius percentage (0-100) from config.
+    ///
+    /// This is the raw config value, useful for scaling other elements proportionally.
+    /// At 0% = square, at 100% = maximum rounding (fully round for square elements).
+    pub fn widget_radius_percent(&self) -> u32 {
+        self.config.borrow().widgets.border_radius
+    }
+
     /// Get the bar size (height) from the current configuration.
     pub fn bar_size(&self) -> u32 {
         self.config.borrow().bar.size
