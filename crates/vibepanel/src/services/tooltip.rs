@@ -383,6 +383,11 @@ impl TooltipManager {
             None => return,
         };
 
+        // Don't show tooltip for hidden widgets
+        if !widget.is_visible() {
+            return;
+        }
+
         // Get monitor info
         let (monitor_width, monitor) = match self.get_monitor_info(&widget) {
             Some(info) => info,

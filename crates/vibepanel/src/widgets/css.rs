@@ -27,6 +27,28 @@ pub fn utility_css() -> String {
     font-size: var(--icon-size);
 }
 
+/* ===== NATIVE GTK TOOLTIPS ===== */
+/* Style GTK's native tooltips (used in popovers/windows where layer-shell tooltips don't work) */
+tooltip,
+tooltip.background {
+    background-color: color-mix(in srgb, var(--color-background-widget) 90%, transparent);
+    border-radius: var(--radius-surface);
+    border: none;
+    padding: 0;
+}
+
+tooltip > box,
+tooltip.background > box {
+    padding: 6px 10px;
+}
+
+tooltip label,
+tooltip.background label {
+    font-family: var(--font-family);
+    font-size: var(--font-size);
+    color: var(--color-foreground-primary);
+}
+
 /* Color utilities - applies to both text and icons */
 .vp-primary { color: var(--color-foreground-primary); }
 .vp-muted { color: var(--color-foreground-muted); }

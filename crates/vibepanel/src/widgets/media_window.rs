@@ -28,6 +28,7 @@ use crate::services::icons::{IconHandle, IconsService};
 use crate::services::media::{MediaService, MediaSnapshot, PlaybackStatus, format_duration};
 use crate::services::surfaces::SurfaceStyleManager;
 use crate::styles::{button, color, icon, media};
+use crate::widgets::marquee_label::{MarqueeLabel, ScrollMode};
 use crate::widgets::rounded_picture::RoundedPicture;
 
 /// Album art size in the pop-out window.
@@ -80,7 +81,7 @@ impl MediaWindowHandle {
 #[derive(Clone)]
 struct MediaWindowController {
     // Track info
-    title_label: Label,
+    title_label: Rc<MarqueeLabel>,
     artist_label: Label,
     album_label: Label,
 
@@ -108,22 +109,28 @@ impl MediaWindowController {
     /// Update all UI elements from the latest media snapshot.
     fn update_from_snapshot(&self, snapshot: &MediaSnapshot) {
         // Track info
-        self.title_label.set_label(
-            snapshot
-                .metadata
-                .title
-                .as_deref()
-                .unwrap_or("No track playing"),
-        );
-        self.artist_label.set_label(
-            snapshot
-                .metadata
-                .artist
-                .as_deref()
-                .unwrap_or("Unknown artist"),
-        );
-        self.album_label
-            .set_label(snapshot.metadata.album.as_deref().unwrap_or(""));
+        let title = snapshot
+            .metadata
+            .title
+            .as_deref()
+            .unwrap_or("No track playing");
+        self.title_label.set_text(title);
+
+        let artist = snapshot
+            .metadata
+            .artist
+            .as_deref()
+            .unwrap_or("Unknown artist");
+        self.artist_label.set_label(artist);
+        self.artist_label.set_tooltip_text(Some(artist));
+
+        let album = snapshot.metadata.album.as_deref().unwrap_or("");
+        self.album_label.set_label(album);
+        if !album.is_empty() {
+            self.album_label.set_tooltip_text(Some(album));
+        } else {
+            self.album_label.set_tooltip_text(None);
+        }
 
         // Album art
         self.update_album_art(snapshot);
@@ -425,12 +432,12 @@ where
     track_info.set_halign(Align::Center);
     track_info.set_margin_bottom(4);
 
-    let title_label = Label::new(Some("No track playing"));
-    title_label.add_css_class(media::TRACK_TITLE);
-    title_label.set_halign(Align::Center);
-    title_label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+    let title_label = Rc::new(MarqueeLabel::with_scroll_mode(ScrollMode::Loop));
+    title_label.set_text("No track playing");
     title_label.set_max_width_chars(18);
-    track_info.append(&title_label);
+    title_label.label().add_css_class(media::TRACK_TITLE);
+    title_label.widget().set_halign(Align::Center);
+    track_info.append(title_label.widget());
 
     let artist_label = Label::new(Some("Unknown artist"));
     artist_label.add_css_class(media::ARTIST);

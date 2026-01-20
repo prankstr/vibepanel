@@ -39,10 +39,10 @@ use crate::widgets::media_window::{MediaWindowHandle, create_media_window};
 use crate::widgets::rounded_picture::RoundedPicture;
 use crate::widgets::{WidgetConfig, warn_unknown_options};
 
-/// Default template: album art, then artist - title.
-const DEFAULT_TEMPLATE: &str = "{art}{artist} - {title}";
+/// Default template: album art, then artist - title, then controls.
+const DEFAULT_TEMPLATE: &str = "{art}{artist} - {title}{controls}";
 /// Default maximum text length (0 = unlimited).
-const DEFAULT_MAX_CHARS: usize = 30;
+const DEFAULT_MAX_CHARS: usize = 20;
 
 // ========== Album Art Rendering Constants ==========
 
@@ -109,10 +109,10 @@ impl WidgetConfig for MediaConfig {
             .get("scroll_mode")
             .and_then(|v| v.as_str())
             .map(|s| match s.to_lowercase().as_str() {
-                "loop" => ScrollMode::Loop,
-                _ => ScrollMode::PingPong,
+                "pingpong" => ScrollMode::PingPong,
+                _ => ScrollMode::Loop,
             })
-            .unwrap_or_default();
+            .unwrap_or(ScrollMode::Loop);
 
         Self {
             template,
@@ -130,7 +130,7 @@ impl Default for MediaConfig {
             template: DEFAULT_TEMPLATE.to_string(),
             empty_text: String::new(),
             max_chars: DEFAULT_MAX_CHARS,
-            scroll_mode: ScrollMode::default(),
+            scroll_mode: ScrollMode::Loop,
             background_color: None,
         }
     }
@@ -1325,9 +1325,10 @@ mod tests {
             background_color: None,
         };
         let config = MediaConfig::from_entry(&entry);
-        assert_eq!(config.template, "{art}{artist} - {title}");
+        assert_eq!(config.template, "{art}{artist} - {title}{controls}");
         assert_eq!(config.empty_text, "");
-        assert_eq!(config.max_chars, 30);
+        assert_eq!(config.max_chars, 20);
+        assert_eq!(config.scroll_mode, ScrollMode::Loop);
     }
 
     #[test]
