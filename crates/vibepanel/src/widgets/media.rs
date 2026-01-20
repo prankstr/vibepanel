@@ -29,11 +29,13 @@ use crate::services::callbacks::CallbackId;
 use crate::services::config_manager::ConfigManager;
 use crate::services::icons::{IconHandle, resolve_app_icon_name, set_image_from_app_id};
 use crate::services::media::{MediaService, MediaSnapshot, PlaybackStatus, format_duration};
+use crate::services::state;
 use crate::services::tooltip::TooltipManager;
 use crate::styles::media;
-use crate::widgets::base::BaseWidget;
+use crate::widgets::base::{BaseWidget, MenuHandle};
 use crate::widgets::marquee_label::{MarqueeLabel, ScrollMode};
 use crate::widgets::media_popover::{MediaPopoverController, build_media_popover_with_controller};
+use crate::widgets::media_window::{MediaWindowHandle, create_media_window};
 use crate::widgets::rounded_picture::RoundedPicture;
 use crate::widgets::{WidgetConfig, warn_unknown_options};
 
@@ -435,12 +437,27 @@ fn clean_rendered_text(text: &str) -> String {
     result
 }
 
+/// Shared state for tracking the pop-out media window.
+///
+/// This is wrapped in `Rc<RefCell<...>>` to allow sharing between the widget,
+/// the popover builder, and the window close callback.
+struct MediaWindowState {
+    /// Handle to the pop-out window, if currently open.
+    handle: Option<MediaWindowHandle>,
+    /// Reference to the bar widget container for hiding/showing.
+    widget_container: gtk4::Box,
+    /// Whether the widget is currently popped out (used to prevent snapshot updates from showing the widget).
+    is_popped_out: bool,
+}
+
 /// Media widget that displays playback status and opens a popover on click.
 pub struct MediaWidget {
     /// Shared base widget container (provides the root GTK widget).
     base: BaseWidget,
     /// Callback ID for MediaService updates (stored for cleanup on drop).
     media_callback_id: CallbackId,
+    /// Shared state for the pop-out window.
+    _window_state: Rc<RefCell<MediaWindowState>>,
 }
 
 /// Handle for the playback controls buttons.
@@ -466,6 +483,8 @@ struct WidgetUpdateContext<'a> {
     template_elements: &'a [TemplateElement],
     empty_text: &'a str,
     art_state: &'a Rc<RefCell<ArtState>>,
+    /// Shared state for checking if the widget is popped out.
+    window_state: &'a Rc<RefCell<MediaWindowState>>,
 }
 
 /// Owned version of widget references for use in callbacks.
@@ -483,6 +502,8 @@ struct CallbackWidgetRefs {
     template_elements: Vec<TemplateElement>,
     empty_text: String,
     art_state: Rc<RefCell<ArtState>>,
+    /// Shared state for checking if the widget is popped out.
+    window_state: Rc<RefCell<MediaWindowState>>,
 }
 
 impl CallbackWidgetRefs {
@@ -498,6 +519,7 @@ impl CallbackWidgetRefs {
             template_elements: &self.template_elements,
             empty_text: &self.empty_text,
             art_state: &self.art_state,
+            window_state: &self.window_state,
         }
     }
 }
@@ -686,12 +708,121 @@ impl MediaWidget {
             Rc::new(RefCell::new(None));
         let controller_for_builder = controller_cell.clone();
 
+        // Shared state for the pop-out window.
+        let window_state: Rc<RefCell<MediaWindowState>> = Rc::new(RefCell::new(MediaWindowState {
+            handle: None,
+            widget_container: base.widget().clone(),
+            is_popped_out: false,
+        }));
+
+        // We need access to the menu handle to close the popover when popping out.
+        // Use the same pattern as notifications: store it after create_menu returns.
+        let menu_handle_cell: Rc<RefCell<Option<Rc<MenuHandle>>>> = Rc::new(RefCell::new(None));
+        let menu_handle_for_builder = menu_handle_cell.clone();
+
+        // Create the on_popout callback that will be called when the pop-out button is clicked.
+        let window_state_for_popout = window_state.clone();
+        let on_popout = move || {
+            // Hide any visible tooltip to prevent orphaned tooltips
+            TooltipManager::global().cancel_and_hide();
+
+            // Close the popover first
+            if let Some(menu_handle) = menu_handle_for_builder.borrow().as_ref() {
+                menu_handle.hide();
+            }
+
+            let mut state = window_state_for_popout.borrow_mut();
+
+            // If window already exists and is visible, just focus it
+            if state.handle.as_ref().is_some_and(|h| h.is_visible()) {
+                state.handle.as_ref().unwrap().show(); // Brings to front
+                return;
+            }
+
+            // Hide the bar widget and mark as popped out
+            state.widget_container.set_visible(false);
+            state.is_popped_out = true;
+
+            // Create the on_close callback for when the window closes
+            let window_state_for_close = Rc::clone(&window_state_for_popout);
+            let on_close = move || {
+                let mut state = window_state_for_close.borrow_mut();
+                // Show the bar widget again and mark as not popped out
+                state.widget_container.set_visible(true);
+                state.is_popped_out = false;
+                // Clear the handle
+                state.handle = None;
+
+                // Persist the window closed state
+                let mut persisted = state::load();
+                persisted.media.window_open = false;
+                state::save(&persisted);
+
+                debug!("Media window closed, bar widget restored");
+            };
+
+            // Create and show the pop-out window
+            let handle = create_media_window(None, on_close);
+            handle.show();
+            state.handle = Some(handle);
+
+            // Persist the window open state
+            let mut persisted = state::load();
+            persisted.media.window_open = true;
+            state::save(&persisted);
+
+            debug!("Media window opened, bar widget hidden");
+        };
+
         // Create a popover menu for detailed media controls.
-        base.create_menu("media", move || {
-            let (widget, controller) = build_media_popover_with_controller();
+        let menu_handle = base.create_menu("media", move || {
+            let on_popout_clone = on_popout.clone();
+            let (widget, controller) = build_media_popover_with_controller(move || {
+                on_popout_clone();
+            });
             *controller_for_builder.borrow_mut() = Some(controller);
             widget
         });
+
+        // Store the menu handle for use in the on_popout callback
+        *menu_handle_cell.borrow_mut() = Some(menu_handle);
+
+        // Check if we should restore the pop-out window from persisted state
+        let persisted = state::load();
+        if persisted.media.window_open {
+            // Restore the pop-out window on startup
+            let window_state_for_restore = window_state.clone();
+            // Use idle_add to defer window creation until the main loop is running
+            glib::idle_add_local_once(move || {
+                let mut state = window_state_for_restore.borrow_mut();
+
+                // Hide the bar widget and mark as popped out
+                state.widget_container.set_visible(false);
+                state.is_popped_out = true;
+
+                // Create the on_close callback
+                let window_state_for_close = Rc::clone(&window_state_for_restore);
+                let on_close = move || {
+                    let mut state = window_state_for_close.borrow_mut();
+                    state.widget_container.set_visible(true);
+                    state.is_popped_out = false;
+                    state.handle = None;
+
+                    let mut persisted = state::load();
+                    persisted.media.window_open = false;
+                    state::save(&persisted);
+
+                    debug!("Media window closed (restored), bar widget restored");
+                };
+
+                // Create and show the window
+                let handle = create_media_window(None, on_close);
+                handle.show();
+                state.handle = Some(handle);
+
+                debug!("Media window restored from persisted state");
+            });
+        }
 
         // Subscribe to the shared MediaService for live updates.
         let media_service = MediaService::global();
@@ -710,6 +841,7 @@ impl MediaWidget {
             template_elements,
             empty_text: config.empty_text.clone(),
             art_state: art_state.clone(),
+            window_state: window_state.clone(),
         };
 
         // Initial state - hidden until we have a player
@@ -731,6 +863,7 @@ impl MediaWidget {
         Self {
             base,
             media_callback_id,
+            _window_state: window_state,
         }
     }
 
@@ -774,6 +907,13 @@ fn update_widgets_from_snapshot_impl(ctx: &WidgetUpdateContext<'_>, snapshot: &M
             "media widget hidden: available={}, status={:?}, has_metadata={}, empty_text='{}'",
             snapshot.available, snapshot.playback_status, has_metadata, ctx.empty_text
         );
+
+        // Don't change visibility if popped out - the pop-out window handles display
+        let is_popped_out = ctx.window_state.borrow().is_popped_out;
+        if is_popped_out {
+            return;
+        }
+
         if ctx.empty_text.is_empty() {
             // Hide widget entirely
             ctx.container.set_visible(false);
@@ -820,7 +960,12 @@ fn update_widgets_from_snapshot_impl(ctx: &WidgetUpdateContext<'_>, snapshot: &M
         snapshot.metadata.title,
         snapshot.metadata.artist,
     );
-    ctx.container.set_visible(true);
+
+    // Don't show the widget if it's currently popped out
+    let is_popped_out = ctx.window_state.borrow().is_popped_out;
+    if !is_popped_out {
+        ctx.container.set_visible(true);
+    }
 
     // Update CSS state classes
     ctx.container.remove_css_class(media::PLAYING);

@@ -21,7 +21,7 @@ use crate::services::icons::{IconHandle, IconsService};
 use crate::services::media::{MediaService, MediaSnapshot, PlaybackStatus, format_duration};
 use crate::services::tooltip::TooltipManager;
 use crate::styles::{button, color, icon, media, surface};
-use crate::widgets::marquee_label::MarqueeLabel;
+use crate::widgets::marquee_label::{MarqueeLabel, ScrollMode};
 use crate::widgets::rounded_picture::RoundedPicture;
 
 /// Size of album art in the popover (pixels).
@@ -42,8 +42,8 @@ struct ArtState {
 pub struct MediaPopoverController {
     // Track info
     title_label: Rc<MarqueeLabel>,
-    artist_label: Rc<MarqueeLabel>,
-    album_label: Rc<MarqueeLabel>,
+    artist_label: Label,
+    album_label: Label,
 
     // Album art
     art_picture: RoundedPicture,
@@ -76,15 +76,22 @@ impl MediaPopoverController {
                 .as_deref()
                 .unwrap_or("No track playing"),
         );
-        self.artist_label.set_text(
-            snapshot
-                .metadata
-                .artist
-                .as_deref()
-                .unwrap_or("Unknown artist"),
-        );
-        self.album_label
-            .set_text(snapshot.metadata.album.as_deref().unwrap_or(""));
+
+        let artist = snapshot
+            .metadata
+            .artist
+            .as_deref()
+            .unwrap_or("Unknown artist");
+        self.artist_label.set_label(artist);
+        self.artist_label.set_tooltip_text(Some(artist));
+
+        let album = snapshot.metadata.album.as_deref().unwrap_or("");
+        self.album_label.set_label(album);
+        if !album.is_empty() {
+            self.album_label.set_tooltip_text(Some(album));
+        } else {
+            self.album_label.set_tooltip_text(None);
+        }
 
         // Album art
         self.update_album_art(snapshot);
@@ -252,7 +259,13 @@ impl MediaPopoverController {
 ///
 /// Returns both the root widget and a controller that can be used to
 /// push live updates while the popover is open.
-pub fn build_media_popover_with_controller() -> (Widget, MediaPopoverController) {
+///
+/// # Arguments
+/// * `on_popout` - Callback invoked when the user clicks the pop-out button
+pub fn build_media_popover_with_controller<F>(on_popout: F) -> (Widget, MediaPopoverController)
+where
+    F: Fn() + 'static,
+{
     let media_service = MediaService::global();
     let snapshot = media_service.snapshot();
     let icons = IconsService::global();
@@ -308,28 +321,28 @@ pub fn build_media_popover_with_controller() -> (Widget, MediaPopoverController)
     track_info.set_halign(Align::Center);
     track_info.set_margin_bottom(16);
 
-    let title_label = Rc::new(MarqueeLabel::new());
+    let title_label = Rc::new(MarqueeLabel::with_scroll_mode(ScrollMode::Loop));
     title_label.set_text("No track playing");
     title_label.set_max_width_chars(18);
     title_label.label().add_css_class(media::TRACK_TITLE);
     title_label.widget().set_halign(Align::Center);
     track_info.append(title_label.widget());
 
-    let artist_label = Rc::new(MarqueeLabel::new());
-    artist_label.set_text("Unknown artist");
+    let artist_label = Label::new(Some("Unknown artist"));
+    artist_label.add_css_class(media::ARTIST);
+    artist_label.add_css_class(color::MUTED);
+    artist_label.set_halign(Align::Center);
+    artist_label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
     artist_label.set_max_width_chars(18);
-    artist_label.label().add_css_class(media::ARTIST);
-    artist_label.label().add_css_class(color::MUTED);
-    artist_label.widget().set_halign(Align::Center);
-    track_info.append(artist_label.widget());
+    track_info.append(&artist_label);
 
-    let album_label = Rc::new(MarqueeLabel::new());
-    album_label.set_text("");
+    let album_label = Label::new(Some(""));
+    album_label.add_css_class(media::ALBUM);
+    album_label.add_css_class(color::MUTED);
+    album_label.set_halign(Align::Center);
+    album_label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
     album_label.set_max_width_chars(18);
-    album_label.label().add_css_class(media::ALBUM);
-    album_label.label().add_css_class(color::MUTED);
-    album_label.widget().set_halign(Align::Center);
-    track_info.append(album_label.widget());
+    track_info.append(&album_label);
 
     info_section.append(&track_info);
 
@@ -466,8 +479,8 @@ pub fn build_media_popover_with_controller() -> (Widget, MediaPopoverController)
     let tooltip_manager = TooltipManager::global();
     tooltip_manager.set_styled_tooltip(&popout_btn, "Pop out");
 
-    popout_btn.connect_clicked(|_| {
-        // TODO: Implement popout functionality
+    popout_btn.connect_clicked(move |_| {
+        on_popout();
     });
 
     overlay.add_overlay(&popout_btn);

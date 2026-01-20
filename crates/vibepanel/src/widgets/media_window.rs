@@ -1,37 +1,47 @@
 //! Media pop-out window - standalone draggable media player controls.
 //!
 //! This creates a regular GTK window (NOT layer-shell) that:
-//! - Can be dragged around by the user
+//! - Can be dragged around by the user (click and drag anywhere on the window)
 //! - Persists when switching focus (doesn't auto-close like popovers)
-//! - Is borderless/undecorated with custom header matching panel theme
-//! - Has custom close/dock button to return to popover mode
+//! - Is borderless/undecorated matching panel theme
+//! - Closed via compositor keybindings (e.g., super+q)
 //!
 //! Note: Always-on-top behavior depends on the compositor/window manager.
 //! On Wayland, this is typically controlled by the compositor, not the app.
 
-// This module is scaffolding for a planned "pop-out" feature where the media
-// widget can be detached from the bar into a standalone always-on-top window.
-// The public API is intentionally exposed for future integration.
-
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use gtk4::gdk_pixbuf::Pixbuf;
+use gtk4::gio;
 use gtk4::glib::{self, clone};
 use gtk4::prelude::*;
 use gtk4::{
-    Align, ApplicationWindow, Box as GtkBox, Button, EventControllerMotion, GestureClick, Label,
-    Orientation, Scale, Separator, Window,
+    Align, ApplicationWindow, Box as GtkBox, Button, GestureClick, Label, Orientation, Scale,
+    Window,
 };
+use tracing::debug;
 
 use crate::services::callbacks::CallbackId;
+use crate::services::config_manager::ConfigManager;
 use crate::services::icons::{IconHandle, IconsService};
 use crate::services::media::{MediaService, MediaSnapshot, PlaybackStatus, format_duration};
 use crate::services::surfaces::SurfaceStyleManager;
 use crate::styles::{button, color, icon, media};
-use crate::widgets::media_utils::{create_media_control_button, volume_icon_name};
+use crate::widgets::rounded_picture::RoundedPicture;
 
-/// Seek step for forward/backward buttons in microseconds (10 seconds).
-const SEEK_STEP_MICROSECONDS: i64 = 10_000_000;
+/// Album art size in the pop-out window.
+const WINDOW_ART_SIZE: i32 = 100;
+
+/// State for async album art loading.
+struct ArtState {
+    /// Current art URL being displayed (or loading).
+    current_url: Option<String>,
+    /// Generation counter to handle race conditions in async art loading.
+    generation: u64,
+    /// Cancellable for in-flight art loading operations.
+    cancellable: gio::Cancellable,
+}
 
 /// Handle to the media pop-out window.
 ///
@@ -73,28 +83,25 @@ struct MediaWindowController {
     title_label: Label,
     artist_label: Label,
     album_label: Label,
-    player_name_label: Label,
+
+    // Album art
+    art_picture: RoundedPicture,
+    art_placeholder_box: GtkBox,
+    art_state: Rc<RefCell<ArtState>>,
 
     // Playback controls
     play_pause_btn: Button,
     play_pause_icon: IconHandle,
     prev_btn: Button,
     next_btn: Button,
-    seek_back_btn: Button,
-    seek_fwd_btn: Button,
 
     // Seek bar
     seek_scale: Scale,
     position_label: Label,
     duration_label: Label,
 
-    // Volume
-    volume_scale: Scale,
-    volume_icon: IconHandle,
-
     // State
     is_seeking: Rc<RefCell<bool>>,
-    is_volume_changing: Rc<RefCell<bool>>,
 }
 
 impl MediaWindowController {
@@ -117,8 +124,9 @@ impl MediaWindowController {
         );
         self.album_label
             .set_label(snapshot.metadata.album.as_deref().unwrap_or(""));
-        self.player_name_label
-            .set_label(snapshot.player_name.as_deref().unwrap_or("No player"));
+
+        // Album art
+        self.update_album_art(snapshot);
 
         // Play/pause button icon
         let icon_name = match snapshot.playback_status {
@@ -133,8 +141,6 @@ impl MediaWindowController {
         self.prev_btn.set_sensitive(snapshot.can_go_previous);
         self.next_btn.set_sensitive(snapshot.can_go_next);
         self.seek_scale.set_sensitive(snapshot.can_seek);
-        self.seek_back_btn.set_sensitive(snapshot.can_seek);
-        self.seek_fwd_btn.set_sensitive(snapshot.can_seek);
 
         // Seek bar - only update if not currently being dragged
         if !*self.is_seeking.borrow() {
@@ -149,19 +155,136 @@ impl MediaWindowController {
                 self.seek_scale.set_value(0.0);
             }
 
-            // Note: GTK's Label internally checks if the text changed before
-            // triggering a redraw, so we don't need to track previous values here.
             self.position_label.set_label(&format_duration(position));
             self.duration_label.set_label(&format_duration(length));
         }
+    }
 
-        // Volume - only update if not currently being dragged
-        if !*self.is_volume_changing.borrow() {
-            self.volume_scale.set_value(snapshot.volume);
+    /// Update album art from snapshot, loading asynchronously if URL changed.
+    fn update_album_art(&self, snapshot: &MediaSnapshot) {
+        let art_url = snapshot.metadata.art_url.as_deref();
 
-            // Update volume icon based on level
-            self.volume_icon.set_icon(volume_icon_name(snapshot.volume));
+        let mut state = self.art_state.borrow_mut();
+
+        // Check if URL changed
+        if state.current_url.as_deref() == art_url {
+            return; // No change
         }
+
+        // Cancel any in-flight loading
+        state.cancellable.cancel();
+        state.cancellable = gio::Cancellable::new();
+        state.generation += 1;
+        state.current_url = art_url.map(String::from);
+
+        let generation = state.generation;
+        let cancellable = state.cancellable.clone();
+        drop(state); // Release borrow before async work
+
+        if let Some(url) = art_url {
+            // Load album art
+            self.load_album_art(url, generation, &cancellable);
+        } else {
+            // No art URL - show placeholder
+            self.show_placeholder();
+        }
+    }
+
+    /// Load album art from URL asynchronously.
+    fn load_album_art(&self, url: &str, generation: u64, cancellable: &gio::Cancellable) {
+        let url_string = url.to_string();
+        let art_picture = self.art_picture.clone();
+        let art_placeholder_box = self.art_placeholder_box.clone();
+        let art_state = self.art_state.clone();
+        let cancellable = cancellable.clone();
+
+        if url.starts_with("file://") || url.starts_with("http://") || url.starts_with("https://") {
+            let file = gio::File::for_uri(url);
+            let cancellable_for_read = cancellable.clone();
+
+            file.read_async(
+                glib::Priority::DEFAULT,
+                Some(&cancellable_for_read),
+                move |result| {
+                    // Validate generation before processing
+                    if art_state.borrow().generation != generation {
+                        return;
+                    }
+
+                    match result {
+                        Ok(stream) => {
+                            Self::load_texture_from_stream(
+                                stream.upcast(),
+                                &art_picture,
+                                &art_placeholder_box,
+                                &art_state,
+                                &url_string,
+                                generation,
+                                &cancellable,
+                            );
+                        }
+                        Err(e) => {
+                            if !e.matches(gio::IOErrorEnum::Cancelled) {
+                                debug!("Failed to load album art from {}: {}", url_string, e);
+                            }
+                            // Show placeholder on error
+                            art_picture.set_visible(false);
+                            art_placeholder_box.set_visible(true);
+                        }
+                    }
+                },
+            );
+        } else {
+            debug!("Unknown album art URL scheme: {}", url);
+            self.show_placeholder();
+        }
+    }
+
+    /// Load texture from stream and apply to picture widget.
+    fn load_texture_from_stream(
+        stream: gio::InputStream,
+        art_picture: &RoundedPicture,
+        art_placeholder_box: &GtkBox,
+        art_state: &Rc<RefCell<ArtState>>,
+        url: &str,
+        generation: u64,
+        cancellable: &gio::Cancellable,
+    ) {
+        let art_picture = art_picture.clone();
+        let art_placeholder_box = art_placeholder_box.clone();
+        let art_state = art_state.clone();
+        let url = url.to_string();
+        let cancellable = cancellable.clone();
+
+        Pixbuf::from_stream_async(&stream, Some(&cancellable), move |result| {
+            // Validate generation before applying
+            if art_state.borrow().generation != generation {
+                return;
+            }
+
+            match result {
+                Ok(pixbuf) => {
+                    let texture = gtk4::gdk::Texture::for_pixbuf(&pixbuf);
+                    art_picture.set_paintable(Some(&texture));
+                    art_picture.set_visible(true);
+                    art_placeholder_box.set_visible(false);
+                    debug!("Loaded album art from {} (window)", url);
+                }
+                Err(e) => {
+                    if !e.matches(gio::IOErrorEnum::Cancelled) {
+                        debug!("Failed to decode album art from {}: {}", url, e);
+                    }
+                    art_picture.set_visible(false);
+                    art_placeholder_box.set_visible(true);
+                }
+            }
+        });
+    }
+
+    /// Show the placeholder and hide the picture.
+    fn show_placeholder(&self) {
+        self.art_picture.set_visible(false);
+        self.art_placeholder_box.set_visible(true);
     }
 }
 
@@ -171,17 +294,18 @@ impl MediaWindowController {
 ///
 /// # Arguments
 /// * `app` - Optional GTK Application to associate with the window
-/// * `on_dock` - Callback invoked when the user clicks the dock button to return to popover mode
+/// * `on_close` - Callback invoked when the window is closed (by any means: close button or programmatically)
 #[allow(dead_code)] // Part of public API for planned pop-out feature
-pub fn create_media_window<F>(app: Option<&gtk4::Application>, on_dock: F) -> MediaWindowHandle
+pub fn create_media_window<G>(app: Option<&gtk4::Application>, on_close: G) -> MediaWindowHandle
 where
-    F: Fn() + 'static,
+    G: Fn() + 'static,
 {
     let icons = IconsService::global();
     let media_service = MediaService::global();
     let snapshot = media_service.snapshot();
 
     // Create window - regular GTK window, not layer-shell
+    // Note: resizable(false) helps compositors treat this as a floating window
     let window = if let Some(app) = app {
         ApplicationWindow::builder()
             .application(app)
@@ -201,29 +325,18 @@ where
     window.add_css_class(media::WINDOW);
     window.set_title(Some("Media Player"));
 
+    // Set fixed size to prevent resizing when label content changes
+    window.set_default_size(280, 150);
+
     // Main container
     let main_box = GtkBox::new(Orientation::Vertical, 0);
     main_box.add_css_class(media::CONTENT);
+    main_box.set_size_request(280, 150);
 
     // Apply surface styling
     SurfaceStyleManager::global().apply_surface_styles(&main_box, true, None);
 
-    // ===== Header with drag area and buttons =====
-    let header = GtkBox::new(Orientation::Horizontal, 8);
-    header.add_css_class(media::WINDOW_HEADER);
-
-    // Drag handle area (most of the header)
-    let drag_area = GtkBox::new(Orientation::Horizontal, 8);
-    drag_area.add_css_class(media::WINDOW_DRAG);
-    drag_area.set_hexpand(true);
-
-    let player_name_label = Label::new(None);
-    player_name_label.add_css_class(media::PLAYER_NAME);
-    player_name_label.add_css_class(color::MUTED);
-    player_name_label.set_halign(Align::Start);
-    drag_area.append(&player_name_label);
-
-    // Set up drag gesture on the drag area
+    // Set up drag gesture on the main container so window can be dragged from anywhere
     {
         let gesture = GestureClick::new();
         gesture.set_button(1); // Left mouse button
@@ -255,159 +368,180 @@ where
             }
         ));
 
-        drag_area.add_controller(gesture);
+        main_box.add_controller(gesture);
     }
 
-    // Also allow dragging by moving the cursor while pressed
-    {
-        let motion = EventControllerMotion::new();
-        motion.connect_enter(clone!(
-            #[weak]
-            window,
-            move |_, _, _| {
-                window.set_cursor_from_name(Some("grab"));
-            }
-        ));
-        motion.connect_leave(clone!(
-            #[weak]
-            window,
-            move |_| {
-                window.set_cursor(gtk4::gdk::Cursor::from_name("default", None).as_ref());
-            }
-        ));
-        drag_area.add_controller(motion);
-    }
+    // ===== Content area - horizontal layout like popover =====
+    let content = GtkBox::new(Orientation::Vertical, 4);
+    content.set_margin_top(0);
+    content.set_margin_bottom(4);
+    content.set_margin_start(8);
+    content.set_margin_end(8);
 
-    header.append(&drag_area);
+    // Main content row - horizontal: album art (left) + info section (right)
+    let content_row = GtkBox::new(Orientation::Horizontal, 12);
+    content_row.add_css_class(media::CONTENT);
 
-    // Dock button (return to popover)
-    let dock_icon = icons.create_icon("dock_to_bottom", &[icon::ICON]);
-    dock_icon.widget().set_halign(Align::Center);
-    dock_icon.widget().set_valign(Align::Center);
-    let dock_btn = Button::new();
-    dock_btn.set_child(Some(&dock_icon.widget()));
-    dock_btn.add_css_class(media::WINDOW_DOCK);
-    dock_btn.set_tooltip_text(Some("Dock to panel"));
-    dock_btn.connect_clicked(clone!(
-        #[weak]
-        window,
-        move |_| {
-            window.close();
-            on_dock();
-        }
-    ));
-    header.append(&dock_btn);
+    // Album art container (holds both picture and placeholder, stacked)
+    let art_container = GtkBox::new(Orientation::Vertical, 0);
+    art_container.set_size_request(WINDOW_ART_SIZE, WINDOW_ART_SIZE);
+    art_container.set_valign(Align::Center);
 
-    // Close button
-    let close_icon = icons.create_icon("close", &[icon::ICON]);
-    close_icon.widget().set_halign(Align::Center);
-    close_icon.widget().set_valign(Align::Center);
-    let close_btn = Button::new();
-    close_btn.set_child(Some(&close_icon.widget()));
-    close_btn.add_css_class(media::WINDOW_CLOSE);
-    close_btn.set_tooltip_text(Some("Close"));
-    close_btn.connect_clicked(clone!(
-        #[weak]
-        window,
-        move |_| {
-            window.close();
-        }
-    ));
-    header.append(&close_btn);
+    // Album art picture (initially hidden until art loads)
+    // Use 80% of widget_border_radius for inner element (slightly smaller than window corners)
+    let config_mgr = ConfigManager::global();
+    let corner_radius = config_mgr.widget_border_radius() as f32 * 0.8;
 
-    main_box.append(&header);
+    let art_picture = RoundedPicture::new();
+    art_picture.set_pixel_size(WINDOW_ART_SIZE);
+    art_picture.set_corner_radius(corner_radius);
+    art_picture.set_visible(false);
+    art_container.append(&art_picture);
 
-    // Separator after header
-    let header_sep = Separator::new(Orientation::Horizontal);
-    main_box.append(&header_sep);
-
-    // ===== Content area (similar to popover) =====
-    let content = GtkBox::new(Orientation::Vertical, 12);
-    content.set_margin_top(12);
-    content.set_margin_bottom(12);
-    content.set_margin_start(16);
-    content.set_margin_end(16);
-
-    // Album art placeholder
-    let art_box = GtkBox::new(Orientation::Vertical, 0);
-    art_box.add_css_class(media::ART);
-    art_box.add_css_class(media::ART_PLACEHOLDER);
-    art_box.set_size_request(200, 200);
-    art_box.set_halign(Align::Center);
+    // Placeholder icon (visible when no art)
+    let art_placeholder_box = GtkBox::new(Orientation::Vertical, 0);
+    art_placeholder_box.add_css_class(media::ART);
+    art_placeholder_box.add_css_class(media::ART_PLACEHOLDER);
+    art_placeholder_box.set_size_request(WINDOW_ART_SIZE, WINDOW_ART_SIZE);
 
     let art_icon = icons.create_icon("album", &[media::EMPTY_ICON]);
     art_icon.widget().set_valign(Align::Center);
     art_icon.widget().set_vexpand(true);
-    art_box.append(&art_icon.widget());
+    art_icon.widget().set_halign(Align::Center);
+    art_icon.widget().set_hexpand(true);
+    art_placeholder_box.append(&art_icon.widget());
+    art_container.append(&art_placeholder_box);
 
-    content.append(&art_box);
+    content_row.append(&art_container);
 
-    // Track info section
-    let info_section = GtkBox::new(Orientation::Vertical, 4);
-    info_section.set_halign(Align::Center);
+    // Right side: info section with track info and controls
+    let info_section = GtkBox::new(Orientation::Vertical, 0);
+
+    // Track info (near bottom, close to controls)
+    let track_info = GtkBox::new(Orientation::Vertical, 2);
+    track_info.set_valign(Align::End);
+    track_info.set_vexpand(true);
+    track_info.set_hexpand(true);
+    track_info.set_halign(Align::Center);
+    track_info.set_margin_bottom(4);
 
     let title_label = Label::new(Some("No track playing"));
     title_label.add_css_class(media::TRACK_TITLE);
     title_label.set_halign(Align::Center);
     title_label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
-    title_label.set_max_width_chars(30);
-    info_section.append(&title_label);
+    title_label.set_max_width_chars(18);
+    track_info.append(&title_label);
 
     let artist_label = Label::new(Some("Unknown artist"));
     artist_label.add_css_class(media::ARTIST);
     artist_label.add_css_class(color::MUTED);
     artist_label.set_halign(Align::Center);
     artist_label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
-    artist_label.set_max_width_chars(30);
-    info_section.append(&artist_label);
+    artist_label.set_max_width_chars(18);
+    track_info.append(&artist_label);
 
     let album_label = Label::new(Some(""));
     album_label.add_css_class(media::ALBUM);
     album_label.add_css_class(color::MUTED);
     album_label.set_halign(Align::Center);
     album_label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
-    album_label.set_max_width_chars(30);
-    info_section.append(&album_label);
+    album_label.set_max_width_chars(18);
+    track_info.append(&album_label);
 
-    content.append(&info_section);
+    info_section.append(&track_info);
 
-    // Seek bar section
-    let seek_section = GtkBox::new(Orientation::Vertical, 4);
+    // Playback controls (bottom of info section, centered)
+    let controls = GtkBox::new(Orientation::Horizontal, 8);
+    controls.add_css_class(media::CONTROLS);
+    controls.set_halign(Align::Center);
+
+    // Previous button
+    let prev_icon = icons.create_icon("skip_previous", &[icon::ICON]);
+    prev_icon.widget().set_halign(Align::Center);
+    prev_icon.widget().set_valign(Align::Center);
+    let prev_btn = Button::new();
+    prev_btn.set_child(Some(&prev_icon.widget()));
+    prev_btn.add_css_class(media::CONTROL_BTN);
+    prev_btn.add_css_class(media::WINDOW_CONTROL_BTN);
+    prev_btn.add_css_class(button::COMPACT);
+    prev_btn.set_tooltip_text(Some("Previous"));
+    prev_btn.connect_clicked(|_| {
+        MediaService::global().previous();
+    });
+    controls.append(&prev_btn);
+
+    // Play/pause button
+    let play_pause_icon =
+        icons.create_icon("media-playback-start", &[icon::ICON, media::PRIMARY_ICON]);
+    play_pause_icon.widget().set_halign(Align::Center);
+    play_pause_icon.widget().set_valign(Align::Center);
+    let play_pause_btn = Button::new();
+    play_pause_btn.set_child(Some(&play_pause_icon.widget()));
+    play_pause_btn.add_css_class(media::CONTROL_BTN);
+    play_pause_btn.add_css_class(media::CONTROL_BTN_PRIMARY);
+    play_pause_btn.add_css_class(media::WINDOW_CONTROL_BTN);
+    play_pause_btn.add_css_class(button::COMPACT);
+    play_pause_btn.set_tooltip_text(Some("Play/Pause"));
+    play_pause_btn.connect_clicked(|_| {
+        MediaService::global().play_pause();
+    });
+    controls.append(&play_pause_btn);
+
+    // Next button
+    let next_icon = icons.create_icon("skip_next", &[icon::ICON]);
+    next_icon.widget().set_halign(Align::Center);
+    next_icon.widget().set_valign(Align::Center);
+    let next_btn = Button::new();
+    next_btn.set_child(Some(&next_icon.widget()));
+    next_btn.add_css_class(media::CONTROL_BTN);
+    next_btn.add_css_class(media::WINDOW_CONTROL_BTN);
+    next_btn.add_css_class(button::COMPACT);
+    next_btn.set_tooltip_text(Some("Next"));
+    next_btn.connect_clicked(|_| {
+        MediaService::global().next();
+    });
+    controls.append(&next_btn);
+
+    info_section.append(&controls);
+    content_row.append(&info_section);
+    content.append(&content_row);
+
+    // Seek bar section (under content row)
+    let seek_section = GtkBox::new(Orientation::Vertical, 0);
     seek_section.add_css_class(media::SEEK);
 
     let is_seeking = Rc::new(RefCell::new(false));
     let seek_scale = Scale::with_range(Orientation::Horizontal, 0.0, 1.0, 1.0);
     seek_scale.add_css_class(media::SEEK_SLIDER);
+    seek_scale.add_css_class(media::WINDOW_SEEK_SLIDER);
     seek_scale.set_draw_value(false);
     seek_scale.set_hexpand(true);
 
-    // Track seek start/end
-    seek_scale.connect_change_value(clone!(
-        #[strong]
-        is_seeking,
-        move |_, _, _| {
-            *is_seeking.borrow_mut() = true;
+    // Track seek start/end to avoid updating while dragging
+    {
+        let is_seeking_clone = is_seeking.clone();
+        seek_scale.connect_change_value(move |_, _, _| {
+            *is_seeking_clone.borrow_mut() = true;
             glib::Propagation::Proceed
-        }
-    ));
+        });
+    }
 
     // Apply seek when released
-    seek_scale.connect_value_changed(clone!(
-        #[strong]
-        is_seeking,
-        #[weak]
-        seek_scale,
-        move |_| {
-            if *is_seeking.borrow() {
-                let position = seek_scale.value() as i64;
+    {
+        let is_seeking_clone = is_seeking.clone();
+        let seek_scale_clone = seek_scale.clone();
+        seek_scale.connect_value_changed(move |_| {
+            if *is_seeking_clone.borrow() {
+                let position = seek_scale_clone.value() as i64;
                 MediaService::global().set_position(position);
-                let is_seeking_for_timeout = is_seeking.clone();
+                // Reset seeking flag after a short delay to allow UI to update
+                let is_seeking_for_timeout = is_seeking_clone.clone();
                 glib::timeout_add_local_once(std::time::Duration::from_millis(100), move || {
                     *is_seeking_for_timeout.borrow_mut() = false;
                 });
             }
-        }
-    ));
+        });
+    }
 
     seek_section.append(&seek_scale);
 
@@ -431,137 +565,31 @@ where
     seek_section.append(&time_row);
     content.append(&seek_section);
 
-    // Playback controls
-    let controls = GtkBox::new(Orientation::Horizontal, 16);
-    controls.add_css_class(media::CONTROLS);
-    controls.set_halign(Align::Center);
-
-    // Previous track button
-    let prev_btn = create_media_control_button(
-        &icons,
-        "skip_previous",
-        "Previous track",
-        &[media::CONTROL_BTN, button::GHOST],
-        || MediaService::global().previous(),
-    );
-    controls.append(&prev_btn);
-
-    // Seek backward button (-10 seconds)
-    let seek_back_btn = create_media_control_button(
-        &icons,
-        "replay_10",
-        "Seek -10s",
-        &[media::CONTROL_BTN, button::GHOST],
-        || MediaService::global().seek(-SEEK_STEP_MICROSECONDS),
-    );
-    controls.append(&seek_back_btn);
-
-    // Play/pause button (special styling, needs icon handle for updates)
-    let play_pause_icon = icons.create_icon("media-playback-start", &[icon::ICON]);
-    let play_pause_btn = Button::new();
-    play_pause_btn.set_child(Some(&play_pause_icon.widget()));
-    play_pause_btn.add_css_class(media::CONTROL_BTN);
-    play_pause_btn.add_css_class(media::CONTROL_BTN_PRIMARY);
-    play_pause_btn.add_css_class(button::ACCENT);
-    play_pause_btn.set_tooltip_text(Some("Play/Pause"));
-    play_pause_btn.connect_clicked(|_| {
-        MediaService::global().play_pause();
-    });
-    controls.append(&play_pause_btn);
-
-    // Seek forward button (+10 seconds)
-    let seek_fwd_btn = create_media_control_button(
-        &icons,
-        "forward_10",
-        "Seek +10s",
-        &[media::CONTROL_BTN, button::GHOST],
-        || MediaService::global().seek(SEEK_STEP_MICROSECONDS),
-    );
-    controls.append(&seek_fwd_btn);
-
-    // Next track button
-    let next_btn = create_media_control_button(
-        &icons,
-        "skip_next",
-        "Next track",
-        &[media::CONTROL_BTN, button::GHOST],
-        || MediaService::global().next(),
-    );
-    controls.append(&next_btn);
-
-    content.append(&controls);
-
-    // Separator
-    let separator = Separator::new(Orientation::Horizontal);
-    content.append(&separator);
-
-    // Volume section
-    let volume_section = GtkBox::new(Orientation::Horizontal, 8);
-    volume_section.add_css_class(media::VOLUME);
-
-    let volume_icon = icons.create_icon("audio-volume-high", &[media::VOLUME_ICON]);
-    volume_section.append(&volume_icon.widget());
-
-    let is_volume_changing = Rc::new(RefCell::new(false));
-    let volume_scale = Scale::with_range(Orientation::Horizontal, 0.0, 1.0, 0.01);
-    volume_scale.add_css_class(media::VOLUME_SLIDER);
-    volume_scale.set_draw_value(false);
-    volume_scale.set_hexpand(true);
-    volume_scale.set_value(1.0);
-
-    // Track volume change start
-    volume_scale.connect_change_value(clone!(
-        #[strong]
-        is_volume_changing,
-        move |_, _, _| {
-            *is_volume_changing.borrow_mut() = true;
-            glib::Propagation::Proceed
-        }
-    ));
-
-    // Apply volume when changed
-    volume_scale.connect_value_changed(clone!(
-        #[strong]
-        is_volume_changing,
-        #[weak]
-        volume_scale,
-        move |_| {
-            if *is_volume_changing.borrow() {
-                let volume = volume_scale.value();
-                MediaService::global().set_volume(volume);
-                let is_vol_for_timeout = is_volume_changing.clone();
-                glib::timeout_add_local_once(std::time::Duration::from_millis(100), move || {
-                    *is_vol_for_timeout.borrow_mut() = false;
-                });
-            }
-        }
-    ));
-
-    volume_section.append(&volume_scale);
-    content.append(&volume_section);
-
     main_box.append(&content);
     window.set_child(Some(&main_box));
 
     // Build controller
+    let art_state = Rc::new(RefCell::new(ArtState {
+        current_url: None,
+        generation: 0,
+        cancellable: gio::Cancellable::new(),
+    }));
+
     let controller = MediaWindowController {
         title_label,
         artist_label,
         album_label,
-        player_name_label,
+        art_picture,
+        art_placeholder_box,
+        art_state,
         play_pause_btn,
         play_pause_icon,
         prev_btn,
         next_btn,
-        seek_back_btn,
-        seek_fwd_btn,
         seek_scale,
         position_label,
         duration_label,
-        volume_scale,
-        volume_icon,
         is_seeking,
-        is_volume_changing,
     };
 
     // Initial update
@@ -587,6 +615,12 @@ where
             }
         }
     ));
+
+    // Notify when window is closed (for any reason)
+    window.connect_close_request(move |_| {
+        on_close();
+        glib::Propagation::Proceed
+    });
 
     MediaWindowHandle {
         window,

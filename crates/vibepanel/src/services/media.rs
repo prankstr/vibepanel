@@ -849,6 +849,7 @@ impl MediaService {
     }
 
     /// Seek by offset (in microseconds). Positive = forward, negative = backward.
+    #[allow(dead_code)]
     pub fn seek(&self, offset_us: i64) {
         let Some((connection, bus_name)) = self.get_player_connection() else {
             return;
@@ -914,6 +915,7 @@ impl MediaService {
     ///
     /// MPRIS allows volumes > 1.0 for amplification, but negative values are invalid.
     /// Invalid values (negative, NaN, infinity) are rejected with a warning.
+    #[allow(dead_code)]
     pub fn set_volume(self: &Rc<Self>, volume: f64) {
         // Validate volume - MPRIS allows > 1.0 for amplification, but not negative or non-finite
         if !volume.is_finite() || volume < 0.0 {

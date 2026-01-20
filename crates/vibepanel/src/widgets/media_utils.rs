@@ -56,31 +56,3 @@ where
     btn.connect_clicked(move |_| on_click());
     btn
 }
-
-/// Volume threshold for "low" volume icon.
-pub const VOLUME_LOW_THRESHOLD: f64 = 0.33;
-
-/// Volume threshold for "medium" volume icon (below this and above LOW is "low").
-pub const VOLUME_MEDIUM_THRESHOLD: f64 = 0.66;
-
-/// Get the appropriate volume icon name based on volume level.
-///
-/// # Arguments
-/// * `volume` - Volume level from 0.0 to 1.0+
-///
-/// # Returns
-/// A freedesktop icon name for the appropriate volume level. These names
-/// (e.g., `"audio-volume-muted"`, `"audio-volume-high"`) follow the freedesktop
-/// icon naming specification and are used with `IconHandle` and `BaseWidget.add_icon()`,
-/// which map them internally to Material Symbols font glyphs.
-pub fn volume_icon_name(volume: f64) -> &'static str {
-    if volume <= 0.0 {
-        "audio-volume-muted"
-    } else if volume < VOLUME_LOW_THRESHOLD {
-        "audio-volume-low"
-    } else if volume < VOLUME_MEDIUM_THRESHOLD {
-        "audio-volume-medium"
-    } else {
-        "audio-volume-high"
-    }
-}

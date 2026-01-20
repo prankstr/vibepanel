@@ -1225,6 +1225,32 @@ window.quick-settings-window {{
             background: var(--color-card-overlay-hover);
         }}
 
+        /* Window-specific smaller controls */
+        .media-window .media-window-control-btn {{
+            min-width: 24px;
+            min-height: 24px;
+        }}
+
+        .media-window .media-window-control-btn.media-control-btn-primary {{
+            min-width: 32px;
+            min-height: 32px;
+        }}
+
+        /* Window-specific thinner seek slider */
+        .media-window .media-window-seek-slider trough {{
+            min-height: 4px;
+        }}
+
+        .media-window .media-window-seek-slider highlight {{
+            min-height: 4px;
+        }}
+
+        .media-window .media-window-seek-slider slider {{
+            min-width: 12px;
+            min-height: 12px;
+            margin: -4px;
+        }}
+
         /* ===== SYSTEM POPOVER ===== */
 
         .system-popover {{

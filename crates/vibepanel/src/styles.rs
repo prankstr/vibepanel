@@ -849,6 +849,12 @@ pub mod media {
     /// Window dock button (return to popover) (`.media-window-dock`).
     pub const WINDOW_DOCK: &str = "media-window-dock";
 
+    /// Window control button - smaller than popover (`.media-window-control-btn`).
+    pub const WINDOW_CONTROL_BTN: &str = "media-window-control-btn";
+
+    /// Window seek slider - thinner than popover (`.media-window-seek-slider`).
+    pub const WINDOW_SEEK_SLIDER: &str = "media-window-seek-slider";
+
     // Popover
     /// Media popover (`.media-popover`).
     pub const POPOVER: &str = "media-popover";

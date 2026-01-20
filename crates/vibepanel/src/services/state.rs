@@ -5,6 +5,7 @@
 //! - VPN last used connection UUID
 //! - Notification muted (DND) state
 //! - Notification history
+//! - Media window open state
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -19,6 +20,8 @@ pub struct PersistedState {
     pub vpn: VpnState,
     #[serde(default)]
     pub notifications: NotificationState,
+    #[serde(default)]
+    pub media: MediaState,
 }
 
 /// VPN-related persisted state
@@ -26,6 +29,13 @@ pub struct PersistedState {
 pub struct VpnState {
     /// UUID of the last successfully connected VPN
     pub last_used_uuid: Option<String>,
+}
+
+/// Media-related persisted state
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct MediaState {
+    /// Whether the media window was open when vibepanel last closed
+    pub window_open: bool,
 }
 
 /// Notification-related persisted state

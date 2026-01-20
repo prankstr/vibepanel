@@ -465,7 +465,10 @@ impl TooltipManager {
     }
 
     /// Cancel pending timer and hide tooltip.
-    fn cancel_and_hide(&self) {
+    ///
+    /// Use this to programmatically dismiss any visible tooltip,
+    /// e.g., when closing a popover or transitioning to a pop-out window.
+    pub fn cancel_and_hide(&self) {
         self.cancel_pending();
         self.hide_tooltip();
     }
