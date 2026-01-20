@@ -13,11 +13,12 @@ use gtk4::gdk::Texture;
 use gtk4::gio;
 use gtk4::glib;
 use gtk4::prelude::*;
-use gtk4::{Align, Box as GtkBox, Button, Label, Orientation, Scale, Widget};
+use gtk4::{Align, Box as GtkBox, Button, Label, Orientation, Overlay, Scale, Widget};
 use tracing::debug;
 
 use crate::services::icons::{IconHandle, IconsService};
 use crate::services::media::{MediaService, MediaSnapshot, PlaybackStatus, format_duration};
+use crate::services::tooltip::TooltipManager;
 use crate::styles::{button, color, icon, media, surface};
 use crate::widgets::rounded_picture::RoundedPicture;
 
@@ -259,9 +260,6 @@ pub fn build_media_popover_with_controller() -> (Widget, MediaPopoverController)
 
     // Main container - vertical layout
     let container = GtkBox::new(Orientation::Vertical, 8);
-    container.add_css_class(media::POPOVER);
-    container.add_css_class(surface::POPOVER);
-    container.add_css_class(surface::NO_FOCUS);
 
     // Main content area - horizontal: album art (left) + info section (right)
     let content_row = GtkBox::new(Orientation::Horizontal, 12);
@@ -298,6 +296,7 @@ pub fn build_media_popover_with_controller() -> (Widget, MediaPopoverController)
 
     // Right side: info section with track info and controls
     let info_section = GtkBox::new(Orientation::Vertical, 0);
+    info_section.set_margin_start(12); // Gap between album art and info
 
     // Track info (near bottom, close to controls)
     let track_info = GtkBox::new(Orientation::Vertical, 4);
@@ -386,7 +385,7 @@ pub fn build_media_popover_with_controller() -> (Widget, MediaPopoverController)
     container.append(&content_row);
 
     // Seek bar section (under controls)
-    let seek_section = GtkBox::new(Orientation::Vertical, 4);
+    let seek_section = GtkBox::new(Orientation::Vertical, 0);
     seek_section.add_css_class(media::SEEK);
 
     let is_seeking = Rc::new(RefCell::new(false));
@@ -444,6 +443,33 @@ pub fn build_media_popover_with_controller() -> (Widget, MediaPopoverController)
     seek_section.append(&time_row);
     container.append(&seek_section);
 
+    // Wrap container in overlay for absolute positioning of popout button
+    let overlay = Overlay::new();
+    overlay.add_css_class(media::POPOVER);
+    overlay.set_child(Some(&container));
+
+    // Popout button - positioned at top-right corner
+    let popout_btn = Button::new();
+    popout_btn.set_has_frame(false);
+    popout_btn.set_focusable(false);
+    popout_btn.set_focus_on_click(false);
+    popout_btn.add_css_class(surface::POPOVER_ICON_BTN);
+    popout_btn.add_css_class(media::POPOUT_BTN);
+    popout_btn.set_halign(Align::End);
+    popout_btn.set_valign(Align::Start);
+
+    let popout_icon = icons.create_icon("open_in_new", &[icon::ICON, media::POPOUT_ICON]);
+    popout_btn.set_child(Some(&popout_icon.widget()));
+
+    let tooltip_manager = TooltipManager::global();
+    tooltip_manager.set_styled_tooltip(&popout_btn, "Pop out");
+
+    popout_btn.connect_clicked(|_| {
+        // TODO: Implement popout functionality
+    });
+
+    overlay.add_overlay(&popout_btn);
+
     // Initialize art state
     let art_state = Rc::new(RefCell::new(ArtState {
         current_url: None,
@@ -472,5 +498,5 @@ pub fn build_media_popover_with_controller() -> (Widget, MediaPopoverController)
     // Initial update
     controller.update_from_snapshot(&snapshot);
 
-    (container.upcast::<Widget>(), controller)
+    (overlay.upcast::<Widget>(), controller)
 }

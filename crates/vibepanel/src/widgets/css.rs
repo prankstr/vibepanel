@@ -1049,6 +1049,15 @@ window.quick-settings-window {{
             padding: 16px;
         }}
 
+        /* Popout button */
+        .media-popout-btn {{
+            min-width: 24px;
+            min-height: 24px;
+            padding: 4px;
+            margin-top: -12px;
+            margin-right: -16px;
+        }}
+
         /* Album art in popover/window */
         .media-art {{
             border-radius: var(--radius-card);
@@ -1119,6 +1128,11 @@ window.quick-settings-window {{
             margin-top: 4px;
         }}
 
+        .media-seek-slider {{
+            margin-left: -8px;
+            margin-right: -8px;
+        }}
+
         .media-seek-slider trough {{
             min-height: var(--slider-height);
             border-radius: calc(var(--slider-height) / 2);
@@ -1151,6 +1165,7 @@ window.quick-settings-window {{
 
         .media-time {{
             font-size: var(--font-size-xs);
+            margin-top: -4px;
         }}
 
         /* Volume control (used in media window) */

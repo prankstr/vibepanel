@@ -853,6 +853,12 @@ pub mod media {
     /// Media popover (`.media-popover`).
     pub const POPOVER: &str = "media-popover";
 
+    /// Pop-out button in popover (`.media-popout-btn`).
+    pub const POPOUT_BTN: &str = "media-popout-btn";
+
+    /// Pop-out button icon (`.media-popout-icon`).
+    pub const POPOUT_ICON: &str = "media-popout-icon";
+
     // Empty state
     /// No player available state (`.media-empty`).
     pub const EMPTY: &str = "media-empty";
