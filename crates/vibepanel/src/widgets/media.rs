@@ -27,7 +27,7 @@ use vibepanel_core::config::WidgetEntry;
 
 use crate::services::callbacks::CallbackId;
 use crate::services::config_manager::ConfigManager;
-use crate::services::icons::{IconHandle, get_app_icon_name, set_image_from_app_id};
+use crate::services::icons::{IconHandle, resolve_app_icon_name, set_image_from_app_id};
 use crate::services::media::{MediaService, MediaSnapshot, PlaybackStatus, format_duration};
 use crate::services::tooltip::TooltipManager;
 use crate::styles::media;
@@ -224,119 +224,157 @@ impl TextToken {
 enum TemplateElement {
     /// A widget token (creates a GTK widget).
     Widget(WidgetToken),
-    /// Literal text (including text tokens to be replaced).
-    Text(String),
+    /// A text token (replaced with snapshot values).
+    TextToken(TextToken),
+    /// Literal text between tokens.
+    Literal(String),
 }
 
 /// Parse a template string into elements.
 ///
-/// Widget tokens ({art}, {player_icon}, {icon}, {controls}) become TemplateElement::Widget.
-/// Everything else (including text tokens) remains as TemplateElement::Text.
+/// Widget tokens (`{art}`, `{player_icon}`, `{icon}`, `{controls}`) become `TemplateElement::Widget`.
+/// Text tokens (`{title}`, `{artist}`, etc.) become `TemplateElement::TextToken`.
+/// Any characters between tokens become `TemplateElement::Literal`.
 ///
 /// Note: Literal braces are not supported. If you need a literal `{` or `}` character
-/// in the template output, this is not currently possible. However, this is unlikely
-/// to be needed for typical media display templates.
+/// in the template output, this is not currently possible.
 fn parse_template(template: &str) -> Vec<TemplateElement> {
     let mut elements = Vec::new();
-    let mut current_text = String::new();
+    let mut current_literal = String::new();
     let mut chars = template.chars().peekable();
 
     while let Some(c) = chars.next() {
-        if c == '{' {
-            // Look for closing brace
-            let mut token = String::new();
-            let mut found_close = false;
+        if c != '{' {
+            current_literal.push(c);
+            continue;
+        }
 
-            for tc in chars.by_ref() {
-                if tc == '}' {
-                    found_close = true;
-                    break;
-                }
-                token.push(tc);
-            }
+        // Look for closing brace
+        let mut token = String::new();
+        let mut found_close = false;
 
-            if found_close {
-                // Check if it's a widget token
-                if let Some(widget_token) = WidgetToken::parse(&token) {
-                    // Flush any accumulated text
-                    if !current_text.is_empty() {
-                        elements.push(TemplateElement::Text(current_text.clone()));
-                        current_text.clear();
-                    }
-                    elements.push(TemplateElement::Widget(widget_token));
-                } else {
-                    // Check if it's a known text token, warn if not
-                    const KNOWN_TEXT_TOKENS: &[&str] =
-                        &["title", "artist", "album", "player", "position", "duration"];
-                    if !KNOWN_TEXT_TOKENS.contains(&token.as_str()) {
-                        warn!(
-                            "Unknown template token '{{{}}}' in media widget template. \
-                             Known tokens: {{art}}, {{player_icon}}, {{icon}}, {{controls}}, \
-                             {{title}}, {{artist}}, {{album}}, {{player}}, {{position}}, {{duration}}",
-                            token
-                        );
-                    }
-                    // Keep as text (including the braces) - will be replaced later
-                    current_text.push('{');
-                    current_text.push_str(&token);
-                    current_text.push('}');
-                }
-            } else {
-                // Unclosed brace - treat as literal
-                current_text.push('{');
-                current_text.push_str(&token);
+        for tc in chars.by_ref() {
+            if tc == '}' {
+                found_close = true;
+                break;
             }
+            token.push(tc);
+        }
+
+        if !found_close {
+            // Unclosed brace - treat as literal
+            current_literal.push('{');
+            current_literal.push_str(&token);
+            continue;
+        }
+
+        // We found a complete `{token}`; flush any accumulated literal.
+        if !current_literal.is_empty() {
+            elements.push(TemplateElement::Literal(std::mem::take(
+                &mut current_literal,
+            )));
+        }
+
+        if let Some(widget_token) = WidgetToken::parse(&token) {
+            elements.push(TemplateElement::Widget(widget_token));
+            continue;
+        }
+
+        let text_token = match token.as_str() {
+            "title" => Some(TextToken::Title),
+            "artist" => Some(TextToken::Artist),
+            "album" => Some(TextToken::Album),
+            "player" => Some(TextToken::Player),
+            "position" => Some(TextToken::Position),
+            "duration" => Some(TextToken::Duration),
+            _ => None,
+        };
+
+        if let Some(text_token) = text_token {
+            elements.push(TemplateElement::TextToken(text_token));
         } else {
-            current_text.push(c);
+            warn!(
+                "Unknown template token '{{{}}}' in media widget template. \
+                 Known tokens: {{art}}, {{player_icon}}, {{icon}}, {{controls}}, \
+                 {{title}}, {{artist}}, {{album}}, {{player}}, {{position}}, {{duration}}",
+                token
+            );
+            elements.push(TemplateElement::Literal(format!("{{{}}}", token)));
         }
     }
 
-    // Flush remaining text
-    if !current_text.is_empty() {
-        elements.push(TemplateElement::Text(current_text));
+    if !current_literal.is_empty() {
+        elements.push(TemplateElement::Literal(current_literal));
     }
 
     elements
 }
 
-/// Extract the text-only portion of a template (widget tokens removed).
-fn extract_text_template(template: &str) -> String {
-    let elements = parse_template(template);
-    elements
-        .iter()
-        .filter_map(|e| match e {
-            TemplateElement::Text(s) => Some(s.as_str()),
-            TemplateElement::Widget(_) => None,
-        })
-        .collect::<Vec<_>>()
-        .join("")
-}
-
-/// Render text tokens in a string, replacing {token} with values.
-fn render_text_tokens(text: &str, snapshot: &MediaSnapshot) -> String {
-    let mut result = text.to_string();
-
-    // Replace all text tokens
-    for (token_name, token) in [
-        ("title", TextToken::Title),
-        ("artist", TextToken::Artist),
-        ("album", TextToken::Album),
-        ("player", TextToken::Player),
-        ("position", TextToken::Position),
-        ("duration", TextToken::Duration),
-    ] {
-        let placeholder = format!("{{{}}}", token_name);
-        let value = token.value(snapshot);
-        result = result.replace(&placeholder, &value);
+/// Render all non-widget template elements into a single string.
+///
+/// This keeps the current widget behavior: all text (including `{artist}` / `{title}`)
+/// is rendered into one `MarqueeLabel`.
+fn render_text_from_elements(elements: &[TemplateElement], snapshot: &MediaSnapshot) -> String {
+    let mut result = String::new();
+    for element in elements {
+        match element {
+            TemplateElement::Widget(_) => {}
+            TemplateElement::TextToken(token) => result.push_str(&token.value(snapshot)),
+            TemplateElement::Literal(s) => result.push_str(s),
+        }
     }
-
     result
+}
+
+fn has_text(element: &TemplateElement) -> bool {
+    matches!(
+        element,
+        TemplateElement::TextToken(_) | TemplateElement::Literal(_)
+    )
+}
+
+fn is_widget(element: &TemplateElement) -> bool {
+    matches!(element, TemplateElement::Widget(_))
+}
+
+fn compute_text_runs(elements: &[TemplateElement]) -> Vec<std::ops::Range<usize>> {
+    // A "text run" is a consecutive sequence of text elements (`TextToken`/`Literal`) in the
+    // template stream. Any widget token splits runs (including `{controls}`), so templates like
+    // "{artist}{controls}{title}" can place controls between distinct labels.
+    let mut runs: Vec<std::ops::Range<usize>> = Vec::new();
+    let mut current_start: Option<usize> = None;
+
+    for (idx, element) in elements.iter().enumerate() {
+        if has_text(element) {
+            if current_start.is_none() {
+                current_start = Some(idx);
+            }
+            continue;
+        }
+
+        if is_widget(element)
+            && let Some(start) = current_start.take()
+        {
+            runs.push(start..idx);
+        }
+    }
+
+    if let Some(start) = current_start {
+        runs.push(start..elements.len());
+    }
+
+    runs
 }
 
 /// Clean up rendered text by removing artifacts from empty tokens.
 ///
 /// When template tokens like `{artist}` or `{title}` are empty, this function
 /// removes orphaned separators that would otherwise appear in the output.
+///
+/// # Whitespace Handling
+///
+/// All whitespace sequences in the input are normalized to single spaces.
+/// For example, `"Artist  -  Song"` becomes `"Artist - Song"`.
 ///
 /// # Supported Separators
 ///
@@ -423,11 +461,9 @@ struct WidgetUpdateContext<'a> {
     status_icon: &'a Option<IconHandle>,
     player_icon: &'a Option<Image>,
     art_picture: &'a Option<RoundedPicture>,
-    text_label: &'a Option<Rc<MarqueeLabel>>,
+    text_labels: &'a Vec<Rc<MarqueeLabel>>,
     controls: &'a Option<ControlsHandle>,
-    /// Pre-extracted text template (widget tokens removed, only text tokens remain).
-    /// Cached to avoid re-parsing on every update.
-    text_template: &'a str,
+    template_elements: &'a [TemplateElement],
     empty_text: &'a str,
     art_state: &'a Rc<RefCell<ArtState>>,
 }
@@ -442,11 +478,9 @@ struct CallbackWidgetRefs {
     status_icon: Option<IconHandle>,
     player_icon: Option<Image>,
     art_picture: Option<RoundedPicture>,
-    text_label: Option<Rc<MarqueeLabel>>,
+    text_labels: Vec<Rc<MarqueeLabel>>,
     controls: Option<ControlsHandle>,
-    /// Pre-extracted text template (widget tokens removed, only text tokens remain).
-    /// Cached to avoid re-parsing on every update.
-    text_template: String,
+    template_elements: Vec<TemplateElement>,
     empty_text: String,
     art_state: Rc<RefCell<ArtState>>,
 }
@@ -459,9 +493,9 @@ impl CallbackWidgetRefs {
             status_icon: &self.status_icon,
             player_icon: &self.player_icon,
             art_picture: &self.art_picture,
-            text_label: &self.text_label,
+            text_labels: &self.text_labels,
             controls: &self.controls,
-            text_template: &self.text_template,
+            template_elements: &self.template_elements,
             empty_text: &self.empty_text,
             art_state: &self.art_state,
         }
@@ -469,7 +503,7 @@ impl CallbackWidgetRefs {
 }
 
 /// Create inline playback controls (previous, play/pause, next buttons).
-fn create_controls(base: &BaseWidget) -> ControlsHandle {
+fn create_controls() -> ControlsHandle {
     use crate::services::icons::IconsService;
     use crate::styles::{button, icon};
     use crate::widgets::media_utils::create_media_control_button;
@@ -514,9 +548,6 @@ fn create_controls(base: &BaseWidget) -> ControlsHandle {
     );
     container.append(&next_btn);
 
-    // Append to parent widget
-    base.content().append(&container);
-
     ControlsHandle {
         container,
         play_pause_icon,
@@ -531,70 +562,117 @@ impl MediaWidget {
         // Initial tooltip until the first snapshot arrives.
         base.set_tooltip("No media playing");
 
-        // Parse the template to identify what widgets we need
+        // Parse the template for layout and rendering.
         let template_elements = parse_template(&config.template);
 
-        // Create widgets in template order.
-        // Each widget is created only once (on first occurrence in template).
-        let mut art_picture = None;
-        let mut player_icon = None;
-        let mut status_icon = None;
-        let mut controls = None;
-        let mut text_label = None;
+        // Create each optional widget at most once, then append according to template order.
+        let mut art_picture: Option<RoundedPicture> = None;
+        let mut player_icon: Option<Image> = None;
+        let mut status_icon: Option<IconHandle> = None;
+        let mut controls: Option<ControlsHandle> = None;
+        let mut text_labels: Vec<Rc<MarqueeLabel>> = Vec::new();
+
+        // Pre-create widgets we might need.
+        if template_elements
+            .iter()
+            .any(|e| matches!(e, TemplateElement::Widget(WidgetToken::Art)))
+        {
+            let config_mgr = ConfigManager::global();
+            let art_size = (config_mgr.bar_size() as f64 * ART_DISPLAY_SCALE) as i32;
+            let corner_radius = config_mgr.radius_pill() as f32;
+
+            let picture = RoundedPicture::new();
+            picture.set_pixel_size(art_size);
+            picture.set_corner_radius(corner_radius);
+            picture.add_css_class(media::ART_SMALL);
+            picture.set_visible(false);
+            art_picture = Some(picture);
+        }
+
+        if template_elements
+            .iter()
+            .any(|e| matches!(e, TemplateElement::Widget(WidgetToken::PlayerIcon)))
+        {
+            let image = Image::from_icon_name(media::ICON_AUDIO_GENERIC);
+            image.add_css_class(media::PLAYER_ICON);
+            image.set_visible(false);
+            player_icon = Some(image);
+        }
+
+        if template_elements
+            .iter()
+            .any(|e| matches!(e, TemplateElement::Widget(WidgetToken::Icon)))
+        {
+            let handle = base.add_icon(media::ICON_PAUSE, &[media::ICON]);
+            handle.widget().set_visible(false);
+            status_icon = Some(handle);
+        }
+
+        if template_elements
+            .iter()
+            .any(|e| matches!(e, TemplateElement::Widget(WidgetToken::Controls)))
+        {
+            controls = Some(create_controls());
+        }
+
+        // Build one MarqueeLabel per text run.
+        // A "text run" is a consecutive sequence of `TextToken`/`Literal` elements.
+        // Any widget (including `{controls}`) splits runs.
+        let text_runs = compute_text_runs(&template_elements);
+
+        for _ in &text_runs {
+            let marquee = Rc::new(MarqueeLabel::with_scroll_mode(config.scroll_mode));
+            marquee.label().add_css_class(media::LABEL);
+            if config.max_chars > 0 {
+                marquee.set_max_width_chars(config.max_chars as i32);
+            }
+            marquee.set_visible(false);
+            text_labels.push(marquee);
+        }
+
+        // Append child widgets in template order.
+        // Text elements are rendered into one MarqueeLabel per text run.
+        let mut current_text_run_idx: usize = 0;
+        let mut pending_text_run = true;
 
         for element in &template_elements {
             match element {
-                TemplateElement::Widget(WidgetToken::Art) => {
-                    if art_picture.is_none() {
-                        // Use RoundedPicture for album art with GPU-accelerated rounded corners.
-                        let config_mgr = ConfigManager::global();
-                        let art_size = (config_mgr.bar_size() as f64 * ART_DISPLAY_SCALE) as i32;
-                        let corner_radius = config_mgr.radius_pill() as f32;
-
-                        let picture = RoundedPicture::new();
-                        picture.set_pixel_size(art_size);
-                        picture.set_corner_radius(corner_radius);
-                        picture.add_css_class(media::ART_SMALL);
-                        picture.set_visible(false);
-
-                        base.content().append(&picture);
-                        art_picture = Some(picture);
-                    }
-                }
-                TemplateElement::Widget(WidgetToken::PlayerIcon) => {
-                    if player_icon.is_none() {
-                        // Use GTK Image for app icons (not IconHandle/Material Symbols)
-                        // This properly renders themed app icons like "firefox", "spotify"
-                        let image = Image::from_icon_name(media::ICON_AUDIO_GENERIC);
-                        image.add_css_class(media::PLAYER_ICON);
-                        image.set_visible(false);
-                        base.content().append(&image);
-                        player_icon = Some(image);
-                    }
-                }
-                TemplateElement::Widget(WidgetToken::Icon) => {
-                    if status_icon.is_none() {
-                        let handle = base.add_icon(media::ICON_PAUSE, &[media::ICON]);
-                        handle.widget().set_visible(false);
-                        status_icon = Some(handle);
-                    }
-                }
-                TemplateElement::Widget(WidgetToken::Controls) => {
-                    if controls.is_none() {
-                        controls = Some(create_controls(&base));
-                    }
-                }
-                TemplateElement::Text(_) => {
-                    // Text label created once, handles all text content
-                    if text_label.is_none() {
-                        let marquee = Rc::new(MarqueeLabel::with_scroll_mode(config.scroll_mode));
-                        marquee.label().add_css_class(media::LABEL);
-                        if config.max_chars > 0 {
-                            marquee.set_max_width_chars(config.max_chars as i32);
+                TemplateElement::TextToken(_) | TemplateElement::Literal(_) => {
+                    if pending_text_run {
+                        if let Some(marquee) = text_labels.get(current_text_run_idx) {
+                            base.content().append(marquee.widget());
                         }
-                        marquee.set_visible(false);
-                        base.content().append(marquee.widget());
-                        text_label = Some(marquee);
+                        pending_text_run = false;
+                    }
+                }
+                TemplateElement::Widget(token) => {
+                    // Any widget token ends the current text run.
+                    if !pending_text_run {
+                        current_text_run_idx += 1;
+                        pending_text_run = true;
+                    }
+
+                    match token {
+                        WidgetToken::Controls => {
+                            if let Some(ctrl) = &controls {
+                                base.content().append(&ctrl.container);
+                            }
+                        }
+                        WidgetToken::Art => {
+                            if let Some(picture) = &art_picture {
+                                base.content().append(picture);
+                            }
+                        }
+                        WidgetToken::PlayerIcon => {
+                            if let Some(image) = &player_icon {
+                                base.content().append(image);
+                            }
+                        }
+                        WidgetToken::Icon => {
+                            if let Some(icon) = &status_icon {
+                                base.content().append(&icon.widget());
+                            }
+                        }
                     }
                 }
             }
@@ -614,8 +692,8 @@ impl MediaWidget {
 
         // Subscribe to the shared MediaService for live updates.
         let media_service = MediaService::global();
-        // Pre-extract text template once (strip widget tokens, keep text tokens)
-        let text_template = extract_text_template(&config.template);
+        // Cache parsed template for rendering and ordering
+        let template_elements = template_elements.clone();
         // Create shared art state once, used by both initial update and callbacks
         let art_state = Rc::new(RefCell::new(ArtState::default()));
 
@@ -624,9 +702,9 @@ impl MediaWidget {
             status_icon: status_icon.clone(),
             player_icon: player_icon.clone(),
             art_picture: art_picture.clone(),
-            text_label: text_label.clone(),
+            text_labels,
             controls: controls.clone(),
-            text_template,
+            template_elements,
             empty_text: config.empty_text.clone(),
             art_state: art_state.clone(),
         };
@@ -688,9 +766,13 @@ fn update_widgets_from_snapshot_impl(ctx: &WidgetUpdateContext<'_>, snapshot: &M
         } else {
             // Show empty text
             ctx.container.set_visible(true);
-            if let Some(marquee) = ctx.text_label {
-                marquee.set_text(ctx.empty_text);
-                marquee.set_visible(true);
+            for marquee in ctx.text_labels {
+                marquee.set_text("");
+                marquee.set_visible(false);
+            }
+            if let Some(first) = ctx.text_labels.first() {
+                first.set_text(ctx.empty_text);
+                first.set_visible(true);
             }
             // Hide all widget tokens
             if let Some(icon) = ctx.status_icon {
@@ -708,6 +790,10 @@ fn update_widgets_from_snapshot_impl(ctx: &WidgetUpdateContext<'_>, snapshot: &M
             ctx.container.remove_css_class(media::PLAYING);
             ctx.container.remove_css_class(media::PAUSED);
             ctx.container.add_css_class(media::STOPPED);
+
+            // Update tooltip for empty state
+            let tooltip_manager = TooltipManager::global();
+            tooltip_manager.set_styled_tooltip(ctx.container, "No media playing");
         }
         return;
     }
@@ -809,20 +895,27 @@ fn update_widgets_from_snapshot_impl(ctx: &WidgetUpdateContext<'_>, snapshot: &M
         }
     }
 
-    // Render text from template
-    if let Some(marquee) = ctx.text_label {
-        // Use pre-extracted text template (widget tokens already stripped)
-        // Render text tokens in the template
-        let rendered = render_text_tokens(ctx.text_template, snapshot);
-        // Clean up artifacts from empty tokens
-        let cleaned = clean_rendered_text(&rendered);
+    // Render text from template.
+    // Each run is consecutive text elements; any widget splits runs.
+    if !ctx.text_labels.is_empty() {
+        // Hide everything by default; we'll show labels with text.
+        for label in ctx.text_labels {
+            label.set_visible(false);
+        }
 
-        if cleaned.is_empty() {
-            marquee.set_visible(false);
-        } else {
-            // MarqueeLabel handles overflow via scrolling, no truncation needed
-            marquee.set_text(&cleaned);
-            marquee.set_visible(true);
+        let runs = compute_text_runs(ctx.template_elements);
+        for (run_idx, element_range) in runs.into_iter().enumerate() {
+            if let Some(marquee) = ctx.text_labels.get(run_idx) {
+                let rendered =
+                    render_text_from_elements(&ctx.template_elements[element_range], snapshot);
+                let cleaned = clean_rendered_text(&rendered);
+                if cleaned.is_empty() {
+                    marquee.set_visible(false);
+                } else {
+                    marquee.set_text(&cleaned);
+                    marquee.set_visible(true);
+                }
+            }
         }
     }
 
@@ -970,22 +1063,15 @@ fn show_player_icon_in_art(
         return; // Stale request, ignore
     }
 
-    // Try to get player icon, fall back to generic music icon
-    let icon_name = if let Some(id) = player_id {
-        let name = get_app_icon_name(id);
-        if name.is_empty() {
-            id.to_string()
-        } else {
-            name
-        }
-    } else {
-        media::ICON_AUDIO_GENERIC.to_string()
-    };
+    // Resolve player icon, fall back to generic music icon
+    let icon_name = player_id
+        .map(|id| resolve_app_icon_name(id, media::ICON_AUDIO_GENERIC))
+        .unwrap_or_else(|| media::ICON_AUDIO_GENERIC.to_string());
 
     // Load icon as paintable using icon theme
     let Some(display) = gtk4::gdk::Display::default() else {
         warn!("No display available for icon lookup");
-        // Can't display without a display - just mark state and return
+        art_picture.set_visible(false);
         let mut state = art_state.borrow_mut();
         state.has_art = false;
         return;
@@ -1058,6 +1144,7 @@ fn build_tooltip(snapshot: &MediaSnapshot) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::media::MediaMetadata;
 
     #[test]
     fn test_media_config_defaults() {
@@ -1080,12 +1167,17 @@ mod tests {
 
     #[test]
     fn test_build_tooltip_with_track() {
-        let mut snapshot = MediaSnapshot::default();
-        snapshot.available = true;
-        snapshot.player_name = Some("Spotify".to_string());
-        snapshot.metadata.title = Some("Test Song".to_string());
-        snapshot.metadata.artist = Some("Test Artist".to_string());
-        snapshot.playback_status = PlaybackStatus::Playing;
+        let snapshot = MediaSnapshot {
+            available: true,
+            player_name: Some("Spotify".to_string()),
+            metadata: MediaMetadata {
+                title: Some("Test Song".to_string()),
+                artist: Some("Test Artist".to_string()),
+                ..Default::default()
+            },
+            playback_status: PlaybackStatus::Playing,
+            ..Default::default()
+        };
 
         let tooltip = build_tooltip(&snapshot);
         assert!(tooltip.contains("Player: Spotify"));
@@ -1115,39 +1207,99 @@ mod tests {
     #[test]
     fn test_parse_template_text_tokens() {
         let elements = parse_template("{title} - {artist}");
-        assert_eq!(elements.len(), 1);
-        assert!(matches!(&elements[0], TemplateElement::Text(s) if s == "{title} - {artist}"));
+        assert_eq!(elements.len(), 3);
+        assert!(matches!(
+            elements[0],
+            TemplateElement::TextToken(TextToken::Title)
+        ));
+        assert!(matches!(
+            &elements[1],
+            TemplateElement::Literal(s) if s == " - "
+        ));
+        assert!(matches!(
+            elements[2],
+            TemplateElement::TextToken(TextToken::Artist)
+        ));
     }
 
     #[test]
     fn test_parse_template_mixed() {
         let elements = parse_template("{art}{title} - {artist}");
-        assert_eq!(elements.len(), 2);
+        assert_eq!(elements.len(), 4);
         assert!(matches!(
             elements[0],
             TemplateElement::Widget(WidgetToken::Art)
         ));
-        assert!(matches!(&elements[1], TemplateElement::Text(s) if s == "{title} - {artist}"));
+        assert!(matches!(
+            elements[1],
+            TemplateElement::TextToken(TextToken::Title)
+        ));
+        assert!(matches!(
+            &elements[2],
+            TemplateElement::Literal(s) if s == " - "
+        ));
+        assert!(matches!(
+            elements[3],
+            TemplateElement::TextToken(TextToken::Artist)
+        ));
     }
 
     #[test]
-    fn test_render_text_tokens() {
+    fn test_compute_text_runs_controls_between_text() {
+        let elements = parse_template("{artist}{controls}{title}");
+        let runs = compute_text_runs(&elements);
+        assert_eq!(runs.len(), 2);
+
+        assert_eq!(
+            elements[runs[0].clone()],
+            [TemplateElement::TextToken(TextToken::Artist)]
+        );
+        assert_eq!(
+            elements[runs[1].clone()],
+            [TemplateElement::TextToken(TextToken::Title)]
+        );
+    }
+
+    #[test]
+    fn test_compute_text_runs_inline_widget_between_text() {
+        let elements = parse_template("{controls}{artist} {art}{title}");
+        let runs = compute_text_runs(&elements);
+        assert_eq!(runs.len(), 2);
+
+        assert_eq!(
+            elements[runs[0].clone()],
+            [
+                TemplateElement::TextToken(TextToken::Artist),
+                TemplateElement::Literal(" ".to_string())
+            ]
+        );
+        assert_eq!(
+            elements[runs[1].clone()],
+            [TemplateElement::TextToken(TextToken::Title)]
+        );
+    }
+
+    #[test]
+    fn test_render_text_from_elements() {
         let mut snapshot = MediaSnapshot::default();
         snapshot.metadata.title = Some("Test Song".to_string());
         snapshot.metadata.artist = Some("Test Artist".to_string());
         snapshot.player_name = Some("Spotify".to_string());
 
-        let result = render_text_tokens("{artist} - {title}", &snapshot);
+        let elements = parse_template("{artist} - {title}");
+        let result = render_text_from_elements(&elements, &snapshot);
         assert_eq!(result, "Test Artist - Test Song");
 
-        let result = render_text_tokens("{player}: {title}", &snapshot);
+        let elements = parse_template("{player}: {title}");
+        let result = render_text_from_elements(&elements, &snapshot);
         assert_eq!(result, "Spotify: Test Song");
     }
 
     #[test]
-    fn test_render_text_tokens_missing() {
+    fn test_render_text_from_elements_missing() {
         let snapshot = MediaSnapshot::default();
-        let result = render_text_tokens("{artist} - {title}", &snapshot);
+        let elements = parse_template("{artist} - {title}");
+        let result = render_text_from_elements(&elements, &snapshot);
         assert_eq!(result, " - ");
     }
 
@@ -1178,28 +1330,27 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_text_template() {
-        // Widget tokens should be stripped
-        assert_eq!(
-            extract_text_template("{art}{artist} - {title}"),
-            "{artist} - {title}"
-        );
-        assert_eq!(
-            extract_text_template("{player_icon}{icon}{title}"),
-            "{title}"
-        );
-        assert_eq!(extract_text_template("{art}"), "");
-
-        // Text-only templates unchanged
-        assert_eq!(
-            extract_text_template("{artist} - {title}"),
-            "{artist} - {title}"
-        );
-
-        // Multiple text segments joined
-        assert_eq!(
-            extract_text_template("{art}{artist}{icon} - {title}"),
-            "{artist} - {title}"
-        );
+    fn test_parse_template_literal_and_tokens() {
+        let elements = parse_template("{art}{artist}{icon} - {title}");
+        assert!(matches!(
+            elements[0],
+            TemplateElement::Widget(WidgetToken::Art)
+        ));
+        assert!(matches!(
+            elements[1],
+            TemplateElement::TextToken(TextToken::Artist)
+        ));
+        assert!(matches!(
+            elements[2],
+            TemplateElement::Widget(WidgetToken::Icon)
+        ));
+        assert!(matches!(
+            &elements[3],
+            TemplateElement::Literal(s) if s == " - "
+        ));
+        assert!(matches!(
+            elements[4],
+            TemplateElement::TextToken(TextToken::Title)
+        ));
     }
 }

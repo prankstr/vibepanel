@@ -921,6 +921,32 @@ pub fn get_app_icon_name(app_id: &str) -> String {
     icon_name
 }
 
+/// Resolve an app ID to a themed icon name.
+///
+/// This function resolves the app ID to a themed icon name using desktop entries,
+/// falling back to the app_id directly if it's a valid icon name, or to a generic
+/// fallback icon if neither works.
+///
+/// # Arguments
+/// * `app_id` - The application identifier (e.g., "firefox", "spotify")
+/// * `fallback` - The icon name to use if no icon can be found
+///
+/// # Returns
+/// The resolved icon name, or the fallback if no icon could be found.
+pub fn resolve_app_icon_name(app_id: &str, fallback: &str) -> String {
+    let icon_name = get_app_icon_name(app_id);
+    if !icon_name.is_empty() {
+        return icon_name;
+    }
+    // Try the app_id directly as an icon name (some apps use their name)
+    let display = gtk4::gdk::Display::default().expect("No display");
+    let icon_theme = IconTheme::for_display(&display);
+    if icon_theme.has_icon(app_id) {
+        return app_id.to_string();
+    }
+    fallback.to_string()
+}
+
 /// Set an Image widget's icon from an app ID (e.g., "firefox", "spotify").
 ///
 /// This function resolves the app ID to a themed icon name using desktop entries,
@@ -929,20 +955,8 @@ pub fn get_app_icon_name(app_id: &str) -> String {
 ///
 /// Falls back to "audio-x-generic" if no icon can be found.
 pub fn set_image_from_app_id(image: &Image, app_id: &str) {
-    let icon_name = get_app_icon_name(app_id);
-    if icon_name.is_empty() {
-        // Try the app_id directly as an icon name (some apps use their name)
-        let display = gtk4::gdk::Display::default().expect("No display");
-        let icon_theme = IconTheme::for_display(&display);
-        if icon_theme.has_icon(app_id) {
-            image.set_icon_name(Some(app_id));
-        } else {
-            // Fall back to generic music icon
-            image.set_icon_name(Some("audio-x-generic"));
-        }
-    } else {
-        image.set_icon_name(Some(&icon_name));
-    }
+    let icon_name = resolve_app_icon_name(app_id, "audio-x-generic");
+    image.set_icon_name(Some(&icon_name));
 }
 
 /// Describes which backend type should be used for icons.

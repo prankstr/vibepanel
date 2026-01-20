@@ -462,13 +462,16 @@ fn check_and_start_scroll(
 ) {
     let container_width = container.width() as f64;
     if container_width <= 0.0 {
-        // Not yet allocated, try again
-        let state = state.clone();
-        let label = label.clone();
-        let container = container.clone();
-        glib::idle_add_local_once(move || {
-            check_and_start_scroll(&state, &label, &container);
-        });
+        // Not yet allocated - only retry if widget is still in the visible hierarchy.
+        // This prevents infinite retries if the widget is hidden or removed.
+        if container.is_mapped() {
+            let state = state.clone();
+            let label = label.clone();
+            let container = container.clone();
+            glib::idle_add_local_once(move || {
+                check_and_start_scroll(&state, &label, &container);
+            });
+        }
         return;
     }
 
@@ -606,10 +609,10 @@ mod tests {
 
     #[test]
     fn test_default_config() {
-        assert!(DEFAULT_SCROLL_SPEED > 0.0);
-        assert!(DEFAULT_PAUSE_MS > 0);
-        assert!(TICK_INTERVAL_MS > 0);
-        assert!(SCROLL_GAP > 0.0);
+        const _: () = assert!(DEFAULT_SCROLL_SPEED > 0.0);
+        const _: () = assert!(DEFAULT_PAUSE_MS > 0);
+        const _: () = assert!(TICK_INTERVAL_MS > 0);
+        const _: () = assert!(SCROLL_GAP > 0.0);
     }
 
     #[test]

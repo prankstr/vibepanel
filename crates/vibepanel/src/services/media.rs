@@ -288,9 +288,13 @@ impl MediaService {
                     Some(DBUS_PATH),
                     None,
                     gio::DBusSignalFlags::NONE,
-                    move |_signal| {
-                        if let Some(this) = this_weak.upgrade() {
-                            // A bus name changed - check if it's an MPRIS player
+                    move |signal| {
+                        // NameOwnerChanged(name: s, old_owner: s, new_owner: s)
+                        // Only trigger discovery if the name is an MPRIS player
+                        if let Some(name) = signal.parameters.child_value(0).str()
+                            && name.starts_with(MPRIS_PREFIX)
+                            && let Some(this) = this_weak.upgrade()
+                        {
                             this.discover_players();
                         }
                     },
@@ -832,7 +836,16 @@ impl MediaService {
     }
 
     /// Set player volume (0.0 - 1.0+).
+    ///
+    /// MPRIS allows volumes > 1.0 for amplification, but negative values are invalid.
+    /// Invalid values (negative, NaN, infinity) are rejected with a warning.
     pub fn set_volume(self: &Rc<Self>, volume: f64) {
+        // Validate volume - MPRIS allows > 1.0 for amplification, but not negative or non-finite
+        if !volume.is_finite() || volume < 0.0 {
+            warn!("Invalid volume value: {}", volume);
+            return;
+        }
+
         let Some((connection, bus_name)) = self.get_player_connection() else {
             return;
         };
@@ -990,7 +1003,7 @@ mod tests {
         assert_eq!(format_duration(0), "0:00");
         assert_eq!(format_duration(30_000_000), "0:30"); // 30 seconds
         assert_eq!(format_duration(90_000_000), "1:30"); // 1:30
-        assert_eq!(format_duration(3661_000_000), "1:01:01"); // 1h 1m 1s
+        assert_eq!(format_duration(3_661_000_000), "1:01:01"); // 1h 1m 1s
         assert_eq!(format_duration(-1000), "0:00"); // negative
     }
 
