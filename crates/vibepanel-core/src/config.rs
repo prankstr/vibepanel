@@ -132,37 +132,18 @@ impl Config {
         // Rule: if a config file exists but fails to load, that's an error (no silent fallback).
         // Only use defaults when no config files exist at all.
         let search_paths = Self::config_search_paths();
-        let mut first_error: Option<(PathBuf, Error)> = None;
 
         for path in &search_paths {
             if path.exists() {
-                match Self::load(path) {
-                    Ok(config) => {
-                        return Ok(ConfigLoadResult {
-                            config,
-                            source: Some(path.clone()),
-                            used_defaults: false,
-                        });
-                    }
-                    Err(e) => {
-                        // Record the first error we encounter - we'll return it if no config loads
-                        if first_error.is_none() {
-                            first_error = Some((path.clone(), e));
-                        }
-                    }
-                }
+                // Found a config file - try to load it
+                // If it fails to parse, return the error immediately (no fallback to other paths)
+                let config = Self::load(path)?;
+                return Ok(ConfigLoadResult {
+                    config,
+                    source: Some(path.clone()),
+                    used_defaults: false,
+                });
             }
-        }
-
-        // If we found at least one config file that failed to load, return that error
-        // instead of silently falling back to defaults
-        if let Some((path, error)) = first_error {
-            tracing::error!(
-                "Config file {:?} exists but failed to load: {}",
-                path,
-                error
-            );
-            return Err(error);
         }
 
         // No config files exist anywhere - use embedded default TOML
