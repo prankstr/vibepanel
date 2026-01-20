@@ -275,7 +275,8 @@ sectioned-bar.bar {{
 .tray-item {{
     transition: transform 100ms ease-out;
 }}
-.tray-item:hover {{
+.tray-item:hover,
+.tray-item.tray-item-menu-open {{
     transform: scale(1.15);
 }}
 

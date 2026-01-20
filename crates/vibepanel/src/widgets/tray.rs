@@ -560,10 +560,15 @@ fn toggle_menu(state: &Rc<RefCell<WidgetState>>, identifier: &str, parent: &Widg
         // GTK labels, and we apply Pango attributes here after the tree is built.
         SurfaceStyleManager::global().apply_pango_attrs_all(&container);
 
+        // Add class to keep icon enlarged while menu is open
+        parent_clone.add_css_class(widget::TRAY_ITEM_MENU_OPEN);
+
         // Connect closed signal
         let state_for_close = state_clone.clone();
+        let parent_for_close = parent_clone.clone();
         popover.connect_closed(move |p| {
             state_for_close.borrow_mut().menu = None;
+            parent_for_close.remove_css_class(widget::TRAY_ITEM_MENU_OPEN);
             if p.parent().is_some() {
                 p.unparent();
             }

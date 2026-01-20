@@ -380,6 +380,9 @@ pub mod widget {
     /// Tray item button (`.tray-item`).
     pub const TRAY_ITEM: &str = "tray-item";
 
+    /// Tray item with menu open - keeps icon enlarged (`.tray-item-menu-open`).
+    pub const TRAY_ITEM_MENU_OPEN: &str = "tray-item-menu-open";
+
     /// Tray menu container (`.tray-menu`).
     pub const TRAY_MENU: &str = "tray-menu";
 
