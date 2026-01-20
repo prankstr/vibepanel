@@ -14,8 +14,8 @@
 //!
 //! - `icons.*`: Switches icon backend (Material ↔ GTK themes) and weight
 //! - `theme.*`: Updates colors, palette, CSS variables
-//! - Structural changes (widget list, layout, bar size, margins, notch settings)
-//!   trigger a full bar rebuild with a brief visual flicker.
+//! - Structural changes (widget list, layout, bar size, margins) trigger a full
+//!   bar rebuild with a brief visual flicker.
 
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -419,19 +419,6 @@ fn config_structure_changed(old: &Config, new: &Config) -> bool {
 
     if old.bar.inset != new.bar.inset {
         debug!("bar.inset changed ({} -> {})", old.bar.inset, new.bar.inset);
-        return true;
-    }
-
-    if old.bar.notch_enabled != new.bar.notch_enabled {
-        debug!("bar.notch_enabled changed");
-        return true;
-    }
-
-    if old.bar.notch_width != new.bar.notch_width {
-        debug!(
-            "bar.notch_width changed ({} -> {})",
-            old.bar.notch_width, new.bar.notch_width
-        );
         return true;
     }
 

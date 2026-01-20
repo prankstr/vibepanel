@@ -124,10 +124,9 @@ pub fn create_bar_window(
     let left_section = create_section("left", config, state, &qs_handle, Some(output_id));
     bar_box.set_start_widget(Some(&left_section));
 
-    // Create center section only if notch is enabled or there are center widgets
+    // Create center section only if there are center widgets
     // Without a center widget, the layout manager uses linear allocation
-    let has_center_content =
-        config.bar.notch_enabled || !config.widgets.resolved_center().is_empty();
+    let has_center_content = !config.widgets.resolved_center().is_empty();
     if has_center_content {
         let center_section = create_center_section(config, state, &qs_handle, Some(output_id));
         bar_box.set_center_widget(Some(&center_section));
@@ -273,7 +272,7 @@ fn create_section(
     section
 }
 
-/// Create the center section, optionally with notch spacer.
+/// Create the center section with widgets.
 fn create_center_section(
     config: &Config,
     state: &mut BarState,
@@ -283,23 +282,12 @@ fn create_center_section(
     let section = gtk4::Box::new(gtk4::Orientation::Horizontal, config.bar.spacing as i32);
     section.add_css_class(class::BAR_SECTION_CENTER);
 
-    if config.bar.notch_enabled {
-        // Notch mode: center section is just a fixed-width empty spacer for the notch.
-        // Users place widgets adjacent to the notch using the spacer widget in left/right sections.
-        let notch_width = config.bar.notch_width;
-        section.set_size_request(notch_width as i32, -1);
-
-        debug!("Notch mode: {}px center spacer", notch_width);
-    } else {
-        // Non-notch mode: simple centered section with widgets
-        let mut widget_count = 0;
-        for item in &config.widgets.resolved_center() {
-            widget_count += build_widget_or_group(item, &section, state, qs_handle, output_id);
-        }
-
-        debug!("Created center section with {} widget(s)", widget_count);
+    let mut widget_count = 0;
+    for item in &config.widgets.resolved_center() {
+        widget_count += build_widget_or_group(item, &section, state, qs_handle, output_id);
     }
 
+    debug!("Created center section with {} widget(s)", widget_count);
     section
 }
 

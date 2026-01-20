@@ -17,10 +17,16 @@
 //!
 //! # Example Usage
 //!
-//! Push a widget to the edge of the notch:
+//! Push a widget to the right edge of a section:
 //! ```toml
 //! [widgets]
 //! left = ["workspaces", "spacer", "clock"]  # clock ends up at right edge of left section
+//! ```
+//!
+//! Create a gap in the center (e.g., for a display notch):
+//! ```toml
+//! [widgets]
+//! center = ["spacer:200"]  # 200px fixed-width spacer in center
 //! ```
 
 use gtk4::prelude::*;

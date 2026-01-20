@@ -236,41 +236,9 @@ fn test_validation_rejects_invalid_osd_position() {
 }
 
 #[test]
-fn test_validation_rejects_notch_enabled_with_center_widgets() {
-    // When notch_enabled=true, using widgets.center should be rejected
-    let toml = r#"
-        [bar]
-        notch_enabled = true
-        
-        [widgets]
-        center = ["clock"]
-    "#;
-
-    let config: Config = toml::from_str(toml).unwrap();
-    let result = config.validate();
-
-    assert!(
-        result.is_err(),
-        "notch_enabled=true with widgets.center should fail"
-    );
-    let err = result.unwrap_err().to_string();
-    assert!(
-        err.contains("widgets.center"),
-        "Error should mention widgets.center"
-    );
-    assert!(
-        err.contains("notch_enabled"),
-        "Error should mention notch_enabled"
-    );
-}
-
-#[test]
 fn test_validation_accepts_valid_enum_values() {
     // Test all valid enum combinations
     let toml = r#"
-        [bar]
-        notch_enabled = false
-        
         [theme]
         mode = "dark"
         
@@ -289,11 +257,8 @@ fn test_validation_accepts_valid_enum_values() {
         .validate()
         .expect("Valid config should pass validation");
 
-    // Also test other valid values (notch mode with left/right sections)
+    // Also test other valid values
     let toml2 = r#"
-        [bar]
-        notch_enabled = true
-        
         [theme]
         mode = "light"
         

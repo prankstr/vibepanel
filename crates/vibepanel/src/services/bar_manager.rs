@@ -17,7 +17,6 @@
 //! This allows live reload of structural changes like:
 //! - Bar size, layout, margins
 //! - Widget list changes
-//! - Notch settings
 //! - Output allow-list changes
 
 use std::cell::RefCell;

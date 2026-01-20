@@ -187,7 +187,7 @@ crates/vibepanel/src/
   main.rs           # Entry point, CLI, GTK app setup
   bar.rs            # Bar window creation, CSS loading
   sectioned_bar.rs  # Layout widget for left/center/right sections
-  layout_math.rs    # Notch/island layout calculations
+  layout_math.rs    # Layout calculations for sections/islands
   styles.rs         # CSS class name constants
   services.rs       # Service module exports
   services/
