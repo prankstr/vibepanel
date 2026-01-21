@@ -733,12 +733,12 @@ impl MediaService {
         }
 
         // If current player is paused with metadata, keep it (don't switch between paused players)
-        if let Some(current) = old_active {
-            if let Some(player) = players.get(current) {
-                let p = player.borrow();
-                if p.playback_status == PlaybackStatus::Paused && p.metadata.title.is_some() {
-                    return;
-                }
+        if let Some(current) = old_active
+            && let Some(player) = players.get(current)
+        {
+            let p = player.borrow();
+            if p.playback_status == PlaybackStatus::Paused && p.metadata.title.is_some() {
+                return;
             }
         }
 
@@ -761,10 +761,10 @@ impl MediaService {
         }
 
         // Keep current if still valid
-        if let Some(current) = old_active {
-            if players.contains_key(current) {
-                return;
-            }
+        if let Some(current) = old_active
+            && players.contains_key(current)
+        {
+            return;
         }
 
         // Pick any available player
@@ -792,9 +792,7 @@ impl MediaService {
             active
                 .as_ref()
                 .and_then(|bus| players.get(bus))
-                .map_or(false, |p| {
-                    p.borrow().playback_status == PlaybackStatus::Playing
-                })
+                .is_some_and(|p| p.borrow().playback_status == PlaybackStatus::Playing)
         };
 
         if should_poll {
@@ -914,9 +912,7 @@ impl MediaService {
                     active
                         .as_ref()
                         .and_then(|bus| players.get(bus))
-                        .map_or(false, |p| {
-                            p.borrow().playback_status == PlaybackStatus::Playing
-                        })
+                        .is_some_and(|p| p.borrow().playback_status == PlaybackStatus::Playing)
                 };
 
                 if !should_continue {

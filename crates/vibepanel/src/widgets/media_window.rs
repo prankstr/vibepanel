@@ -353,20 +353,17 @@ where
             move |gesture, _n_press, x, y| {
                 if let Some(surface) = window.surface()
                     && let Some(toplevel) = surface.downcast_ref::<gtk4::gdk::Toplevel>()
+                    && let Some(widget) = gesture.widget()
+                    && let Some(point) = widget
+                        .compute_point(&window, &gtk4::graphene::Point::new(x as f32, y as f32))
                 {
-                    if let Some(widget) = gesture.widget() {
-                        if let Some(point) = widget
-                            .compute_point(&window, &gtk4::graphene::Point::new(x as f32, y as f32))
-                        {
-                            toplevel.begin_move(
-                                gesture.device().as_ref().unwrap(),
-                                gesture.current_button() as i32,
-                                point.x() as f64,
-                                point.y() as f64,
-                                gesture.current_event_time(),
-                            );
-                        }
-                    }
+                    toplevel.begin_move(
+                        gesture.device().as_ref().unwrap(),
+                        gesture.current_button() as i32,
+                        point.x() as f64,
+                        point.y() as f64,
+                        gesture.current_event_time(),
+                    );
                 }
             }
         ));
