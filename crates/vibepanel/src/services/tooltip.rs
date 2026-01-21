@@ -478,6 +478,20 @@ impl TooltipManager {
         self.hide_tooltip();
     }
 
+    /// Trigger showing a tooltip for a widget that has been registered with `set_styled_tooltip`.
+    ///
+    /// This is useful when a child widget blocks the parent tooltip and you want to
+    /// re-trigger the parent tooltip when leaving the child.
+    pub fn trigger_tooltip(&self, widget: &impl IsA<gtk4::Widget>) {
+        let widget = widget.as_ref();
+        let widget_addr = widget.as_ptr() as usize;
+
+        if let Some(text) = self.tooltip_texts.borrow().get(&widget_addr) {
+            let text = text.clone();
+            self.schedule_show(widget, &text);
+        }
+    }
+
     /// Hide the tooltip window.
     fn hide_tooltip(&self) {
         if let Some(ref tooltip_window) = *self.tooltip_window.borrow() {

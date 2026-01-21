@@ -420,8 +420,9 @@ impl CallbackWidgetRefs {
     }
 }
 
-fn create_controls() -> ControlsHandle {
+fn create_controls(parent_widget: &gtk4::Box) -> ControlsHandle {
     use crate::services::icons::IconsService;
+    use crate::services::tooltip::TooltipManager;
     use crate::styles::{button, icon};
     use crate::widgets::media_utils::create_media_control_button;
     use gtk4::Button;
@@ -431,6 +432,19 @@ fn create_controls() -> ControlsHandle {
     let container = gtk4::Box::new(gtk4::Orientation::Horizontal, 2);
     container.add_css_class(media::CONTROLS);
     container.set_visible(false);
+
+    // Add motion controller to manage tooltip behavior when hovering over controls.
+    // - On enter: hide parent tooltip so button tooltips can show
+    // - On leave: re-trigger parent tooltip
+    let motion = gtk4::EventControllerMotion::new();
+    motion.connect_enter(|_, _, _| {
+        TooltipManager::global().cancel_and_hide();
+    });
+    let parent_for_leave = parent_widget.clone();
+    motion.connect_leave(move |_| {
+        TooltipManager::global().trigger_tooltip(&parent_for_leave);
+    });
+    container.add_controller(motion);
 
     let prev_btn = create_media_control_button(
         &icons,
@@ -523,7 +537,7 @@ impl MediaWidget {
             .iter()
             .any(|e| matches!(e, TemplateElement::Widget(WidgetToken::Controls)))
         {
-            controls = Some(create_controls());
+            controls = Some(create_controls(base.widget()));
         }
 
         let text_runs = compute_text_runs(&template_elements);
