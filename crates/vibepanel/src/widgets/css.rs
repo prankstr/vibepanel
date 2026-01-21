@@ -1085,8 +1085,8 @@ window.quick-settings-window {{
             min-width: 24px;
             min-height: 24px;
             padding: 0px;
-            margin-top: -12px;
-            margin-right: -12px;
+            margin-top: -8px;
+            margin-right: -8px;
         }}
 
         /* Player selector button */
@@ -1094,7 +1094,7 @@ window.quick-settings-window {{
             min-width: 24px;
             min-height: 24px;
             padding: 0px;
-            margin-top: -12px;
+            margin-top: -8px;
             margin-right: 4px;
         }}
 

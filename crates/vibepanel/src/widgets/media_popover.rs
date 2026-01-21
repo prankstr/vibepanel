@@ -94,7 +94,7 @@ where
 
     // Info section
     let info_section = GtkBox::new(Orientation::Vertical, 0);
-    info_section.set_valign(Align::Center);
+    info_section.set_valign(Align::End);
     info_section.set_margin_start(12);
 
     let (track_info_container, title_label, artist_label, album_label) = build_track_info(18, 4);

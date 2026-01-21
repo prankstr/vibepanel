@@ -199,6 +199,7 @@ where
 
     let content_row = GtkBox::new(Orientation::Horizontal, 12);
     content_row.add_css_class(media::CONTENT);
+    content_row.set_size_request(-1, WINDOW_ART_SIZE);
 
     // Album art
     let (art_container, art_picture, art_placeholder_box, art_state) =
@@ -207,7 +208,7 @@ where
 
     // Info section
     let info_section = GtkBox::new(Orientation::Vertical, 0);
-    info_section.set_valign(Align::Center);
+    info_section.set_valign(Align::End);
     info_section.set_size_request(160, -1);
 
     let (track_info_container, title_label, artist_label, album_label) = build_track_info(15, 2);
