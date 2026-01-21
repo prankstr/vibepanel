@@ -660,35 +660,11 @@ impl MediaWidget {
 
         *menu_handle_cell.borrow_mut() = Some(menu_handle);
 
-        let persisted = state::load();
+        // Always reset window state on startup (don't restore pop-out)
+        let mut persisted = state::load();
         if persisted.media.window_open {
-            let window_state_for_restore = window_state.clone();
-            glib::idle_add_local_once(move || {
-                let mut state = window_state_for_restore.borrow_mut();
-
-                state.widget_container.set_visible(false);
-                state.is_popped_out = true;
-
-                let window_state_for_close = Rc::clone(&window_state_for_restore);
-                let on_close = move || {
-                    let mut state = window_state_for_close.borrow_mut();
-                    state.widget_container.set_visible(true);
-                    state.is_popped_out = false;
-                    state.handle = None;
-
-                    let mut persisted = state::load();
-                    persisted.media.window_open = false;
-                    state::save(&persisted);
-
-                    debug!("Media window closed (restored), bar widget restored");
-                };
-
-                let handle = create_media_window(None, on_close);
-                handle.show();
-                state.handle = Some(handle);
-
-                debug!("Media window restored from persisted state");
-            });
+            persisted.media.window_open = false;
+            state::save(&persisted);
         }
 
         let media_service = MediaService::global();
