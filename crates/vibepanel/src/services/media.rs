@@ -175,6 +175,9 @@ pub struct MediaService {
     /// Cancellable for in-flight D-Bus operations on the current player.
     /// Cancelled when switching players to abort stale requests.
     player_cancellable: RefCell<gio::Cancellable>,
+    /// Generation counter for track changes. Incremented on every track change
+    /// to invalidate in-flight position poll requests for the old track.
+    track_generation: RefCell<u64>,
 }
 
 impl MediaService {
@@ -188,6 +191,7 @@ impl MediaService {
             _properties_subscription: RefCell::new(None),
             position_poll_source: RefCell::new(None),
             player_cancellable: RefCell::new(gio::Cancellable::new()),
+            track_generation: RefCell::new(0),
         });
 
         Self::init_dbus(&service);
@@ -576,9 +580,11 @@ impl MediaService {
     /// Update snapshot from proxy properties.
     fn update_from_proxy(self: &Rc<Self>, proxy: &gio::DBusProxy) {
         // Update snapshot and get status change info for polling management
-        let (old_status, new_status) = {
+        let (old_status, new_status, track_changed) = {
             let mut snapshot = self.snapshot.borrow_mut();
             let old_status = snapshot.playback_status;
+            let old_track_id = snapshot.metadata.track_id.clone();
+            let old_title = snapshot.metadata.title.clone();
 
             // PlaybackStatus
             if let Some(status) = proxy.cached_property("PlaybackStatus")
@@ -599,12 +605,24 @@ impl MediaService {
                 snapshot.volume = v;
             }
 
-            // Position (note: this doesn't emit PropertiesChanged, we poll it)
-            if let Some(position) = proxy.cached_property("Position")
-                && let Some(p) = position.get::<i64>()
-            {
-                snapshot.position = p;
+            // Detect track change by comparing track IDs OR titles.
+            // Some players (e.g., Firefox) use a constant track ID for all tracks,
+            // so we also check if the title changed as a fallback.
+            let track_id_changed = old_track_id != snapshot.metadata.track_id;
+            let title_changed = old_title.is_some()
+                && snapshot.metadata.title.is_some()
+                && old_title != snapshot.metadata.title;
+            let track_changed = track_id_changed || title_changed;
+
+            // Reset position to 0 when track changes to avoid showing stale position
+            // from the previous track. The next poll will update to the correct value.
+            if track_changed {
+                snapshot.position = 0;
             }
+            // Note: Position doesn't reliably emit PropertiesChanged and the cached
+            // value is often stale. We poll it separately via poll_position().
+            // Don't update position here (except on track change) to avoid
+            // overwriting good values with stale ones.
 
             // Capabilities
             snapshot.can_play = proxy
@@ -632,16 +650,29 @@ impl MediaService {
                 .and_then(|v| v.get::<bool>())
                 .unwrap_or(true);
 
-            (old_status, snapshot.playback_status)
+            (old_status, snapshot.playback_status, track_changed)
         };
+
+        // Increment track generation on track change to invalidate in-flight position polls
+        if track_changed {
+            *self.track_generation.borrow_mut() += 1;
+        }
 
         // Manage position polling based on playback status change
         if old_status != new_status {
             if new_status == PlaybackStatus::Playing {
                 self.start_position_polling();
             } else {
+                // Increment generation when stopping to invalidate any in-flight polls
+                *self.track_generation.borrow_mut() += 1;
                 self.stop_position_polling();
             }
+        }
+
+        // If track changed while playing, do an immediate position poll
+        // to get the new track's position quickly
+        if track_changed && new_status == PlaybackStatus::Playing {
+            self.poll_position();
         }
 
         // If current player became stopped with no metadata, try to find a better one
@@ -771,6 +802,9 @@ impl MediaService {
             return;
         };
 
+        // Capture current generation to detect stale responses after track/status change
+        let generation_at_request = *self.track_generation.borrow();
+
         let cancellable = self.player_cancellable.borrow().clone();
 
         connection.call(
@@ -787,6 +821,20 @@ impl MediaService {
                 #[strong(rename_to = this)]
                 self,
                 move |res| {
+                    let current_gen = *this.track_generation.borrow();
+
+                    // Ignore stale results if playback stopped while request was in flight.
+                    // This prevents the "jump back on pause" issue.
+                    if this.snapshot.borrow().playback_status != PlaybackStatus::Playing {
+                        return;
+                    }
+
+                    // Ignore stale results if track changed while request was in flight.
+                    // This prevents showing old track's position on the new track.
+                    if current_gen != generation_at_request {
+                        return;
+                    }
+
                     match res {
                         Ok(reply) => {
                             // Response is (v) where v contains the actual value
@@ -874,13 +922,18 @@ impl MediaService {
     }
 
     /// Set absolute position (in microseconds).
+    ///
+    /// This optimistically updates the local position immediately for responsive UI,
+    /// then sends the seek command to the player. If the command fails, the next
+    /// position poll will correct the displayed value.
     pub fn set_position(&self, position_us: i64) {
-        let snapshot = self.snapshot.borrow();
-        let track_id = match &snapshot.metadata.track_id {
-            Some(id) => id.clone(),
-            None => return,
+        let track_id = {
+            let snapshot = self.snapshot.borrow();
+            match &snapshot.metadata.track_id {
+                Some(id) => id.clone(),
+                None => return,
+            }
         };
-        drop(snapshot);
 
         let Some((connection, bus_name)) = self.get_player_connection() else {
             return;
@@ -892,6 +945,11 @@ impl MediaService {
             warn!("Invalid track ID for SetPosition: {}", track_id);
             return;
         };
+
+        // Optimistically update local position for responsive UI
+        self.update_and_notify(|snapshot| {
+            snapshot.position = position_us;
+        });
 
         connection.call(
             Some(&bus_name),
@@ -906,6 +964,8 @@ impl MediaService {
             |res| {
                 if let Err(e) = res {
                     warn!("MPRIS SetPosition failed: {}", e);
+                    // Note: We don't revert the optimistic update on failure.
+                    // The next position poll will correct the displayed value.
                 }
             },
         );

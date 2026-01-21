@@ -17,8 +17,8 @@ use gtk4::gio;
 use gtk4::glib::{self, clone};
 use gtk4::prelude::*;
 use gtk4::{
-    Align, ApplicationWindow, Box as GtkBox, Button, GestureClick, Label, Orientation, Scale,
-    Window,
+    Align, ApplicationWindow, Box as GtkBox, Button, EventControllerLegacy, GestureClick, Label,
+    Orientation, Scale, Window,
 };
 use tracing::debug;
 
@@ -517,6 +517,8 @@ where
     let seek_section = GtkBox::new(Orientation::Vertical, 0);
     seek_section.add_css_class(media::SEEK);
 
+    let is_pressed = Rc::new(RefCell::new(false));
+    let pending_seek = Rc::new(RefCell::new(None::<i64>));
     let is_seeking = Rc::new(RefCell::new(false));
     let seek_scale = Scale::with_range(Orientation::Horizontal, 0.0, 1.0, 1.0);
     seek_scale.add_css_class(media::SEEK_SLIDER);
@@ -524,35 +526,7 @@ where
     seek_scale.set_draw_value(false);
     seek_scale.set_hexpand(true);
 
-    // Track seek start/end to avoid updating while dragging
-    {
-        let is_seeking_clone = is_seeking.clone();
-        seek_scale.connect_change_value(move |_, _, _| {
-            *is_seeking_clone.borrow_mut() = true;
-            glib::Propagation::Proceed
-        });
-    }
-
-    // Apply seek when released
-    {
-        let is_seeking_clone = is_seeking.clone();
-        let seek_scale_clone = seek_scale.clone();
-        seek_scale.connect_value_changed(move |_| {
-            if *is_seeking_clone.borrow() {
-                let position = seek_scale_clone.value() as i64;
-                MediaService::global().set_position(position);
-                // Reset seeking flag after a short delay to allow UI to update
-                let is_seeking_for_timeout = is_seeking_clone.clone();
-                glib::timeout_add_local_once(std::time::Duration::from_millis(100), move || {
-                    *is_seeking_for_timeout.borrow_mut() = false;
-                });
-            }
-        });
-    }
-
-    seek_section.append(&seek_scale);
-
-    // Time labels row
+    // Time labels row (defined before seek handler so we can update position label during drag)
     let time_row = GtkBox::new(Orientation::Horizontal, 0);
     time_row.add_css_class(media::TIME);
 
@@ -568,6 +542,65 @@ where
     duration_label.add_css_class(color::MUTED);
     duration_label.set_halign(Align::End);
     time_row.append(&duration_label);
+
+    // Use EventControllerLegacy to catch raw button press/release events
+    // This works reliably for both clicks and drags
+    let legacy_controller = EventControllerLegacy::new();
+    {
+        let is_pressed_clone = is_pressed.clone();
+        let is_seeking_clone = is_seeking.clone();
+        let pending_seek_clone = pending_seek.clone();
+        legacy_controller.connect_event(move |_, event| {
+            use gtk4::gdk::EventType;
+            match event.event_type() {
+                EventType::ButtonPress => {
+                    *is_pressed_clone.borrow_mut() = true;
+                    glib::Propagation::Proceed
+                }
+                EventType::ButtonRelease => {
+                    *is_pressed_clone.borrow_mut() = false;
+                    // Apply the pending seek position on release
+                    if let Some(position) = pending_seek_clone.borrow_mut().take() {
+                        MediaService::global().set_position(position);
+                        // Keep is_seeking true briefly to avoid UI jitter from stale updates
+                        let is_seeking_for_timeout = is_seeking_clone.clone();
+                        glib::timeout_add_local_once(
+                            std::time::Duration::from_millis(150),
+                            move || {
+                                *is_seeking_for_timeout.borrow_mut() = false;
+                            },
+                        );
+                    }
+                    glib::Propagation::Proceed
+                }
+                _ => glib::Propagation::Proceed,
+            }
+        });
+    }
+    seek_scale.add_controller(legacy_controller);
+
+    // Handle value changes - store pending seek during press, don't actually seek until release
+    {
+        let is_pressed_clone = is_pressed.clone();
+        let is_seeking_clone = is_seeking.clone();
+        let pending_seek_clone = pending_seek.clone();
+        let position_label_clone = position_label.clone();
+        seek_scale.connect_change_value(move |_, _, value| {
+            if *is_pressed_clone.borrow() {
+                // Mouse is pressed - store the value but don't seek yet
+                *is_seeking_clone.borrow_mut() = true;
+                *pending_seek_clone.borrow_mut() = Some(value as i64);
+                position_label_clone.set_label(&format_duration(value as i64));
+            } else {
+                // Not pressed (keyboard, etc.) - seek immediately
+                MediaService::global().set_position(value as i64);
+            }
+            // Always allow the visual slider to update
+            glib::Propagation::Proceed
+        });
+    }
+
+    seek_section.append(&seek_scale);
 
     seek_section.append(&time_row);
     content.append(&seek_section);
