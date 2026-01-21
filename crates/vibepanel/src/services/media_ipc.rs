@@ -183,12 +183,12 @@ impl MediaIpcListener {
                     }
 
                     let n = n as usize;
-                    if let Ok(s) = std::str::from_utf8(&buf[..n]) {
+                    if let Ok(s) = std::str::from_utf8(&buf[..n])
+                        && let Some(msg) = MediaIpcMessage::from_wire(s)
+                    {
                         debug!("Media IPC: received message: {:?}", s);
-                        if let Some(msg) = MediaIpcMessage::from_wire(s) {
-                            if let Some(ref cb) = *callback_for_watcher.borrow() {
-                                cb(msg);
-                            }
+                        if let Some(ref cb) = *callback_for_watcher.borrow() {
+                            cb(msg);
                         }
                     }
                 }

@@ -778,17 +778,16 @@ impl MediaService {
         old_active: &Option<String>,
     ) {
         // First, check if last_playing is still playing - prefer it
-        if let Some(ref last) = *self.last_playing.borrow() {
-            if let Some(player) = players.get(last) {
-                if player.borrow().playback_status == PlaybackStatus::Playing {
-                    if old_active.as_ref() != Some(last) {
-                        debug!("Active player (auto, last playing): {}", last);
-                        self.active_player.replace(Some(last.clone()));
-                        self.on_active_player_changed();
-                    }
-                    return;
-                }
+        if let Some(ref last) = *self.last_playing.borrow()
+            && let Some(player) = players.get(last)
+            && player.borrow().playback_status == PlaybackStatus::Playing
+        {
+            if old_active.as_ref() != Some(last) {
+                debug!("Active player (auto, last playing): {}", last);
+                self.active_player.replace(Some(last.clone()));
+                self.on_active_player_changed();
             }
+            return;
         }
 
         // Otherwise prefer any playing player
@@ -807,18 +806,18 @@ impl MediaService {
         }
 
         // If last_playing is paused with metadata, prefer it
-        if let Some(ref last) = *self.last_playing.borrow() {
-            if let Some(player) = players.get(last) {
-                let p = player.borrow();
-                if p.playback_status == PlaybackStatus::Paused && p.metadata.title.is_some() {
-                    if old_active.as_ref() != Some(last) {
-                        debug!("Active player (auto, last playing paused): {}", last);
-                        drop(p);
-                        self.active_player.replace(Some(last.clone()));
-                        self.on_active_player_changed();
-                    }
-                    return;
+        if let Some(ref last) = *self.last_playing.borrow()
+            && let Some(player) = players.get(last)
+        {
+            let p = player.borrow();
+            if p.playback_status == PlaybackStatus::Paused && p.metadata.title.is_some() {
+                if old_active.as_ref() != Some(last) {
+                    debug!("Active player (auto, last playing paused): {}", last);
+                    drop(p);
+                    self.active_player.replace(Some(last.clone()));
+                    self.on_active_player_changed();
                 }
+                return;
             }
         }
 
@@ -1426,14 +1425,12 @@ impl MediaCli {
 
         // Check if the panel has a selected player via IPC state file
         let (ipc_active, is_auto) = super::media_ipc::read_state();
-        if !is_auto {
-            if let Some(ref bus_name) = ipc_active {
-                // Verify the player still exists
-                if self.players.iter().any(|(b, _)| b == bus_name) {
-                    self.active_player = Some(bus_name.clone());
-                    return;
-                }
-            }
+        if !is_auto
+            && let Some(ref bus_name) = ipc_active
+            && self.players.iter().any(|(b, _)| b == bus_name)
+        {
+            self.active_player = Some(bus_name.clone());
+            return;
         }
 
         // Auto-select: first playing player, or first player
@@ -1444,10 +1441,10 @@ impl MediaCli {
 
     fn find_playing_player(&self) -> Option<String> {
         for (bus_name, _) in &self.players {
-            if let Some(status) = self.get_playback_status(bus_name) {
-                if status == PlaybackStatus::Playing {
-                    return Some(bus_name.clone());
-                }
+            if let Some(status) = self.get_playback_status(bus_name)
+                && status == PlaybackStatus::Playing
+            {
+                return Some(bus_name.clone());
             }
         }
         None
@@ -1567,7 +1564,7 @@ impl MediaCli {
 
         let metadata = props
             .get("Metadata")
-            .map(|m| MediaService::parse_metadata(m))
+            .map(MediaService::parse_metadata)
             .unwrap_or_default();
 
         let position = props

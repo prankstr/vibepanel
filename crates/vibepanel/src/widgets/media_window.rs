@@ -28,6 +28,7 @@ const WINDOW_ART_SIZE: i32 = 100;
 pub struct MediaWindowHandle {
     window: Window,
     _callback_id: Rc<RefCell<Option<CallbackId>>>,
+    opacity_provider: gtk4::CssProvider,
 }
 
 #[allow(dead_code)]
@@ -46,6 +47,13 @@ impl MediaWindowHandle {
 
     pub fn close(&self) {
         self.window.close();
+    }
+
+    /// Update the window opacity (0.0 = fully transparent, 1.0 = fully opaque).
+    pub fn set_opacity(&self, opacity: f64) {
+        let opacity = opacity.clamp(0.0, 1.0);
+        let css = format!("box {{ opacity: {}; }}", opacity);
+        self.opacity_provider.load_from_string(&css);
     }
 }
 
@@ -100,7 +108,11 @@ impl MediaWindowController {
 }
 
 /// Create a new media pop-out window (not shown by default).
-pub fn create_media_window<G>(app: Option<&gtk4::Application>, on_close: G) -> MediaWindowHandle
+pub fn create_media_window<G>(
+    app: Option<&gtk4::Application>,
+    opacity: f64,
+    on_close: G,
+) -> MediaWindowHandle
 where
     G: Fn() + 'static,
 {
@@ -127,10 +139,32 @@ where
     window.set_title(Some("Media Player"));
     window.set_default_size(280, 150);
 
+    // Make the window itself transparent so only main_box background shows
+    let window_css =
+        "window.media-window { background: transparent; background-color: transparent; }";
+    let window_provider = gtk4::CssProvider::new();
+    window_provider.load_from_string(window_css);
+    #[allow(deprecated)]
+    window
+        .style_context()
+        .add_provider(&window_provider, gtk4::STYLE_PROVIDER_PRIORITY_USER + 20);
+
     let main_box = GtkBox::new(Orientation::Vertical, 0);
     main_box.add_css_class(media::CONTENT);
     main_box.set_size_request(280, 150);
+
+    // Apply surface styles for consistent theming
     SurfaceStyleManager::global().apply_surface_styles(&main_box, true, None);
+
+    // Apply opacity to the entire window content (background + children)
+    // We use CSS opacity on the main_box since Wayland doesn't support window-level opacity
+    let opacity_provider = gtk4::CssProvider::new();
+    let opacity_css = format!("box {{ opacity: {}; }}", opacity.clamp(0.0, 1.0));
+    opacity_provider.load_from_string(&opacity_css);
+    #[allow(deprecated)]
+    main_box
+        .style_context()
+        .add_provider(&opacity_provider, gtk4::STYLE_PROVIDER_PRIORITY_USER + 20);
 
     // Drag gesture
     let gesture = GestureClick::new();
@@ -241,5 +275,6 @@ where
     MediaWindowHandle {
         window,
         _callback_id: callback_id_cell,
+        opacity_provider,
     }
 }

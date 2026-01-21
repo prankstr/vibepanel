@@ -30,6 +30,15 @@ use crate::widgets::media_window::{MediaWindowHandle, create_media_window};
 use crate::widgets::rounded_picture::RoundedPicture;
 use crate::widgets::{WidgetConfig, warn_unknown_options};
 
+// Thread-local global state for the popout window.
+// This allows the popout to survive widget recreation during config reloads.
+thread_local! {
+    static POPOUT_HANDLE: RefCell<Option<MediaWindowHandle>> = const { RefCell::new(None) };
+    // Reference to the current widget container, updated when widget is recreated.
+    // Used by the popout close callback to restore visibility of the correct widget.
+    static POPOUT_WIDGET_CONTAINER: RefCell<Option<gtk4::Box>> = const { RefCell::new(None) };
+}
+
 /// Default template: album art, then artist - title, then controls.
 const DEFAULT_TEMPLATE: &str = "{art}{artist} - {title}{controls}";
 const DEFAULT_MAX_CHARS: usize = 20;
@@ -52,6 +61,10 @@ pub struct MediaConfig {
     pub scroll_mode: ScrollMode,
     /// Custom background color for this widget.
     pub background_color: Option<String>,
+    /// Opacity for the pop-out window (0.0 = fully transparent, 1.0 = fully opaque).
+    /// Note: Read at runtime from ConfigManager for live-reload support.
+    #[allow(dead_code)]
+    pub popout_opacity: f64,
 }
 
 impl WidgetConfig for MediaConfig {
@@ -65,6 +78,7 @@ impl WidgetConfig for MediaConfig {
                 "max_chars",
                 "scroll_mode",
                 "background_color",
+                "popout_opacity",
             ],
         );
 
@@ -99,12 +113,20 @@ impl WidgetConfig for MediaConfig {
             })
             .unwrap_or(ScrollMode::Loop);
 
+        let popout_opacity = entry
+            .options
+            .get("popout_opacity")
+            .and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64)))
+            .map(|v| v.clamp(0.0, 1.0))
+            .unwrap_or(1.0);
+
         Self {
             template,
             empty_text,
             max_chars,
             scroll_mode,
             background_color: entry.background_color.clone(),
+            popout_opacity,
         }
     }
 }
@@ -117,6 +139,7 @@ impl Default for MediaConfig {
             max_chars: DEFAULT_MAX_CHARS,
             scroll_mode: ScrollMode::Loop,
             background_color: None,
+            popout_opacity: 1.0,
         }
     }
 }
@@ -354,18 +377,19 @@ fn clean_rendered_text(text: &str) -> String {
     result
 }
 
-/// Shared state for tracking the pop-out media window.
-struct MediaWindowState {
-    handle: Option<MediaWindowHandle>,
-    widget_container: gtk4::Box,
-    is_popped_out: bool,
+/// Check if the popout window is currently open and visible.
+fn is_popout_open() -> bool {
+    POPOUT_HANDLE.with(|h| {
+        h.borrow()
+            .as_ref()
+            .is_some_and(|handle| handle.is_visible())
+    })
 }
 
 /// Media widget that displays playback status and opens a popover on click.
 pub struct MediaWidget {
     base: BaseWidget,
     media_callback_id: CallbackId,
-    _window_state: Rc<RefCell<MediaWindowState>>,
 }
 
 #[derive(Clone)]
@@ -385,7 +409,6 @@ struct WidgetUpdateContext<'a> {
     template_elements: &'a [TemplateElement],
     empty_text: &'a str,
     art_state: &'a Rc<RefCell<ArtState>>,
-    window_state: &'a Rc<RefCell<MediaWindowState>>,
 }
 
 /// Owned version of widget references for use in callbacks.
@@ -400,7 +423,6 @@ struct CallbackWidgetRefs {
     template_elements: Vec<TemplateElement>,
     empty_text: String,
     art_state: Rc<RefCell<ArtState>>,
-    window_state: Rc<RefCell<MediaWindowState>>,
 }
 
 impl CallbackWidgetRefs {
@@ -415,7 +437,6 @@ impl CallbackWidgetRefs {
             template_elements: &self.template_elements,
             empty_text: &self.empty_text,
             art_state: &self.art_state,
-            window_state: &self.window_state,
         }
     }
 }
@@ -603,12 +624,38 @@ impl MediaWidget {
             Rc::new(RefCell::new(None));
         let controller_for_builder = controller_cell.clone();
 
-        // Shared state for the pop-out window.
-        let window_state: Rc<RefCell<MediaWindowState>> = Rc::new(RefCell::new(MediaWindowState {
-            handle: None,
-            widget_container: base.widget().clone(),
-            is_popped_out: false,
-        }));
+        // Check if a popout window is already open (from a previous widget instance).
+        // This handles config reloads where the popout should survive.
+        let popout_already_open = is_popout_open();
+
+        // Register this widget's container globally so the popout close callback
+        // can restore visibility even after widget recreation.
+        POPOUT_WIDGET_CONTAINER.with(|c| {
+            *c.borrow_mut() = Some(base.widget().clone());
+        });
+
+        // If popout is already open, hide the bar widget and update opacity from current config.
+        if popout_already_open {
+            base.widget().set_visible(false);
+
+            // Update opacity on existing window
+            let popout_opacity = ConfigManager::global()
+                .get_widget_option("media", "popout_opacity")
+                .and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64)))
+                .map(|v| v.clamp(0.0, 1.0))
+                .unwrap_or(1.0);
+
+            POPOUT_HANDLE.with(|h| {
+                if let Some(handle) = h.borrow().as_ref() {
+                    handle.set_opacity(popout_opacity);
+                }
+            });
+
+            debug!(
+                "Media widget recreated, updated popout opacity to {}",
+                popout_opacity
+            );
+        }
 
         // We need access to the menu handle to close the popover when popping out.
         // Use the same pattern as notifications: store it after create_menu returns.
@@ -616,7 +663,6 @@ impl MediaWidget {
         let menu_handle_for_builder = menu_handle_cell.clone();
 
         // Create the on_popout callback that will be called when the pop-out button is clicked.
-        let window_state_for_popout = window_state.clone();
         let on_popout = move || {
             // Hide any visible tooltip to prevent orphaned tooltips
             TooltipManager::global().cancel_and_hide();
@@ -626,26 +672,38 @@ impl MediaWidget {
                 menu_handle.hide();
             }
 
-            let mut state = window_state_for_popout.borrow_mut();
-
             // If window already exists and is visible, just focus it
-            if state.handle.as_ref().is_some_and(|h| h.is_visible()) {
-                state.handle.as_ref().unwrap().show(); // Brings to front
+            if is_popout_open() {
+                POPOUT_HANDLE.with(|h| {
+                    if let Some(handle) = h.borrow().as_ref() {
+                        handle.show(); // Brings to front
+                    }
+                });
                 return;
             }
 
-            // Hide the bar widget and mark as popped out
-            state.widget_container.set_visible(false);
-            state.is_popped_out = true;
+            // Hide the bar widget
+            POPOUT_WIDGET_CONTAINER.with(|c| {
+                if let Some(container) = c.borrow().as_ref() {
+                    container.set_visible(false);
+                }
+            });
 
-            // Create the on_close callback for when the window closes
-            let window_state_for_close = Rc::clone(&window_state_for_popout);
+            // Create the on_close callback for when the window closes.
+            // This uses the global POPOUT_WIDGET_CONTAINER to restore the correct
+            // widget even if it was recreated during a config reload.
             let on_close = move || {
-                let mut state = window_state_for_close.borrow_mut();
-                // Show the bar widget again and mark as not popped out
-                state.widget_container.set_visible(true);
-                state.is_popped_out = false;
-                state.handle = None;
+                // Clear the global handle
+                POPOUT_HANDLE.with(|h| {
+                    *h.borrow_mut() = None;
+                });
+
+                // Show the current widget container (may be different from original)
+                POPOUT_WIDGET_CONTAINER.with(|c| {
+                    if let Some(container) = c.borrow().as_ref() {
+                        container.set_visible(true);
+                    }
+                });
 
                 let mut persisted = state::load();
                 persisted.media.window_open = false;
@@ -654,9 +712,20 @@ impl MediaWidget {
                 debug!("Media window closed, bar widget restored");
             };
 
-            let handle = create_media_window(None, on_close);
+            // Read opacity from current config for live-reload support
+            let popout_opacity = ConfigManager::global()
+                .get_widget_option("media", "popout_opacity")
+                .and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64)))
+                .map(|v| v.clamp(0.0, 1.0))
+                .unwrap_or(1.0);
+
+            let handle = create_media_window(None, popout_opacity, on_close);
             handle.show();
-            state.handle = Some(handle);
+
+            // Store in global state
+            POPOUT_HANDLE.with(|h| {
+                *h.borrow_mut() = Some(handle);
+            });
 
             let mut persisted = state::load();
             persisted.media.window_open = true;
@@ -676,9 +745,9 @@ impl MediaWidget {
 
         *menu_handle_cell.borrow_mut() = Some(menu_handle);
 
-        // Always reset window state on startup (don't restore pop-out)
+        // Reset persisted state on startup (actual popout state is tracked in POPOUT_HANDLE)
         let mut persisted = state::load();
-        if persisted.media.window_open {
+        if persisted.media.window_open && !popout_already_open {
             persisted.media.window_open = false;
             state::save(&persisted);
         }
@@ -697,7 +766,6 @@ impl MediaWidget {
             template_elements,
             empty_text: config.empty_text.clone(),
             art_state: art_state.clone(),
-            window_state: window_state.clone(),
         };
 
         update_widgets_from_snapshot_impl(&widget_refs.as_context(), &MediaSnapshot::empty());
@@ -714,7 +782,6 @@ impl MediaWidget {
         Self {
             base,
             media_callback_id,
-            _window_state: window_state,
         }
     }
 
@@ -746,8 +813,7 @@ fn update_widgets_from_snapshot_impl(ctx: &WidgetUpdateContext<'_>, snapshot: &M
         );
 
         // Don't change visibility if popped out - the pop-out window handles display
-        let is_popped_out = ctx.window_state.borrow().is_popped_out;
-        if is_popped_out {
+        if is_popout_open() {
             return;
         }
 
@@ -793,8 +859,7 @@ fn update_widgets_from_snapshot_impl(ctx: &WidgetUpdateContext<'_>, snapshot: &M
         snapshot.metadata.artist,
     );
 
-    let is_popped_out = ctx.window_state.borrow().is_popped_out;
-    if !is_popped_out {
+    if !is_popout_open() {
         ctx.container.set_visible(true);
     }
 

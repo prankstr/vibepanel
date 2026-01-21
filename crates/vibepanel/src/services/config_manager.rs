@@ -173,6 +173,17 @@ impl ConfigManager {
         self.config.borrow().widgets.background_opacity
     }
 
+    /// Get a widget option value from the current configuration.
+    ///
+    /// Returns `None` if the widget has no config section or the option doesn't exist.
+    pub fn get_widget_option(&self, widget_name: &str, option_name: &str) -> Option<toml::Value> {
+        self.config
+            .borrow()
+            .widgets
+            .get_options(widget_name)
+            .and_then(|opts| opts.options.get(option_name).cloned())
+    }
+
     /// Start watching the config file for changes.
     ///
     /// This spawns a background thread that monitors the config file. When changes
