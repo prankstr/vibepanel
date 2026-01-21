@@ -443,6 +443,8 @@ fn create_controls() -> ControlsHandle {
 
     let play_pause_icon = icons.create_icon("play_arrow", &[icon::ICON]);
     let play_pause_btn = Button::new();
+    play_pause_btn.set_has_frame(false);
+    play_pause_btn.set_valign(gtk4::Align::Center);
     play_pause_btn.set_child(Some(&play_pause_icon.widget()));
     play_pause_btn.add_css_class(media::CONTROL_BTN);
     play_pause_btn.add_css_class(media::CONTROL_BTN_PRIMARY);

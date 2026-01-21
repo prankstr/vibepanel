@@ -1053,16 +1053,18 @@ window.quick-settings-window {{
             margin-left: 4px;
         }}
 
-        .media .media-control-btn {{
-            border-radius: var(--radius-sm);
+        .media-control-btn {{
+            min-width: 24px;
+            min-height: 24px;
+            border-radius: 50%;
             color: var(--color-foreground-primary);
         }}
 
-        .media .media-control-btn.media-control-btn-primary .icon-root {{
+        .media-control-btn.media-control-btn-primary .icon-root {{
             font-size: calc(var(--icon-size) * 1.1);
         }}
 
-        .media .media-control-btn:hover {{
+        .media-control-btn:hover {{
             background: var(--color-card-overlay-hover);
         }}
 

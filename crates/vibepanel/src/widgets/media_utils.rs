@@ -22,6 +22,8 @@ where
     icon_handle.widget().set_valign(Align::Center);
 
     let btn = Button::new();
+    btn.set_has_frame(false);
+    btn.set_valign(Align::Center);
     btn.set_child(Some(&icon_handle.widget()));
     for class in css_classes {
         btn.add_css_class(class);
