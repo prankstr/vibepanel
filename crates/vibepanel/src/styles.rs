@@ -865,6 +865,24 @@ pub mod media {
     /// Pop-out button icon (`.media-popout-icon`).
     pub const POPOUT_ICON: &str = "media-popout-icon";
 
+    /// Player selector button in popover (`.media-player-selector-btn`).
+    pub const PLAYER_SELECTOR_BTN: &str = "media-player-selector-btn";
+
+    /// Player selector menu container (`.media-player-menu`).
+    pub const PLAYER_MENU: &str = "media-player-menu";
+
+    /// Player selector menu item (`.media-player-menu-item`).
+    pub const PLAYER_MENU_ITEM: &str = "media-player-menu-item";
+
+    /// Player menu item title label (`.media-player-menu-title`).
+    pub const PLAYER_MENU_TITLE: &str = "media-player-menu-title";
+
+    /// Player menu item subtitle/status label (`.media-player-menu-subtitle`).
+    pub const PLAYER_MENU_SUBTITLE: &str = "media-player-menu-subtitle";
+
+    /// Player menu check icon (`.media-player-menu-check`).
+    pub const PLAYER_MENU_CHECK: &str = "media-player-menu-check";
+
     // Empty state
     /// No player available state (`.media-empty`).
     pub const EMPTY: &str = "media-empty";

@@ -340,6 +340,7 @@ sectioned-bar.bar {{
     border: none;
     box-shadow: none;
     padding: 4px 8px;
+    border-radius: var(--radius-widget);
 }}
 
 .qs-row-menu-item:hover,
@@ -1086,6 +1087,45 @@ window.quick-settings-window {{
             padding: 0px;
             margin-top: -12px;
             margin-right: -12px;
+        }}
+
+        /* Player selector button */
+        .media-player-selector-btn {{
+            min-width: 24px;
+            min-height: 24px;
+            padding: 0px;
+            margin-top: -12px;
+            margin-right: 4px;
+        }}
+
+        /* Player selector menu - extends qs-row-menu-content */
+        .media-player-menu {{
+            font-family: var(--font-family);
+            font-size: var(--font-size);
+        }}
+
+        .media-player-menu * {{
+            font-family: inherit;
+            font-size: inherit;
+        }}
+
+        /* Player menu item - extends qs-row-menu-item */
+        .media-player-menu-item {{
+            border: none;
+            outline: none;
+            box-shadow: none;
+        }}
+
+        .media-player-menu-title {{
+        }}
+
+        .media-player-menu-subtitle {{
+            font-size: var(--font-size-sm);
+        }}
+
+        /* Check icon in player menu - slightly larger for visibility */
+        .media-player-menu-check {{
+            font-size: 1.15em;
         }}
 
         /* Album art in popover/window */
