@@ -1118,8 +1118,8 @@ fn load_album_art_with_fallback(
     let art_state = art_state.clone();
     let cancellable = cancellable.clone();
 
-    // gio::File::for_uri handles file://, http://, and https:// via GVfs
-    if url.starts_with("file://") || url.starts_with("http://") || url.starts_with("https://") {
+    if url.starts_with("file://") {
+        // Local files: use gio::File directly
         let file = gio::File::for_uri(url);
         let cancellable_for_read = cancellable.clone();
 
@@ -1148,6 +1148,55 @@ fn load_album_art_with_fallback(
                         // Don't log cancelled operations as failures
                         if !e.matches(gio::IOErrorEnum::Cancelled) {
                             debug!("Failed to load album art from {}: {}", url_string, e);
+                        }
+                        show_player_icon_in_art(
+                            &art_picture,
+                            player_id.as_deref(),
+                            &art_state,
+                            generation,
+                        );
+                    }
+                }
+            },
+        );
+    } else if url.starts_with("http://") || url.starts_with("https://") {
+        // Remote URLs: use soup3 for HTTP(S) since gio::File requires GVfs
+        use soup::prelude::*;
+
+        let session = soup::Session::new();
+        let Ok(message) = soup::Message::new("GET", url) else {
+            debug!("Failed to create HTTP request for album art: {}", url);
+            show_player_icon_in_art(&art_picture, player_id.as_deref(), &art_state, generation);
+            return;
+        };
+
+        let cancellable_for_callback = cancellable.clone();
+        session.send_async(
+            &message,
+            glib::Priority::DEFAULT,
+            Some(&cancellable),
+            move |result: Result<gio::InputStream, glib::Error>| {
+                // Validate generation before processing
+                if art_state.borrow().generation != generation {
+                    return;
+                }
+
+                match result {
+                    Ok(stream) => {
+                        load_texture_from_stream_with_fallback(
+                            stream,
+                            &art_picture,
+                            player_id.as_deref(),
+                            &art_state,
+                            &url_string,
+                            generation,
+                            &cancellable_for_callback,
+                        );
+                    }
+                    Err(e) => {
+                        // Don't log cancelled operations as failures
+                        if !e.matches(gio::IOErrorEnum::Cancelled) {
+                            debug!("Failed to fetch album art from {}: {}", url_string, e);
                         }
                         show_player_icon_in_art(
                             &art_picture,

@@ -59,5 +59,8 @@ sysinfo = { version = "0.33", default-features = false, features = ["system", "n
 # Synchronization
 parking_lot = "0.12"
 
+# HTTP
+soup3 = "0.8"
+
 # Internal crates
 vibepanel-core = { path = "crates/vibepanel-core" }

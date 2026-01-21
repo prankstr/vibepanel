@@ -736,8 +736,11 @@ impl MediaService {
             }
 
             // Length (duration in microseconds)
+            // Note: Some players (like Spotify) report length as u64, others as i64
             if let Some(length) = dict.get("mpris:length") {
-                meta.length = length.get::<i64>();
+                meta.length = length
+                    .get::<i64>()
+                    .or_else(|| length.get::<u64>().map(|v| v as i64));
             }
 
             // Track ID
