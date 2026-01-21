@@ -1111,6 +1111,11 @@ window.quick-settings-window {{
             padding: 0;
         }}
 
+        /* Window base styling */
+        .media-window {{
+            min-width: 280px;
+        }}
+
         .media-window .media-controls {{
             padding: 8px 0;
         }}

@@ -331,6 +331,7 @@ where
 
     window.add_css_class(media::WINDOW);
     window.set_title(Some("Media Player"));
+    window.set_resizable(false); // Prevent window from resizing with content
 
     // Set fixed size to prevent resizing when label content changes
     window.set_default_size(280, 150);
@@ -423,18 +424,18 @@ where
 
     // Right side: info section with track info and controls
     let info_section = GtkBox::new(Orientation::Vertical, 0);
+    info_section.set_size_request(160, -1); // Fixed width to prevent horizontal resizing
 
     // Track info (near bottom, close to controls)
     let track_info = GtkBox::new(Orientation::Vertical, 2);
     track_info.set_valign(Align::End);
     track_info.set_vexpand(true);
-    track_info.set_hexpand(true);
     track_info.set_halign(Align::Center);
     track_info.set_margin_bottom(4);
 
     let title_label = Rc::new(MarqueeLabel::with_scroll_mode(ScrollMode::Loop));
     title_label.set_text("No track playing");
-    title_label.set_max_width_chars(18);
+    title_label.set_max_width_chars(15);
     title_label.label().add_css_class(media::TRACK_TITLE);
     title_label.widget().set_halign(Align::Center);
     track_info.append(title_label.widget());
