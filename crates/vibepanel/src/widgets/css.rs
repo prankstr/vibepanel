@@ -1083,9 +1083,9 @@ window.quick-settings-window {{
         .media-popout-btn {{
             min-width: 24px;
             min-height: 24px;
-            padding: 4px;
+            padding: 0px;
             margin-top: -12px;
-            margin-right: -16px;
+            margin-right: -12px;
         }}
 
         /* Album art in popover/window */
