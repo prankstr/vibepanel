@@ -472,6 +472,7 @@ where
     prev_btn.add_css_class(media::WINDOW_CONTROL_BTN);
     prev_btn.add_css_class(button::COMPACT);
     prev_btn.set_tooltip_text(Some("Previous"));
+    prev_btn.set_valign(Align::Center); // Prevent vertical stretching
     prev_btn.connect_clicked(|_| {
         MediaService::global().previous();
     });
@@ -489,6 +490,7 @@ where
     play_pause_btn.add_css_class(media::WINDOW_CONTROL_BTN);
     play_pause_btn.add_css_class(button::COMPACT);
     play_pause_btn.set_tooltip_text(Some("Play/Pause"));
+    play_pause_btn.set_valign(Align::Center); // Prevent vertical stretching
     play_pause_btn.connect_clicked(|_| {
         MediaService::global().play_pause();
     });
@@ -504,6 +506,7 @@ where
     next_btn.add_css_class(media::WINDOW_CONTROL_BTN);
     next_btn.add_css_class(button::COMPACT);
     next_btn.set_tooltip_text(Some("Next"));
+    next_btn.set_valign(Align::Center); // Prevent vertical stretching
     next_btn.connect_clicked(|_| {
         MediaService::global().next();
     });
