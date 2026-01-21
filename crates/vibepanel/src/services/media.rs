@@ -229,6 +229,8 @@ pub struct MediaService {
     active_player: RefCell<Option<String>>,
     /// User's manual selection (None = auto mode).
     manual_selection: RefCell<Option<String>>,
+    /// Last player that started playing (for auto-selection preference).
+    last_playing: RefCell<Option<String>>,
     /// Registered callbacks for state changes.
     callbacks: Callbacks<MediaSnapshot>,
     /// Signal subscription for NameOwnerChanged (player appear/disappear).
@@ -237,6 +239,8 @@ pub struct MediaService {
     position_poll_source: RefCell<Option<glib::SourceId>>,
     /// Cancellable for position polling D-Bus calls.
     poll_cancellable: RefCell<gio::Cancellable>,
+    /// IPC listener for CLI commands.
+    _ipc_listener: RefCell<Option<Rc<RefCell<super::media_ipc::MediaIpcListener>>>>,
 }
 
 impl MediaService {
@@ -246,13 +250,16 @@ impl MediaService {
             players: RefCell::new(HashMap::new()),
             active_player: RefCell::new(None),
             manual_selection: RefCell::new(None),
+            last_playing: RefCell::new(None),
             callbacks: Callbacks::new(),
             _name_owner_subscription: RefCell::new(None),
             position_poll_source: RefCell::new(None),
             poll_cancellable: RefCell::new(gio::Cancellable::new()),
+            _ipc_listener: RefCell::new(None),
         });
 
         Self::init_dbus(&service);
+        Self::init_ipc(&service);
         service
     }
 
@@ -327,6 +334,45 @@ impl MediaService {
     /// Check if auto-selection is active.
     pub fn is_auto_selection(&self) -> bool {
         self.manual_selection.borrow().is_none()
+    }
+
+    // ========== IPC Initialization ==========
+
+    fn init_ipc(this: &Rc<Self>) {
+        use super::media_ipc::{MediaIpcListener, MediaIpcMessage};
+
+        let Some(listener) = MediaIpcListener::new() else {
+            debug!("Media IPC listener not available (non-fatal)");
+            return;
+        };
+
+        let this_weak = Rc::downgrade(this);
+        listener.borrow().connect(move |msg| {
+            let Some(this) = this_weak.upgrade() else {
+                return;
+            };
+
+            match msg {
+                MediaIpcMessage::Select { bus_name } => {
+                    debug!("Media IPC: selecting player {}", bus_name);
+                    this.set_active_player(&bus_name);
+                }
+                MediaIpcMessage::Auto => {
+                    debug!("Media IPC: switching to auto selection");
+                    this.set_auto_selection();
+                }
+            }
+        });
+
+        *this._ipc_listener.borrow_mut() = Some(listener);
+        debug!("Media IPC listener connected");
+    }
+
+    /// Write current state to the IPC state file.
+    fn write_ipc_state(&self) {
+        let active = self.active_player.borrow();
+        let is_auto = self.manual_selection.borrow().is_none();
+        super::media_ipc::write_state(active.as_deref(), is_auto);
     }
 
     // ========== D-Bus Initialization ==========
@@ -542,6 +588,14 @@ impl MediaService {
                             Self::update_player_from_proxy(&player);
                             let new_status = player.borrow().playback_status;
 
+                            // Track the most recently playing player
+                            if new_status == PlaybackStatus::Playing
+                                && old_status != PlaybackStatus::Playing
+                            {
+                                let bus_name = player.borrow().bus_name.clone();
+                                this.last_playing.replace(Some(bus_name));
+                            }
+
                             // In auto mode, if this player just started playing, make it active
                             if this.is_auto_selection() && old_status != new_status {
                                 if new_status == PlaybackStatus::Playing {
@@ -717,13 +771,27 @@ impl MediaService {
         self.select_best_player_auto(&players, &old_active);
     }
 
-    /// Auto-select the best player (playing > current paused > other paused > any).
+    /// Auto-select the best player (last playing > other playing > current paused > other paused > any).
     fn select_best_player_auto(
         self: &Rc<Self>,
         players: &HashMap<String, Rc<RefCell<MprisPlayer>>>,
         old_active: &Option<String>,
     ) {
-        // Prefer playing player
+        // First, check if last_playing is still playing - prefer it
+        if let Some(ref last) = *self.last_playing.borrow() {
+            if let Some(player) = players.get(last) {
+                if player.borrow().playback_status == PlaybackStatus::Playing {
+                    if old_active.as_ref() != Some(last) {
+                        debug!("Active player (auto, last playing): {}", last);
+                        self.active_player.replace(Some(last.clone()));
+                        self.on_active_player_changed();
+                    }
+                    return;
+                }
+            }
+        }
+
+        // Otherwise prefer any playing player
         let playing = players
             .values()
             .find(|p| p.borrow().playback_status == PlaybackStatus::Playing)
@@ -736,6 +804,22 @@ impl MediaService {
                 self.on_active_player_changed();
             }
             return;
+        }
+
+        // If last_playing is paused with metadata, prefer it
+        if let Some(ref last) = *self.last_playing.borrow() {
+            if let Some(player) = players.get(last) {
+                let p = player.borrow();
+                if p.playback_status == PlaybackStatus::Paused && p.metadata.title.is_some() {
+                    if old_active.as_ref() != Some(last) {
+                        debug!("Active player (auto, last playing paused): {}", last);
+                        drop(p);
+                        self.active_player.replace(Some(last.clone()));
+                        self.on_active_player_changed();
+                    }
+                    return;
+                }
+            }
         }
 
         // If current player is paused with metadata, keep it (don't switch between paused players)
@@ -791,6 +875,9 @@ impl MediaService {
         self.stop_position_polling();
         self.poll_cancellable.borrow().cancel();
         self.poll_cancellable.replace(gio::Cancellable::new());
+
+        // Write state for CLI to read
+        self.write_ipc_state();
 
         let should_poll = {
             let players = self.players.borrow();
@@ -1254,6 +1341,332 @@ pub fn format_duration(microseconds: i64) -> String {
         format!("{}:{:02}:{:02}", hours, minutes, seconds)
     } else {
         format!("{}:{:02}", minutes, seconds)
+    }
+}
+
+// ============================================================================
+// CLI interface - synchronous, standalone (no GTK main loop required)
+// ============================================================================
+
+/// Synchronous media control for CLI usage.
+///
+/// This is a lightweight, standalone interface that doesn't require GTK or
+/// a running main loop. It uses synchronous D-Bus calls to control MPRIS
+/// media players.
+pub struct MediaCli {
+    connection: gio::DBusConnection,
+    players: Vec<(String, String)>, // (bus_name, player_name)
+    active_player: Option<String>,
+}
+
+impl MediaCli {
+    /// Create a new CLI media controller.
+    ///
+    /// Returns `None` if D-Bus connection fails.
+    pub fn new() -> Option<Self> {
+        let connection =
+            gio::bus_get_sync(gio::BusType::Session, None::<&gio::Cancellable>).ok()?;
+
+        let mut cli = Self {
+            connection,
+            players: Vec::new(),
+            active_player: None,
+        };
+
+        cli.discover_players();
+        Some(cli)
+    }
+
+    fn discover_players(&mut self) {
+        // Call ListNames to find MPRIS players
+        let result = self.connection.call_sync(
+            Some(DBUS_NAME),
+            DBUS_PATH,
+            DBUS_INTERFACE,
+            "ListNames",
+            None,
+            Some(glib::VariantTy::new("(as)").unwrap()),
+            gio::DBusCallFlags::NONE,
+            DBUS_CALL_TIMEOUT_MS,
+            None::<&gio::Cancellable>,
+        );
+
+        let Ok(reply) = result else {
+            return;
+        };
+
+        let names: Vec<String> = reply
+            .child_value(0)
+            .iter()
+            .filter_map(|v| v.get::<String>())
+            .filter(|n| n.starts_with(MPRIS_PREFIX))
+            .collect();
+
+        // Build player list with display names
+        self.players = names
+            .iter()
+            .map(|bus_name| {
+                let player_id = bus_name
+                    .strip_prefix(MPRIS_PREFIX)
+                    .map(|s| s.split('.').next().unwrap_or(s))
+                    .unwrap_or(bus_name);
+
+                // Capitalize first letter for display name
+                let player_name = {
+                    let mut chars = player_id.chars();
+                    match chars.next() {
+                        Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
+                        None => player_id.to_string(),
+                    }
+                };
+
+                (bus_name.clone(), player_name)
+            })
+            .collect();
+
+        // Check if the panel has a selected player via IPC state file
+        let (ipc_active, is_auto) = super::media_ipc::read_state();
+        if !is_auto {
+            if let Some(ref bus_name) = ipc_active {
+                // Verify the player still exists
+                if self.players.iter().any(|(b, _)| b == bus_name) {
+                    self.active_player = Some(bus_name.clone());
+                    return;
+                }
+            }
+        }
+
+        // Auto-select: first playing player, or first player
+        self.active_player = self
+            .find_playing_player()
+            .or_else(|| self.players.first().map(|(bus, _)| bus.clone()));
+    }
+
+    fn find_playing_player(&self) -> Option<String> {
+        for (bus_name, _) in &self.players {
+            if let Some(status) = self.get_playback_status(bus_name) {
+                if status == PlaybackStatus::Playing {
+                    return Some(bus_name.clone());
+                }
+            }
+        }
+        None
+    }
+
+    fn get_playback_status(&self, bus_name: &str) -> Option<PlaybackStatus> {
+        let result = self
+            .connection
+            .call_sync(
+                Some(bus_name),
+                MPRIS_PATH,
+                PROPERTIES_INTERFACE,
+                "Get",
+                Some(&(MPRIS_PLAYER_INTERFACE, "PlaybackStatus").to_variant()),
+                Some(glib::VariantTy::new("(v)").unwrap()),
+                gio::DBusCallFlags::NONE,
+                DBUS_CALL_TIMEOUT_MS,
+                None::<&gio::Cancellable>,
+            )
+            .ok()?;
+
+        result
+            .child_value(0)
+            .get::<Variant>()
+            .and_then(|v| v.get::<String>())
+            .map(|s| s.parse().unwrap_or(PlaybackStatus::Stopped))
+    }
+
+    /// Check if any player is available.
+    #[allow(dead_code)]
+    pub fn has_player(&self) -> bool {
+        self.active_player.is_some()
+    }
+
+    /// Get list of available players as (bus_name, display_name) pairs.
+    pub fn list_players(&self) -> &[(String, String)] {
+        &self.players
+    }
+
+    /// Get the currently active player's bus name.
+    pub fn active_player(&self) -> Option<&str> {
+        self.active_player.as_deref()
+    }
+
+    /// Select a specific player by bus name.
+    /// Note: This only affects this CLI instance. To make the panel switch to this
+    /// player, use play() after selecting to trigger the auto-switch.
+    pub fn select_player(&mut self, bus_name: &str) -> Result<(), String> {
+        if self.players.iter().any(|(b, _)| b == bus_name) {
+            self.active_player = Some(bus_name.to_string());
+            Ok(())
+        } else {
+            Err(format!("player not found: {}", bus_name))
+        }
+    }
+
+    /// Start playback on the active player.
+    /// This is useful after select_player() to trigger the panel's auto-switch.
+    #[allow(dead_code)]
+    pub fn play(&self) -> Result<(), String> {
+        self.call_method("Play")
+    }
+
+    /// Toggle play/pause on the active player.
+    pub fn play_pause(&self) -> Result<(), String> {
+        self.call_method("PlayPause")
+    }
+
+    /// Skip to next track.
+    pub fn next(&self) -> Result<(), String> {
+        self.call_method("Next")
+    }
+
+    /// Go to previous track.
+    pub fn previous(&self) -> Result<(), String> {
+        self.call_method("Previous")
+    }
+
+    /// Stop playback.
+    pub fn stop(&self) -> Result<(), String> {
+        self.call_method("Stop")
+    }
+
+    /// Get current playback status and metadata.
+    pub fn status(&self) -> Result<MediaCliStatus, String> {
+        let bus_name = self
+            .active_player
+            .as_ref()
+            .ok_or_else(|| "no media player found".to_string())?;
+
+        // Get all properties at once
+        let result = self
+            .connection
+            .call_sync(
+                Some(bus_name),
+                MPRIS_PATH,
+                PROPERTIES_INTERFACE,
+                "GetAll",
+                Some(&(MPRIS_PLAYER_INTERFACE,).to_variant()),
+                Some(glib::VariantTy::new("(a{sv})").unwrap()),
+                gio::DBusCallFlags::NONE,
+                DBUS_CALL_TIMEOUT_MS,
+                None::<&gio::Cancellable>,
+            )
+            .map_err(|e| format!("failed to get player properties: {}", e))?;
+
+        // Parse properties dict
+        let props_variant = result.child_value(0);
+        let props: std::collections::HashMap<String, Variant> =
+            props_variant.get().unwrap_or_default();
+
+        let playback_status = props
+            .get("PlaybackStatus")
+            .and_then(|v| v.get::<String>())
+            .map(|s| s.parse().unwrap_or(PlaybackStatus::Stopped))
+            .unwrap_or(PlaybackStatus::Stopped);
+
+        let metadata = props
+            .get("Metadata")
+            .map(|m| MediaService::parse_metadata(m))
+            .unwrap_or_default();
+
+        let position = props
+            .get("Position")
+            .and_then(|v| v.get::<i64>())
+            .unwrap_or(0);
+
+        let volume = props
+            .get("Volume")
+            .and_then(|v| v.get::<f64>())
+            .unwrap_or(1.0);
+
+        // Get player display name
+        let player_name = self
+            .players
+            .iter()
+            .find(|(b, _)| b == bus_name)
+            .map(|(_, name)| name.clone())
+            .unwrap_or_else(|| bus_name.clone());
+
+        Ok(MediaCliStatus {
+            player_name,
+            playback_status,
+            title: metadata.title,
+            artist: metadata.artist,
+            album: metadata.album,
+            position,
+            length: metadata.length,
+            volume,
+        })
+    }
+
+    fn call_method(&self, method: &str) -> Result<(), String> {
+        let bus_name = self
+            .active_player
+            .as_ref()
+            .ok_or_else(|| "no media player found".to_string())?;
+
+        self.connection
+            .call_sync(
+                Some(bus_name),
+                MPRIS_PATH,
+                MPRIS_PLAYER_INTERFACE,
+                method,
+                None,
+                None,
+                gio::DBusCallFlags::NONE,
+                DBUS_CALL_TIMEOUT_MS,
+                None::<&gio::Cancellable>,
+            )
+            .map_err(|e| format!("MPRIS {} failed: {}", method, e))?;
+
+        Ok(())
+    }
+}
+
+/// Status information returned by MediaCli::status().
+#[derive(Debug)]
+#[allow(dead_code)]
+pub struct MediaCliStatus {
+    pub player_name: String,
+    pub playback_status: PlaybackStatus,
+    pub title: Option<String>,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+    pub position: i64,
+    pub length: Option<i64>,
+    pub volume: f64,
+}
+
+impl std::fmt::Display for MediaCliStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let status_icon = match self.playback_status {
+            PlaybackStatus::Playing => "▶",
+            PlaybackStatus::Paused => "⏸",
+            PlaybackStatus::Stopped => "⏹",
+        };
+
+        write!(f, "{} {}", status_icon, self.player_name)?;
+
+        if let Some(ref title) = self.title {
+            write!(f, "\n  {}", title)?;
+            if let Some(ref artist) = self.artist {
+                write!(f, " - {}", artist)?;
+            }
+        }
+
+        // Show position/duration if available
+        if self.position > 0 || self.length.is_some() {
+            let pos_str = format_duration(self.position);
+            if let Some(length) = self.length {
+                let len_str = format_duration(length);
+                write!(f, "\n  {} / {}", pos_str, len_str)?;
+            } else {
+                write!(f, "\n  {}", pos_str)?;
+            }
+        }
+
+        Ok(())
     }
 }
 

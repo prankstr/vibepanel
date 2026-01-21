@@ -31,6 +31,7 @@ pub mod config_manager;
 pub mod icons;
 pub mod idle_inhibitor;
 pub mod media;
+pub mod media_ipc;
 pub mod network;
 pub mod notification;
 pub mod osd_ipc;
