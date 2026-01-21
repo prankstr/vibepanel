@@ -170,6 +170,9 @@ pub struct MediaService {
     _name_owner_subscription: RefCell<Option<gio::SignalSubscription>>,
     /// Signal subscription for PropertiesChanged on the active player.
     _properties_subscription: RefCell<Option<gio::SignalSubscription>>,
+    /// Signal subscription for PropertiesChanged on ALL MPRIS players.
+    /// Used to detect when another player starts playing so we can switch to it.
+    _global_properties_subscription: RefCell<Option<gio::SignalSubscription>>,
     /// Timer for position polling when playing.
     position_poll_source: RefCell<Option<glib::SourceId>>,
     /// Cancellable for in-flight D-Bus operations on the current player.
@@ -189,6 +192,7 @@ impl MediaService {
             callbacks: Callbacks::new(),
             _name_owner_subscription: RefCell::new(None),
             _properties_subscription: RefCell::new(None),
+            _global_properties_subscription: RefCell::new(None),
             position_poll_source: RefCell::new(None),
             player_cancellable: RefCell::new(gio::Cancellable::new()),
             track_generation: RefCell::new(0),
@@ -214,47 +218,66 @@ impl MediaService {
     /// Select the best player from available players.
     ///
     /// Priority order:
-    /// 1. Keep current player if it's still in the list and is playing/paused with metadata
-    /// 2. Otherwise, pick a different player (prefer any player over a stopped one with no metadata)
+    /// 1. Keep current player if it's still in the list and is **playing**
+    /// 2. Otherwise, pick a different player (prefer any player over stopped/paused)
+    ///
+    /// Note: When another player starts playing, we detect it via the global
+    /// PropertiesChanged subscription and pass it as `playing_player` to prefer it.
     ///
     /// Returns `None` if no players available, or the best candidate's bus name.
-    fn pick_best_player(&self, players: &[String]) -> Option<String> {
+    fn pick_best_player(&self, players: &[String], playing_player: Option<&str>) -> Option<String> {
         if players.is_empty() {
             return None;
         }
 
+        // If we know a specific player is playing, prefer it
+        if let Some(playing) = playing_player
+            && players.contains(&playing.to_string())
+        {
+            debug!("Selecting known playing player: {}", playing);
+            return Some(playing.to_string());
+        }
+
         let current_snapshot = self.snapshot.borrow();
 
-        // Keep current player if still valid and has meaningful state
+        // Keep current player if still valid and is actively playing
         if let Some(current_bus) = &current_snapshot.player_bus_name
             && players.contains(current_bus)
         {
-            // Keep it if playing, or paused with metadata
+            // Only keep it if actively playing - paused players can be preempted
+            if current_snapshot.playback_status == PlaybackStatus::Playing {
+                return Some(current_bus.clone());
+            }
+
+            // Current player is paused/stopped - check if there are other players
+            // that might be playing (we'll discover their status after connecting)
             let has_metadata = current_snapshot
                 .metadata
                 .title
                 .as_ref()
                 .is_some_and(|t| !t.trim().is_empty());
-            let dominated = current_snapshot.playback_status == PlaybackStatus::Playing
-                || (current_snapshot.playback_status == PlaybackStatus::Paused && has_metadata);
 
-            if dominated {
+            // If paused with metadata and no other players, keep current
+            if current_snapshot.playback_status == PlaybackStatus::Paused
+                && has_metadata
+                && players.len() == 1
+            {
                 return Some(current_bus.clone());
             }
 
-            // Current player is stopped/empty - try to find a different one
-            // (The new player might be better, we won't know until we connect to it)
+            // If there are other players and current is not playing, try them
+            // (one of them might be playing)
             for player in players {
                 if player != current_bus {
                     debug!(
-                        "Current player {} is stopped/empty, switching to {}",
-                        current_bus, player
+                        "Current player {} is not playing (status: {:?}), trying {}",
+                        current_bus, current_snapshot.playback_status, player
                     );
                     return Some(player.clone());
                 }
             }
 
-            // No other players, stick with current (widget will hide it)
+            // No other players, stick with current
             return Some(current_bus.clone());
         }
 
@@ -353,6 +376,110 @@ impl MediaService {
                 );
                 this._name_owner_subscription.replace(Some(subscription));
 
+                // Subscribe to PropertiesChanged from ALL MPRIS players to detect
+                // when another player starts playing (so we can switch to it)
+                let this_weak = Rc::downgrade(&this);
+                let global_subscription = connection.subscribe_to_signal(
+                    None, // Any sender (all MPRIS players)
+                    Some(PROPERTIES_INTERFACE),
+                    Some("PropertiesChanged"),
+                    Some(MPRIS_PATH),
+                    None,
+                    gio::DBusSignalFlags::NONE,
+                    move |signal| {
+                        // The signal sender name (unique bus name like :1.123)
+                        let sender = signal.sender_name;
+
+                        // Check if this is from an MPRIS player by checking if it's in our list
+                        // (signal.sender is the unique bus name like :1.123, not the well-known name)
+                        let Some(this) = this_weak.upgrade() else {
+                            return;
+                        };
+
+                        // Parse the signal to check if PlaybackStatus changed to Playing
+                        // PropertiesChanged(interface: s, changed_properties: a{sv}, invalidated: as)
+                        let interface = signal.parameters.child_value(0);
+                        let Some(iface_str) = interface.str() else {
+                            return;
+                        };
+
+                        // Only care about Player interface changes
+                        if iface_str != MPRIS_PLAYER_INTERFACE {
+                            return;
+                        }
+
+                        // Check if PlaybackStatus is in the changed properties
+                        let changed = signal.parameters.child_value(1);
+                        let Some(dict) = changed.get::<HashMap<String, Variant>>() else {
+                            return;
+                        };
+
+                        let Some(status_variant) = dict.get("PlaybackStatus") else {
+                            return;
+                        };
+
+                        let Some(status_str) = status_variant.get::<String>() else {
+                            return;
+                        };
+
+                        // If a player started playing, switch to it (prefer most recent)
+                        if status_str == "Playing" {
+                            let current_bus = this.snapshot.borrow().player_bus_name.clone();
+                            let sender_unique = sender.to_string();
+
+                            // Query D-Bus to find which well-known MPRIS name owns this unique name
+                            // We need to check each known player to see if it matches
+                            let available = this.snapshot.borrow().available_players.clone();
+
+                            if let Some(conn) = this.connection.borrow().clone() {
+                                for player_name in available {
+                                    // Skip if this is already the current player
+                                    if current_bus.as_ref() == Some(&player_name) {
+                                        continue;
+                                    }
+
+                                    let this_weak = Rc::downgrade(&this);
+                                    let player_name_clone = player_name.clone();
+                                    let sender_clone = sender_unique.clone();
+
+                                    // Query GetNameOwner to check if this player matches the signal sender
+                                    conn.call(
+                                        Some(DBUS_NAME),
+                                        DBUS_PATH,
+                                        DBUS_INTERFACE,
+                                        "GetNameOwner",
+                                        Some(&glib::Variant::from((&player_name,))),
+                                        Some(glib::VariantTy::new("(s)").unwrap()),
+                                        gio::DBusCallFlags::NONE,
+                                        DBUS_CALL_TIMEOUT_MS,
+                                        None::<&gio::Cancellable>,
+                                        move |res| {
+                                            let Some(this) = this_weak.upgrade() else {
+                                                return;
+                                            };
+
+                                            if let Ok(reply) = res
+                                                && let Some(owner) =
+                                                    reply.child_value(0).get::<String>()
+                                                && owner == sender_clone
+                                            {
+                                                // Found the player! Switch to it.
+                                                debug!(
+                                                    "Player {} started playing, switching to it",
+                                                    player_name_clone
+                                                );
+                                                this.select_player(&player_name_clone);
+                                            }
+                                        },
+                                    );
+                                }
+                            }
+                        }
+                    },
+                );
+                this._global_properties_subscription
+                    .replace(Some(global_subscription));
+
                 // Initial player discovery
                 this.discover_players();
             },
@@ -409,36 +536,25 @@ impl MediaService {
                     players
                 );
 
-                // Update available players list
                 {
                     let mut snapshot = this.snapshot.borrow_mut();
                     snapshot.available_players = players.clone();
                 }
 
-                // Determine best player and switch if needed
                 let current_player = this.snapshot.borrow().player_bus_name.clone();
-                let best_player = this.pick_best_player(&players);
+                let best_player = this.pick_best_player(&players, None);
 
                 match (&current_player, &best_player) {
-                    (_, None) => {
-                        // No players available
-                        this.clear_player();
-                    }
-                    (None, Some(player)) => {
-                        // No current player, select new one
-                        this.select_player(player);
-                    }
+                    (_, None) => this.clear_player(),
+                    (None, Some(player)) => this.select_player(player),
                     (Some(current), Some(best)) if current != best => {
-                        // Switch to better player
                         debug!("Switching from {} to {}", current, best);
                         this.select_player(best);
                     }
                     (Some(current), Some(_)) if !players.contains(current) => {
-                        // Current player disappeared, select new one
                         this.select_player(best_player.as_ref().unwrap());
                     }
                     _ => {
-                        // Just notify about updated player list
                         let snapshot = this.snapshot.borrow().clone();
                         this.callbacks.notify(&snapshot);
                     }
@@ -447,16 +563,11 @@ impl MediaService {
         );
     }
 
-    /// Select and connect to a specific player.
     fn select_player(self: &Rc<Self>, bus_name: &str) {
         debug!("Selecting MPRIS player: {}", bus_name);
 
-        // Cancel any in-flight operations for the previous player
         self.player_cancellable.borrow().cancel();
-        // Create a fresh cancellable for the new player
         self.player_cancellable.replace(gio::Cancellable::new());
-
-        // Clear old subscription
         self._properties_subscription.replace(None);
         self.stop_position_polling();
 
@@ -492,16 +603,11 @@ impl MediaService {
                 debug!("Created MPRIS proxy for {}", bus_name_owned);
                 this.player_proxy.replace(Some(proxy.clone()));
 
-                // Extract player ID from bus name for icon lookup
-                // e.g., "org.mpris.MediaPlayer2.spotify" -> "spotify"
-                // e.g., "org.mpris.MediaPlayer2.firefox.instance_1234" -> "firefox"
-                let player_id = bus_name_owned.strip_prefix(MPRIS_PREFIX).map(|s| {
-                    // Take only the first segment (before any dots)
-                    // This handles cases like "firefox.instance_1234" -> "firefox"
-                    s.split('.').next().unwrap_or(s).to_string()
-                });
+                // Extract player ID from bus name (e.g., "org.mpris.MediaPlayer2.spotify" -> "spotify")
+                let player_id = bus_name_owned
+                    .strip_prefix(MPRIS_PREFIX)
+                    .map(|s| s.split('.').next().unwrap_or(s).to_string());
 
-                // Extract player name (capitalized version for display)
                 let player_name = player_id
                     .as_ref()
                     .map(|id| {
@@ -514,7 +620,6 @@ impl MediaService {
                     })
                     .unwrap_or_else(|| bus_name_owned.clone());
 
-                // Update snapshot with player info
                 {
                     let mut snapshot = this.snapshot.borrow_mut();
                     snapshot.available = true;
@@ -523,10 +628,8 @@ impl MediaService {
                     snapshot.player_bus_name = Some(bus_name_owned.clone());
                 }
 
-                // Read initial properties
                 this.update_from_proxy(&proxy);
 
-                // Subscribe to PropertiesChanged
                 let connection = proxy.connection();
                 let this_weak = Rc::downgrade(&this);
                 let proxy_for_cb = proxy.clone();
@@ -545,11 +648,9 @@ impl MediaService {
                 );
                 this._properties_subscription.replace(Some(subscription));
 
-                // Notify listeners
                 let snapshot = this.snapshot.borrow().clone();
                 this.callbacks.notify(&snapshot);
 
-                // Start position polling if playing
                 if snapshot.playback_status == PlaybackStatus::Playing {
                     this.start_position_polling();
                 }
@@ -557,15 +658,11 @@ impl MediaService {
         );
     }
 
-    /// Clear the active player (no player available).
     fn clear_player(&self) {
         debug!("Clearing MPRIS player");
 
-        // Cancel any in-flight operations
         self.player_cancellable.borrow().cancel();
-        // Create a fresh cancellable for future operations
         self.player_cancellable.replace(gio::Cancellable::new());
-
         self.player_proxy.replace(None);
         self._properties_subscription.replace(None);
         self.stop_position_polling();
@@ -577,54 +674,41 @@ impl MediaService {
         });
     }
 
-    /// Update snapshot from proxy properties.
     fn update_from_proxy(self: &Rc<Self>, proxy: &gio::DBusProxy) {
-        // Update snapshot and get status change info for polling management
         let (old_status, new_status, track_changed) = {
             let mut snapshot = self.snapshot.borrow_mut();
             let old_status = snapshot.playback_status;
             let old_track_id = snapshot.metadata.track_id.clone();
             let old_title = snapshot.metadata.title.clone();
 
-            // PlaybackStatus
             if let Some(status) = proxy.cached_property("PlaybackStatus")
                 && let Some(s) = status.get::<String>()
             {
                 snapshot.playback_status = s.parse().unwrap_or_default();
             }
 
-            // Metadata
             if let Some(metadata) = proxy.cached_property("Metadata") {
                 snapshot.metadata = Self::parse_metadata(&metadata);
             }
 
-            // Volume
             if let Some(volume) = proxy.cached_property("Volume")
                 && let Some(v) = volume.get::<f64>()
             {
                 snapshot.volume = v;
             }
 
-            // Detect track change by comparing track IDs OR titles.
-            // Some players (e.g., Firefox) use a constant track ID for all tracks,
-            // so we also check if the title changed as a fallback.
+            // Detect track change by track ID or title (Firefox uses constant track IDs)
             let track_id_changed = old_track_id != snapshot.metadata.track_id;
             let title_changed = old_title.is_some()
                 && snapshot.metadata.title.is_some()
                 && old_title != snapshot.metadata.title;
             let track_changed = track_id_changed || title_changed;
 
-            // Reset position to 0 when track changes to avoid showing stale position
-            // from the previous track. The next poll will update to the correct value.
+            // Reset position on track change; actual position comes from polling
             if track_changed {
                 snapshot.position = 0;
             }
-            // Note: Position doesn't reliably emit PropertiesChanged and the cached
-            // value is often stale. We poll it separately via poll_position().
-            // Don't update position here (except on track change) to avoid
-            // overwriting good values with stale ones.
 
-            // Capabilities
             snapshot.can_play = proxy
                 .cached_property("CanPlay")
                 .and_then(|v| v.get::<bool>())
@@ -658,60 +742,48 @@ impl MediaService {
             *self.track_generation.borrow_mut() += 1;
         }
 
-        // Manage position polling based on playback status change
         if old_status != new_status {
             if new_status == PlaybackStatus::Playing {
                 self.start_position_polling();
             } else {
-                // Increment generation when stopping to invalidate any in-flight polls
                 *self.track_generation.borrow_mut() += 1;
                 self.stop_position_polling();
             }
         }
 
-        // If track changed while playing, do an immediate position poll
-        // to get the new track's position quickly
         if track_changed && new_status == PlaybackStatus::Playing {
             self.poll_position();
         }
 
-        // If current player became stopped with no metadata, try to find a better one
-        // This handles the case where e.g. a Slack call ends while music is playing elsewhere
+        // Check if another player started playing while this one paused
         let should_try_switch = {
             let snapshot = self.snapshot.borrow();
-            let has_metadata = snapshot
-                .metadata
-                .title
-                .as_ref()
-                .is_some_and(|t| !t.trim().is_empty());
-            snapshot.playback_status == PlaybackStatus::Stopped
-                && !has_metadata
+            old_status == PlaybackStatus::Playing
+                && new_status != PlaybackStatus::Playing
                 && snapshot.available_players.len() > 1
         };
 
         if should_try_switch {
-            debug!("Current player stopped with no metadata, re-evaluating players");
+            debug!(
+                "Current player stopped playing ({:?} -> {:?}), checking for other playing players",
+                old_status, new_status
+            );
             self.discover_players();
-            return; // discover_players will notify
+            return;
         }
 
-        // Notify after releasing the borrow
         let snapshot = self.snapshot.borrow().clone();
         self.callbacks.notify(&snapshot);
     }
 
-    /// Parse MPRIS metadata dict into MediaMetadata.
     fn parse_metadata(variant: &Variant) -> MediaMetadata {
         let mut meta = MediaMetadata::default();
 
-        // Metadata is a{sv}
         if let Some(dict) = variant.get::<HashMap<String, Variant>>() {
-            // Title
             if let Some(title) = dict.get("xesam:title") {
                 meta.title = title.get::<String>();
             }
 
-            // Artist (can be array of strings)
             if let Some(artist) = dict.get("xesam:artist") {
                 if let Some(artists) = artist.get::<Vec<String>>() {
                     meta.artist = Some(artists.join(", "));
@@ -720,32 +792,26 @@ impl MediaService {
                 }
             }
 
-            // Album
             if let Some(album) = dict.get("xesam:album") {
                 meta.album = album.get::<String>();
             }
 
-            // Art URL
             if let Some(art_url) = dict.get("mpris:artUrl") {
                 meta.art_url = art_url.get::<String>();
             }
 
-            // Track URL (useful for identifying web players)
             if let Some(url) = dict.get("xesam:url") {
                 meta.url = url.get::<String>();
             }
 
-            // Length (duration in microseconds)
-            // Note: Some players (like Spotify) report length as u64, others as i64
+            // Length in microseconds (some players use u64, others i64)
             if let Some(length) = dict.get("mpris:length") {
                 meta.length = length
                     .get::<i64>()
                     .or_else(|| length.get::<u64>().map(|v| v as i64));
             }
 
-            // Track ID
             if let Some(track_id) = dict.get("mpris:trackid") {
-                // Track ID is an object path (o), but we store as string
                 if let Some(id) = track_id.get::<String>() {
                     meta.track_id = Some(id);
                 } else if let Some(path) = track_id.get::<glib::variant::ObjectPath>() {
@@ -757,11 +823,7 @@ impl MediaService {
         meta
     }
 
-    // ========== Position Polling ==========
-
-    /// Start periodic position polling while playback is active.
     fn start_position_polling(self: &Rc<Self>) {
-        // Stop any existing polling first to prevent duplicate timers
         self.stop_position_polling();
 
         trace!("Starting position polling");
@@ -773,7 +835,6 @@ impl MediaService {
                     return ControlFlow::Break;
                 };
 
-                // Only continue polling if still playing
                 if this.snapshot.borrow().playback_status != PlaybackStatus::Playing {
                     this.position_poll_source.replace(None);
                     return ControlFlow::Break;
@@ -798,14 +859,12 @@ impl MediaService {
             return;
         };
 
-        // Position property needs to be fetched directly (not cached reliably)
         let connection = proxy.connection();
         let bus_name = proxy.name().map(|n| n.to_string());
         let Some(bus_name) = bus_name else {
             return;
         };
 
-        // Capture current generation to detect stale responses after track/status change
         let generation_at_request = *self.track_generation.borrow();
 
         let cancellable = self.player_cancellable.borrow().clone();
@@ -826,25 +885,19 @@ impl MediaService {
                 move |res| {
                     let current_gen = *this.track_generation.borrow();
 
-                    // Ignore stale results if playback stopped while request was in flight.
-                    // This prevents the "jump back on pause" issue.
+                    // Ignore stale results from before pause or track change
                     if this.snapshot.borrow().playback_status != PlaybackStatus::Playing {
                         return;
                     }
-
-                    // Ignore stale results if track changed while request was in flight.
-                    // This prevents showing old track's position on the new track.
                     if current_gen != generation_at_request {
                         return;
                     }
 
                     match res {
                         Ok(reply) => {
-                            // Response is (v) where v contains the actual value
                             if let Some(inner) = reply.child_value(0).get::<Variant>()
                                 && let Some(position) = inner.get::<i64>()
                             {
-                                // Only notify if position actually changed
                                 if this.snapshot.borrow().position != position {
                                     this.update_and_notify(|snapshot| {
                                         snapshot.position = position;
@@ -853,7 +906,6 @@ impl MediaService {
                             }
                         }
                         Err(e) => {
-                            // Don't log cancelled operations (expected when switching players)
                             if !e.matches(gio::IOErrorEnum::Cancelled) {
                                 trace!("Position poll failed (transient): {}", e);
                             }
@@ -864,42 +916,33 @@ impl MediaService {
         );
     }
 
-    // ========== Playback Control ==========
-
-    /// Toggle play/pause.
     pub fn play_pause(&self) {
         self.call_player_method("PlayPause");
     }
 
-    /// Start playback.
-    #[allow(dead_code)] // Part of public API, use play_pause() for toggle behavior
+    #[allow(dead_code)]
     pub fn play(&self) {
         self.call_player_method("Play");
     }
 
-    /// Pause playback.
-    #[allow(dead_code)] // Part of public API, use play_pause() for toggle behavior
+    #[allow(dead_code)]
     pub fn pause(&self) {
         self.call_player_method("Pause");
     }
 
-    /// Stop playback.
-    #[allow(dead_code)] // Part of public API for potential future use
+    #[allow(dead_code)]
     pub fn stop(&self) {
         self.call_player_method("Stop");
     }
 
-    /// Skip to next track.
     pub fn next(&self) {
         self.call_player_method("Next");
     }
 
-    /// Skip to previous track.
     pub fn previous(&self) {
         self.call_player_method("Previous");
     }
 
-    /// Seek by offset (in microseconds). Positive = forward, negative = backward.
     #[allow(dead_code)]
     pub fn seek(&self, offset_us: i64) {
         let Some((connection, bus_name)) = self.get_player_connection() else {
@@ -924,11 +967,7 @@ impl MediaService {
         );
     }
 
-    /// Set absolute position (in microseconds).
-    ///
-    /// This optimistically updates the local position immediately for responsive UI,
-    /// then sends the seek command to the player. If the command fails, the next
-    /// position poll will correct the displayed value.
+    /// Set absolute position (in microseconds). Updates UI optimistically.
     pub fn set_position(&self, position_us: i64) {
         let track_id = {
             let snapshot = self.snapshot.borrow();
@@ -949,7 +988,6 @@ impl MediaService {
             return;
         };
 
-        // Optimistically update local position for responsive UI
         self.update_and_notify(|snapshot| {
             snapshot.position = position_us;
         });
@@ -967,20 +1005,14 @@ impl MediaService {
             |res| {
                 if let Err(e) = res {
                     warn!("MPRIS SetPosition failed: {}", e);
-                    // Note: We don't revert the optimistic update on failure.
-                    // The next position poll will correct the displayed value.
                 }
             },
         );
     }
 
-    /// Set player volume (0.0 - 1.0+).
-    ///
-    /// MPRIS allows volumes > 1.0 for amplification, but negative values are invalid.
-    /// Invalid values (negative, NaN, infinity) are rejected with a warning.
+    /// Set player volume (0.0 - 1.0+, where >1.0 allows amplification).
     #[allow(dead_code)]
     pub fn set_volume(self: &Rc<Self>, volume: f64) {
-        // Validate volume - MPRIS allows > 1.0 for amplification, but not negative or non-finite
         if !volume.is_finite() || volume < 0.0 {
             warn!("Invalid volume value: {}", volume);
             return;
@@ -990,15 +1022,12 @@ impl MediaService {
             return;
         };
 
-        // Store previous volume for rollback on error
         let previous_volume = self.snapshot.borrow().volume;
 
-        // Optimistically update local snapshot for responsive UI
         self.update_and_notify(|snapshot| {
             snapshot.volume = volume;
         });
 
-        // Volume is set via org.freedesktop.DBus.Properties.Set
         let volume_variant = volume.to_variant();
         let params = (MPRIS_PLAYER_INTERFACE, "Volume", volume_variant).to_variant();
 
@@ -1016,7 +1045,6 @@ impl MediaService {
             move |res| {
                 if let Err(e) = res {
                     warn!("MPRIS set volume failed: {}", e);
-                    // Revert optimistic update on error
                     if let Some(this) = this.upgrade() {
                         this.update_and_notify(|snapshot| {
                             snapshot.volume = previous_volume;
@@ -1027,8 +1055,7 @@ impl MediaService {
         );
     }
 
-    /// Switch to a different player by bus name.
-    #[allow(dead_code)] // Part of public API for future player selector feature
+    #[allow(dead_code)]
     pub fn switch_player(self: &Rc<Self>, bus_name: &str) {
         if self.snapshot.borrow().player_bus_name.as_deref() == Some(bus_name) {
             return; // Already on this player
@@ -1044,7 +1071,6 @@ impl MediaService {
         }
     }
 
-    /// Call a simple method on the Player interface (no arguments, no return).
     fn call_player_method(&self, method: &str) {
         let Some((connection, bus_name)) = self.get_player_connection() else {
             return;
@@ -1069,9 +1095,6 @@ impl MediaService {
         );
     }
 
-    /// Get the D-Bus connection and bus name for the current player.
-    ///
-    /// Returns `None` if no player is connected.
     fn get_player_connection(&self) -> Option<(gio::DBusConnection, String)> {
         let proxy = self.player_proxy.borrow().clone()?;
         let connection = proxy.connection();
@@ -1083,32 +1106,20 @@ impl MediaService {
 impl Drop for MediaService {
     fn drop(&mut self) {
         trace!("MediaService dropping, cleaning up resources");
-
-        // Cancel any in-flight D-Bus operations
         self.player_cancellable.borrow().cancel();
-
-        // Stop position polling timer (SourceId doesn't auto-remove on drop)
         if let Some(source) = self.position_poll_source.take() {
             source.remove();
         }
-
-        // Signal subscriptions (gio::SignalSubscription) automatically unsubscribe
-        // when dropped, so we just need to clear them to trigger the drop.
         self._name_owner_subscription.take();
         self._properties_subscription.take();
     }
 }
 
-// ========== Helper Functions ==========
-
-/// Microseconds per second (for duration formatting).
 const MICROSECONDS_PER_SECOND: i64 = 1_000_000;
-/// Seconds per minute (for duration formatting).
 const SECONDS_PER_MINUTE: i64 = 60;
-/// Seconds per hour (for duration formatting).
 const SECONDS_PER_HOUR: i64 = 3600;
 
-/// Format duration in microseconds to human-readable string (MM:SS or H:MM:SS).
+/// Format microseconds as MM:SS or H:MM:SS.
 pub fn format_duration(microseconds: i64) -> String {
     if microseconds < 0 {
         return "0:00".to_string();
