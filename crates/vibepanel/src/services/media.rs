@@ -96,6 +96,7 @@ pub struct MediaMetadata {
 
 /// Info about a single player, for the player selector UI.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct PlayerInfo {
     /// Bus name (e.g., "org.mpris.MediaPlayer2.spotify").
     pub bus_name: String,
@@ -111,6 +112,7 @@ pub struct PlayerInfo {
 
 /// Canonical snapshot of media player state.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct MediaSnapshot {
     /// Whether any MPRIS player is available.
     pub available: bool,
@@ -204,6 +206,7 @@ struct MprisPlayer {
     track_generation: u64,
 }
 
+#[allow(dead_code)]
 impl MprisPlayer {
     fn to_player_info(&self, is_active: bool) -> PlayerInfo {
         PlayerInfo {
@@ -283,6 +286,7 @@ impl MediaService {
     }
 
     /// Get info about all available players (for selector UI).
+    #[allow(dead_code)]
     pub fn available_players(&self) -> Vec<PlayerInfo> {
         let players = self.players.borrow();
         let active = self.active_player.borrow();
@@ -298,6 +302,7 @@ impl MediaService {
     }
 
     /// Manually select a specific player.
+    #[allow(dead_code)]
     pub fn set_active_player(self: &Rc<Self>, bus_name: &str) {
         if !self.players.borrow().contains_key(bus_name) {
             warn!("Cannot select unknown player: {}", bus_name);
@@ -311,6 +316,7 @@ impl MediaService {
     }
 
     /// Switch to auto-selection mode.
+    #[allow(dead_code)]
     pub fn set_auto_selection(self: &Rc<Self>) {
         debug!("Switching to auto player selection");
         self.manual_selection.replace(None);

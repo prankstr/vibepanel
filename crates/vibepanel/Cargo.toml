@@ -35,7 +35,7 @@ udev = { workspace = true }
 toml = { workspace = true }
 sysinfo = { workspace = true }
 parking_lot = { workspace = true }
-soup3 = { workspace = true }
+minreq = { workspace = true }
 
 [dev-dependencies]
 cargo-husky = { version = "1.5.0", default-features = false, features = [

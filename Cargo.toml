@@ -60,7 +60,7 @@ sysinfo = { version = "0.33", default-features = false, features = ["system", "n
 parking_lot = "0.12"
 
 # HTTP
-soup3 = "0.8"
+minreq = { version = "2.14", default-features = false, features = ["https-rustls"] }
 
 # Internal crates
 vibepanel-core = { path = "crates/vibepanel-core" }
