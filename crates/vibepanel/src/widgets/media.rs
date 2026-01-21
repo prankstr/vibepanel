@@ -553,6 +553,7 @@ fn create_controls() -> ControlsHandle {
     let play_pause_btn = Button::new();
     play_pause_btn.set_child(Some(&play_pause_icon.widget()));
     play_pause_btn.add_css_class(media::CONTROL_BTN);
+    play_pause_btn.add_css_class(media::CONTROL_BTN_PRIMARY);
     play_pause_btn.add_css_class(button::COMPACT);
     play_pause_btn.set_tooltip_text(Some("Play/Pause"));
     play_pause_btn.connect_clicked(|_| {

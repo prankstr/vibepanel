@@ -1049,15 +1049,20 @@ window.quick-settings-window {{
         }}
 
         /* Inline playback controls in bar */
-        .media-widget .media-controls {{
+        .media .media-controls {{
             margin-left: 4px;
         }}
 
-        .media-widget .media-control-btn {{
+        .media .media-control-btn {{
             border-radius: var(--radius-sm);
+            color: var(--color-foreground-primary);
         }}
 
-        .media-widget .media-control-btn:hover {{
+        .media .media-control-btn.media-control-btn-primary .icon-root {{
+            font-size: calc(var(--icon-size) * 1.1);
+        }}
+
+        .media .media-control-btn:hover {{
             background: var(--color-card-overlay-hover);
         }}
 
@@ -1129,6 +1134,7 @@ window.quick-settings-window {{
             min-height: 32px;
             padding: 0;
             border-radius: 50%;
+            color: var(--color-foreground-primary);
         }}
 
         .media-popover .media-control-btn:hover,
@@ -1346,6 +1352,8 @@ window.quick-settings-window {{
         .system-network-icon {{
             font-size: 0.9em;
         }}
+
+        /* ===== MEDIA ===== */
 
 "#
     )
