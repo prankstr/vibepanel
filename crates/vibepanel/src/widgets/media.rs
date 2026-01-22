@@ -25,6 +25,7 @@ use crate::services::tooltip::TooltipManager;
 use crate::styles::media;
 use crate::widgets::base::{BaseWidget, MenuHandle};
 use crate::widgets::marquee_label::{MarqueeLabel, ScrollMode};
+use crate::widgets::media_components::ArtState;
 use crate::widgets::media_popover::{MediaPopoverController, build_media_popover_with_controller};
 use crate::widgets::media_window::{MediaWindowHandle, create_media_window};
 use crate::widgets::rounded_picture::RoundedPicture;
@@ -144,25 +145,7 @@ impl Default for MediaConfig {
     }
 }
 
-/// State for tracking album art loading to avoid redundant loads.
-struct ArtState {
-    current_url: Option<String>,
-    has_art: bool,
-    /// Incremented on each art load to invalidate stale async callbacks.
-    generation: u64,
-    cancellable: gio::Cancellable,
-}
-
-impl Default for ArtState {
-    fn default() -> Self {
-        Self {
-            current_url: None,
-            has_art: false,
-            generation: 0,
-            cancellable: gio::Cancellable::new(),
-        }
-    }
-}
+// ArtState is imported from media_components
 
 /// Widget tokens that create actual GTK widgets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -917,7 +900,6 @@ fn update_widgets_from_snapshot_impl(ctx: &WidgetUpdateContext<'_>, snapshot: &M
             } else {
                 state.cancellable.cancel();
                 state.current_url = art_url.map(String::from);
-                state.has_art = false;
                 state.generation += 1;
                 state.cancellable = gio::Cancellable::new();
                 Some((state.generation, state.cancellable.clone()))
@@ -1113,7 +1095,6 @@ fn load_texture_from_stream_with_fallback(
                 let texture = Texture::for_pixbuf(&pixbuf);
                 art_picture.set_paintable(Some(&texture));
                 art_picture.set_visible(true);
-                art_state.borrow_mut().has_art = true;
                 debug!("Loaded album art from {}", url);
             }
             Err(e) => {
@@ -1149,7 +1130,6 @@ fn load_texture_from_bytes_with_fallback(
             let texture = Texture::for_pixbuf(&pixbuf);
             art_picture.set_paintable(Some(&texture));
             art_picture.set_visible(true);
-            art_state.borrow_mut().has_art = true;
             debug!("Loaded album art from {}", url);
         }
         Err(e) => {
@@ -1177,8 +1157,6 @@ fn show_player_icon_in_art(
     let Some(display) = gtk4::gdk::Display::default() else {
         warn!("No display available for icon lookup");
         art_picture.set_visible(false);
-        let mut state = art_state.borrow_mut();
-        state.has_art = false;
         return;
     };
     let icon_theme = gtk4::IconTheme::for_display(&display);
@@ -1197,8 +1175,6 @@ fn show_player_icon_in_art(
 
     art_picture.set_paintable(Some(&paintable));
     art_picture.set_visible(true);
-
-    art_state.borrow_mut().has_art = false;
 }
 
 fn build_tooltip(snapshot: &MediaSnapshot) -> String {

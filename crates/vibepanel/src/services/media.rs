@@ -54,6 +54,26 @@ const DBUS_CALL_TIMEOUT_MS: i32 = 5000;
 /// Shorter timeout for position polling queries.
 const DBUS_POLL_TIMEOUT_MS: i32 = 1000;
 
+// ========== Helper Functions ==========
+
+/// Extract player ID from MPRIS bus name (e.g., "org.mpris.MediaPlayer2.spotify" -> "spotify").
+fn player_id_from_bus_name(bus_name: &str) -> String {
+    bus_name
+        .strip_prefix(MPRIS_PREFIX)
+        .map(|s| s.split('.').next().unwrap_or(s))
+        .unwrap_or(bus_name)
+        .to_string()
+}
+
+/// Capitalize the first character of a string (e.g., "spotify" -> "Spotify").
+fn capitalize_first(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
 /// Playback status of the media player.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PlaybackStatus {
@@ -530,18 +550,8 @@ impl MediaService {
                     };
 
                     // Extract player ID and name
-                    let player_id = bus_name_owned
-                        .strip_prefix(MPRIS_PREFIX)
-                        .map(|s| s.split('.').next().unwrap_or(s).to_string())
-                        .unwrap_or_else(|| bus_name_owned.clone());
-
-                    let player_name = {
-                        let mut chars = player_id.chars();
-                        match chars.next() {
-                            Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
-                            None => player_id.clone(),
-                        }
-                    };
+                    let player_id = player_id_from_bus_name(&bus_name_owned);
+                    let player_name = capitalize_first(&player_id);
 
                     // Create the player with initial state from proxy
                     let player = Rc::new(RefCell::new(MprisPlayer {
@@ -1405,20 +1415,8 @@ impl MediaCli {
         self.players = names
             .iter()
             .map(|bus_name| {
-                let player_id = bus_name
-                    .strip_prefix(MPRIS_PREFIX)
-                    .map(|s| s.split('.').next().unwrap_or(s))
-                    .unwrap_or(bus_name);
-
-                // Capitalize first letter for display name
-                let player_name = {
-                    let mut chars = player_id.chars();
-                    match chars.next() {
-                        Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
-                        None => player_id.to_string(),
-                    }
-                };
-
+                let player_id = player_id_from_bus_name(bus_name);
+                let player_name = capitalize_first(&player_id);
                 (bus_name.clone(), player_name)
             })
             .collect();
