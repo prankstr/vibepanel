@@ -1105,10 +1105,6 @@ impl MediaService {
                         return;
                     }
 
-                    if player.borrow().playback_status != PlaybackStatus::Playing {
-                        return;
-                    }
-
                     match res {
                         Ok(reply) => {
                             if let Some(inner) = reply.child_value(0).get::<Variant>()
