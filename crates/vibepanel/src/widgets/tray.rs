@@ -243,6 +243,7 @@ fn sync_items(state: &Rc<RefCell<WidgetState>>, container: &GtkBox, root: &GtkBo
 fn create_button(state: &Rc<RefCell<WidgetState>>, identifier: &str) -> Button {
     let button = Button::new();
     button.set_has_frame(false);
+    button.set_focusable(false);
     button.set_focus_on_click(false);
     button.add_css_class(widget::TRAY_ITEM);
     button.add_css_class(btn::COMPACT); // Remove default button padding
@@ -580,6 +581,7 @@ fn toggle_menu(state: &Rc<RefCell<WidgetState>>, identifier: &str, parent: &Widg
         // Create the popover now that we have entries
         let popover = Popover::new();
         popover.set_parent(&parent_clone);
+        popover.set_can_focus(false);
         configure_popover(&popover);
 
         let container = GtkBox::new(Orientation::Vertical, 2);
