@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0](https://github.com/prankstr/vibepanel/compare/v0.5.3...v0.6.0) (2026-01-22)
+
+
+### ⚠ BREAKING CHANGES
+
+* **config:** `notch_enabled` and `notch_width` options have been removed from [bar] config. Remove these fields and use `center = ["spacer:WIDTH"]` instead
+
+### Features
+
+* **widget:** MPRIS media player widget ([#20](https://github.com/prankstr/vibepanel/issues/20)) ([db2dfd2](https://github.com/prankstr/vibepanel/commit/db2dfd25c480c04b2893e0907c94d5614796800c))
+
+
+### Bug Fixes
+
+* **bar:** border radius calculation is now correct for widgets ([ff88b63](https://github.com/prankstr/vibepanel/commit/ff88b63a1830cce860daef2dac875acd9b8b47e3))
+* **battery:** set available flag synchronously to prevent race condition ([541d2d6](https://github.com/prankstr/vibepanel/commit/541d2d61ba85438b1a9d74bb23be567a83483008))
+* collapse nested if statement in battery service ([531d4bb](https://github.com/prankstr/vibepanel/commit/531d4bbdfb2e3fdf2a65c523778a2a16fc54fe8a))
+* **theme:** use 9999px for --radius-widget when border_radius &gt;= 50 ([337b873](https://github.com/prankstr/vibepanel/commit/337b873789487511f4f7bb01c96673a9dca8c989))
+* **tray:** keep tray icon large while is menu open ([#18](https://github.com/prankstr/vibepanel/issues/18)) ([8c70417](https://github.com/prankstr/vibepanel/commit/8c704170fdbf528b16f399acfbbbfe7b3dca29a8))
+* **tray:** load icons from custom IconThemePath when provided ([6bf848d](https://github.com/prankstr/vibepanel/commit/6bf848d8c2f92a2005008ef08b62fde1ccafe280))
+* **widget:** disable default horizontal expansion ([005d78e](https://github.com/prankstr/vibepanel/commit/005d78e7f86028b4d2df2147922c382dc178e4ad))
+* **widgets:** don't use full rounding for larger elements ([ce5037a](https://github.com/prankstr/vibepanel/commit/ce5037aa09fce163d503dadb9c912c50a0413450))
+* **widgets:** hide battery widget when no battery device is detected ([c58b047](https://github.com/prankstr/vibepanel/commit/c58b047b758122441c07a0960903a660687120c1))
+* **widgets:** scale popover border radius with widget radius ([7903715](https://github.com/prankstr/vibepanel/commit/7903715c938daf70b6810826762fcccabd833a85))
+
+
+### Code Refactoring
+
+* **config:** remove notch mode in favor of spacer ([#19](https://github.com/prankstr/vibepanel/issues/19)) ([fb5e7fd](https://github.com/prankstr/vibepanel/commit/fb5e7fd15307e287fe39b3053688c6c3ab8ae188))
+
 ## [0.5.3](https://github.com/prankstr/vibepanel/compare/v0.5.2...v0.5.3) (2026-01-18)
 
 
