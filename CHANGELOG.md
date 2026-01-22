@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1](https://github.com/prankstr/vibepanel/compare/v0.6.0...v0.6.1) (2026-01-22)
+
+
+### Bug Fixes
+
+* **battery:** dont use device scope for battery detection ([3fe1778](https://github.com/prankstr/vibepanel/commit/3fe1778062021c9748d72b79f5ea2f81e5caf10f))
+* **media:** make album art update radius live when config changes ([6d3d890](https://github.com/prankstr/vibepanel/commit/6d3d890d2626f1825ea86ee185807f7560d6b897))
+* **notifications:** batch disk operations when clearing all ([51e56ee](https://github.com/prankstr/vibepanel/commit/51e56ee45111387e6b648eedab87cfca753df091))
+* **tray:** avoid flickering menus with animated tray icons ([#21](https://github.com/prankstr/vibepanel/issues/21)) ([18c5800](https://github.com/prankstr/vibepanel/commit/18c580023eb19fca11ee0d02cc14e17efed571b5))
+* **widgets:** more elements scale with widget radius for choesive look ([d86b017](https://github.com/prankstr/vibepanel/commit/d86b0175f14ef84fa0d8e0d89668c2ec933e39ad))
+
 ## [0.6.0](https://github.com/prankstr/vibepanel/compare/v0.5.3...v0.6.0) (2026-01-22)
 
 
