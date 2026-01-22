@@ -6,8 +6,7 @@
 //! Features:
 //! - Automatic scroll detection based on text vs container width
 //! - Smooth scrolling animation with configurable speed
-//! - Pause at start/end of scroll for readability
-//! - Two scroll modes: ping-pong (rewind) or seamless loop
+//! - Seamless loop scrolling with configurable gap
 //!
 //! Implementation uses a custom GtkWidget subclass to properly control size
 //! reporting, ensuring the widget respects max_width_chars for layout purposes
@@ -22,60 +21,27 @@ use std::rc::Rc;
 use tracing::debug;
 
 /// Default scroll speed in pixels per tick (60 FPS).
-/// 0.4 = ~24 pixels per second, smooth and readable.
+/// 0.35 = ~21 pixels per second, smooth and readable.
 const DEFAULT_SCROLL_SPEED: f64 = 0.35;
-/// Default pause duration at start/end in milliseconds.
-const DEFAULT_PAUSE_MS: u32 = 2000;
 /// Animation tick interval in milliseconds (~60 FPS).
 const TICK_INTERVAL_MS: u32 = 16;
-/// Gap between repeated text when scrolling in loop mode (in pixels).
+/// Gap between repeated text when scrolling (in pixels).
 const SCROLL_GAP: f64 = 50.0;
-
-/// Scroll mode for the marquee animation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ScrollMode {
-    /// Scroll left to show end, then scroll back right to start (ping-pong).
-    #[default]
-    PingPong,
-    /// Seamless loop - text wraps around continuously with a gap.
-    Loop,
-}
-
-/// Scroll state for the marquee animation.
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum ScrollState {
-    /// Text fits, no scrolling needed.
-    Static,
-    /// Pausing at the start before scrolling begins.
-    PauseStart,
-    /// Actively scrolling left.
-    Scrolling,
-    /// Pausing at the end before rewinding (ping-pong) or resetting (loop).
-    PauseEnd,
-    /// Scrolling back to start (ping-pong mode only).
-    ScrollingBack,
-}
 
 /// Internal state shared between the widget and animation callback.
 struct MarqueeState {
-    /// Current scroll state.
-    state: ScrollState,
-    /// Scroll mode (ping-pong or loop).
-    scroll_mode: ScrollMode,
+    /// Whether currently scrolling.
+    scrolling: bool,
     /// Current scroll offset in pixels.
     offset: f64,
-    /// Total scroll distance needed.
+    /// Total scroll distance needed (text_width + gap).
     scroll_distance: f64,
     /// Width of the text content.
     text_width: f64,
     /// Width of the container.
     container_width: f64,
-    /// Pause countdown in ticks.
-    pause_ticks: u32,
     /// Scroll speed in pixels per tick.
     scroll_speed: f64,
-    /// Pause duration in ticks.
-    pause_ticks_duration: u32,
     /// Animation timer source ID.
     timer_id: Option<SourceId>,
     /// Current text to detect changes.
@@ -85,15 +51,12 @@ struct MarqueeState {
 impl Default for MarqueeState {
     fn default() -> Self {
         Self {
-            state: ScrollState::Static,
-            scroll_mode: ScrollMode::default(),
+            scrolling: false,
             offset: 0.0,
             scroll_distance: 0.0,
             text_width: 0.0,
             container_width: 0.0,
-            pause_ticks: 0,
             scroll_speed: DEFAULT_SCROLL_SPEED,
-            pause_ticks_duration: DEFAULT_PAUSE_MS / TICK_INTERVAL_MS,
             timer_id: None,
             current_text: String::new(),
         }
@@ -214,17 +177,12 @@ mod imp {
                 .translate(&gtk4::graphene::Point::new(-offset as f32, 0.0));
             label.allocate(text_width.max(width), height, baseline, Some(transform));
 
-            // Always allocate label2 (even if off-screen) to avoid snapshot warnings
+            // Position secondary label for seamless loop
+            // Second label appears at: text_width + gap - offset
+            // When offset = 0, label2 is off-screen to the right
+            // As offset increases, label2 slides in from the right
             if let Some(label2) = self.label2.borrow().as_ref() {
-                let label2_x = if state.scroll_mode == ScrollMode::Loop {
-                    // Second label appears at: text_width + gap - offset
-                    // When offset = 0, label2 is off-screen to the right
-                    // As offset increases, label2 slides in from the right
-                    text_width as f32 + SCROLL_GAP as f32 - offset as f32
-                } else {
-                    // For non-loop mode, place off-screen to the right
-                    (width + text_width) as f32
-                };
+                let label2_x = text_width as f32 + SCROLL_GAP as f32 - offset as f32;
                 let transform2 = gtk4::gsk::Transform::new()
                     .translate(&gtk4::graphene::Point::new(label2_x, 0.0));
                 label2.allocate(text_width.max(width), height, baseline, Some(transform2));
@@ -299,27 +257,13 @@ pub struct MarqueeLabel {
     container: MarqueeContainer,
     /// The primary label displaying the text.
     label: Label,
-    /// Secondary label for seamless loop mode.
+    /// Secondary label for seamless loop scrolling.
     label2: Label,
 }
 
 impl MarqueeLabel {
     /// Create a new marquee label with default settings.
     pub fn new() -> Self {
-        Self::with_config(
-            DEFAULT_SCROLL_SPEED,
-            DEFAULT_PAUSE_MS,
-            ScrollMode::default(),
-        )
-    }
-
-    /// Create a new marquee label with a specific scroll mode.
-    pub fn with_scroll_mode(scroll_mode: ScrollMode) -> Self {
-        Self::with_config(DEFAULT_SCROLL_SPEED, DEFAULT_PAUSE_MS, scroll_mode)
-    }
-
-    /// Create a new marquee label with custom scroll speed, pause duration, and scroll mode.
-    pub fn with_config(scroll_speed: f64, pause_ms: u32, scroll_mode: ScrollMode) -> Self {
         let container = MarqueeContainer::new();
 
         // Helper to configure a label
@@ -339,15 +283,6 @@ impl MarqueeLabel {
         let label2 = make_label();
 
         container.set_label(&label, &label2);
-
-        // Configure animation state
-        {
-            let state = container.state();
-            let mut s = state.borrow_mut();
-            s.scroll_speed = scroll_speed;
-            s.pause_ticks_duration = pause_ms / TICK_INTERVAL_MS;
-            s.scroll_mode = scroll_mode;
-        }
 
         Self {
             container,
@@ -440,9 +375,8 @@ impl MarqueeLabel {
         if let Some(id) = s.timer_id.take() {
             id.remove();
         }
-        s.state = ScrollState::Static;
+        s.scrolling = false;
         s.offset = 0.0;
-        s.pause_ticks = 0;
     }
 }
 
@@ -489,28 +423,14 @@ fn check_and_start_scroll(
     let needs_scroll = text_width > container_width;
 
     if needs_scroll {
-        // Calculate scroll distance based on mode
-        s.scroll_distance = match s.scroll_mode {
-            // Ping-pong: scroll just enough to show the end of text
-            ScrollMode::PingPong => text_width - container_width,
-            // Loop: scroll full text width + gap for seamless wrap
-            ScrollMode::Loop => text_width + SCROLL_GAP,
-        };
-
-        // For loop mode, start scrolling immediately (no pause)
-        // For ping-pong, pause at start so user can read the beginning
-        if s.scroll_mode == ScrollMode::Loop {
-            s.state = ScrollState::Scrolling;
-            s.pause_ticks = 0;
-        } else {
-            s.state = ScrollState::PauseStart;
-            s.pause_ticks = s.pause_ticks_duration;
-        }
+        // Scroll full text width + gap for seamless loop
+        s.scroll_distance = text_width + SCROLL_GAP;
+        s.scrolling = true;
         s.offset = 0.0;
 
         debug!(
-            "Marquee: text_width={}, container_width={}, scroll_distance={}, mode={:?}",
-            text_width, container_width, s.scroll_distance, s.scroll_mode
+            "Marquee: text_width={}, container_width={}, scroll_distance={}",
+            text_width, container_width, s.scroll_distance
         );
 
         if s.timer_id.is_none() {
@@ -518,7 +438,7 @@ fn check_and_start_scroll(
             start_animation(state, container);
         }
     } else {
-        s.state = ScrollState::Static;
+        s.scrolling = false;
         s.offset = 0.0;
 
         debug!(
@@ -538,66 +458,21 @@ fn start_animation(state: &Rc<RefCell<MarqueeState>>, container: &MarqueeContain
         move || {
             let mut s = state_for_closure.borrow_mut();
 
-            match s.state {
-                ScrollState::Static => {
-                    s.timer_id = None;
-                    return glib::ControlFlow::Break;
-                }
-                ScrollState::PauseStart => {
-                    if s.pause_ticks > 0 {
-                        s.pause_ticks -= 1;
-                    } else {
-                        s.state = ScrollState::Scrolling;
-                        debug!("Marquee: starting scroll");
-                    }
-                }
-                ScrollState::Scrolling => {
-                    s.offset += s.scroll_speed;
-                    if container.is_mapped() {
-                        container.queue_allocate();
-                    }
+            if !s.scrolling {
+                s.timer_id = None;
+                return glib::ControlFlow::Break;
+            }
 
-                    if s.offset >= s.scroll_distance {
-                        match s.scroll_mode {
-                            ScrollMode::PingPong => {
-                                // Pause at end before rewinding
-                                s.state = ScrollState::PauseEnd;
-                                s.pause_ticks = s.pause_ticks_duration;
-                                debug!("Marquee: reached end, pausing");
-                            }
-                            ScrollMode::Loop => {
-                                // Seamless loop - immediately reset, no pause
-                                s.offset = 0.0;
-                                if container.is_mapped() {
-                                    container.queue_allocate();
-                                }
-                                debug!("Marquee: loop reset");
-                            }
-                        }
-                    }
-                }
-                ScrollState::PauseEnd => {
-                    if s.pause_ticks > 0 {
-                        s.pause_ticks -= 1;
-                    } else {
-                        // Only ping-pong uses PauseEnd
-                        s.state = ScrollState::ScrollingBack;
-                        debug!("Marquee: rewinding");
-                    }
-                }
-                ScrollState::ScrollingBack => {
-                    s.offset -= s.scroll_speed;
-                    if container.is_mapped() {
-                        container.queue_allocate();
-                    }
+            s.offset += s.scroll_speed;
 
-                    if s.offset <= 0.0 {
-                        s.offset = 0.0;
-                        s.state = ScrollState::PauseStart;
-                        s.pause_ticks = s.pause_ticks_duration;
-                        debug!("Marquee: back at start, pausing");
-                    }
-                }
+            // Seamless loop - reset when we've scrolled the full distance
+            if s.offset >= s.scroll_distance {
+                s.offset = 0.0;
+                debug!("Marquee: loop reset");
+            }
+
+            if container.is_mapped() {
+                container.queue_allocate();
             }
 
             glib::ControlFlow::Continue
@@ -614,15 +489,14 @@ mod tests {
     #[test]
     fn test_default_config() {
         const _: () = assert!(DEFAULT_SCROLL_SPEED > 0.0);
-        const _: () = assert!(DEFAULT_PAUSE_MS > 0);
         const _: () = assert!(TICK_INTERVAL_MS > 0);
         const _: () = assert!(SCROLL_GAP > 0.0);
     }
 
     #[test]
-    fn test_scroll_state_default() {
+    fn test_marquee_state_default() {
         let state = MarqueeState::default();
-        assert_eq!(state.state, ScrollState::Static);
+        assert!(!state.scrolling);
         assert_eq!(state.offset, 0.0);
     }
 }

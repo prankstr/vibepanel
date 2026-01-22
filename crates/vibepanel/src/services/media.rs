@@ -188,7 +188,6 @@ struct MprisPlayer {
     playback_status: PlaybackStatus,
     metadata: MediaMetadata,
     position: i64,
-    volume: f64,
     can_play: bool,
     can_pause: bool,
     can_go_next: bool,
@@ -495,7 +494,6 @@ impl MediaService {
                         playback_status: PlaybackStatus::Stopped,
                         metadata: MediaMetadata::default(),
                         position: 0,
-                        volume: 1.0,
                         can_play: false,
                         can_pause: false,
                         can_go_next: false,
@@ -611,7 +609,6 @@ impl MediaService {
         let (
             playback_status,
             metadata,
-            volume,
             can_play,
             can_pause,
             can_go_next,
@@ -632,11 +629,6 @@ impl MediaService {
                 .cached_property("Metadata")
                 .map(|m| Self::parse_metadata(&m))
                 .unwrap_or_default();
-
-            let volume = proxy
-                .cached_property("Volume")
-                .and_then(|v| v.get::<f64>())
-                .unwrap_or(1.0);
 
             let can_play = proxy
                 .cached_property("CanPlay")
@@ -666,7 +658,6 @@ impl MediaService {
             (
                 playback_status,
                 metadata,
-                volume,
                 can_play,
                 can_pause,
                 can_go_next,
@@ -683,7 +674,6 @@ impl MediaService {
 
         p.playback_status = playback_status;
         p.metadata = metadata;
-        p.volume = volume;
         p.can_play = can_play;
         p.can_pause = can_pause;
         p.can_go_next = can_go_next;

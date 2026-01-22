@@ -22,7 +22,7 @@ use crate::services::state;
 use crate::services::tooltip::TooltipManager;
 use crate::styles::media;
 use crate::widgets::base::{BaseWidget, MenuHandle};
-use crate::widgets::marquee_label::{MarqueeLabel, ScrollMode};
+use crate::widgets::marquee_label::MarqueeLabel;
 use crate::widgets::media_components::{ArtState, load_art_from_url};
 use crate::widgets::media_popover::{MediaPopoverController, build_media_popover_with_controller};
 use crate::widgets::media_window::{MediaWindowHandle, create_media_window};
@@ -56,8 +56,6 @@ pub struct MediaConfig {
     pub empty_text: String,
     /// Maximum text length (0 = unlimited).
     pub max_chars: usize,
-    /// Scroll mode for text that doesn't fit: "pingpong" or "loop".
-    pub scroll_mode: ScrollMode,
     /// Custom background color for this widget.
     pub background_color: Option<String>,
     /// Opacity for the pop-out window (0.0 = fully transparent, 1.0 = fully opaque).
@@ -75,7 +73,6 @@ impl WidgetConfig for MediaConfig {
                 "template",
                 "empty_text",
                 "max_chars",
-                "scroll_mode",
                 "background_color",
                 "popout_opacity",
             ],
@@ -102,16 +99,6 @@ impl WidgetConfig for MediaConfig {
             .map(|v| v.max(0) as usize)
             .unwrap_or(DEFAULT_MAX_CHARS);
 
-        let scroll_mode = entry
-            .options
-            .get("scroll_mode")
-            .and_then(|v| v.as_str())
-            .map(|s| match s.to_lowercase().as_str() {
-                "pingpong" => ScrollMode::PingPong,
-                _ => ScrollMode::Loop,
-            })
-            .unwrap_or(ScrollMode::Loop);
-
         let popout_opacity = entry
             .options
             .get("popout_opacity")
@@ -123,7 +110,6 @@ impl WidgetConfig for MediaConfig {
             template,
             empty_text,
             max_chars,
-            scroll_mode,
             background_color: entry.background_color.clone(),
             popout_opacity,
         }
@@ -136,7 +122,6 @@ impl Default for MediaConfig {
             template: DEFAULT_TEMPLATE.to_string(),
             empty_text: String::new(),
             max_chars: DEFAULT_MAX_CHARS,
-            scroll_mode: ScrollMode::Loop,
             background_color: None,
             popout_opacity: 1.0,
         }
@@ -274,16 +259,61 @@ fn parse_template(template: &str) -> Vec<TemplateElement> {
 }
 
 /// Render all non-widget template elements into a single string.
+/// Literals (separators) are only included if both adjacent text tokens have values.
 fn render_text_from_elements(elements: &[TemplateElement], snapshot: &MediaSnapshot) -> String {
+    // First, resolve all token values
+    let resolved: Vec<Option<String>> = elements
+        .iter()
+        .map(|el| match el {
+            TemplateElement::Widget(_) => None,
+            TemplateElement::TextToken(token) => {
+                let val = token.value(snapshot);
+                if val.is_empty() { None } else { Some(val) }
+            }
+            TemplateElement::Literal(s) => Some(s.clone()),
+        })
+        .collect();
+
     let mut result = String::new();
-    for element in elements {
+
+    for (idx, element) in elements.iter().enumerate() {
         match element {
             TemplateElement::Widget(_) => {}
-            TemplateElement::TextToken(token) => result.push_str(&token.value(snapshot)),
-            TemplateElement::Literal(s) => result.push_str(s),
+            TemplateElement::TextToken(_) => {
+                if let Some(ref val) = resolved[idx] {
+                    result.push_str(val);
+                }
+            }
+            TemplateElement::Literal(_) => {
+                // Only include literal if there's a non-empty text token before AND after
+                let has_content_before = resolved[..idx]
+                    .iter()
+                    .rev()
+                    .find(|r| !matches!(r, Some(s) if is_literal_str(s)))
+                    .is_some_and(|r| r.is_some());
+
+                let has_content_after = resolved[idx + 1..]
+                    .iter()
+                    .find(|r| !matches!(r, Some(s) if is_literal_str(s)))
+                    .is_some_and(|r| r.is_some());
+
+                if has_content_before
+                    && has_content_after
+                    && let Some(ref val) = resolved[idx]
+                {
+                    result.push_str(val);
+                }
+            }
         }
     }
-    result
+
+    result.trim().to_string()
+}
+
+/// Check if a string looks like a literal (whitespace and/or punctuation only).
+fn is_literal_str(s: &str) -> bool {
+    s.chars()
+        .all(|c| c.is_whitespace() || c.is_ascii_punctuation() || "–—‒•".contains(c))
 }
 
 fn has_text(element: &TemplateElement) -> bool {
@@ -321,41 +351,6 @@ fn compute_text_runs(elements: &[TemplateElement]) -> Vec<std::ops::Range<usize>
     }
 
     runs
-}
-
-/// Clean up rendered text by removing artifacts from empty tokens.
-/// Normalizes whitespace and removes orphaned separators (-, |, :, /, etc.).
-fn clean_rendered_text(text: &str) -> String {
-    const SEPARATORS: &[&str] = &["-", "–", "—", "‒", "|", ":", "/", "•"];
-
-    let mut result = String::with_capacity(text.len());
-    let mut last_was_separator = true;
-    let mut pending_separator: Option<&str> = None;
-
-    for token in text.split_whitespace() {
-        let is_separator = SEPARATORS.contains(&token);
-
-        if is_separator {
-            if !last_was_separator && pending_separator.is_none() {
-                pending_separator = Some(token);
-            }
-        } else {
-            if !result.is_empty() {
-                if let Some(sep) = pending_separator {
-                    result.push(' ');
-                    result.push_str(sep);
-                    result.push(' ');
-                } else {
-                    result.push(' ');
-                }
-            }
-            result.push_str(token);
-            last_was_separator = false;
-            pending_separator = None;
-        }
-    }
-
-    result
 }
 
 /// Check if the popout window is currently open and visible.
@@ -545,7 +540,7 @@ impl MediaWidget {
         let text_runs = compute_text_runs(&template_elements);
 
         for _ in &text_runs {
-            let marquee = Rc::new(MarqueeLabel::with_scroll_mode(config.scroll_mode));
+            let marquee = Rc::new(MarqueeLabel::new());
             marquee.label().add_css_class(media::LABEL);
             if config.max_chars > 0 {
                 marquee.set_max_width_chars(config.max_chars as i32);
@@ -943,14 +938,13 @@ fn update_widgets_from_snapshot_impl(ctx: &WidgetUpdateContext<'_>, snapshot: &M
 
         for (run_idx, element_range) in runs.iter().cloned().enumerate() {
             if let Some(marquee) = ctx.text_labels.get(run_idx) {
-                let rendered =
+                let text =
                     render_text_from_elements(&ctx.template_elements[element_range], snapshot);
-                let cleaned = clean_rendered_text(&rendered);
-                if cleaned.is_empty() {
+                if text.is_empty() {
                     marquee.set_text("");
                     marquee.set_visible(false);
                 } else {
-                    marquee.set_text(&cleaned);
+                    marquee.set_text(&text);
                     marquee.set_visible(true);
                 }
             }
@@ -1057,7 +1051,6 @@ mod tests {
         assert_eq!(config.template, "{art}{artist} - {title}{controls}");
         assert_eq!(config.empty_text, "");
         assert_eq!(config.max_chars, 20);
-        assert_eq!(config.scroll_mode, ScrollMode::Loop);
     }
 
     #[test]
@@ -1199,23 +1192,23 @@ mod tests {
     #[test]
     fn test_render_text_from_elements_missing() {
         let snapshot = MediaSnapshot::default();
+
+        // Both missing - separator should be omitted
         let elements = parse_template("{artist} - {title}");
         let result = render_text_from_elements(&elements, &snapshot);
-        assert_eq!(result, " - ");
-    }
+        assert_eq!(result, "");
 
-    #[test]
-    fn test_clean_rendered_text() {
-        // Empty tokens leave separators
-        assert_eq!(clean_rendered_text(" - "), "");
-        assert_eq!(clean_rendered_text(" - Song"), "Song");
-        assert_eq!(clean_rendered_text("Artist - "), "Artist");
+        // Only title present - separator should be omitted
+        let mut snapshot_title = MediaSnapshot::default();
+        snapshot_title.metadata.title = Some("Song".to_string());
+        let result = render_text_from_elements(&elements, &snapshot_title);
+        assert_eq!(result, "Song");
 
-        // Multiple separators
-        assert_eq!(clean_rendered_text(" - - "), "");
-
-        // Normal text unchanged
-        assert_eq!(clean_rendered_text("Artist - Song"), "Artist - Song");
+        // Only artist present - separator should be omitted
+        let mut snapshot_artist = MediaSnapshot::default();
+        snapshot_artist.metadata.artist = Some("Artist".to_string());
+        let result = render_text_from_elements(&elements, &snapshot_artist);
+        assert_eq!(result, "Artist");
     }
 
     #[test]

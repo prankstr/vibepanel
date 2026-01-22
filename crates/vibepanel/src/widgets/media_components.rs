@@ -14,7 +14,7 @@ use crate::services::config_manager::ConfigManager;
 use crate::services::icons::{IconHandle, IconsService};
 use crate::services::media::{MediaService, MediaSnapshot, PlaybackStatus, format_duration};
 use crate::styles::{button, color, icon, media};
-use crate::widgets::marquee_label::{MarqueeLabel, ScrollMode};
+use crate::widgets::marquee_label::MarqueeLabel;
 use crate::widgets::rounded_picture::RoundedPicture;
 
 // ============================================================================
@@ -340,7 +340,7 @@ pub fn build_track_info(
     container.set_halign(Align::Fill);
     container.set_hexpand(true);
 
-    let title_label = Rc::new(MarqueeLabel::with_scroll_mode(ScrollMode::Loop));
+    let title_label = Rc::new(MarqueeLabel::new());
     title_label.set_text("No track playing");
     title_label.set_max_width_chars(max_width_chars);
     title_label.label().add_css_class(media::TRACK_TITLE);
