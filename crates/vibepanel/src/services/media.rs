@@ -116,12 +116,9 @@ pub struct MediaMetadata {
 
 /// Info about a single player, for the player selector UI.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct PlayerInfo {
     /// Bus name (e.g., "org.mpris.MediaPlayer2.spotify").
     pub bus_name: String,
-    /// Player ID for icon lookup (e.g., "spotify").
-    pub player_id: String,
     /// Display name (e.g., "Spotify").
     pub player_name: String,
     /// Current playback status.
@@ -132,7 +129,6 @@ pub struct PlayerInfo {
 
 /// Canonical snapshot of media player state.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct MediaSnapshot {
     /// Whether any MPRIS player is available.
     pub available: bool,
@@ -140,16 +136,12 @@ pub struct MediaSnapshot {
     pub player_name: Option<String>,
     /// Raw player ID for icon lookup (e.g., "spotify", "firefox").
     pub player_id: Option<String>,
-    /// Bus name of the active player (e.g., "org.mpris.MediaPlayer2.spotify").
-    pub player_bus_name: Option<String>,
     /// Current playback status.
     pub playback_status: PlaybackStatus,
     /// Track metadata.
     pub metadata: MediaMetadata,
     /// Current position in microseconds.
     pub position: i64,
-    /// Player volume (0.0 - 1.0+).
-    pub volume: f64,
     /// Whether the player can play.
     pub can_play: bool,
     /// Whether the player can pause.
@@ -160,12 +152,6 @@ pub struct MediaSnapshot {
     pub can_go_previous: bool,
     /// Whether the player can seek.
     pub can_seek: bool,
-    /// Whether the player can be controlled at all.
-    pub can_control: bool,
-    /// Whether auto-selection mode is active.
-    pub is_auto_selection: bool,
-    /// Number of available players.
-    pub player_count: usize,
 }
 
 impl Default for MediaSnapshot {
@@ -174,19 +160,14 @@ impl Default for MediaSnapshot {
             available: false,
             player_name: None,
             player_id: None,
-            player_bus_name: None,
             playback_status: PlaybackStatus::Stopped,
             metadata: MediaMetadata::default(),
             position: 0,
-            volume: 1.0,
             can_play: false,
             can_pause: false,
             can_go_next: false,
             can_go_previous: false,
             can_seek: false,
-            can_control: false,
-            is_auto_selection: true,
-            player_count: 0,
         }
     }
 }
@@ -195,12 +176,6 @@ impl MediaSnapshot {
     /// Create an empty snapshot (no player available).
     pub fn empty() -> Self {
         Self::default()
-    }
-
-    /// Check if there's an active player with metadata.
-    #[allow(dead_code)]
-    pub fn has_track(&self) -> bool {
-        self.available && self.metadata.title.is_some()
     }
 }
 
@@ -226,12 +201,10 @@ struct MprisPlayer {
     track_generation: u64,
 }
 
-#[allow(dead_code)]
 impl MprisPlayer {
     fn to_player_info(&self, is_active: bool) -> PlayerInfo {
         PlayerInfo {
             bus_name: self.bus_name.clone(),
-            player_id: self.player_id.clone(),
             player_name: self.player_name.clone(),
             playback_status: self.playback_status,
             is_active,
@@ -313,7 +286,6 @@ impl MediaService {
     }
 
     /// Get info about all available players (for selector UI).
-    #[allow(dead_code)]
     pub fn available_players(&self) -> Vec<PlayerInfo> {
         let players = self.players.borrow();
         let active = self.active_player.borrow();
@@ -329,7 +301,6 @@ impl MediaService {
     }
 
     /// Manually select a specific player.
-    #[allow(dead_code)]
     pub fn set_active_player(self: &Rc<Self>, bus_name: &str) {
         if !self.players.borrow().contains_key(bus_name) {
             warn!("Cannot select unknown player: {}", bus_name);
@@ -343,7 +314,6 @@ impl MediaService {
     }
 
     /// Switch to auto-selection mode.
-    #[allow(dead_code)]
     pub fn set_auto_selection(self: &Rc<Self>) {
         debug!("Switching to auto player selection");
         self.manual_selection.replace(None);
@@ -935,24 +905,17 @@ impl MediaService {
                 available: true,
                 player_name: Some(p.player_name.clone()),
                 player_id: Some(p.player_id.clone()),
-                player_bus_name: Some(p.bus_name.clone()),
                 playback_status: p.playback_status,
                 metadata: p.metadata.clone(),
                 position: p.position,
-                volume: p.volume,
                 can_play: p.can_play,
                 can_pause: p.can_pause,
                 can_go_next: p.can_go_next,
                 can_go_previous: p.can_go_previous,
                 can_seek: p.can_seek,
-                can_control: p.can_control,
-                is_auto_selection: self.manual_selection.borrow().is_none(),
-                player_count: players.len(),
             },
             None => MediaSnapshot {
                 available: !players.is_empty(),
-                is_auto_selection: self.manual_selection.borrow().is_none(),
-                player_count: players.len(),
                 ..Default::default()
             },
         }
@@ -1136,51 +1099,12 @@ impl MediaService {
         self.call_player_method("PlayPause");
     }
 
-    #[allow(dead_code)]
-    pub fn play(&self) {
-        self.call_player_method("Play");
-    }
-
-    #[allow(dead_code)]
-    pub fn pause(&self) {
-        self.call_player_method("Pause");
-    }
-
-    #[allow(dead_code)]
-    pub fn stop(&self) {
-        self.call_player_method("Stop");
-    }
-
     pub fn next(&self) {
         self.call_player_method("Next");
     }
 
     pub fn previous(&self) {
         self.call_player_method("Previous");
-    }
-
-    #[allow(dead_code)]
-    pub fn seek(&self, offset_us: i64) {
-        let Some((connection, bus_name)) = self.get_active_connection() else {
-            return;
-        };
-
-        connection.call(
-            Some(&bus_name),
-            MPRIS_PATH,
-            MPRIS_PLAYER_INTERFACE,
-            "Seek",
-            Some(&(offset_us,).to_variant()),
-            None::<&glib::VariantTy>,
-            gio::DBusCallFlags::NONE,
-            DBUS_CALL_TIMEOUT_MS,
-            None::<&gio::Cancellable>,
-            |res| {
-                if let Err(e) = res {
-                    warn!("MPRIS Seek failed: {}", e);
-                }
-            },
-        );
     }
 
     /// Set absolute position (in microseconds).
@@ -1233,70 +1157,6 @@ impl MediaService {
             |res| {
                 if let Err(e) = res {
                     warn!("MPRIS SetPosition failed: {}", e);
-                }
-            },
-        );
-    }
-
-    /// Set player volume (0.0 - 1.0+).
-    #[allow(dead_code)]
-    pub fn set_volume(self: &Rc<Self>, volume: f64) {
-        if !volume.is_finite() || volume < 0.0 {
-            warn!("Invalid volume value: {}", volume);
-            return;
-        }
-
-        let Some((connection, bus_name)) = self.get_active_connection() else {
-            return;
-        };
-
-        let previous_volume = {
-            let players = self.players.borrow();
-            let active = self.active_player.borrow();
-            active
-                .as_ref()
-                .and_then(|bus| players.get(bus))
-                .map(|p| p.borrow().volume)
-                .unwrap_or(1.0)
-        };
-
-        // Optimistic update
-        {
-            let players = self.players.borrow();
-            let active = self.active_player.borrow();
-            if let Some(player) = active.as_ref().and_then(|bus| players.get(bus)) {
-                player.borrow_mut().volume = volume;
-            }
-        }
-        self.notify_callbacks();
-
-        let volume_variant = volume.to_variant();
-        let params = (MPRIS_PLAYER_INTERFACE, "Volume", volume_variant).to_variant();
-
-        let this = Rc::downgrade(self);
-        connection.call(
-            Some(&bus_name),
-            MPRIS_PATH,
-            PROPERTIES_INTERFACE,
-            "Set",
-            Some(&params),
-            None::<&glib::VariantTy>,
-            gio::DBusCallFlags::NONE,
-            DBUS_CALL_TIMEOUT_MS,
-            None::<&gio::Cancellable>,
-            move |res| {
-                if let Err(e) = res {
-                    warn!("MPRIS set volume failed: {}", e);
-                    if let Some(this) = this.upgrade() {
-                        let players = this.players.borrow();
-                        let active = this.active_player.borrow();
-                        if let Some(player) = active.as_ref().and_then(|bus| players.get(bus)) {
-                            player.borrow_mut().volume = previous_volume;
-                        }
-                        drop(players);
-                        drop(active);
-                        this.notify_callbacks();
-                    }
                 }
             },
         );
@@ -1435,17 +1295,18 @@ impl MediaCli {
             })
             .collect();
 
-        // Check if the panel has a selected player via IPC state file
-        let (ipc_active, is_auto) = super::media_ipc::read_state();
-        if !is_auto
-            && let Some(ref bus_name) = ipc_active
+        // Check if the panel has a selected player via IPC state file.
+        // Always use the panel's active player (regardless of auto/manual mode)
+        // so CLI commands control the same player shown in the UI.
+        let (ipc_active, _is_auto) = super::media_ipc::read_state();
+        if let Some(ref bus_name) = ipc_active
             && self.players.iter().any(|(b, _)| b == bus_name)
         {
             self.active_player = Some(bus_name.clone());
             return;
         }
 
-        // Auto-select: first playing player, or first player
+        // Fallback when panel is not running: first playing player, or first player
         self.active_player = self
             .find_playing_player()
             .or_else(|| self.players.first().map(|(bus, _)| bus.clone()));
@@ -1485,12 +1346,6 @@ impl MediaCli {
             .map(|s| s.parse().unwrap_or(PlaybackStatus::Stopped))
     }
 
-    /// Check if any player is available.
-    #[allow(dead_code)]
-    pub fn has_player(&self) -> bool {
-        self.active_player.is_some()
-    }
-
     /// Get list of available players as (bus_name, display_name) pairs.
     pub fn list_players(&self) -> &[(String, String)] {
         &self.players
@@ -1502,8 +1357,6 @@ impl MediaCli {
     }
 
     /// Select a specific player by bus name.
-    /// Note: This only affects this CLI instance. To make the panel switch to this
-    /// player, use play() after selecting to trigger the auto-switch.
     pub fn select_player(&mut self, bus_name: &str) -> Result<(), String> {
         if self.players.iter().any(|(b, _)| b == bus_name) {
             self.active_player = Some(bus_name.to_string());
@@ -1511,13 +1364,6 @@ impl MediaCli {
         } else {
             Err(format!("player not found: {}", bus_name))
         }
-    }
-
-    /// Start playback on the active player.
-    /// This is useful after select_player() to trigger the panel's auto-switch.
-    #[allow(dead_code)]
-    pub fn play(&self) -> Result<(), String> {
-        self.call_method("Play")
     }
 
     /// Toggle play/pause on the active player.
@@ -1584,11 +1430,6 @@ impl MediaCli {
             .and_then(|v| v.get::<i64>())
             .unwrap_or(0);
 
-        let volume = props
-            .get("Volume")
-            .and_then(|v| v.get::<f64>())
-            .unwrap_or(1.0);
-
         // Get player display name
         let player_name = self
             .players
@@ -1602,10 +1443,8 @@ impl MediaCli {
             playback_status,
             title: metadata.title,
             artist: metadata.artist,
-            album: metadata.album,
             position,
             length: metadata.length,
-            volume,
         })
     }
 
@@ -1635,16 +1474,13 @@ impl MediaCli {
 
 /// Status information returned by MediaCli::status().
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct MediaCliStatus {
     pub player_name: String,
     pub playback_status: PlaybackStatus,
     pub title: Option<String>,
     pub artist: Option<String>,
-    pub album: Option<String>,
     pub position: i64,
     pub length: Option<i64>,
-    pub volume: f64,
 }
 
 impl std::fmt::Display for MediaCliStatus {
@@ -1706,18 +1542,5 @@ mod tests {
         assert!(!snapshot.available);
         assert!(snapshot.player_name.is_none());
         assert_eq!(snapshot.playback_status, PlaybackStatus::Stopped);
-        assert!(!snapshot.has_track());
-    }
-
-    #[test]
-    fn test_media_snapshot_has_track() {
-        let mut snapshot = MediaSnapshot::default();
-        assert!(!snapshot.has_track());
-
-        snapshot.available = true;
-        assert!(!snapshot.has_track());
-
-        snapshot.metadata.title = Some("Test Track".to_string());
-        assert!(snapshot.has_track());
     }
 }

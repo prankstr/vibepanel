@@ -17,6 +17,69 @@ use crate::styles::{button, color, icon, media};
 use crate::widgets::marquee_label::{MarqueeLabel, ScrollMode};
 use crate::widgets::rounded_picture::RoundedPicture;
 
+// ============================================================================
+// Shared Controller
+// ============================================================================
+
+/// Shared controller for media UI views (popover and pop-out window).
+///
+/// Owns references to UI elements and provides a unified `update_from_snapshot()`
+/// method to keep the view in sync with media state.
+#[derive(Clone)]
+pub struct MediaViewController {
+    pub title_label: Rc<MarqueeLabel>,
+    pub artist_label: Label,
+    pub album_label: Label,
+    pub art_picture: RoundedPicture,
+    pub art_placeholder_box: GtkBox,
+    pub art_state: Rc<RefCell<ArtState>>,
+    pub play_pause_btn: Button,
+    pub play_pause_icon: IconHandle,
+    pub prev_btn: Button,
+    pub next_btn: Button,
+    pub seek_scale: Scale,
+    pub position_label: Label,
+    pub duration_label: Label,
+    pub is_seeking: Rc<RefCell<bool>>,
+}
+
+impl MediaViewController {
+    /// Update all UI elements from a media snapshot.
+    pub fn update_from_snapshot(&self, snapshot: &MediaSnapshot) {
+        update_track_info(
+            &self.title_label,
+            &self.artist_label,
+            &self.album_label,
+            snapshot,
+        );
+        load_album_art(
+            snapshot.metadata.art_url.as_deref(),
+            &self.art_picture,
+            &self.art_placeholder_box,
+            &self.art_state,
+        );
+        update_playback_controls(
+            &self.play_pause_icon,
+            &self.play_pause_btn,
+            &self.prev_btn,
+            &self.next_btn,
+            &self.seek_scale,
+            snapshot,
+        );
+        update_seek_position(
+            &self.seek_scale,
+            &self.position_label,
+            &self.duration_label,
+            &self.is_seeking,
+            snapshot,
+        );
+    }
+}
+
+// ============================================================================
+// Art State
+// ============================================================================
+
 /// State for tracking album art loading with cancellation support.
 pub struct ArtState {
     pub current_url: Option<String>,

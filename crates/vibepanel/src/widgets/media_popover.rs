@@ -1,76 +1,23 @@
 //! Media popover - detailed media player controls and track information.
 
-use std::cell::RefCell;
-use std::rc::Rc;
-
 use gtk4::prelude::*;
-use gtk4::{Align, Box as GtkBox, Button, Label, Orientation, Overlay, Popover, Scale, Widget};
+use gtk4::{Align, Box as GtkBox, Button, Label, Orientation, Overlay, Popover, Widget};
 
-use crate::services::icons::{IconHandle, IconsService};
-use crate::services::media::{MediaService, MediaSnapshot, PlaybackStatus};
+use crate::services::icons::IconsService;
+use crate::services::media::{MediaService, PlaybackStatus};
 use crate::services::surfaces::SurfaceStyleManager;
 use crate::services::tooltip::TooltipManager;
 use crate::styles::{button, color, icon, media, qs, surface};
 use crate::widgets::base::configure_popover;
-use crate::widgets::marquee_label::MarqueeLabel;
 use crate::widgets::media_components::{
-    ArtState, build_album_art, build_media_controls, build_seek_section, build_track_info,
-    load_album_art, update_playback_controls, update_seek_position, update_track_info,
+    MediaViewController, build_album_art, build_media_controls, build_seek_section,
+    build_track_info,
 };
-use crate::widgets::rounded_picture::RoundedPicture;
 
 const POPOVER_ART_SIZE: i32 = 140;
 
-/// Controller owning the media popover UI elements and update logic.
-#[derive(Clone)]
-pub struct MediaPopoverController {
-    title_label: Rc<MarqueeLabel>,
-    artist_label: Label,
-    album_label: Label,
-    art_picture: RoundedPicture,
-    art_placeholder_box: GtkBox,
-    art_state: Rc<RefCell<ArtState>>,
-    play_pause_btn: Button,
-    play_pause_icon: IconHandle,
-    prev_btn: Button,
-    next_btn: Button,
-    seek_scale: Scale,
-    position_label: Label,
-    duration_label: Label,
-    is_seeking: Rc<RefCell<bool>>,
-}
-
-impl MediaPopoverController {
-    pub fn update_from_snapshot(&self, snapshot: &MediaSnapshot) {
-        update_track_info(
-            &self.title_label,
-            &self.artist_label,
-            &self.album_label,
-            snapshot,
-        );
-        load_album_art(
-            snapshot.metadata.art_url.as_deref(),
-            &self.art_picture,
-            &self.art_placeholder_box,
-            &self.art_state,
-        );
-        update_playback_controls(
-            &self.play_pause_icon,
-            &self.play_pause_btn,
-            &self.prev_btn,
-            &self.next_btn,
-            &self.seek_scale,
-            snapshot,
-        );
-        update_seek_position(
-            &self.seek_scale,
-            &self.position_label,
-            &self.duration_label,
-            &self.is_seeking,
-            snapshot,
-        );
-    }
-}
+/// Type alias for the shared media view controller.
+pub type MediaPopoverController = MediaViewController;
 
 /// Build a media popover content widget.
 /// Returns both the root widget and a controller for live updates.

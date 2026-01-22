@@ -6,21 +6,16 @@ use std::rc::Rc;
 use gtk4::glib;
 use gtk4::glib::clone;
 use gtk4::prelude::*;
-use gtk4::{
-    Align, ApplicationWindow, Box as GtkBox, GestureClick, Label, Orientation, Scale, Window,
-};
+use gtk4::{Align, ApplicationWindow, Box as GtkBox, GestureClick, Orientation, Window};
 
 use crate::services::callbacks::CallbackId;
-use crate::services::icons::IconHandle;
-use crate::services::media::{MediaService, MediaSnapshot};
+use crate::services::media::MediaService;
 use crate::services::surfaces::SurfaceStyleManager;
 use crate::styles::media;
-use crate::widgets::marquee_label::MarqueeLabel;
 use crate::widgets::media_components::{
-    ArtState, build_album_art, build_media_controls, build_seek_section, build_track_info,
-    load_album_art, update_playback_controls, update_seek_position, update_track_info,
+    MediaViewController, build_album_art, build_media_controls, build_seek_section,
+    build_track_info,
 };
-use crate::widgets::rounded_picture::RoundedPicture;
 
 const WINDOW_ART_SIZE: i32 = 100;
 
@@ -31,22 +26,13 @@ pub struct MediaWindowHandle {
     opacity_provider: gtk4::CssProvider,
 }
 
-#[allow(dead_code)]
 impl MediaWindowHandle {
     pub fn show(&self) {
         self.window.present();
     }
 
-    pub fn hide(&self) {
-        self.window.set_visible(false);
-    }
-
     pub fn is_visible(&self) -> bool {
         self.window.is_visible()
-    }
-
-    pub fn close(&self) {
-        self.window.close();
     }
 
     /// Update the window opacity (0.0 = fully transparent, 1.0 = fully opaque).
@@ -54,56 +40,6 @@ impl MediaWindowHandle {
         let opacity = opacity.clamp(0.0, 1.0);
         let css = format!("box {{ opacity: {}; }}", opacity);
         self.opacity_provider.load_from_string(&css);
-    }
-}
-
-#[derive(Clone)]
-struct MediaWindowController {
-    title_label: Rc<MarqueeLabel>,
-    artist_label: Label,
-    album_label: Label,
-    art_picture: RoundedPicture,
-    art_placeholder_box: GtkBox,
-    art_state: Rc<RefCell<ArtState>>,
-    play_pause_btn: gtk4::Button,
-    play_pause_icon: IconHandle,
-    prev_btn: gtk4::Button,
-    next_btn: gtk4::Button,
-    seek_scale: Scale,
-    position_label: Label,
-    duration_label: Label,
-    is_seeking: Rc<RefCell<bool>>,
-}
-
-impl MediaWindowController {
-    fn update_from_snapshot(&self, snapshot: &MediaSnapshot) {
-        update_track_info(
-            &self.title_label,
-            &self.artist_label,
-            &self.album_label,
-            snapshot,
-        );
-        load_album_art(
-            snapshot.metadata.art_url.as_deref(),
-            &self.art_picture,
-            &self.art_placeholder_box,
-            &self.art_state,
-        );
-        update_playback_controls(
-            &self.play_pause_icon,
-            &self.play_pause_btn,
-            &self.prev_btn,
-            &self.next_btn,
-            &self.seek_scale,
-            snapshot,
-        );
-        update_seek_position(
-            &self.seek_scale,
-            &self.position_label,
-            &self.duration_label,
-            &self.is_seeking,
-            snapshot,
-        );
     }
 }
 
@@ -230,7 +166,7 @@ where
     main_box.append(&content);
     window.set_child(Some(&main_box));
 
-    let controller = MediaWindowController {
+    let controller = MediaViewController {
         title_label,
         artist_label,
         album_label,

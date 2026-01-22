@@ -409,18 +409,6 @@ impl MarqueeLabel {
         }
     }
 
-    /// Check if the label is currently visible.
-    #[allow(dead_code)]
-    pub fn is_visible(&self) -> bool {
-        self.container.is_visible()
-    }
-
-    /// Add a CSS class to the container.
-    #[allow(dead_code)]
-    pub fn add_css_class(&self, class: &str) {
-        self.container.add_css_class(class);
-    }
-
     /// Reset scroll and check if scrolling is needed.
     fn reset_and_check_scroll(&self) {
         self.stop_animation();
