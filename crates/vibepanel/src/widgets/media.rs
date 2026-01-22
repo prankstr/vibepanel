@@ -59,7 +59,9 @@ pub struct MediaConfig {
     /// Custom background color for this widget.
     pub background_color: Option<String>,
     /// Opacity for the pop-out window (0.0 = fully transparent, 1.0 = fully opaque).
-    /// Note: Read at runtime from ConfigManager for live-reload support.
+    ///
+    /// Note: This field is parsed for config validation but read dynamically from
+    /// `ConfigManager::get_widget_option()` at runtime to support live-reload.
     #[allow(dead_code)]
     pub popout_opacity: f64,
 }
