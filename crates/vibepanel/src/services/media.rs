@@ -616,10 +616,25 @@ impl MediaService {
                                         debug!("Switching to newly playing player: {}", bus_name);
                                         this.active_player.replace(Some(bus_name));
                                         this.on_active_player_changed();
+                                    } else {
+                                        // Same player resumed - restart position polling
+                                        this.start_position_polling();
                                     }
                                 } else {
                                     // Player stopped/paused - re-evaluate to find best player
                                     this.update_active_player();
+                                }
+                            } else if old_status != new_status {
+                                // Manual mode: if the active player changed status, handle polling
+                                let bus_name = player.borrow().bus_name.clone();
+                                let is_active =
+                                    this.active_player.borrow().as_ref() == Some(&bus_name);
+                                if is_active {
+                                    if new_status == PlaybackStatus::Playing {
+                                        this.start_position_polling();
+                                    } else {
+                                        this.stop_position_polling();
+                                    }
                                 }
                             }
 
@@ -887,6 +902,9 @@ impl MediaService {
 
         // Write state for CLI to read
         self.write_ipc_state();
+
+        // Fetch position immediately and start polling if playing
+        self.poll_position();
 
         let should_poll = {
             let players = self.players.borrow();
