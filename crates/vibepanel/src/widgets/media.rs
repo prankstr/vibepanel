@@ -7,9 +7,7 @@
 //! - Pop-out button to open a standalone draggable window
 
 use gtk4::Image;
-use gtk4::gdk::Texture;
 use gtk4::gio;
-use gtk4::glib;
 use gtk4::prelude::*;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -25,7 +23,7 @@ use crate::services::tooltip::TooltipManager;
 use crate::styles::media;
 use crate::widgets::base::{BaseWidget, MenuHandle};
 use crate::widgets::marquee_label::{MarqueeLabel, ScrollMode};
-use crate::widgets::media_components::ArtState;
+use crate::widgets::media_components::{ArtState, load_art_from_url};
 use crate::widgets::media_popover::{MediaPopoverController, build_media_popover_with_controller};
 use crate::widgets::media_window::{MediaWindowHandle, create_media_window};
 use crate::widgets::rounded_picture::RoundedPicture;
@@ -907,22 +905,34 @@ fn update_widgets_from_snapshot_impl(ctx: &WidgetUpdateContext<'_>, snapshot: &M
         };
 
         if let Some((generation, cancellable)) = load_info {
+            let art_state = ctx.art_state.clone();
+            let player_id = snapshot.player_id.clone();
+            let picture_clone = picture.clone();
+
+            // Bar widget doesn't have a placeholder - on_success is a no-op
+            let on_success = || {};
+
+            let on_failure = move || {
+                show_player_icon_in_art(
+                    &picture_clone,
+                    player_id.as_deref(),
+                    &art_state,
+                    generation,
+                );
+            };
+
             if let Some(url) = art_url {
-                load_album_art_with_fallback(
+                load_art_from_url(
                     url,
-                    picture,
-                    snapshot.player_id.as_deref(),
+                    picture.clone(),
                     ctx.art_state,
                     generation,
                     &cancellable,
+                    on_success,
+                    on_failure,
                 );
             } else {
-                show_player_icon_in_art(
-                    picture,
-                    snapshot.player_id.as_deref(),
-                    ctx.art_state,
-                    generation,
-                );
+                on_failure();
             }
         }
     }
@@ -956,187 +966,6 @@ fn update_widgets_from_snapshot_impl(ctx: &WidgetUpdateContext<'_>, snapshot: &M
     let tooltip = build_tooltip(snapshot);
     let tooltip_manager = TooltipManager::global();
     tooltip_manager.set_styled_tooltip(ctx.container, &tooltip);
-}
-
-/// Load album art from URL asynchronously, falling back to player icon on failure.
-fn load_album_art_with_fallback(
-    url: &str,
-    art_picture: &RoundedPicture,
-    player_id: Option<&str>,
-    art_state: &Rc<RefCell<ArtState>>,
-    generation: u64,
-    cancellable: &gio::Cancellable,
-) {
-    let url_string = url.to_string();
-    let art_picture = art_picture.clone();
-    let player_id = player_id.map(String::from);
-    let art_state = art_state.clone();
-    let cancellable = cancellable.clone();
-
-    if url.starts_with("file://") {
-        let file = gio::File::for_uri(url);
-        let cancellable_for_read = cancellable.clone();
-
-        file.read_async(
-            glib::Priority::DEFAULT,
-            Some(&cancellable_for_read),
-            move |result| {
-                if art_state.borrow().generation != generation {
-                    return;
-                }
-
-                match result {
-                    Ok(stream) => {
-                        load_texture_from_stream_with_fallback(
-                            stream.upcast(),
-                            &art_picture,
-                            player_id.as_deref(),
-                            &art_state,
-                            &url_string,
-                            generation,
-                            &cancellable,
-                        );
-                    }
-                    Err(e) => {
-                        // Don't log cancelled operations as failures
-                        if !e.matches(gio::IOErrorEnum::Cancelled) {
-                            debug!("Failed to load album art from {}: {}", url_string, e);
-                        }
-                        show_player_icon_in_art(
-                            &art_picture,
-                            player_id.as_deref(),
-                            &art_state,
-                            generation,
-                        );
-                    }
-                }
-            },
-        );
-    } else if url.starts_with("http://") || url.starts_with("https://") {
-        let url_for_fetch = url.to_string();
-
-        // minreq is blocking, so spawn in thread pool
-        glib::spawn_future_local(async move {
-            let fetch_result = gio::spawn_blocking(move || {
-                minreq::get(&url_for_fetch)
-                    .with_timeout(10)
-                    .send()
-                    .ok()
-                    .filter(|r| r.status_code >= 200 && r.status_code < 300)
-                    .map(|r| r.into_bytes())
-            })
-            .await;
-
-            // Check if still relevant after async work
-            if art_state.borrow().generation != generation {
-                return;
-            }
-
-            match fetch_result {
-                Ok(Some(bytes)) => {
-                    load_texture_from_bytes_with_fallback(
-                        &bytes,
-                        &art_picture,
-                        player_id.as_deref(),
-                        &art_state,
-                        &url_string,
-                        generation,
-                    );
-                }
-                Ok(None) => {
-                    debug!("Failed to fetch album art from {}", url_string);
-                    show_player_icon_in_art(
-                        &art_picture,
-                        player_id.as_deref(),
-                        &art_state,
-                        generation,
-                    );
-                }
-                Err(e) => {
-                    debug!("Failed to fetch album art from {}: {:?}", url_string, e);
-                    show_player_icon_in_art(
-                        &art_picture,
-                        player_id.as_deref(),
-                        &art_state,
-                        generation,
-                    );
-                }
-            }
-        });
-    } else {
-        debug!("Unknown album art URL scheme: {}", url);
-        show_player_icon_in_art(&art_picture, player_id.as_deref(), &art_state, generation);
-    }
-}
-
-/// Load texture from stream and apply to the picture widget.
-fn load_texture_from_stream_with_fallback(
-    stream: gio::InputStream,
-    art_picture: &RoundedPicture,
-    player_id: Option<&str>,
-    art_state: &Rc<RefCell<ArtState>>,
-    url: &str,
-    generation: u64,
-    cancellable: &gio::Cancellable,
-) {
-    let art_picture = art_picture.clone();
-    let player_id = player_id.map(String::from);
-    let art_state = art_state.clone();
-    let url = url.to_string();
-    let cancellable = cancellable.clone();
-
-    gtk4::gdk_pixbuf::Pixbuf::from_stream_async(&stream, Some(&cancellable), move |result| {
-        if art_state.borrow().generation != generation {
-            return;
-        }
-
-        match result {
-            Ok(pixbuf) => {
-                let texture = Texture::for_pixbuf(&pixbuf);
-                art_picture.set_paintable(Some(&texture));
-                art_picture.set_visible(true);
-                debug!("Loaded album art from {}", url);
-            }
-            Err(e) => {
-                if e.matches(gio::IOErrorEnum::Cancelled) {
-                    return;
-                }
-                debug!("Failed to decode album art from {}: {}", url, e);
-                show_player_icon_in_art(&art_picture, player_id.as_deref(), &art_state, generation);
-            }
-        }
-    });
-}
-
-/// Load texture from bytes and apply to the picture widget.
-fn load_texture_from_bytes_with_fallback(
-    bytes: &[u8],
-    art_picture: &RoundedPicture,
-    player_id: Option<&str>,
-    art_state: &Rc<RefCell<ArtState>>,
-    url: &str,
-    generation: u64,
-) {
-    if art_state.borrow().generation != generation {
-        return;
-    }
-
-    let glib_bytes = glib::Bytes::from(bytes);
-    match gtk4::gdk_pixbuf::Pixbuf::from_stream(
-        &gio::MemoryInputStream::from_bytes(&glib_bytes),
-        None::<&gio::Cancellable>,
-    ) {
-        Ok(pixbuf) => {
-            let texture = Texture::for_pixbuf(&pixbuf);
-            art_picture.set_paintable(Some(&texture));
-            art_picture.set_visible(true);
-            debug!("Loaded album art from {}", url);
-        }
-        Err(e) => {
-            debug!("Failed to decode album art from {}: {}", url, e);
-            show_player_icon_in_art(art_picture, player_id, art_state, generation);
-        }
-    }
 }
 
 /// Show the player's app icon as fallback for album art.

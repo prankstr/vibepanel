@@ -452,6 +452,8 @@ pub fn update_seek_position(
 // ============================================================================
 
 /// Load album art, handling URL changes and cancellation.
+///
+/// Shows placeholder box on failure, hides it on success.
 pub fn load_album_art(
     art_url: Option<&str>,
     picture: &RoundedPicture,
@@ -473,38 +475,57 @@ pub fn load_album_art(
     let cancellable = state.cancellable.clone();
     drop(state);
 
+    let placeholder_for_success = placeholder_box.clone();
+    let on_success = move || {
+        placeholder_for_success.set_visible(false);
+    };
+
+    let picture_for_failure = picture.clone();
+    let placeholder_box = placeholder_box.clone();
+    let on_failure = move || {
+        picture_for_failure.set_visible(false);
+        placeholder_box.set_visible(true);
+    };
+
     match art_url {
         Some(url) => load_art_from_url(
             url,
-            picture,
-            placeholder_box,
+            picture.clone(),
             art_state,
             generation,
             &cancellable,
+            on_success,
+            on_failure,
         ),
-        None => {
-            picture.set_visible(false);
-            placeholder_box.set_visible(true);
-        }
+        None => on_failure(),
     }
 }
 
-fn load_art_from_url(
+/// Load album art from URL, calling `on_success` or `on_failure` callbacks.
+///
+/// This is the shared implementation used by both the bar widget and popover/window.
+/// - `on_success` is called after the picture is set (e.g., to hide placeholder)
+/// - `on_failure` is called when loading fails (e.g., to show placeholder or fallback icon)
+pub fn load_art_from_url<S, F>(
     url: &str,
-    picture: &RoundedPicture,
-    placeholder_box: &GtkBox,
+    picture: RoundedPicture,
     art_state: &Rc<RefCell<ArtState>>,
     generation: u64,
     cancellable: &gio::Cancellable,
-) {
+    on_success: S,
+    on_failure: F,
+) where
+    S: Fn() + Clone + 'static,
+    F: Fn() + Clone + 'static,
+{
     let url_string = url.to_string();
-    let picture = picture.clone();
-    let placeholder_box = placeholder_box.clone();
     let art_state = art_state.clone();
     let cancellable = cancellable.clone();
 
     if url.starts_with("file://") {
         let file = gio::File::for_uri(url);
+        let on_success_clone = on_success.clone();
+        let on_failure_clone = on_failure.clone();
         file.read_async(
             glib::Priority::DEFAULT,
             Some(&cancellable.clone()),
@@ -516,18 +537,18 @@ fn load_art_from_url(
                     Ok(stream) => load_texture_from_stream(
                         stream.upcast(),
                         &picture,
-                        &placeholder_box,
                         &art_state,
                         &url_string,
                         generation,
                         &cancellable,
+                        on_success_clone,
+                        on_failure_clone,
                     ),
                     Err(e) => {
                         if !e.matches(gio::IOErrorEnum::Cancelled) {
                             debug!("Failed to load album art from {}: {}", url_string, e);
                         }
-                        picture.set_visible(false);
-                        placeholder_box.set_visible(true);
+                        on_failure_clone();
                     }
                 }
             },
@@ -554,38 +575,45 @@ fn load_art_from_url(
 
             match fetch_result {
                 Ok(Some(bytes)) => {
-                    load_texture_from_bytes(&bytes, &picture, &placeholder_box, &url_string);
+                    load_texture_from_bytes(
+                        &bytes,
+                        &picture,
+                        &url_string,
+                        &on_success,
+                        &on_failure,
+                    );
                 }
                 Ok(None) => {
                     debug!("Failed to fetch album art from {}", url_string);
-                    picture.set_visible(false);
-                    placeholder_box.set_visible(true);
+                    on_failure();
                 }
                 Err(e) => {
                     debug!("Failed to fetch album art from {}: {:?}", url_string, e);
-                    picture.set_visible(false);
-                    placeholder_box.set_visible(true);
+                    on_failure();
                 }
             }
         });
     } else {
         debug!("Unknown album art URL scheme: {}", url);
-        picture.set_visible(false);
-        placeholder_box.set_visible(true);
+        on_failure();
     }
 }
 
-fn load_texture_from_stream(
+#[allow(clippy::too_many_arguments)]
+fn load_texture_from_stream<S, F>(
     stream: gio::InputStream,
     picture: &RoundedPicture,
-    placeholder_box: &GtkBox,
     art_state: &Rc<RefCell<ArtState>>,
     url: &str,
     generation: u64,
     cancellable: &gio::Cancellable,
-) {
+    on_success: S,
+    on_failure: F,
+) where
+    S: Fn() + 'static,
+    F: Fn() + 'static,
+{
     let picture = picture.clone();
-    let placeholder_box = placeholder_box.clone();
     let art_state = art_state.clone();
     let url = url.to_string();
 
@@ -597,26 +625,29 @@ fn load_texture_from_stream(
             Ok(pixbuf) => {
                 picture.set_paintable(Some(&gtk4::gdk::Texture::for_pixbuf(&pixbuf)));
                 picture.set_visible(true);
-                placeholder_box.set_visible(false);
+                on_success();
                 debug!("Loaded album art from {}", url);
             }
             Err(e) => {
                 if !e.matches(gio::IOErrorEnum::Cancelled) {
                     debug!("Failed to decode album art from {}: {}", url, e);
                 }
-                picture.set_visible(false);
-                placeholder_box.set_visible(true);
+                on_failure();
             }
         }
     });
 }
 
-fn load_texture_from_bytes(
+fn load_texture_from_bytes<S, F>(
     bytes: &[u8],
     picture: &RoundedPicture,
-    placeholder_box: &GtkBox,
     url: &str,
-) {
+    on_success: &S,
+    on_failure: &F,
+) where
+    S: Fn(),
+    F: Fn(),
+{
     let glib_bytes = glib::Bytes::from(bytes);
     match Pixbuf::from_stream(
         &gio::MemoryInputStream::from_bytes(&glib_bytes),
@@ -625,13 +656,12 @@ fn load_texture_from_bytes(
         Ok(pixbuf) => {
             picture.set_paintable(Some(&gtk4::gdk::Texture::for_pixbuf(&pixbuf)));
             picture.set_visible(true);
-            placeholder_box.set_visible(false);
+            on_success();
             debug!("Loaded album art from {}", url);
         }
         Err(e) => {
             debug!("Failed to decode album art from {}: {}", url, e);
-            picture.set_visible(false);
-            placeholder_box.set_visible(true);
+            on_failure();
         }
     }
 }
