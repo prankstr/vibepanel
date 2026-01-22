@@ -17,7 +17,7 @@ use vibepanel_core::config::WidgetEntry;
 use crate::services::callbacks::CallbackId;
 use crate::services::config_manager::ConfigManager;
 use crate::services::icons::{IconHandle, resolve_app_icon_name, set_image_from_app_id};
-use crate::services::media::{MediaService, MediaSnapshot, PlaybackStatus, format_duration};
+use crate::services::media::{MediaService, MediaSnapshot, PlaybackStatus};
 use crate::services::state;
 use crate::services::tooltip::TooltipManager;
 use crate::styles::media;
@@ -49,8 +49,8 @@ const ART_DISPLAY_SCALE: f64 = 0.75;
 #[derive(Debug, Clone)]
 pub struct MediaConfig {
     /// Template string for rendering.
-    /// Widget tokens: {art}, {player_icon}, {icon}
-    /// Text tokens: {title}, {artist}, {album}, {player}, {position}, {duration}
+    /// Widget tokens: {art}, {player_icon}, {icon}, {controls}
+    /// Text tokens: {title}, {artist}, {album}
     pub template: String,
     /// Text to show when no player is available (empty = hide widget).
     pub empty_text: String,
@@ -157,9 +157,6 @@ enum TextToken {
     Title,
     Artist,
     Album,
-    Player,
-    Position,
-    Duration,
 }
 
 impl TextToken {
@@ -168,13 +165,6 @@ impl TextToken {
             Self::Title => snapshot.metadata.title.clone().unwrap_or_default(),
             Self::Artist => snapshot.metadata.artist.clone().unwrap_or_default(),
             Self::Album => snapshot.metadata.album.clone().unwrap_or_default(),
-            Self::Player => snapshot.player_name.clone().unwrap_or_default(),
-            Self::Position => format_duration(snapshot.position),
-            Self::Duration => snapshot
-                .metadata
-                .length
-                .map(format_duration)
-                .unwrap_or_default(),
         }
     }
 }
@@ -232,9 +222,6 @@ fn parse_template(template: &str) -> Vec<TemplateElement> {
             "title" => Some(TextToken::Title),
             "artist" => Some(TextToken::Artist),
             "album" => Some(TextToken::Album),
-            "player" => Some(TextToken::Player),
-            "position" => Some(TextToken::Position),
-            "duration" => Some(TextToken::Duration),
             _ => None,
         };
 
@@ -244,7 +231,7 @@ fn parse_template(template: &str) -> Vec<TemplateElement> {
             warn!(
                 "Unknown template token '{{{}}}' in media widget template. \
                  Known tokens: {{art}}, {{player_icon}}, {{icon}}, {{controls}}, \
-                 {{title}}, {{artist}}, {{album}}, {{player}}, {{position}}, {{duration}}",
+                 {{title}}, {{artist}}, {{album}}",
                 token
             );
             elements.push(TemplateElement::Literal(format!("{{{}}}", token)));
@@ -1178,15 +1165,15 @@ mod tests {
         let mut snapshot = MediaSnapshot::default();
         snapshot.metadata.title = Some("Test Song".to_string());
         snapshot.metadata.artist = Some("Test Artist".to_string());
-        snapshot.player_name = Some("Spotify".to_string());
 
         let elements = parse_template("{artist} - {title}");
         let result = render_text_from_elements(&elements, &snapshot);
         assert_eq!(result, "Test Artist - Test Song");
 
-        let elements = parse_template("{player}: {title}");
+        snapshot.metadata.album = Some("Test Album".to_string());
+        let elements = parse_template("{album}: {title}");
         let result = render_text_from_elements(&elements, &snapshot);
-        assert_eq!(result, "Spotify: Test Song");
+        assert_eq!(result, "Test Album: Test Song");
     }
 
     #[test]
