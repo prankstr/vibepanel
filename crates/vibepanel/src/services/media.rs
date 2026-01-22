@@ -232,8 +232,6 @@ pub struct MediaService {
     position_poll_source: RefCell<Option<glib::SourceId>>,
     /// Cancellable for position polling D-Bus calls.
     poll_cancellable: RefCell<gio::Cancellable>,
-    /// IPC listener for CLI commands.
-    _ipc_listener: RefCell<Option<Rc<RefCell<super::media_ipc::MediaIpcListener>>>>,
 }
 
 impl MediaService {
@@ -248,11 +246,9 @@ impl MediaService {
             _name_owner_subscription: RefCell::new(None),
             position_poll_source: RefCell::new(None),
             poll_cancellable: RefCell::new(gio::Cancellable::new()),
-            _ipc_listener: RefCell::new(None),
         });
 
         Self::init_dbus(&service);
-        Self::init_ipc(&service);
         service
     }
 
@@ -326,43 +322,10 @@ impl MediaService {
         self.manual_selection.borrow().is_none()
     }
 
-    // ========== IPC Initialization ==========
-
-    fn init_ipc(this: &Rc<Self>) {
-        use super::media_ipc::{MediaIpcListener, MediaIpcMessage};
-
-        let Some(listener) = MediaIpcListener::new() else {
-            debug!("Media IPC listener not available (non-fatal)");
-            return;
-        };
-
-        let this_weak = Rc::downgrade(this);
-        listener.borrow().connect(move |msg| {
-            let Some(this) = this_weak.upgrade() else {
-                return;
-            };
-
-            match msg {
-                MediaIpcMessage::Select { bus_name } => {
-                    debug!("Media IPC: selecting player {}", bus_name);
-                    this.set_active_player(&bus_name);
-                }
-                MediaIpcMessage::Auto => {
-                    debug!("Media IPC: switching to auto selection");
-                    this.set_auto_selection();
-                }
-            }
-        });
-
-        *this._ipc_listener.borrow_mut() = Some(listener);
-        debug!("Media IPC listener connected");
-    }
-
-    /// Write current state to the IPC state file.
+    /// Write current active player to state file for CLI commands.
     fn write_ipc_state(&self) {
         let active = self.active_player.borrow();
-        let is_auto = self.manual_selection.borrow().is_none();
-        super::media_ipc::write_state(active.as_deref(), is_auto);
+        super::media_ipc::write_state(active.as_deref());
     }
 
     // ========== D-Bus Initialization ==========
@@ -1295,11 +1258,9 @@ impl MediaCli {
             })
             .collect();
 
-        // Check if the panel has a selected player via IPC state file.
-        // Always use the panel's active player (regardless of auto/manual mode)
-        // so CLI commands control the same player shown in the UI.
-        let (ipc_active, _is_auto) = super::media_ipc::read_state();
-        if let Some(ref bus_name) = ipc_active
+        // Check if the panel has a selected player via state file.
+        // Use the panel's active player so CLI commands control the same player shown in the UI.
+        if let Some(ref bus_name) = super::media_ipc::read_state()
             && self.players.iter().any(|(b, _)| b == bus_name)
         {
             self.active_player = Some(bus_name.clone());
@@ -1344,26 +1305,6 @@ impl MediaCli {
             .get::<Variant>()
             .and_then(|v| v.get::<String>())
             .map(|s| s.parse().unwrap_or(PlaybackStatus::Stopped))
-    }
-
-    /// Get list of available players as (bus_name, display_name) pairs.
-    pub fn list_players(&self) -> &[(String, String)] {
-        &self.players
-    }
-
-    /// Get the currently active player's bus name.
-    pub fn active_player(&self) -> Option<&str> {
-        self.active_player.as_deref()
-    }
-
-    /// Select a specific player by bus name.
-    pub fn select_player(&mut self, bus_name: &str) -> Result<(), String> {
-        if self.players.iter().any(|(b, _)| b == bus_name) {
-            self.active_player = Some(bus_name.to_string());
-            Ok(())
-        } else {
-            Err(format!("player not found: {}", bus_name))
-        }
     }
 
     /// Toggle play/pause on the active player.

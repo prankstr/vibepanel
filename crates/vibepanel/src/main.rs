@@ -142,8 +142,6 @@ enum MediaAction {
     Stop,
     /// Show current playback status
     Status,
-    /// Select which media player to control
-    Player,
 }
 
 fn main() -> ExitCode {
@@ -436,7 +434,7 @@ fn handle_inhibit_command(reason: &str, command: &[String]) -> ExitCode {
 fn handle_media_command(action: MediaAction) -> ExitCode {
     use crate::services::media::MediaCli;
 
-    let mut cli = match MediaCli::new() {
+    let cli = match MediaCli::new() {
         Some(c) => c,
         None => {
             eprintln!("Error: could not connect to D-Bus session bus");
@@ -487,85 +485,6 @@ fn handle_media_command(action: MediaAction) -> ExitCode {
                 ExitCode::FAILURE
             }
         },
-        MediaAction::Player => {
-            use crate::services::media_ipc::{MediaIpcMessage, read_state, send_message};
-
-            let players: Vec<_> = cli.list_players().to_vec();
-            if players.is_empty() {
-                eprintln!("No media players found");
-                return ExitCode::FAILURE;
-            }
-
-            // Check current mode from IPC state
-            let (_, is_auto) = read_state();
-
-            // Show the list with auto option
-            let active = cli.active_player().map(|s| s.to_string());
-            let auto_marker = if is_auto { "*" } else { " " };
-            println!("{} [a] Auto", auto_marker);
-            for (i, (bus_name, display_name)) in players.iter().enumerate() {
-                let marker = if !is_auto && active.as_deref() == Some(bus_name.as_str()) {
-                    "*"
-                } else {
-                    " "
-                };
-                println!("{} [{}] {}", marker, i, display_name);
-            }
-
-            // Prompt for selection
-            eprint!("Select [a,0-{}]: ", players.len() - 1);
-            use std::io::{BufRead, Write};
-            std::io::stderr().flush().ok();
-
-            let stdin = std::io::stdin();
-            let input = match stdin.lock().lines().next() {
-                Some(Ok(line)) => line.trim().to_string(),
-                _ => return ExitCode::SUCCESS,
-            };
-
-            if input.is_empty() {
-                return ExitCode::SUCCESS;
-            }
-
-            // Handle "a" or "auto" for auto-selection
-            if input.eq_ignore_ascii_case("a") || input.eq_ignore_ascii_case("auto") {
-                let _ = send_message(&MediaIpcMessage::Auto);
-                println!("Switched to auto player selection");
-                return ExitCode::SUCCESS;
-            }
-
-            // Try to parse as index first, then as name
-            let bus_name = if let Ok(idx) = input.parse::<usize>() {
-                players.get(idx).map(|(b, _)| b.clone())
-            } else {
-                let input_lower = input.to_lowercase();
-                players
-                    .iter()
-                    .find(|(_, name)| name.to_lowercase().contains(&input_lower))
-                    .map(|(b, _)| b.clone())
-            };
-
-            match bus_name {
-                Some(bus) => {
-                    let _ = send_message(&MediaIpcMessage::Select {
-                        bus_name: bus.clone(),
-                    });
-
-                    if let Err(e) = cli.select_player(&bus) {
-                        eprintln!("Error: {}", e);
-                        return ExitCode::FAILURE;
-                    }
-                    if let Ok(status) = cli.status() {
-                        println!("{}", status);
-                    }
-                    ExitCode::SUCCESS
-                }
-                None => {
-                    eprintln!("Invalid selection: {}", input);
-                    ExitCode::FAILURE
-                }
-            }
-        }
     }
 }
 
