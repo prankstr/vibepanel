@@ -618,6 +618,8 @@ pub struct ToggleCardResult {
     pub toggle: ToggleButton,
     /// Handle to the icon for dynamic updates.
     pub icon_handle: IconHandle,
+    /// Title label handle for dynamic renaming.
+    pub title: Label,
     /// Optional subtitle label (e.g., "Connected" or SSID).
     pub subtitle: Option<Label>,
     /// Optional expander button.
@@ -771,6 +773,7 @@ impl ToggleCard {
             card: card_box,
             toggle,
             icon_handle,
+            title: label_result.title,
             subtitle: label_result.subtitle,
             expander_button,
             expander_icon,

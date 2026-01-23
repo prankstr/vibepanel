@@ -35,8 +35,10 @@ use crate::widgets::base::configure_popover;
 /// The main card widget uses this for a stable "connected" icon,
 /// while the per-network list rows use `wifi_strength_icon` for
 /// detailed signal levels.
-pub fn wifi_icon_name(connected: bool, wifi_enabled: bool) -> &'static str {
-    if !wifi_enabled {
+pub fn wifi_icon_name(connected: bool, wifi_enabled: bool, wired_connected: bool) -> &'static str {
+    if wired_connected {
+        "network-wired-symbolic"
+    } else if !wifi_enabled {
         "network-wireless-offline-symbolic"
     } else if connected {
         "network-wireless-signal-excellent-symbolic"
@@ -97,6 +99,8 @@ pub struct WifiCardState {
     pub scan_button: RefCell<Option<Button>>,
     /// The Wi-Fi scan button label.
     pub scan_label: RefCell<Option<Label>>,
+    /// The title label for the card (e.g., "Wi-Fi" or "Ethernet").
+    pub title_label: RefCell<Option<Label>>,
     /// Inline password box.
     pub password_box: RefCell<Option<GtkBox>>,
     /// Label in the password box.
@@ -130,6 +134,7 @@ impl WifiCardState {
             base: ExpandableCardBase::new(),
             scan_button: RefCell::new(None),
             scan_label: RefCell::new(None),
+            title_label: RefCell::new(None),
             password_box: RefCell::new(None),
             password_label: RefCell::new(None),
             password_error_label: RefCell::new(None),
@@ -786,7 +791,9 @@ pub fn update_subtitle(state: &WifiCardState, snapshot: &NetworkSnapshot) {
     let enabled = snapshot.wifi_enabled.unwrap_or(false);
     let is_connecting = snapshot.connecting_ssid.is_some();
 
-    let subtitle = if is_connecting {
+    let subtitle = if snapshot.wired_connected {
+        "Ethernet connected".to_string()
+    } else if is_connecting {
         format!(
             "Connecting to {}",
             snapshot.connecting_ssid.as_ref().unwrap()
@@ -799,9 +806,9 @@ pub fn update_subtitle(state: &WifiCardState, snapshot: &NetworkSnapshot) {
         "Disabled".to_string()
     };
 
-    let connected = snapshot.ssid.is_some() && !is_connecting;
+    let connected = (snapshot.ssid.is_some() && !is_connecting) || snapshot.wired_connected;
     label.set_label(&subtitle);
-    set_subtitle_active(label, enabled && connected);
+    set_subtitle_active(label, (enabled && connected) || snapshot.wired_connected);
 }
 
 /// Update the scan button UI and animate while scanning.
@@ -929,17 +936,23 @@ pub fn on_network_changed(
         }
     }
 
+    // Update card title between Wi-Fi and Ethernet
+    if let Some(title_label) = state.title_label.borrow().as_ref() {
+        let title = if snapshot.wired_connected { "Ethernet" } else { "Wi-Fi" };
+        title_label.set_label(title);
+    }
+
     // Update Wi-Fi card icon and its active state class
     if let Some(icon_handle) = state.base.card_icon.borrow().as_ref() {
         let enabled = snapshot.wifi_enabled.unwrap_or(false);
-        let icon_name = wifi_icon_name(snapshot.connected, enabled);
+        let icon_name = wifi_icon_name(snapshot.connected, enabled, snapshot.wired_connected);
         icon_handle.set_icon(icon_name);
 
-        let icon_active = enabled && snapshot.connected;
+        let icon_active = (enabled && snapshot.connected) || snapshot.wired_connected;
         set_icon_active(icon_handle, icon_active);
 
         // Additional disabled styling for Wi-Fi
-        if !enabled {
+        if !enabled && !snapshot.wired_connected {
             icon_handle.add_css_class(qs::WIFI_DISABLED_ICON);
         } else {
             icon_handle.remove_css_class(qs::WIFI_DISABLED_ICON);
@@ -972,7 +985,7 @@ mod tests {
     #[test]
     fn test_wifi_icon_name_connected() {
         assert_eq!(
-            wifi_icon_name(true, true),
+            wifi_icon_name(true, true, false),
             "network-wireless-signal-excellent-symbolic"
         );
     }
@@ -980,7 +993,7 @@ mod tests {
     #[test]
     fn test_wifi_icon_name_disconnected() {
         assert_eq!(
-            wifi_icon_name(false, true),
+            wifi_icon_name(false, true, false),
             "network-wireless-offline-symbolic"
         );
     }
@@ -988,12 +1001,24 @@ mod tests {
     #[test]
     fn test_wifi_icon_name_disabled() {
         assert_eq!(
-            wifi_icon_name(true, false),
+            wifi_icon_name(true, false, false),
             "network-wireless-offline-symbolic"
         );
         assert_eq!(
-            wifi_icon_name(false, false),
+            wifi_icon_name(false, false, false),
             "network-wireless-offline-symbolic"
+        );
+    }
+
+    #[test]
+    fn test_wifi_icon_name_wired_connected() {
+        assert_eq!(
+            wifi_icon_name(false, false, true),
+            "network-wired-symbolic"
+        );
+        assert_eq!(
+            wifi_icon_name(true, true, true),
+            "network-wired-symbolic"
         );
     }
 

@@ -239,13 +239,15 @@ impl QuickSettingsWidget {
             let wifi_snapshot = NetworkService::global().snapshot();
             let wifi_enabled = wifi_snapshot.wifi_enabled.unwrap_or(false);
             let wifi_connected = wifi_snapshot.connected;
-            let wifi_icon_name_initial = wifi_icon_name(wifi_connected, wifi_enabled);
+            let wired_connected = wifi_snapshot.wired_connected;
+            let wifi_icon_name_initial =
+                wifi_icon_name(wifi_connected, wifi_enabled, wired_connected);
             let wifi_icon = base.add_icon(wifi_icon_name_initial, &[icon::ICON, icon::TEXT]);
 
-            if !wifi_enabled {
+            if !wifi_enabled && !wired_connected {
                 wifi_icon.widget().add_css_class(qs::WIFI_DISABLED_ICON);
             }
-            if wifi_enabled && wifi_connected {
+            if (wifi_enabled && wifi_connected) || wired_connected {
                 wifi_icon.widget().add_css_class(state::ICON_ACTIVE);
             }
 
@@ -267,23 +269,26 @@ impl QuickSettingsWidget {
 
                 let enabled = snapshot.wifi_enabled.unwrap_or(false);
                 let connected = snapshot.connected;
+                let wired_connected = snapshot.wired_connected;
 
-                let icon_name = wifi_icon_name(connected, enabled);
+                let icon_name = wifi_icon_name(connected, enabled, wired_connected);
                 wifi_icon_handle.set_icon(icon_name);
 
-                if !enabled {
+                if !enabled && !wired_connected {
                     widget.add_css_class(qs::WIFI_DISABLED_ICON);
                 } else {
                     widget.remove_css_class(qs::WIFI_DISABLED_ICON);
                 }
 
-                if enabled && connected {
+                if (enabled && connected) || wired_connected {
                     widget.add_css_class(state::ICON_ACTIVE);
                 } else {
                     widget.remove_css_class(state::ICON_ACTIVE);
                 }
 
-                let tooltip = if connected {
+                let tooltip = if wired_connected {
+                    "Ethernet connected".to_string()
+                } else if connected {
                     let ssid = snapshot.ssid.as_deref().unwrap_or("Connected");
                     let strength = snapshot.strength;
                     if strength > 0 {

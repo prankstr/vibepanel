@@ -171,6 +171,10 @@ pub fn material_symbol_name(icon_name: &str) -> &str {
         "network-wireless-signal-none-symbolic" => "wifi_1_bar",
         "network-wireless-offline-symbolic" => "wifi_off",
 
+        // Wired networking
+        "network-wired" => "settings_ethernet",
+        "network-wired-symbolic" => "settings_ethernet",
+
         // Simplified Wi-Fi names
         "wifi-off" => "wifi_off",
         "wifi" => "wifi",

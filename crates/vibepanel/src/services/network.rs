@@ -68,6 +68,10 @@ pub struct NetworkSnapshot {
     pub wifi_enabled: Option<bool>,
     /// Whether connected to a Wi-Fi network.
     pub connected: bool,
+    /// Whether a non-Wi-Fi (e.g., Ethernet) connection is active as the primary link.
+    pub wired_connected: bool,
+    /// NetworkManager primary connection type (e.g., "802-11-wireless", "802-3-ethernet").
+    pub primary_connection_type: Option<String>,
     /// Current SSID if connected.
     pub ssid: Option<String>,
     /// Current signal strength if connected (0-100).
@@ -91,6 +95,8 @@ impl NetworkSnapshot {
             available: false,
             wifi_enabled: None,
             connected: false,
+            wired_connected: false,
+            primary_connection_type: None,
             ssid: None,
             strength: 0,
             scanning: false,
@@ -579,9 +585,19 @@ impl NetworkService {
             .cached_property("WirelessEnabled")
             .and_then(|v| v.get::<bool>());
 
+        let primary_connection_type = nm
+            .cached_property("PrimaryConnectionType")
+            .and_then(|v| v.get::<String>());
+
+        let wired_connected = primary_connection_type
+            .as_deref()
+            .is_some_and(|t| t == "802-3-ethernet");
+
         let mut snapshot = self.snapshot.borrow_mut();
+        let mut changed = false;
         if snapshot.wifi_enabled != wifi_enabled {
             snapshot.wifi_enabled = wifi_enabled;
+            changed = true;
 
             // When WiFi is disabled, clear connection state and mark all networks as inactive
             if wifi_enabled == Some(false) {
@@ -593,7 +609,19 @@ impl NetworkService {
                     net.active = false;
                 }
             }
+        }
 
+        if snapshot.primary_connection_type != primary_connection_type {
+            snapshot.primary_connection_type = primary_connection_type;
+            changed = true;
+        }
+
+        if snapshot.wired_connected != wired_connected {
+            snapshot.wired_connected = wired_connected;
+            changed = true;
+        }
+
+        if changed {
             let snapshot_clone = snapshot.clone();
             drop(snapshot);
             self.callbacks.notify(&snapshot_clone);

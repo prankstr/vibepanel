@@ -538,8 +538,13 @@ impl QuickSettingsWindow {
 
         let wifi_enabled = snapshot.wifi_enabled.unwrap_or(false);
         let wifi_connected = snapshot.connected;
+        let wired_connected = snapshot.wired_connected;
 
-        let subtitle_text = if let Some(ref ssid) = snapshot.ssid {
+        let label_text = if wired_connected { "Ethernet" } else { "Wi-Fi" };
+
+        let subtitle_text = if wired_connected {
+            "Ethernet".to_string()
+        } else if let Some(ref ssid) = snapshot.ssid {
             ssid.clone()
         } else if wifi_enabled {
             "Enabled".to_string()
@@ -547,12 +552,12 @@ impl QuickSettingsWindow {
             "Disabled".to_string()
         };
 
-        let icon_name = wifi_icon_name(wifi_connected, wifi_enabled);
-        let icon_active = wifi_enabled && wifi_connected;
+        let icon_name = wifi_icon_name(wifi_connected, wifi_enabled, wired_connected);
+        let icon_active = (wifi_enabled && wifi_connected) || wired_connected;
 
         let wifi_card = ToggleCard::builder()
             .icon(icon_name)
-            .label("Wi-Fi")
+            .label(label_text)
             .subtitle(&subtitle_text)
             .active(wifi_enabled)
             .sensitive(true)
@@ -563,7 +568,7 @@ impl QuickSettingsWindow {
         // Add card identifier for CSS targeting
         wifi_card.card.add_css_class(qs::WIFI);
 
-        if !wifi_enabled {
+        if !wifi_enabled && !wired_connected {
             wifi_card
                 .icon_handle
                 .widget()
@@ -587,6 +592,7 @@ impl QuickSettingsWindow {
         *qs.wifi.base.card_icon.borrow_mut() = Some(wifi_card.icon_handle.clone());
         *qs.wifi.base.subtitle.borrow_mut() = wifi_card.subtitle.clone();
         *qs.wifi.base.arrow.borrow_mut() = wifi_card.expander_icon.clone();
+        *qs.wifi.title_label.borrow_mut() = Some(wifi_card.title.clone());
 
         // Build revealer
         let wifi_revealer = Revealer::new();
