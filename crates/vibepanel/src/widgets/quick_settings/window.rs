@@ -40,7 +40,9 @@ use super::power_card::{self, PowerCardBuildResult};
 use super::ui_helpers::{AccordionManager, ExpandableCard};
 use super::updates_card::{self, UpdatesCardState, build_updates_card};
 use super::vpn_card::{self, VpnCardState, build_vpn_details, vpn_icon_name};
-use super::wifi_card::{self, WifiCardState, build_wifi_details, wifi_icon_name};
+use super::wifi_card::{
+    self, WifiCardState, build_network_subtitle, build_wifi_details, wifi_icon_name,
+};
 
 /// Full Quick Settings window.
 ///
@@ -539,26 +541,30 @@ impl QuickSettingsWindow {
         let wifi_enabled = snapshot.wifi_enabled.unwrap_or(false);
         let wifi_connected = snapshot.connected;
         let wired_connected = snapshot.wired_connected;
+        let has_wifi_device = snapshot.has_wifi_device;
 
-        let label_text = if wired_connected { "Ethernet" } else { "Wi-Fi" };
+        // Build custom subtitle widget with connection status icons
+        let subtitle_result = build_network_subtitle(&snapshot);
 
-        let subtitle_text = if wired_connected {
-            "Ethernet".to_string()
-        } else if let Some(ref ssid) = snapshot.ssid {
-            ssid.clone()
-        } else if wifi_enabled {
-            "Enabled".to_string()
-        } else {
-            "Disabled".to_string()
-        };
-
-        let icon_name = wifi_icon_name(wifi_connected, wifi_enabled, wired_connected);
+        let icon_name = wifi_icon_name(
+            wifi_connected,
+            wifi_enabled,
+            wired_connected,
+            has_wifi_device,
+        );
         let icon_active = (wifi_enabled && wifi_connected) || wired_connected;
+
+        // Card title: "Network" if ethernet device exists, "Wi-Fi" otherwise
+        let card_title = if snapshot.has_ethernet_device {
+            "Network"
+        } else {
+            "Wi-Fi"
+        };
 
         let wifi_card = ToggleCard::builder()
             .icon(icon_name)
-            .label(label_text)
-            .subtitle(&subtitle_text)
+            .label(card_title)
+            .subtitle_widget(subtitle_result.container.upcast())
             .active(wifi_enabled)
             .sensitive(true)
             .icon_active(icon_active)
@@ -567,6 +573,11 @@ impl QuickSettingsWindow {
 
         // Add card identifier for CSS targeting
         wifi_card.card.add_css_class(qs::WIFI);
+
+        // Disable toggle if no Wi-Fi device (toggle controls Wi-Fi, not ethernet)
+        if !snapshot.has_wifi_device {
+            wifi_card.toggle.set_sensitive(false);
+        }
 
         if !wifi_enabled && !wired_connected {
             wifi_card
@@ -590,9 +601,13 @@ impl QuickSettingsWindow {
         // Store references (use base fields)
         *qs.wifi.base.toggle.borrow_mut() = Some(wifi_card.toggle.clone());
         *qs.wifi.base.card_icon.borrow_mut() = Some(wifi_card.icon_handle.clone());
-        *qs.wifi.base.subtitle.borrow_mut() = wifi_card.subtitle.clone();
         *qs.wifi.base.arrow.borrow_mut() = wifi_card.expander_icon.clone();
+
+        // Store title label for dynamic updates
         *qs.wifi.title_label.borrow_mut() = Some(wifi_card.title.clone());
+
+        // Store subtitle label reference
+        *qs.wifi.subtitle_label.borrow_mut() = Some(subtitle_result.label);
 
         // Build revealer
         let wifi_revealer = Revealer::new();

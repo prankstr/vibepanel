@@ -315,6 +315,7 @@ pub struct CardLabelResult {
 pub struct CardLabel {
     title: String,
     subtitle: Option<String>,
+    subtitle_widget: Option<gtk4::Widget>,
     width_chars: i32,
     subtitle_width_chars: i32,
     title_class: String,
@@ -327,6 +328,7 @@ impl CardLabel {
         Self {
             title: title.to_string(),
             subtitle: None,
+            subtitle_widget: None,
             width_chars: 16,
             subtitle_width_chars: 22,
             title_class: String::new(),
@@ -343,6 +345,12 @@ impl CardLabel {
     /// Set optional subtitle (convenience for Option<&str>).
     pub fn subtitle_opt(mut self, subtitle: Option<&str>) -> Self {
         self.subtitle = subtitle.map(|s| s.to_string());
+        self
+    }
+
+    /// Set a custom subtitle widget (takes precedence over subtitle text).
+    pub fn subtitle_widget(mut self, widget: gtk4::Widget) -> Self {
+        self.subtitle_widget = Some(widget);
         self
     }
 
@@ -393,8 +401,11 @@ impl CardLabel {
         title.add_css_class(color::PRIMARY);
         container.append(&title);
 
-        // Optional subtitle
-        let subtitle = if let Some(subtitle_text) = &self.subtitle {
+        // Optional subtitle: custom widget takes precedence over text
+        let subtitle = if let Some(widget) = self.subtitle_widget {
+            container.append(&widget);
+            None // No Label to return when using custom widget
+        } else if let Some(subtitle_text) = &self.subtitle {
             let sub = Label::new(Some(subtitle_text));
             sub.set_xalign(0.0);
             sub.set_ellipsize(EllipsizeMode::End);
@@ -647,6 +658,7 @@ pub struct ToggleCard {
     icon_name: String,
     label_text: String,
     subtitle_text: Option<String>,
+    subtitle_widget: Option<gtk4::Widget>,
     active: bool,
     sensitive: bool,
     icon_active: bool,
@@ -660,6 +672,7 @@ impl ToggleCard {
             icon_name: String::new(),
             label_text: String::new(),
             subtitle_text: None,
+            subtitle_widget: None,
             active: false,
             sensitive: true,
             icon_active: false,
@@ -682,6 +695,12 @@ impl ToggleCard {
     /// Set the subtitle text.
     pub fn subtitle(mut self, subtitle_text: &str) -> Self {
         self.subtitle_text = Some(subtitle_text.to_string());
+        self
+    }
+
+    /// Set a custom subtitle widget (takes precedence over subtitle text).
+    pub fn subtitle_widget(mut self, widget: gtk4::Widget) -> Self {
+        self.subtitle_widget = Some(widget);
         self
     }
 
@@ -746,12 +765,21 @@ impl ToggleCard {
         content.append(&icon_handle.widget());
 
         // Label (with optional subtitle) using CardLabel
-        let label_result = CardLabel::new(&self.label_text)
-            .subtitle_opt(self.subtitle_text.as_deref())
-            .width_chars(16)
-            .title_class(qs::TOGGLE_LABEL)
-            .subtitle_class(qs::TOGGLE_SUBTITLE)
-            .build();
+        let label_result = if let Some(widget) = self.subtitle_widget {
+            CardLabel::new(&self.label_text)
+                .subtitle_widget(widget)
+                .width_chars(16)
+                .title_class(qs::TOGGLE_LABEL)
+                .subtitle_class(qs::TOGGLE_SUBTITLE)
+                .build()
+        } else {
+            CardLabel::new(&self.label_text)
+                .subtitle_opt(self.subtitle_text.as_deref())
+                .width_chars(16)
+                .title_class(qs::TOGGLE_LABEL)
+                .subtitle_class(qs::TOGGLE_SUBTITLE)
+                .build()
+        };
         content.append(&label_result.container);
 
         toggle.set_child(Some(&content));
@@ -809,6 +837,7 @@ pub struct ListRowResult {
 pub struct ListRow {
     title: String,
     subtitle: Option<String>,
+    subtitle_widget: Option<gtk4::Widget>,
     leading_widget: Option<gtk4::Widget>,
     trailing_widget: Option<gtk4::Widget>,
     css_class: Option<String>,
@@ -820,6 +849,7 @@ impl ListRow {
         Self {
             title: String::new(),
             subtitle: None,
+            subtitle_widget: None,
             leading_widget: None,
             trailing_widget: None,
             css_class: None,
@@ -841,6 +871,12 @@ impl ListRow {
     /// Set optional subtitle (convenience for Option<&str>).
     pub fn subtitle_opt(mut self, subtitle: Option<&str>) -> Self {
         self.subtitle = subtitle.map(|s| s.to_string());
+        self
+    }
+
+    /// Set a custom subtitle widget (takes precedence over subtitle text).
+    pub fn subtitle_widget(mut self, widget: gtk4::Widget) -> Self {
+        self.subtitle_widget = Some(widget);
         self
     }
 
@@ -884,12 +920,19 @@ impl ListRow {
         }
 
         // Title and subtitle using CardLabel
-        let label_result = CardLabel::new(&self.title)
-            .subtitle_opt(self.subtitle.as_deref())
+        let mut label_builder = CardLabel::new(&self.title)
             .width_chars(22)
             .title_class(row::QS_TITLE)
-            .subtitle_class(row::QS_SUBTITLE)
-            .build();
+            .subtitle_class(row::QS_SUBTITLE);
+
+        // Custom subtitle widget takes precedence over text
+        if let Some(widget) = self.subtitle_widget {
+            label_builder = label_builder.subtitle_widget(widget);
+        } else if let Some(ref text) = self.subtitle {
+            label_builder = label_builder.subtitle(text);
+        }
+
+        let label_result = label_builder.build();
         hbox.append(&label_result.container);
 
         // Trailing widget (e.g., menu button)

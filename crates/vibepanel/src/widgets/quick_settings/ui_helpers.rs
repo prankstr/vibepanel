@@ -78,6 +78,37 @@ pub fn set_subtitle_active(label: &Label, active: bool) {
     }
 }
 
+/// Build a subtitle widget with "Connected" in accent color followed by muted parts.
+///
+/// Creates an HBox containing:
+/// - "Connected" label with accent color
+/// - " · part1 · part2 · ..." label with muted color
+///
+/// Used for Wi-Fi, Ethernet, Bluetooth, and VPN connected rows.
+pub fn build_connected_subtitle(extra_parts: &[&str]) -> GtkBox {
+    use gtk4::pango::EllipsizeMode;
+
+    let hbox = GtkBox::new(Orientation::Horizontal, 0);
+
+    // "Connected" label in accent color
+    let connected_label = Label::new(Some("Connected"));
+    connected_label.add_css_class(color::ACCENT);
+    connected_label.add_css_class(row::QS_SUBTITLE);
+    hbox.append(&connected_label);
+
+    // Remaining parts in muted color
+    if !extra_parts.is_empty() {
+        let rest = format!(" \u{2022} {}", extra_parts.join(" \u{2022} "));
+        let rest_label = Label::new(Some(&rest));
+        rest_label.add_css_class(color::MUTED);
+        rest_label.add_css_class(row::QS_SUBTITLE);
+        rest_label.set_ellipsize(EllipsizeMode::End);
+        hbox.append(&rest_label);
+    }
+
+    hbox
+}
+
 /// Manages accordion behavior for expandable cards within a single row.
 ///
 /// Each row of cards gets its own `AccordionManager` instance, so cards in

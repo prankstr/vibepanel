@@ -240,8 +240,13 @@ impl QuickSettingsWidget {
             let wifi_enabled = wifi_snapshot.wifi_enabled.unwrap_or(false);
             let wifi_connected = wifi_snapshot.connected;
             let wired_connected = wifi_snapshot.wired_connected;
-            let wifi_icon_name_initial =
-                wifi_icon_name(wifi_connected, wifi_enabled, wired_connected);
+            let has_wifi_device = wifi_snapshot.has_wifi_device;
+            let wifi_icon_name_initial = wifi_icon_name(
+                wifi_connected,
+                wifi_enabled,
+                wired_connected,
+                has_wifi_device,
+            );
             let wifi_icon = base.add_icon(wifi_icon_name_initial, &[icon::ICON, icon::TEXT]);
 
             if !wifi_enabled && !wired_connected {
@@ -270,8 +275,10 @@ impl QuickSettingsWidget {
                 let enabled = snapshot.wifi_enabled.unwrap_or(false);
                 let connected = snapshot.connected;
                 let wired_connected = snapshot.wired_connected;
+                let has_wifi_device = snapshot.has_wifi_device;
 
-                let icon_name = wifi_icon_name(connected, enabled, wired_connected);
+                let icon_name =
+                    wifi_icon_name(connected, enabled, wired_connected, has_wifi_device);
                 wifi_icon_handle.set_icon(icon_name);
 
                 if !enabled && !wired_connected {
