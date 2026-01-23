@@ -15,6 +15,7 @@ use gtk4::{
 };
 use tracing::debug;
 use vibepanel_core::config::WidgetEntry;
+use vibepanel_core::parse_hex_color;
 
 use crate::services::config_manager::ConfigManager;
 use crate::services::surfaces::SurfaceStyleManager;
@@ -389,7 +390,13 @@ fn get_cached_texture(
     state: &Rc<RefCell<WidgetState>>,
     pixmap: &TrayPixmap,
 ) -> Option<gdk::Texture> {
-    let cache_key = format!("{}x{}:{}", pixmap.width, pixmap.height, pixmap.hash_key);
+    // Include background luminance in cache key so icons re-render on theme change
+    let bg_luminance = get_panel_background_luminance();
+    let bg_key = if bg_luminance > 0.5 { "light" } else { "dark" };
+    let cache_key = format!(
+        "{}x{}:{}:{}",
+        pixmap.width, pixmap.height, pixmap.hash_key, bg_key
+    );
 
     // Check cache
     if let Some(texture) = state.borrow().pixmap_cache.get(&cache_key).cloned() {
@@ -423,7 +430,27 @@ fn texture_from_pixmap(pixmap: &TrayPixmap) -> Option<gdk::Texture> {
     let stride = pixmap.width * 4;
 
     // Convert ARGB to RGBA
-    let rgba_data = argb_to_rgba(&pixmap.buffer);
+    let mut rgba_data = argb_to_rgba(&pixmap.buffer);
+
+    // Improve visibility of low-contrast icons
+    let bg_luminance = get_panel_background_luminance();
+    if let Some(edge_analysis) = analyze_edge_pixels(&rgba_data, pixmap.width, pixmap.height) {
+        if should_invert_icon(&edge_analysis, bg_luminance) {
+            // Grayscale icon with low contrast: invert colors
+            debug!(
+                "Inverting grayscale tray icon (bg_lum={:.2}, icon_lum={:.2})",
+                bg_luminance, edge_analysis.avg_luminance
+            );
+            invert_grayscale_pixels(&mut rgba_data);
+        } else if should_add_outline(&edge_analysis, bg_luminance) {
+            // Colored icon with low contrast: add outline
+            debug!(
+                "Adding outline to colored tray icon (bg_lum={:.2}, icon_lum={:.2})",
+                bg_luminance, edge_analysis.avg_luminance
+            );
+            add_outline(&mut rgba_data, pixmap.width, pixmap.height, bg_luminance);
+        }
+    }
 
     // Create pixbuf from bytes
     let gbytes = glib::Bytes::from_owned(rgba_data);
@@ -465,6 +492,273 @@ fn argb_to_rgba(data: &glib::Bytes) -> Vec<u8> {
     }
 
     result
+}
+
+/// Check if an RGB pixel is grayscale (within tolerance).
+///
+/// Returns true if R, G, B channels are all within `tolerance` of each other.
+fn is_grayscale_pixel(r: u8, g: u8, b: u8, tolerance: u8) -> bool {
+    r.abs_diff(g) <= tolerance && g.abs_diff(b) <= tolerance && r.abs_diff(b) <= tolerance
+}
+
+/// Calculate relative luminance of an RGB pixel (0.0 = black, 1.0 = white).
+///
+/// Uses the WCAG formula for perceptual luminance.
+fn pixel_luminance(r: u8, g: u8, b: u8) -> f64 {
+    fn channel(c: u8) -> f64 {
+        let c_srgb = c as f64 / 255.0;
+        if c_srgb <= 0.03928 {
+            c_srgb / 12.92
+        } else {
+            ((c_srgb + 0.055) / 1.055).powf(2.4)
+        }
+    }
+    0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
+}
+
+/// Result of analyzing icon edge pixels.
+struct EdgeAnalysis {
+    /// Average luminance of visible edge pixels (0.0 to 1.0).
+    avg_luminance: f64,
+    /// Whether the visible edge pixels are predominantly grayscale.
+    is_grayscale: bool,
+}
+
+/// Sample edge pixels (corners + midpoints) to analyze icon appearance.
+///
+/// Only considers pixels with alpha > 128 (visible pixels).
+/// Returns None if no visible edge pixels found.
+fn analyze_edge_pixels(rgba_data: &[u8], width: i32, height: i32) -> Option<EdgeAnalysis> {
+    let w = width as usize;
+    let h = height as usize;
+
+    if w < 2 || h < 2 {
+        return None;
+    }
+
+    // Sample positions: outer edges, inner ring at 25%, and center region
+    // This handles icons with transparent padding around them
+    let w25 = w / 4;
+    let w75 = w * 3 / 4;
+    let h25 = h / 4;
+    let h75 = h * 3 / 4;
+
+    let positions = [
+        // Outer corners
+        (0, 0),
+        (w - 1, 0),
+        (0, h - 1),
+        (w - 1, h - 1),
+        // Outer edge midpoints
+        (w / 2, 0),
+        (w / 2, h - 1),
+        (0, h / 2),
+        (w - 1, h / 2),
+        // Inner ring at 25% from edges (for icons with transparent padding)
+        (w25, h25),
+        (w75, h25),
+        (w25, h75),
+        (w75, h75),
+        // Inner edge midpoints
+        (w / 2, h25),
+        (w / 2, h75),
+        (w25, h / 2),
+        (w75, h / 2),
+        // Center
+        (w / 2, h / 2),
+    ];
+
+    let mut total_luminance = 0.0;
+    let mut grayscale_count = 0;
+    let mut visible_count = 0;
+
+    const GRAYSCALE_TOLERANCE: u8 = 15;
+    const ALPHA_THRESHOLD: u8 = 128;
+
+    for (x, y) in positions {
+        let idx = (y * w + x) * 4;
+        if idx + 3 >= rgba_data.len() {
+            continue;
+        }
+
+        let r = rgba_data[idx];
+        let g = rgba_data[idx + 1];
+        let b = rgba_data[idx + 2];
+        let a = rgba_data[idx + 3];
+
+        // Skip transparent pixels
+        if a < ALPHA_THRESHOLD {
+            continue;
+        }
+
+        visible_count += 1;
+        total_luminance += pixel_luminance(r, g, b);
+
+        if is_grayscale_pixel(r, g, b, GRAYSCALE_TOLERANCE) {
+            grayscale_count += 1;
+        }
+    }
+
+    if visible_count == 0 {
+        return None;
+    }
+
+    Some(EdgeAnalysis {
+        avg_luminance: total_luminance / visible_count as f64,
+        // Consider grayscale if majority of visible pixels are grayscale
+        is_grayscale: grayscale_count > visible_count / 2,
+    })
+}
+
+/// Invert grayscale pixels in RGBA data.
+///
+/// Only inverts pixels that are grayscale (within tolerance), preserving colored pixels.
+fn invert_grayscale_pixels(rgba_data: &mut [u8]) {
+    const GRAYSCALE_TOLERANCE: u8 = 15;
+
+    let mut idx = 0;
+    while idx + 3 < rgba_data.len() {
+        let r = rgba_data[idx];
+        let g = rgba_data[idx + 1];
+        let b = rgba_data[idx + 2];
+        // alpha at idx + 3, we leave it unchanged
+
+        if is_grayscale_pixel(r, g, b, GRAYSCALE_TOLERANCE) {
+            rgba_data[idx] = 255 - r;
+            rgba_data[idx + 1] = 255 - g;
+            rgba_data[idx + 2] = 255 - b;
+        }
+
+        idx += 4;
+    }
+}
+
+/// Determine if icon colors need inversion based on background contrast.
+///
+/// Uses WCAG contrast ratio to determine if the icon's visible edge pixels
+/// have sufficient contrast against the panel background. Returns true if:
+/// - Icon edges are grayscale AND
+/// - Contrast ratio is below the minimum threshold (3:1 for graphics)
+fn should_invert_icon(edge_analysis: &EdgeAnalysis, bg_luminance: f64) -> bool {
+    if !edge_analysis.is_grayscale {
+        return false;
+    }
+
+    has_low_contrast(edge_analysis.avg_luminance, bg_luminance)
+}
+
+/// Check if two luminance values have low contrast (below WCAG 3:1 threshold).
+fn has_low_contrast(lum1: f64, lum2: f64) -> bool {
+    let (lighter, darker) = if lum1 > lum2 {
+        (lum1, lum2)
+    } else {
+        (lum2, lum1)
+    };
+
+    let contrast_ratio = (lighter + 0.05) / (darker + 0.05);
+
+    // WCAG recommends 3:1 minimum for UI components and graphics
+    contrast_ratio < 3.0
+}
+
+/// Check if a colored (non-grayscale) icon needs an outline for visibility.
+fn should_add_outline(edge_analysis: &EdgeAnalysis, bg_luminance: f64) -> bool {
+    if edge_analysis.is_grayscale {
+        return false;
+    }
+
+    has_low_contrast(edge_analysis.avg_luminance, bg_luminance)
+}
+
+/// Add a contrasting outline around visible pixels in the icon.
+///
+/// For each transparent pixel within a certain distance of a visible pixel,
+/// fill it with a contrasting color (dark outline on light bg, light outline on dark bg).
+fn add_outline(rgba_data: &mut [u8], width: i32, height: i32, bg_luminance: f64) {
+    let w = width as usize;
+    let h = height as usize;
+
+    // Choose outline color based on background
+    let outline_color: (u8, u8, u8, u8) = if bg_luminance > 0.5 {
+        (0, 0, 0, 255) // Dark outline, fully opaque
+    } else {
+        (255, 255, 255, 255) // Light outline, fully opaque
+    };
+
+    const ALPHA_THRESHOLD: u8 = 64; // Lower threshold to catch semi-transparent edges
+    const OUTLINE_RADIUS: i32 = 3; // Outline thickness in pixels
+
+    // Create a mask of visible pixels
+    let mut visible = vec![false; w * h];
+    for y in 0..h {
+        for x in 0..w {
+            let idx = (y * w + x) * 4;
+            if idx + 3 < rgba_data.len() && rgba_data[idx + 3] >= ALPHA_THRESHOLD {
+                visible[y * w + x] = true;
+            }
+        }
+    }
+
+    // Find all transparent pixels within OUTLINE_RADIUS of a visible pixel
+    let mut outline_pixels = Vec::new();
+
+    for y in 0..h {
+        for x in 0..w {
+            let idx = (y * w + x) * 4;
+            if idx + 3 >= rgba_data.len() {
+                continue;
+            }
+
+            // Skip if this pixel is already visible
+            if visible[y * w + x] {
+                continue;
+            }
+
+            // Check if any pixel within radius is visible
+            let mut found = false;
+            'outer: for dy in -OUTLINE_RADIUS..=OUTLINE_RADIUS {
+                for dx in -OUTLINE_RADIUS..=OUTLINE_RADIUS {
+                    // Skip if outside the radius (use squared distance for circle)
+                    if dx * dx + dy * dy > OUTLINE_RADIUS * OUTLINE_RADIUS {
+                        continue;
+                    }
+
+                    let nx = x as i32 + dx;
+                    let ny = y as i32 + dy;
+                    if nx < 0 || nx >= w as i32 || ny < 0 || ny >= h as i32 {
+                        continue;
+                    }
+
+                    if visible[ny as usize * w + nx as usize] {
+                        found = true;
+                        break 'outer;
+                    }
+                }
+            }
+
+            if found {
+                outline_pixels.push(idx);
+            }
+        }
+    }
+
+    // Fill outline pixels
+    for idx in outline_pixels {
+        rgba_data[idx] = outline_color.0;
+        rgba_data[idx + 1] = outline_color.1;
+        rgba_data[idx + 2] = outline_color.2;
+        rgba_data[idx + 3] = outline_color.3;
+    }
+}
+
+/// Get the current panel background luminance from SurfaceStyleManager.
+fn get_panel_background_luminance() -> f64 {
+    let styles = SurfaceStyleManager::global();
+    let bg_color = styles.background_color();
+
+    parse_hex_color(&bg_color)
+        .map(|(r, g, b)| pixel_luminance(r, g, b))
+        .unwrap_or(0.1) // Default to dark if parsing fails
 }
 
 /// Load an icon from a custom theme path provided by the application.
