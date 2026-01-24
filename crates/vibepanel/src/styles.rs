@@ -258,6 +258,21 @@ pub mod qs {
     /// Scan label (`.qs-scan-label`).
     pub const SCAN_LABEL: &str = "qs-scan-label";
 
+    /// Wi-Fi switch row container (`.qs-wifi-switch-row`).
+    pub const WIFI_SWITCH_ROW: &str = "qs-wifi-switch-row";
+
+    /// Wi-Fi switch label (`.qs-wifi-switch-label`).
+    pub const WIFI_SWITCH_LABEL: &str = "qs-wifi-switch-label";
+
+    /// Network empty state container (`.qs-no-connections-state`).
+    pub const NO_CONNECTIONS_STATE: &str = "qs-no-connections-state";
+
+    /// Network empty state icon (`.qs-no-connections-icon`).
+    pub const NO_CONNECTIONS_ICON: &str = "qs-no-connections-icon";
+
+    /// Network empty state label (`.qs-no-connections-label`).
+    pub const NO_CONNECTIONS_LABEL: &str = "qs-no-connections-label";
+
     /// Wi-Fi disabled icon state (`.qs-wifi-disabled-icon`).
     pub const WIFI_DISABLED_ICON: &str = "qs-wifi-disabled-icon";
 

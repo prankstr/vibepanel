@@ -174,6 +174,7 @@ pub fn material_symbol_name(icon_name: &str) -> &str {
         // Wired networking
         "network-wired" => "lan",
         "network-wired-symbolic" => "lan",
+        "network-offline-symbolic" => "settings_ethernet",
 
         // Simplified Wi-Fi names
         "wifi-off" => "wifi_off",
@@ -514,6 +515,12 @@ pub fn gtk_icon_candidates(logical: &str) -> &'static [&'static str] {
             "network-wireless-disabled-symbolic",
             "network-wireless-signal-none-symbolic",
             "network-wireless-symbolic",
+        ],
+        "network-offline-symbolic" => &[
+            "network-offline-symbolic",
+            "network-error-symbolic",
+            "network-wired-offline-symbolic",
+            "network-wired-symbolic",
         ],
 
         // Simplified Wi-Fi names

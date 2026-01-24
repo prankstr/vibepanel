@@ -14,7 +14,7 @@ use gtk4::glib::{self, WeakRef};
 use gtk4::prelude::*;
 use gtk4::{
     ApplicationWindow, Box as GtkBox, Button, Entry, GestureClick, Label, ListBox, ListBoxRow,
-    Orientation, Overlay, Popover, ScrolledWindow,
+    Orientation, Overlay, Popover, ScrolledWindow, Switch,
 };
 use tracing::debug;
 
@@ -230,6 +230,8 @@ pub struct WifiCardState {
     /// Flag to prevent toggle signal handler from firing during programmatic updates.
     /// This prevents feedback loops when the service notifies us of state changes.
     pub updating_toggle: Cell<bool>,
+    /// The Wi-Fi switch in the expanded details section.
+    pub wifi_switch: RefCell<Option<Switch>>,
 }
 
 impl WifiCardState {
@@ -252,6 +254,7 @@ impl WifiCardState {
             connect_anim_source: RefCell::new(None),
             connect_anim_step: Cell::new(0),
             updating_toggle: Cell::new(false),
+            wifi_switch: RefCell::new(None),
         }
     }
 }
@@ -289,6 +292,7 @@ pub struct WifiDetailsResult {
     pub list_box: ListBox,
     pub scan_button: Button,
     pub scan_label: Label,
+    pub wifi_switch: Switch,
 }
 
 /// Build the Wi-Fi details section with scan button, network list, and
@@ -298,6 +302,32 @@ pub fn build_wifi_details(
     window: WeakRef<ApplicationWindow>,
 ) -> WifiDetailsResult {
     let container = GtkBox::new(Orientation::Vertical, 0);
+
+    // Get current network state for initial values
+    let snapshot = NetworkService::global().snapshot();
+
+    // Top row: Wi-Fi switch + Scan button
+    let top_row = GtkBox::new(Orientation::Horizontal, 8);
+    top_row.add_css_class(qs::WIFI_SWITCH_ROW);
+    // Disable baseline alignment to prevent GTK baseline issues with Switch widget
+    top_row.set_baseline_position(gtk4::BaselinePosition::Center);
+
+    // Wi-Fi label + switch
+    let wifi_label = Label::new(Some("Wi-Fi"));
+    wifi_label.add_css_class(color::PRIMARY);
+    wifi_label.add_css_class(qs::WIFI_SWITCH_LABEL);
+    wifi_label.set_valign(gtk4::Align::Center);
+    top_row.append(&wifi_label);
+
+    let wifi_switch = Switch::new();
+    wifi_switch.set_valign(gtk4::Align::Center);
+    wifi_switch.set_active(snapshot.wifi_enabled.unwrap_or(false));
+    top_row.append(&wifi_switch);
+
+    // Spacer to push scan button to the right
+    let spacer = GtkBox::new(Orientation::Horizontal, 0);
+    spacer.set_hexpand(true);
+    top_row.append(&spacer);
 
     // Scan button
     let scan_result = build_scan_button("Scan");
@@ -310,7 +340,8 @@ pub fn build_wifi_details(
         });
     }
 
-    container.append(&scan_button);
+    top_row.append(&scan_button);
+    container.append(&top_row);
 
     // Network list
     let list_box = create_qs_list_box();
@@ -408,8 +439,10 @@ pub fn build_wifi_details(
     *state.password_cancel_button.borrow_mut() = Some(btn_cancel.clone());
     *state.password_connect_button.borrow_mut() = Some(btn_ok.clone());
 
+    // Store switch reference
+    *state.wifi_switch.borrow_mut() = Some(wifi_switch.clone());
+
     // Populate with current network state
-    let snapshot = NetworkService::global().snapshot();
     populate_wifi_list(state, &list_box, &snapshot);
 
     WifiDetailsResult {
@@ -417,7 +450,42 @@ pub fn build_wifi_details(
         list_box,
         scan_button,
         scan_label,
+        wifi_switch,
     }
+}
+
+/// Add "No network connections" empty state with icon.
+fn add_no_connections_state(list_box: &ListBox) {
+    let icons = IconsService::global();
+
+    let container = GtkBox::new(Orientation::Vertical, 8);
+    container.add_css_class(qs::NO_CONNECTIONS_STATE);
+    container.set_valign(gtk4::Align::Center);
+    container.set_halign(gtk4::Align::Center);
+    container.set_hexpand(true);
+
+    // Icon - use IconsService for proper Material icon mapping
+    // GTK: network-offline-symbolic, Material: settings_ethernet (grayed out)
+    let icon_handle = icons.create_icon(
+        "network-offline-symbolic",
+        &[qs::NO_CONNECTIONS_ICON, color::MUTED],
+    );
+    let icon_widget = icon_handle.widget();
+    icon_widget.set_halign(gtk4::Align::Center);
+    container.append(&icon_widget);
+
+    // Message - centered like notifications empty state
+    let label = Label::new(Some("No network connections"));
+    label.add_css_class(qs::NO_CONNECTIONS_LABEL);
+    label.add_css_class(color::MUTED);
+    label.set_halign(gtk4::Align::Center);
+    label.set_justify(gtk4::Justification::Center);
+    container.append(&label);
+
+    let row = ListBoxRow::new();
+    row.set_child(Some(&container));
+    row.set_activatable(false);
+    list_box.append(&row);
 }
 
 /// Add an Ethernet connection row to the list.
@@ -480,14 +548,28 @@ pub fn populate_wifi_list(state: &WifiCardState, list_box: &ListBox, snapshot: &
 
     clear_list_box(list_box);
 
-    if !snapshot.is_ready && !snapshot.wired_connected {
-        add_placeholder_row(list_box, "Scanning for networks...");
-        return;
-    }
-
     // Add Ethernet row at the top if wired connection is active
     if snapshot.wired_connected {
         add_ethernet_row(list_box, snapshot);
+    }
+
+    // Check if Wi-Fi is disabled (or no Wi-Fi device exists)
+    let wifi_enabled = snapshot.wifi_enabled.unwrap_or(false);
+    let has_wifi = snapshot.has_wifi_device;
+
+    if !wifi_enabled || !has_wifi {
+        // Wi-Fi is off or unavailable
+        if !snapshot.wired_connected {
+            // No Ethernet either - show "No network connections" empty state
+            add_no_connections_state(list_box);
+        }
+        // If Ethernet is connected, just show Ethernet row (no placeholder needed)
+        return;
+    }
+
+    if !snapshot.is_ready && !snapshot.wired_connected {
+        add_placeholder_row(list_box, "Scanning for networks...");
+        return;
     }
 
     if snapshot.networks.is_empty() && !snapshot.wired_connected {
@@ -964,6 +1046,7 @@ pub fn update_scan_ui(
     window: &ApplicationWindow,
 ) {
     let scanning = snapshot.scanning;
+    let wifi_enabled = snapshot.wifi_enabled.unwrap_or(false);
 
     // Update label text and CSS
     if let Some(label) = state.scan_label.borrow().as_ref() {
@@ -975,8 +1058,9 @@ pub fn update_scan_ui(
         }
     }
 
-    // Update button sensitivity
+    // Hide button completely when Wi-Fi is off, disable when scanning
     if let Some(button) = state.scan_button.borrow().as_ref() {
+        button.set_visible(wifi_enabled);
         button.set_sensitive(!scanning);
     }
 
@@ -1071,18 +1155,30 @@ pub fn on_network_changed(
         }
     }
 
-    // Update Wi-Fi toggle state (with signal blocking to prevent feedback loop)
+    // Update Wi-Fi toggle and switch state (with signal blocking to prevent feedback loop)
+    let enabled = snapshot.wifi_enabled.unwrap_or(false);
+    state.updating_toggle.set(true);
+
+    // Update card toggle
     if let Some(toggle) = state.base.toggle.borrow().as_ref() {
-        let enabled = snapshot.wifi_enabled.unwrap_or(false);
         if toggle.is_active() != enabled {
-            // Set the flag to block the toggle signal handler
-            state.updating_toggle.set(true);
             toggle.set_active(enabled);
-            state.updating_toggle.set(false);
         }
-        // Toggle should only be sensitive if Wi-Fi device exists
-        toggle.set_sensitive(snapshot.has_wifi_device);
+        // Card toggle is only sensitive on WiFi-only devices (no ethernet port)
+        // When ethernet is present, users must use the switch in expanded view
+        toggle.set_sensitive(snapshot.has_wifi_device && !snapshot.has_ethernet_device);
     }
+
+    // Update Wi-Fi switch in expanded details
+    if let Some(wifi_switch) = state.wifi_switch.borrow().as_ref() {
+        if wifi_switch.is_active() != enabled {
+            wifi_switch.set_active(enabled);
+        }
+        // Switch should only be sensitive if Wi-Fi device exists
+        wifi_switch.set_sensitive(snapshot.has_wifi_device);
+    }
+
+    state.updating_toggle.set(false);
 
     // Update card title based on whether ethernet device exists
     if let Some(title_label) = state.title_label.borrow().as_ref() {

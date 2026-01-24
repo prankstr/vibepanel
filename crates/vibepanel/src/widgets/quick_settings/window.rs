@@ -623,6 +623,21 @@ impl QuickSettingsWindow {
         *qs.wifi.scan_button.borrow_mut() = Some(wifi_details.scan_button);
         *qs.wifi.scan_label.borrow_mut() = Some(wifi_details.scan_label);
 
+        // Connect Wi-Fi switch to toggle Wi-Fi enabled state
+        {
+            let wifi_state = Rc::clone(&qs.wifi);
+            wifi_details
+                .wifi_switch
+                .connect_state_set(move |_, enabled| {
+                    // Skip if this is a programmatic update (prevents feedback loops)
+                    if wifi_state.updating_toggle.get() {
+                        return glib::Propagation::Proceed;
+                    }
+                    NetworkService::global().set_wifi_enabled(enabled);
+                    glib::Propagation::Proceed
+                });
+        }
+
         (wifi_card.card, wifi_revealer, wifi_card.expander_button)
     }
 
