@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.2](https://github.com/prankstr/vibepanel/compare/v0.6.1...v0.6.2) (2026-01-24)
+
+
+### Features
+
+* **quick_settings:** add support for ethernet in the wifi(now network) card ([#23](https://github.com/prankstr/vibepanel/issues/23)) ([0f3c914](https://github.com/prankstr/vibepanel/commit/0f3c91421398a4d013af0021ea6e6571e4870909))
+* **quick-settings:** unify bt disabled state and scan button with wifi ([1997149](https://github.com/prankstr/vibepanel/commit/199714974f4c62bc131d7f50934e0df5b0ee53f3))
+
+
+### Bug Fixes
+
+* **calenders:** todays date background scale with radius ([f485702](https://github.com/prankstr/vibepanel/commit/f485702c60d382e2d82efc90c91abe4ea3cee4a6))
+* **quick_settings:** css adjustment to fix alignment issues ([02ba214](https://github.com/prankstr/vibepanel/commit/02ba21484a31311f60e796e6a79d3161dfed58b9))
+* **quick_settings:** prevent toggle 2x-trigger on bt/vpn state changes ([7d050af](https://github.com/prankstr/vibepanel/commit/7d050af01c24f44b10556ccedafbbe4fd812ed97))
+* **quick_settings:** scale audio checkboxes with radius ([37e21c5](https://github.com/prankstr/vibepanel/commit/37e21c56dbbbf9ebd93ca7a85d4d65c58dcf2a94))
+
 ## [0.6.1](https://github.com/prankstr/vibepanel/compare/v0.6.0...v0.6.1) (2026-01-22)
 
 
