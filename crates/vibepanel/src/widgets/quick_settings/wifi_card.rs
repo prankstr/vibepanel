@@ -232,6 +232,8 @@ pub struct WifiCardState {
     pub updating_toggle: Cell<bool>,
     /// The Wi-Fi switch in the expanded details section.
     pub wifi_switch: RefCell<Option<Switch>>,
+    /// Ethernet row container (shown above Wi-Fi controls when connected).
+    pub ethernet_row: RefCell<Option<GtkBox>>,
 }
 
 impl WifiCardState {
@@ -255,6 +257,7 @@ impl WifiCardState {
             connect_anim_step: Cell::new(0),
             updating_toggle: Cell::new(false),
             wifi_switch: RefCell::new(None),
+            ethernet_row: RefCell::new(None),
         }
     }
 }
@@ -306,33 +309,41 @@ pub fn build_wifi_details(
     // Get current network state for initial values
     let snapshot = NetworkService::global().snapshot();
 
-    // Top row: Wi-Fi switch + Scan button
-    let top_row = GtkBox::new(Orientation::Horizontal, 8);
-    top_row.add_css_class(qs::WIFI_SWITCH_ROW);
+    // Ethernet row (above Wi-Fi controls, shown only when connected)
+    let ethernet_row = build_ethernet_row(&snapshot);
+    container.append(&ethernet_row);
+
+    // Store ethernet row reference for dynamic updates
+    *state.ethernet_row.borrow_mut() = Some(ethernet_row);
+
+    // Wi-Fi controls row: Wi-Fi switch + Scan button
+    let wifi_row = GtkBox::new(Orientation::Horizontal, 8);
+    wifi_row.add_css_class(qs::WIFI_SWITCH_ROW);
     // Disable baseline alignment to prevent GTK baseline issues with Switch widget
-    top_row.set_baseline_position(gtk4::BaselinePosition::Center);
+    wifi_row.set_baseline_position(gtk4::BaselinePosition::Center);
 
     // Wi-Fi label + switch
     let wifi_label = Label::new(Some("Wi-Fi"));
     wifi_label.add_css_class(color::PRIMARY);
     wifi_label.add_css_class(qs::WIFI_SWITCH_LABEL);
-    wifi_label.set_valign(gtk4::Align::Center);
-    top_row.append(&wifi_label);
+    wifi_label.set_valign(gtk4::Align::End);
+    wifi_row.append(&wifi_label);
 
     let wifi_switch = Switch::new();
-    wifi_switch.set_valign(gtk4::Align::Center);
+    wifi_switch.set_valign(gtk4::Align::End);
     wifi_switch.set_active(snapshot.wifi_enabled.unwrap_or(false));
-    top_row.append(&wifi_switch);
+    wifi_row.append(&wifi_switch);
 
     // Spacer to push scan button to the right
     let spacer = GtkBox::new(Orientation::Horizontal, 0);
     spacer.set_hexpand(true);
-    top_row.append(&spacer);
+    wifi_row.append(&spacer);
 
     // Scan button
     let scan_result = build_scan_button("Scan");
     let scan_button = scan_result.button;
     let scan_label = scan_result.label;
+    scan_button.set_valign(gtk4::Align::End);
 
     {
         scan_button.connect_clicked(move |_| {
@@ -340,8 +351,8 @@ pub fn build_wifi_details(
         });
     }
 
-    top_row.append(&scan_button);
-    container.append(&top_row);
+    wifi_row.append(&scan_button);
+    container.append(&wifi_row);
 
     // Network list
     let list_box = create_qs_list_box();
@@ -488,11 +499,74 @@ fn add_no_connections_state(list_box: &ListBox) {
     list_box.append(&row);
 }
 
-/// Add an Ethernet connection row to the list.
-fn add_ethernet_row(list_box: &ListBox, snapshot: &NetworkSnapshot) {
+fn add_wifi_disabled_placeholder(list_box: &ListBox) {
     let icons = IconsService::global();
 
-    // Build subtitle extra parts: interface, speed
+    let container = GtkBox::new(Orientation::Vertical, 6);
+    container.add_css_class(qs::WIFI_DISABLED_STATE);
+    container.set_valign(gtk4::Align::Center);
+    container.set_halign(gtk4::Align::Center);
+    container.set_hexpand(true);
+
+    // Icon - disabled Wi-Fi icon, grayed out
+    let icon_handle = icons.create_icon(
+        "network-wireless-offline-symbolic",
+        &[qs::WIFI_DISABLED_STATE_ICON, color::MUTED],
+    );
+    let icon_widget = icon_handle.widget();
+    icon_widget.set_halign(gtk4::Align::Center);
+    container.append(&icon_widget);
+
+    // Message
+    let label = Label::new(Some("Wi-Fi is disabled"));
+    label.add_css_class(qs::WIFI_DISABLED_LABEL);
+    label.add_css_class(color::MUTED);
+    label.set_halign(gtk4::Align::Center);
+    label.set_justify(gtk4::Justification::Center);
+    container.append(&label);
+
+    let row = ListBoxRow::new();
+    row.set_child(Some(&container));
+    row.set_activatable(false);
+    list_box.append(&row);
+}
+
+/// Build a standalone Ethernet section widget (not in a ListBox).
+/// Includes a header label and connection details row.
+/// Returns a GtkBox that can be shown/hidden based on connection state.
+fn build_ethernet_row(snapshot: &NetworkSnapshot) -> GtkBox {
+    let icons = IconsService::global();
+
+    // Main container for the entire Ethernet section
+    let container = GtkBox::new(Orientation::Vertical, 0);
+    container.add_css_class(qs::ETHERNET_ROW_CONTAINER);
+
+    // Header row with "Ethernet" label (matches Wi-Fi header style)
+    let header_row = GtkBox::new(Orientation::Horizontal, 8);
+    header_row.add_css_class(qs::WIFI_SWITCH_ROW);
+
+    let header_label = Label::new(Some("Ethernet"));
+    header_label.add_css_class(color::PRIMARY);
+    header_label.add_css_class(qs::WIFI_SWITCH_LABEL);
+    header_label.set_valign(gtk4::Align::Center);
+    header_row.append(&header_label);
+
+    container.append(&header_row);
+
+    // Create ethernet icon with accent color (always connected when shown)
+    let icon_handle = icons.create_icon(
+        "network-wired-symbolic",
+        &[icon::TEXT, row::QS_ICON, color::ACCENT],
+    );
+
+    // Get connection name for title, fallback to interface name, then generic
+    let title = snapshot
+        .wired_name
+        .as_deref()
+        .or(snapshot.wired_iface.as_deref())
+        .unwrap_or("Wired Connection");
+
+    // Build subtitle extra parts: interface name, speed
     let mut extra_parts: Vec<String> = Vec::new();
     if let Some(ref iface) = snapshot.wired_iface {
         extra_parts.push(iface.clone());
@@ -510,27 +584,46 @@ fn add_ethernet_row(list_box: &ListBox, snapshot: &NetworkSnapshot) {
         }
     }
 
-    // Build connected subtitle widget with accent "Connected"
+    // Build connected subtitle widget with accent "Connected" and muted extra parts
     let extra_refs: Vec<&str> = extra_parts.iter().map(|s| s.as_str()).collect();
     let subtitle_widget = build_connected_subtitle(&extra_refs);
 
-    // Create ethernet icon with accent color (always connected when shown)
-    let icon_handle = icons.create_icon(
-        "network-wired-symbolic",
-        &[icon::TEXT, row::QS_ICON, color::ACCENT],
-    );
-
+    // Connection details row with connection name as title
     let row_result = ListRow::builder()
-        .title("Ethernet")
+        .title(title)
         .subtitle_widget(subtitle_widget.upcast())
         .leading_widget(icon_handle.widget())
         .css_class(qs::WIFI_ROW)
         .build();
 
-    // Ethernet row is not actionable (no disconnect option for now)
-    row_result.row.set_activatable(false);
+    // Connection row container with background styling
+    let connection_row = GtkBox::new(Orientation::Vertical, 0);
+    connection_row.add_css_class(row::QS);
+    connection_row.add_css_class(qs::ETHERNET_CONNECTION_ROW);
 
-    list_box.append(&row_result.row);
+    // Extract the row's child and put it in our container
+    if let Some(child) = row_result.row.child() {
+        row_result.row.set_child(None::<&gtk4::Widget>);
+        connection_row.append(&child);
+    }
+
+    container.append(&connection_row);
+
+    // Initially visible only if wired is connected
+    container.set_visible(snapshot.wired_connected);
+
+    container
+}
+
+/// Update the Ethernet row visibility and content based on connection state.
+pub fn update_ethernet_row(state: &WifiCardState, snapshot: &NetworkSnapshot) {
+    if let Some(ethernet_row) = state.ethernet_row.borrow().as_ref() {
+        ethernet_row.set_visible(snapshot.wired_connected);
+
+        // If connected and row is visible, we might want to update the subtitle
+        // For now, the subtitle is static after creation. If we need dynamic updates,
+        // we'd need to store subtitle label reference and update it here.
+    }
 }
 
 /// Populate the Wi-Fi list with network data from snapshot.
@@ -548,31 +641,29 @@ pub fn populate_wifi_list(state: &WifiCardState, list_box: &ListBox, snapshot: &
 
     clear_list_box(list_box);
 
-    // Add Ethernet row at the top if wired connection is active
-    if snapshot.wired_connected {
-        add_ethernet_row(list_box, snapshot);
-    }
-
     // Check if Wi-Fi is disabled (or no Wi-Fi device exists)
     let wifi_enabled = snapshot.wifi_enabled.unwrap_or(false);
     let has_wifi = snapshot.has_wifi_device;
 
     if !wifi_enabled || !has_wifi {
         // Wi-Fi is off or unavailable
-        if !snapshot.wired_connected {
-            // No Ethernet either - show "No network connections" empty state
+        if has_wifi && !wifi_enabled {
+            // Device has Wi-Fi but it's disabled - show "Wi-Fi is disabled"
+            add_wifi_disabled_placeholder(list_box);
+        } else if !snapshot.wired_connected {
+            // No Wi-Fi device and no Ethernet - show "No network connections"
             add_no_connections_state(list_box);
         }
-        // If Ethernet is connected, just show Ethernet row (no placeholder needed)
+        // If no Wi-Fi device but Ethernet is connected, nothing to show in Wi-Fi list
         return;
     }
 
-    if !snapshot.is_ready && !snapshot.wired_connected {
+    if !snapshot.is_ready {
         add_placeholder_row(list_box, "Scanning for networks...");
         return;
     }
 
-    if snapshot.networks.is_empty() && !snapshot.wired_connected {
+    if snapshot.networks.is_empty() {
         add_placeholder_row(list_box, "No networks found");
         return;
     }
@@ -1217,6 +1308,9 @@ pub fn on_network_changed(
     // Update Wi-Fi subtitle
     update_subtitle(state, snapshot);
 
+    // Update Ethernet row visibility
+    update_ethernet_row(state, snapshot);
+
     // Update scan button UI (label + animation)
     update_scan_ui(state, snapshot, window);
 
@@ -1366,6 +1460,7 @@ mod tests {
             has_ethernet_device: false,
             primary_connection_type: None,
             wired_iface: None,
+            wired_name: None,
             wired_speed: None,
             ssid: None,
             strength: 0,

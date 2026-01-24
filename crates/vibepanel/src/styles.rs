@@ -264,6 +264,12 @@ pub mod qs {
     /// Wi-Fi switch label (`.qs-wifi-switch-label`).
     pub const WIFI_SWITCH_LABEL: &str = "qs-wifi-switch-label";
 
+    /// Ethernet section container in expanded details (`.qs-ethernet-section`).
+    pub const ETHERNET_ROW_CONTAINER: &str = "qs-ethernet-section";
+
+    /// Ethernet connection row with background (`.qs-ethernet-connection-row`).
+    pub const ETHERNET_CONNECTION_ROW: &str = "qs-ethernet-connection-row";
+
     /// Network empty state container (`.qs-no-connections-state`).
     pub const NO_CONNECTIONS_STATE: &str = "qs-no-connections-state";
 
@@ -275,6 +281,15 @@ pub mod qs {
 
     /// Wi-Fi disabled icon state (`.qs-wifi-disabled-icon`).
     pub const WIFI_DISABLED_ICON: &str = "qs-wifi-disabled-icon";
+
+    /// Wi-Fi disabled state container (`.qs-wifi-disabled-state`).
+    pub const WIFI_DISABLED_STATE: &str = "qs-wifi-disabled-state";
+
+    /// Wi-Fi disabled state icon (`.qs-wifi-disabled-state-icon`).
+    pub const WIFI_DISABLED_STATE_ICON: &str = "qs-wifi-disabled-state-icon";
+
+    /// Wi-Fi disabled state label (`.qs-wifi-disabled-label`).
+    pub const WIFI_DISABLED_LABEL: &str = "qs-wifi-disabled-label";
 
     /// Muted placeholder label (`.qs-muted`).
     pub const MUTED_LABEL: &str = "qs-muted";

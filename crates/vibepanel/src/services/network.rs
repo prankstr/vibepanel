@@ -42,6 +42,8 @@ const IFACE_WIFI: &str = "org.freedesktop.NetworkManager.Device.Wireless";
 const IFACE_WIRED: &str = "org.freedesktop.NetworkManager.Device.Wired";
 /// Access point interface.
 const IFACE_AP: &str = "org.freedesktop.NetworkManager.AccessPoint";
+/// Active connection interface (for connection name/Id).
+const IFACE_ACTIVE_CONN: &str = "org.freedesktop.NetworkManager.Connection.Active";
 
 /// NetworkManager device type for Ethernet (NM_DEVICE_TYPE_ETHERNET = 1).
 const ETHERNET_DEVICE_TYPE: u32 = 1;
@@ -84,6 +86,8 @@ pub struct NetworkSnapshot {
     pub primary_connection_type: Option<String>,
     /// Wired interface name (e.g., "enp3s0") when connected via Ethernet.
     pub wired_iface: Option<String>,
+    /// Wired connection name from NetworkManager (e.g., "Wired connection 1").
+    pub wired_name: Option<String>,
     /// Wired link speed in Mb/s (e.g., 1000 for gigabit) when connected via Ethernet.
     pub wired_speed: Option<u32>,
     /// Current SSID if connected.
@@ -114,6 +118,7 @@ impl NetworkSnapshot {
             has_ethernet_device: false,
             primary_connection_type: None,
             wired_iface: None,
+            wired_name: None,
             wired_speed: None,
             ssid: None,
             strength: 0,
@@ -158,6 +163,8 @@ enum NetworkUpdate {
     WiredDeviceInfo {
         /// Interface name (e.g., "enp3s0").
         iface_name: Option<String>,
+        /// Connection name from NetworkManager (e.g., "Wired connection 1").
+        conn_name: Option<String>,
         /// Link speed in Mb/s (e.g., 1000 for gigabit).
         speed: Option<u32>,
     },
@@ -348,11 +355,18 @@ impl NetworkService {
 
                 self.refresh_networks_async();
             }
-            NetworkUpdate::WiredDeviceInfo { iface_name, speed } => {
+            NetworkUpdate::WiredDeviceInfo {
+                iface_name,
+                conn_name,
+                speed,
+            } => {
                 let mut snapshot = self.snapshot.borrow_mut();
-                let changed = snapshot.wired_iface != iface_name || snapshot.wired_speed != speed;
+                let changed = snapshot.wired_iface != iface_name
+                    || snapshot.wired_name != conn_name
+                    || snapshot.wired_speed != speed;
                 if changed {
                     snapshot.wired_iface = iface_name;
+                    snapshot.wired_name = conn_name;
                     snapshot.wired_speed = speed;
                     let snapshot_clone = snapshot.clone();
                     drop(snapshot);
@@ -651,6 +665,48 @@ impl NetworkService {
         Ok((iface_name, speed))
     }
 
+    /// Get the primary connection name (Id) from NetworkManager.
+    /// Returns None if no primary connection or on error.
+    fn get_primary_connection_name_sync() -> Option<String> {
+        // Get NM proxy to read PrimaryConnection path
+        let nm_proxy = gio::DBusProxy::for_bus_sync(
+            gio::BusType::System,
+            gio::DBusProxyFlags::NONE,
+            None::<&gio::DBusInterfaceInfo>,
+            NM_SERVICE,
+            NM_PATH,
+            NM_IFACE,
+            None::<&gio::Cancellable>,
+        )
+        .ok()?;
+
+        // Get PrimaryConnection object path
+        let primary_conn_path = nm_proxy
+            .cached_property("PrimaryConnection")
+            .and_then(|v| v.get::<glib::variant::ObjectPath>())?;
+
+        let path_str = primary_conn_path.as_str();
+        if path_str == "/" {
+            return None; // No primary connection
+        }
+
+        // Get the connection name (Id) from the ActiveConnection
+        let conn_proxy = gio::DBusProxy::for_bus_sync(
+            gio::BusType::System,
+            gio::DBusProxyFlags::NONE,
+            None::<&gio::DBusInterfaceInfo>,
+            NM_SERVICE,
+            path_str,
+            IFACE_ACTIVE_CONN,
+            None::<&gio::Cancellable>,
+        )
+        .ok()?;
+
+        conn_proxy
+            .cached_property("Id")
+            .and_then(|v| v.get::<String>())
+    }
+
     /// Discover wired device and fetch its info in a background thread.
     fn fetch_wired_device_info() {
         thread::spawn(move || {
@@ -662,6 +718,7 @@ impl NetworkService {
                 send_network_update(NetworkUpdate::EthernetDeviceExists);
                 send_network_update(NetworkUpdate::WiredDeviceInfo {
                     iface_name: Some("enp0s31f6".to_string()),
+                    conn_name: Some("Wired connection 1".to_string()),
                     speed: Some(1000),
                 });
                 return;
@@ -673,6 +730,7 @@ impl NetworkService {
                     warn!("Failed to get device paths for wired lookup: {}", e);
                     send_network_update(NetworkUpdate::WiredDeviceInfo {
                         iface_name: None,
+                        conn_name: None,
                         speed: None,
                     });
                     return;
@@ -685,9 +743,15 @@ impl NetworkService {
                     Ok((dtype, _)) if dtype == ETHERNET_DEVICE_TYPE => {
                         match Self::get_wired_device_info_sync(&path) {
                             Ok((iface_name, speed)) => {
-                                debug!("Found wired device: {} ({} Mb/s)", iface_name, speed);
+                                // Also get the connection name from the primary connection
+                                let conn_name = Self::get_primary_connection_name_sync();
+                                debug!(
+                                    "Found wired device: {} ({} Mb/s), connection: {:?}",
+                                    iface_name, speed, conn_name
+                                );
                                 send_network_update(NetworkUpdate::WiredDeviceInfo {
                                     iface_name: Some(iface_name),
+                                    conn_name,
                                     speed: if speed > 0 { Some(speed) } else { None },
                                 });
                                 return;
@@ -704,6 +768,7 @@ impl NetworkService {
             // No wired device found
             send_network_update(NetworkUpdate::WiredDeviceInfo {
                 iface_name: None,
+                conn_name: None,
                 speed: None,
             });
         });
@@ -813,6 +878,7 @@ impl NetworkService {
             // Clear wired info when disconnecting
             if !wired_connected {
                 snapshot.wired_iface = None;
+                snapshot.wired_name = None;
                 snapshot.wired_speed = None;
             }
         }
