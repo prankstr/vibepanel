@@ -111,7 +111,7 @@ pub fn css() -> &'static str {
 
 /* Album art in popover/window */
 .media-art {
-    border-radius: var(--radius-card);
+    border-radius: var(--radius-widget);
     background: var(--color-card-overlay);
 }
 

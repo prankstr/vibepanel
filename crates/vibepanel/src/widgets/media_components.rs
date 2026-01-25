@@ -300,7 +300,7 @@ pub fn build_seek_section(
 pub fn build_album_art(size: i32) -> (GtkBox, RoundedPicture, GtkBox, Rc<RefCell<ArtState>>) {
     let icons = IconsService::global();
     let config_mgr = ConfigManager::global();
-    let corner_radius = config_mgr.widget_border_radius() as f32 * 0.8;
+    let corner_radius = config_mgr.widget_border_radius() as f32;
 
     let container = GtkBox::new(Orientation::Vertical, 0);
     container.set_size_request(size, size);

@@ -12,6 +12,7 @@ pub fn css() -> &'static str {
 /* Section cards */
 .system-section-card {
     padding: 12px;
+    border-radius: var(--radius-card);
 }
 
 /* Disable hover on non-interactive section cards */
@@ -56,7 +57,7 @@ pub fn css() -> &'static str {
     padding: 12px;
     margin-top: 4px;
     background: var(--color-card-overlay);
-    border-radius: var(--radius-widget);
+    border-radius: var(--radius-card);
 }
 
 .system-expander-header {
@@ -65,7 +66,7 @@ pub fn css() -> &'static str {
 
 .system-expander-header:hover {
     background: var(--color-card-overlay-hover);
-    border-radius: var(--radius-widget);
+    border-radius: var(--radius-card);
 }
 
 .system-network-icon {
