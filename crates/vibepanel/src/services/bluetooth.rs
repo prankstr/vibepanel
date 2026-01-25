@@ -152,6 +152,17 @@ impl BluetoothAuthRequest {
             Self::DisplayPinCode { .. } | Self::DisplayPasskey { .. }
         )
     }
+
+    /// Returns the number of characters expected for this auth request's input.
+    pub fn char_count(&self) -> usize {
+        match self {
+            Self::RequestPinCode { .. } => 4,
+            Self::RequestPasskey { .. } => 6,
+            Self::RequestConfirmation { .. } => 6,
+            Self::DisplayPinCode { pincode, .. } => pincode.len().max(4),
+            Self::DisplayPasskey { .. } => 6,
+        }
+    }
 }
 
 /// Response to an authentication request.
@@ -979,7 +990,7 @@ impl BluetoothService {
         *self.debounce_id.borrow_mut() = Some(id);
     }
 
-    fn update_state(&self) {
+    fn update_state(self: &Rc<Self>) {
         let adapter = self.adapter.borrow().clone();
         let object_manager = self.object_manager.borrow().clone();
         let connection = self.connection.borrow().clone();
@@ -1002,9 +1013,8 @@ impl BluetoothService {
             .unwrap_or(false);
 
         // Get managed objects to enumerate devices
-        let this = BluetoothService::global();
         if let Some(om) = object_manager {
-            let this_weak = Rc::downgrade(&this);
+            let this_weak = Rc::downgrade(self);
             om.call(
                 "GetManagedObjects",
                 None,
@@ -1045,21 +1055,28 @@ impl BluetoothService {
                     snapshot.scanning = discovering;
                     snapshot.is_ready = true;
 
-                    // Clear display-only auth requests when device becomes paired
+                    // Clear display-only auth requests when:
+                    // - Device becomes paired (success)
+                    // - Device disappeared from the list
+                    // - Pairing is no longer in progress for this device (failure/cancel)
                     // (DisplayPinCode/DisplayPasskey have no pending invocation to complete)
                     if let Some(ref auth_req) = snapshot.auth_request
                         && auth_req.is_display_only()
                     {
                         let device_path = auth_req.device_path();
-                        // Use snapshot.devices for lookup (devices was moved above)
                         let device = snapshot.devices.iter().find(|d| d.path == device_path);
+                        let pairing_cleared = snapshot
+                            .pairing_device_path
+                            .as_ref()
+                            .map(|p| p != device_path)
+                            .unwrap_or(true);
                         let should_clear = match device {
-                            Some(d) => d.paired, // Clear when paired
-                            None => true,        // Clear if device disappeared
+                            Some(d) => d.paired || pairing_cleared, // Clear when paired or pairing ended
+                            None => true, // Clear if device disappeared
                         };
                         if should_clear {
                             debug!(
-                                "BluetoothService: clearing display auth request - device paired"
+                                "BluetoothService: clearing display auth request - device paired or pairing ended"
                             );
                             snapshot.auth_request = None;
                         }

@@ -316,7 +316,6 @@ fn create_bluetooth_action_widget(dev: &BluetoothDevice, is_pairing: bool) -> gt
     let path = dev.path.clone();
     let paired = dev.paired;
     let trusted = dev.trusted;
-    let connected = dev.connected;
 
     // If pairing is in progress, show nothing (hide the Pair button)
     if is_pairing {
@@ -338,11 +337,19 @@ fn create_bluetooth_action_widget(dev: &BluetoothDevice, is_pairing: bool) -> gt
     // Paired or trusted devices: hamburger menu (Connect/Disconnect/Forget)
     let menu_btn = create_row_menu_button();
 
-    let path_for_connect = path.clone();
-    let path_for_disconnect = path.clone();
-    let path_for_forget = path.clone();
+    let path_for_menu = path.clone();
 
     menu_btn.connect_clicked(move |btn| {
+        // Query fresh snapshot at click time to get current connected state
+        let bt = BluetoothService::global();
+        let snapshot = bt.snapshot();
+        let connected = snapshot
+            .devices
+            .iter()
+            .find(|d| d.path == path_for_menu)
+            .map(|d| d.connected)
+            .unwrap_or(false);
+
         let popover = Popover::new();
         configure_popover(&popover);
 
@@ -353,7 +360,7 @@ fn create_bluetooth_action_widget(dev: &BluetoothDevice, is_pairing: bool) -> gt
         content_box.add_css_class(qs::ROW_MENU_CONTENT);
 
         if connected {
-            let path = path_for_disconnect.clone();
+            let path = path_for_menu.clone();
             let action = create_row_menu_action("Disconnect", move || {
                 let bt = BluetoothService::global();
                 debug!("bt_disconnect_from_menu path={}", path);
@@ -361,7 +368,7 @@ fn create_bluetooth_action_widget(dev: &BluetoothDevice, is_pairing: bool) -> gt
             });
             content_box.append(&action);
         } else {
-            let path = path_for_connect.clone();
+            let path = path_for_menu.clone();
             let action = create_row_menu_action("Connect", move || {
                 let bt = BluetoothService::global();
                 debug!("bt_connect_from_menu path={}", path);
@@ -370,7 +377,7 @@ fn create_bluetooth_action_widget(dev: &BluetoothDevice, is_pairing: bool) -> gt
             content_box.append(&action);
         }
 
-        let path = path_for_forget.clone();
+        let path = path_for_menu.clone();
         let action = create_row_menu_action("Forget", move || {
             let bt = BluetoothService::global();
             debug!("bt_forget_from_menu path={}", path);
@@ -481,14 +488,8 @@ fn build_auth_row(auth_request: &BluetoothAuthRequest, state: &BluetoothCardStat
     let cached_input = state.get_auth_input();
     let auth_input_rc = state.auth_input_rc();
 
-    // Determine char_count for validation (must match build_char_entries_inline logic)
-    let char_count = match auth_request {
-        BluetoothAuthRequest::RequestPinCode { .. } => 4,
-        BluetoothAuthRequest::RequestPasskey { .. } => 6,
-        BluetoothAuthRequest::RequestConfirmation { .. } => 6,
-        BluetoothAuthRequest::DisplayPinCode { pincode, .. } => pincode.len().max(4),
-        BluetoothAuthRequest::DisplayPasskey { .. } => 6,
-    };
+    // Use char_count from auth request to ensure consistency
+    let char_count = auth_request.char_count();
 
     // Create validation callback that updates button sensitivity
     let validation_callback: InputChangedCallback = if !is_display_mode {
