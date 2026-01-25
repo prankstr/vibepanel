@@ -358,6 +358,7 @@ impl ThemePalette {
     --radius-bar: {radius_bar}px;
     --radius-surface: {radius_surface}px;
     --radius-widget: {radius_widget};
+    --radius-widget-lg: calc({radius_widget} * 2);            /* Larger surfaces that scale with widget */
     --radius-pill: {radius_pill}px;
     --radius-card: {radius_card}px;                        /* Cards/containers - never goes pill */
     --radius-track: calc(var(--radius-pill) * 0.4);        /* Thin (6px) slider troughs */

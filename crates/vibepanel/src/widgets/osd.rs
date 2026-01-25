@@ -223,8 +223,13 @@ impl OsdOverlay {
             container.add_css_class(osd::HORIZONTAL);
         }
 
-        // Apply theme surface styles for consistent popover appearance.
-        SurfaceStyleManager::global().apply_surface_styles(&container, true, None);
+        // Apply theme surface styles with larger widget radius for pill shape at max radius.
+        SurfaceStyleManager::global().apply_surface_styles_with_radius(
+            &container,
+            true,
+            None,
+            "var(--radius-widget-lg)",
+        );
 
         // Child OSD widget.
         let osd_widget = OsdWidget::new(orientation, 24);

@@ -290,8 +290,8 @@ impl SurfaceStyleManager {
     /// same visual language as widgets: dark background, rounded corners,
     /// readable text, subtle border.
     ///
-    /// The styles are applied with high priority to override GTK themes
-    /// (like Tokyo Night) that may interfere with custom styling.
+    /// The styles are applied at base priority so CSS classes can override
+    /// specific properties while GTK themes are still overridden.
     ///
     /// # Arguments
     /// * `widget` - The widget to style
@@ -302,6 +302,38 @@ impl SurfaceStyleManager {
         widget: &impl IsA<gtk4::Widget>,
         with_padding: bool,
         color_override: Option<&str>,
+    ) {
+        self.apply_surface_styles_inner(
+            widget,
+            with_padding,
+            color_override,
+            "var(--radius-surface)",
+        );
+    }
+
+    /// Apply surface styles with a custom border radius.
+    ///
+    /// # Arguments
+    /// * `widget` - The widget to style
+    /// * `with_padding` - Whether to apply padding to the widget
+    /// * `color_override` - Optional background color override (e.g., from parent widget)
+    /// * `radius` - CSS value for border-radius (e.g., "var(--radius-widget)")
+    pub fn apply_surface_styles_with_radius(
+        &self,
+        widget: &impl IsA<gtk4::Widget>,
+        with_padding: bool,
+        color_override: Option<&str>,
+        radius: &str,
+    ) {
+        self.apply_surface_styles_inner(widget, with_padding, color_override, radius);
+    }
+
+    fn apply_surface_styles_inner(
+        &self,
+        widget: &impl IsA<gtk4::Widget>,
+        with_padding: bool,
+        color_override: Option<&str>,
+        radius: &str,
     ) {
         let widget = widget.as_ref();
 
@@ -319,7 +351,6 @@ impl SurfaceStyleManager {
         // Build CSS targeting the widget's CSS name
         // For Popover, we need to target both the popover and its contents
         // Use high-specificity selectors to override GTK themes
-        // Use var(--radius-surface) CSS variable to respect theme settings including 0
         let css_name = widget.css_name();
         let css = if css_name == "popover" {
             format!(
@@ -330,7 +361,7 @@ popover.widget-menu.background {{
     background: {bg};
     background-image: none;
     border: none;
-    border-radius: var(--radius-surface);
+    border-radius: {radius};
     box-shadow: {shadow};
 }}
 
@@ -340,7 +371,7 @@ popover.widget-menu.background > contents {{
     background: transparent;
     background-image: none;
     border: none;
-    border-radius: var(--radius-surface);
+    border-radius: {radius};
     font-family: {font};
     font-size: var(--font-size);
     color: var(--color-foreground-primary);
@@ -366,6 +397,7 @@ popover.widget-menu.background * {{
                 font = styles.font_family,
                 padding = padding_css,
                 shadow = styles.shadow,
+                radius = radius,
             )
         } else {
             // Check if widget has the widget-menu-content class - if so, use
@@ -383,7 +415,7 @@ popover.widget-menu.background * {{
 {selector} {{
     background-color: {bg};
     background-image: none;
-    border-radius: var(--radius-surface);
+    border-radius: {radius};
     font-family: {font};
     font-size: var(--font-size);
     color: var(--color-foreground-primary);
@@ -400,6 +432,7 @@ popover.widget-menu.background * {{
                 font = styles.font_family,
                 padding = padding_css,
                 shadow = styles.shadow,
+                radius = radius,
             )
         };
 
@@ -419,6 +452,6 @@ popover.widget-menu.background * {{
         #[allow(deprecated)]
         widget
             .style_context()
-            .add_provider(&provider, gtk4::STYLE_PROVIDER_PRIORITY_USER + 10);
+            .add_provider(&provider, gtk4::STYLE_PROVIDER_PRIORITY_USER);
     }
 }
