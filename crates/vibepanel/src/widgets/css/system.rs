@@ -34,23 +34,15 @@ pub fn css() -> &'static str {
 .system-progress-bar trough,
 .system-core-bar trough {
     background-color: var(--color-slider-track);
-    border-radius: var(--radius-pill);
-    min-height: 6px;
-}
-
-.system-progress-bar trough {
-    min-height: 8px;
+    border-radius: var(--radius-track);
+    min-height: var(--slider-height);
 }
 
 .system-progress-bar trough progress,
 .system-core-bar trough progress {
     background-color: var(--color-accent-slider, var(--color-accent-primary));
-    border-radius: var(--radius-pill);
-    min-height: 6px;
-}
-
-.system-progress-bar trough progress {
-    min-height: 8px;
+    border-radius: var(--radius-track);
+    min-height: var(--slider-height);
 }
 
 .system-expander-content {
