@@ -359,6 +359,9 @@ impl ThemePalette {
     --radius-surface: {radius_surface}px;
     --radius-widget: {radius_widget};
     --radius-pill: {radius_pill}px;
+    --radius-track: calc(var(--radius-pill) * 0.4);        /* Thin (6px) slider troughs */
+    --radius-track-thick: calc(var(--radius-pill) * 0.75); /* Thick (10px) OSD sliders, switch sliders */
+    --radius-round: 9999px;                                /* Always circular */
 
     /* ===== Sizes & Spacing ===== */
     --bar-height: {bar_height}px;
