@@ -371,6 +371,18 @@ pub mod qs {
     /// Bluetooth controls row (`.qs-bt-controls-row`).
     pub const BT_CONTROLS_ROW: &str = "qs-bt-controls-row";
 
+    /// Bluetooth auth prompt container (`.qs-bt-auth-prompt`).
+    pub const BT_AUTH_PROMPT: &str = "qs-bt-auth-prompt";
+
+    /// Bluetooth auth character box container (`.qs-bt-char-container`).
+    pub const BT_CHAR_CONTAINER: &str = "qs-bt-char-container";
+
+    /// Individual character entry box (`.qs-bt-char-box`).
+    pub const BT_CHAR_BOX: &str = "qs-bt-char-box";
+
+    /// Bluetooth auth button row (`.qs-bt-auth-buttons`).
+    pub const BT_AUTH_BUTTONS: &str = "qs-bt-auth-buttons";
+
     // Power card
     /// Power card container (`.qs-power-card`).
     pub const POWER_CARD: &str = "qs-power-card";

@@ -341,6 +341,56 @@ window.quick-settings-window {
     border-radius: var(--radius-widget);
 }
 
+/* ===== BLUETOOTH AUTH PROMPT ===== */
+
+/* Auth prompt container - inline under device row */
+.qs-bt-auth-prompt {
+    padding: 8px 10px;
+    margin: 0;
+}
+
+/* Auth prompt instruction label (direct child only, not button labels) */
+.qs-bt-auth-prompt > label {
+    font-size: var(--font-size);
+    margin-bottom: 8px;
+    color: var(--color-foreground-primary);
+}
+
+/* Character box container - horizontal layout for PIN/passkey digits */
+.qs-bt-char-container {
+    margin-bottom: 8px;
+}
+
+/* Individual character entry boxes - square with rounded corners */
+.qs-bt-char-box {
+    min-width: 36px;
+    min-height: 0;
+    padding: 8px 0;
+    border-radius: var(--radius-widget);
+    font-size: calc(var(--font-size) * 1.1);
+    background: var(--color-card-overlay);
+    border: 1px solid var(--color-border, rgba(255,255,255,0.1));
+    margin: 0 2px;
+    color: var(--color-foreground-primary);
+}
+
+.qs-bt-char-box:focus {
+    border-color: var(--color-accent-primary);
+    outline: none;
+}
+
+/* Read-only character boxes (for confirmation/display modes) */
+.qs-bt-char-box:disabled {
+    background: var(--color-card-overlay);
+    color: var(--color-foreground-primary);
+    opacity: 1;
+}
+
+/* Auth prompt button row */
+.qs-bt-auth-buttons {
+    margin-top: 4px;
+}
+
 /* ===== QUICK SETTINGS AUDIO UNAVAILABLE ===== */
 
 /* Audio row disabled state - gray out everything */
