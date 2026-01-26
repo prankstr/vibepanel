@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.4](https://github.com/prankstr/vibepanel/compare/v0.6.3...v0.6.4) (2026-01-26)
+
+
+### Features
+
+* **bluetooth:** add pairing authentication with PIN/passkey UI ([#30](https://github.com/prankstr/vibepanel/issues/30)) ([2d166fa](https://github.com/prankstr/vibepanel/commit/2d166fafc4edecf891c2156c5e5183ce2f51432c))
+* **tray:** adjust light grayscale icons for light panel backgrounds  ([2f3ba25](https://github.com/prankstr/vibepanel/commit/2f3ba25075b29c9aea584da6cd1d5c5a9729ac43))
+
+
+### Bug Fixes
+
+* **bluetooth_service:** improve pairing process by adding device trus… ([#27](https://github.com/prankstr/vibepanel/issues/27)) ([24865d8](https://github.com/prankstr/vibepanel/commit/24865d8f5bec3a1c7cfe62e3f79536c5e55f5629))
+* **media:** re-poll position after track or status change ([e45e636](https://github.com/prankstr/vibepanel/commit/e45e636e06aed2efca199df180a63de9847d23b4))
+* **quick_settings:** use material spinner when using material icons ([804cac4](https://github.com/prankstr/vibepanel/commit/804cac4a8fe834d2b83939c0ed0753f0fbd178a7))
+
 ## [0.6.3](https://github.com/prankstr/vibepanel/compare/v0.6.2...v0.6.3) (2026-01-24)
 
 
