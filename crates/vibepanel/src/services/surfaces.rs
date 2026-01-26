@@ -143,6 +143,11 @@ impl SurfaceStyleManager {
         self.styles.borrow().background_color.clone()
     }
 
+    /// Get the theme's foreground/text color (e.g., "#1a1a1a" for light mode).
+    pub fn text_color(&self) -> String {
+        self.styles.borrow().text_color.clone()
+    }
+
     /// Get the current font size for bar widgets.
     fn font_size(&self) -> u32 {
         self.styles.borrow().font_size

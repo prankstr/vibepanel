@@ -15,8 +15,9 @@ use gtk4::{
 };
 use tracing::debug;
 use vibepanel_core::config::WidgetEntry;
-use vibepanel_core::parse_hex_color;
+use vibepanel_core::{parse_hex_color, theme::relative_luminance};
 
+use crate::services::callbacks::CallbackId;
 use crate::services::config_manager::ConfigManager;
 use crate::services::surfaces::SurfaceStyleManager;
 use crate::services::tooltip::TooltipManager;
@@ -28,6 +29,9 @@ use crate::widgets::warn_unknown_options;
 
 const DEFAULT_MAX_ICONS: usize = 12;
 const DEFAULT_PIXMAP_ICON_SIZE: i32 = 18;
+
+/// Tolerance for considering a pixel grayscale (max difference between R, G, B channels).
+const GRAYSCALE_TOLERANCE: u8 = 15;
 
 /// Configuration for the system tray widget.
 #[derive(Debug, Clone)]
@@ -91,6 +95,13 @@ struct MenuState {
     stack: Vec<Vec<TrayMenuEntry>>,
 }
 
+/// Cached theme values for contrast adjustment (avoids re-parsing colors per pixmap).
+#[derive(Clone, Copy)]
+struct ContrastParams {
+    bg_luminance: f64,
+    target_gray: u8,
+}
+
 struct WidgetState {
     config: TrayConfig,
     buttons: HashMap<String, Button>,
@@ -99,12 +110,36 @@ struct WidgetState {
     /// Track the current button order to avoid unnecessary rebuilds.
     /// This prevents menu flickering when animated icons update rapidly.
     button_order: Vec<String>,
+    /// Cached contrast parameters, updated on theme change.
+    contrast_params: ContrastParams,
 }
 
 /// System tray widget displaying StatusNotifierItem icons.
 pub struct TrayWidget {
     base: BaseWidget,
     state: Rc<RefCell<WidgetState>>,
+    theme_callback_id: Option<CallbackId>,
+}
+
+/// Compute contrast parameters from current theme colors.
+fn compute_contrast_params() -> ContrastParams {
+    let styles = SurfaceStyleManager::global();
+    let bg_color = styles.background_color();
+    let text_color = styles.text_color();
+
+    let bg_luminance = parse_hex_color(&bg_color)
+        .map(|(r, g, b)| relative_luminance(r, g, b))
+        .unwrap_or(0.1); // Default to dark if parsing fails
+
+    // Derive target gray from text color (sRGB average, consistent with adjust_grayscale_icon)
+    let target_gray = parse_hex_color(&text_color)
+        .map(|(r, g, b)| ((r as u16 + g as u16 + b as u16) / 3) as u8)
+        .unwrap_or(if bg_luminance > 0.5 { 0 } else { 255 });
+
+    ContrastParams {
+        bg_luminance,
+        target_gray,
+    }
 }
 
 impl TrayWidget {
@@ -118,9 +153,14 @@ impl TrayWidget {
             pixmap_cache: HashMap::new(),
             menu: None,
             button_order: Vec::new(),
+            contrast_params: compute_contrast_params(),
         }));
 
-        let widget = Self { base, state };
+        let mut widget = Self {
+            base,
+            state,
+            theme_callback_id: None,
+        };
         widget.bind_service();
         widget
     }
@@ -130,7 +170,7 @@ impl TrayWidget {
         self.base.widget()
     }
 
-    fn bind_service(&self) {
+    fn bind_service(&mut self) {
         let service = TrayService::global();
         let state = self.state.clone();
         let content = self.base.content().clone();
@@ -145,6 +185,30 @@ impl TrayWidget {
             });
         });
 
+        // Subscribe to theme changes to invalidate pixmap cache
+        // (icon contrast adjustment depends on background color)
+        {
+            let state = self.state.clone();
+            let content = self.base.content().clone();
+            let root = self.base.widget().clone();
+            let callback_id = ConfigManager::global().on_theme_change(move || {
+                // Update cached contrast params and clear pixmap cache
+                {
+                    let mut st = state.borrow_mut();
+                    st.contrast_params = compute_contrast_params();
+                    st.pixmap_cache.clear();
+                }
+                // Re-sync to update icons
+                let state = state.clone();
+                let content = content.clone();
+                let root = root.clone();
+                glib::idle_add_local_once(move || {
+                    sync_items(&state, &content, &root);
+                });
+            });
+            self.theme_callback_id = Some(callback_id);
+        }
+
         // Initial sync if service is already ready
         if service.is_ready() {
             let state = self.state.clone();
@@ -153,6 +217,14 @@ impl TrayWidget {
             glib::idle_add_local_once(move || {
                 sync_items(&state, &content, &root);
             });
+        }
+    }
+}
+
+impl Drop for TrayWidget {
+    fn drop(&mut self) {
+        if let Some(id) = self.theme_callback_id {
+            ConfigManager::global().disconnect_theme_callback(id);
         }
     }
 }
@@ -390,39 +462,32 @@ fn get_cached_texture(
     state: &Rc<RefCell<WidgetState>>,
     pixmap: &TrayPixmap,
 ) -> Option<gdk::Texture> {
-    // Include background luminance in cache key so icons re-render on theme change
-    let bg_luminance = get_panel_background_luminance();
-    let bg_key = if bg_luminance > 0.5 { "light" } else { "dark" };
-    let cache_key = format!(
-        "{}x{}:{}:{}",
-        pixmap.width, pixmap.height, pixmap.hash_key, bg_key
-    );
+    // Cache key based on pixmap identity; theme changes invalidate entire cache
+    let cache_key = format!("{}x{}:{}", pixmap.width, pixmap.height, pixmap.hash_key);
 
     // Check cache
     if let Some(texture) = state.borrow().pixmap_cache.get(&cache_key).cloned() {
         return Some(texture);
     }
 
-    // Create texture
-    let texture = texture_from_pixmap(pixmap)?;
+    // Create texture using cached contrast params
+    let contrast_params = state.borrow().contrast_params;
+    let texture = texture_from_pixmap(pixmap, &contrast_params)?;
 
-    // Cache it (with size limit)
+    // Cache it with bounded size to prevent unbounded growth from animated icons
+    // (spinners/progress indicators generate many unique hash_keys)
     {
         let mut st = state.borrow_mut();
-        st.pixmap_cache.insert(cache_key, texture.clone());
-
-        // Evict oldest if cache is too large
-        if st.pixmap_cache.len() > 50
-            && let Some(oldest_key) = st.pixmap_cache.keys().next().cloned()
-        {
-            st.pixmap_cache.remove(&oldest_key);
+        if st.pixmap_cache.len() >= 50 {
+            st.pixmap_cache.clear();
         }
+        st.pixmap_cache.insert(cache_key, texture.clone());
     }
 
     Some(texture)
 }
 
-fn texture_from_pixmap(pixmap: &TrayPixmap) -> Option<gdk::Texture> {
+fn texture_from_pixmap(pixmap: &TrayPixmap, params: &ContrastParams) -> Option<gdk::Texture> {
     if pixmap.width <= 0 || pixmap.height <= 0 {
         return None;
     }
@@ -432,23 +497,23 @@ fn texture_from_pixmap(pixmap: &TrayPixmap) -> Option<gdk::Texture> {
     // Convert ARGB to RGBA
     let mut rgba_data = argb_to_rgba(&pixmap.buffer);
 
-    // Improve visibility of low-contrast icons
-    let bg_luminance = get_panel_background_luminance();
+    // Improve visibility of low-contrast grayscale icons by scaling toward
+    // a theme-derived gray (ensures legible monochrome appearance)
     if let Some(edge_analysis) = analyze_edge_pixels(&rgba_data, pixmap.width, pixmap.height) {
-        if should_invert_icon(&edge_analysis, bg_luminance) {
-            // Grayscale icon with low contrast: invert colors
-            debug!(
-                "Inverting grayscale tray icon (bg_lum={:.2}, icon_lum={:.2})",
-                bg_luminance, edge_analysis.avg_luminance
-            );
-            invert_grayscale_pixels(&mut rgba_data);
-        } else if should_add_outline(&edge_analysis, bg_luminance) {
-            // Colored icon with low contrast: add outline
-            debug!(
-                "Adding outline to colored tray icon (bg_lum={:.2}, icon_lum={:.2})",
-                bg_luminance, edge_analysis.avg_luminance
-            );
-            add_outline(&mut rgba_data, pixmap.width, pixmap.height, bg_luminance);
+        let contrast = calculate_contrast_ratio(edge_analysis.avg_luminance, params.bg_luminance);
+
+        // Only adjust grayscale icons - colored icons are distinguishable by hue
+        if edge_analysis.is_grayscale {
+            // WCAG minimum contrast for UI graphics is 3:1
+            const MIN_CONTRAST: f64 = 3.0;
+
+            if contrast < MIN_CONTRAST {
+                debug!(
+                    "Adjusting grayscale tray icon: contrast={:.2}:1 -> gray {}",
+                    contrast, params.target_gray
+                );
+                adjust_grayscale_icon(&mut rgba_data, params.target_gray);
+            }
         }
     }
 
@@ -496,24 +561,11 @@ fn argb_to_rgba(data: &glib::Bytes) -> Vec<u8> {
 
 /// Check if an RGB pixel is grayscale (within tolerance).
 ///
-/// Returns true if R, G, B channels are all within `tolerance` of each other.
-fn is_grayscale_pixel(r: u8, g: u8, b: u8, tolerance: u8) -> bool {
-    r.abs_diff(g) <= tolerance && g.abs_diff(b) <= tolerance && r.abs_diff(b) <= tolerance
-}
-
-/// Calculate relative luminance of an RGB pixel (0.0 = black, 1.0 = white).
-///
-/// Uses the WCAG formula for perceptual luminance.
-fn pixel_luminance(r: u8, g: u8, b: u8) -> f64 {
-    fn channel(c: u8) -> f64 {
-        let c_srgb = c as f64 / 255.0;
-        if c_srgb <= 0.03928 {
-            c_srgb / 12.92
-        } else {
-            ((c_srgb + 0.055) / 1.055).powf(2.4)
-        }
-    }
-    0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
+/// Returns true if R, G, B channels are all within `GRAYSCALE_TOLERANCE` of each other.
+fn is_grayscale_pixel(r: u8, g: u8, b: u8) -> bool {
+    r.abs_diff(g) <= GRAYSCALE_TOLERANCE
+        && g.abs_diff(b) <= GRAYSCALE_TOLERANCE
+        && r.abs_diff(b) <= GRAYSCALE_TOLERANCE
 }
 
 /// Result of analyzing icon edge pixels.
@@ -572,7 +624,6 @@ fn analyze_edge_pixels(rgba_data: &[u8], width: i32, height: i32) -> Option<Edge
     let mut grayscale_count = 0;
     let mut visible_count = 0;
 
-    const GRAYSCALE_TOLERANCE: u8 = 15;
     const ALPHA_THRESHOLD: u8 = 128;
 
     for (x, y) in positions {
@@ -592,9 +643,9 @@ fn analyze_edge_pixels(rgba_data: &[u8], width: i32, height: i32) -> Option<Edge
         }
 
         visible_count += 1;
-        total_luminance += pixel_luminance(r, g, b);
+        total_luminance += relative_luminance(r, g, b);
 
-        if is_grayscale_pixel(r, g, b, GRAYSCALE_TOLERANCE) {
+        if is_grayscale_pixel(r, g, b) {
             grayscale_count += 1;
         }
     }
@@ -610,155 +661,44 @@ fn analyze_edge_pixels(rgba_data: &[u8], width: i32, height: i32) -> Option<Edge
     })
 }
 
-/// Invert grayscale pixels in RGBA data.
-///
-/// Only inverts pixels that are grayscale (within tolerance), preserving colored pixels.
-fn invert_grayscale_pixels(rgba_data: &mut [u8]) {
-    const GRAYSCALE_TOLERANCE: u8 = 15;
+/// Adjust grayscale pixels in the icon toward a given gray, preserving antialiasing.
+/// Does not affect colored pixels.
+fn adjust_grayscale_icon(rgba_data: &mut [u8], base_gray: u8) {
+    // Blend 15% toward mid-gray (128) to soften the contrast
+    let target_gray = ((base_gray as u16 * 85 + 128 * 15) / 100) as u8;
+
+    // Scale factor: maps white (255) to target_gray, preserving relative brightness
+    // For antialiasing: darker pixels stay proportionally darker than solid pixels
+    let scale = target_gray as f32 / 255.0;
 
     let mut idx = 0;
     while idx + 3 < rgba_data.len() {
         let r = rgba_data[idx];
         let g = rgba_data[idx + 1];
         let b = rgba_data[idx + 2];
-        // alpha at idx + 3, we leave it unchanged
 
-        if is_grayscale_pixel(r, g, b, GRAYSCALE_TOLERANCE) {
-            rgba_data[idx] = 255 - r;
-            rgba_data[idx + 1] = 255 - g;
-            rgba_data[idx + 2] = 255 - b;
+        if is_grayscale_pixel(r, g, b) {
+            // Use average as the pixel's brightness, scale proportionally
+            let original_gray = ((r as u16 + g as u16 + b as u16) / 3) as f32;
+            let new_gray = (original_gray * scale + 0.5) as u8;
+            rgba_data[idx] = new_gray;
+            rgba_data[idx + 1] = new_gray;
+            rgba_data[idx + 2] = new_gray;
         }
 
         idx += 4;
     }
 }
 
-/// Determine if icon colors need inversion based on background contrast.
-///
-/// Uses WCAG contrast ratio to determine if the icon's visible edge pixels
-/// have sufficient contrast against the panel background. Returns true if:
-/// - Icon edges are grayscale AND
-/// - Contrast ratio is below the minimum threshold (3:1 for graphics)
-fn should_invert_icon(edge_analysis: &EdgeAnalysis, bg_luminance: f64) -> bool {
-    if !edge_analysis.is_grayscale {
-        return false;
-    }
-
-    has_low_contrast(edge_analysis.avg_luminance, bg_luminance)
-}
-
-/// Check if two luminance values have low contrast (below WCAG 3:1 threshold).
-fn has_low_contrast(lum1: f64, lum2: f64) -> bool {
+/// Calculate WCAG contrast ratio between two luminance values.
+fn calculate_contrast_ratio(lum1: f64, lum2: f64) -> f64 {
     let (lighter, darker) = if lum1 > lum2 {
         (lum1, lum2)
     } else {
         (lum2, lum1)
     };
 
-    let contrast_ratio = (lighter + 0.05) / (darker + 0.05);
-
-    // WCAG recommends 3:1 minimum for UI components and graphics
-    contrast_ratio < 3.0
-}
-
-/// Check if a colored (non-grayscale) icon needs an outline for visibility.
-fn should_add_outline(edge_analysis: &EdgeAnalysis, bg_luminance: f64) -> bool {
-    if edge_analysis.is_grayscale {
-        return false;
-    }
-
-    has_low_contrast(edge_analysis.avg_luminance, bg_luminance)
-}
-
-/// Add a contrasting outline around visible pixels in the icon.
-///
-/// For each transparent pixel within a certain distance of a visible pixel,
-/// fill it with a contrasting color (dark outline on light bg, light outline on dark bg).
-fn add_outline(rgba_data: &mut [u8], width: i32, height: i32, bg_luminance: f64) {
-    let w = width as usize;
-    let h = height as usize;
-
-    // Choose outline color based on background
-    let outline_color: (u8, u8, u8, u8) = if bg_luminance > 0.5 {
-        (0, 0, 0, 255) // Dark outline, fully opaque
-    } else {
-        (255, 255, 255, 255) // Light outline, fully opaque
-    };
-
-    const ALPHA_THRESHOLD: u8 = 64; // Lower threshold to catch semi-transparent edges
-    const OUTLINE_RADIUS: i32 = 3; // Outline thickness in pixels
-
-    // Create a mask of visible pixels
-    let mut visible = vec![false; w * h];
-    for y in 0..h {
-        for x in 0..w {
-            let idx = (y * w + x) * 4;
-            if idx + 3 < rgba_data.len() && rgba_data[idx + 3] >= ALPHA_THRESHOLD {
-                visible[y * w + x] = true;
-            }
-        }
-    }
-
-    // Find all transparent pixels within OUTLINE_RADIUS of a visible pixel
-    let mut outline_pixels = Vec::new();
-
-    for y in 0..h {
-        for x in 0..w {
-            let idx = (y * w + x) * 4;
-            if idx + 3 >= rgba_data.len() {
-                continue;
-            }
-
-            // Skip if this pixel is already visible
-            if visible[y * w + x] {
-                continue;
-            }
-
-            // Check if any pixel within radius is visible
-            let mut found = false;
-            'outer: for dy in -OUTLINE_RADIUS..=OUTLINE_RADIUS {
-                for dx in -OUTLINE_RADIUS..=OUTLINE_RADIUS {
-                    // Skip if outside the radius (use squared distance for circle)
-                    if dx * dx + dy * dy > OUTLINE_RADIUS * OUTLINE_RADIUS {
-                        continue;
-                    }
-
-                    let nx = x as i32 + dx;
-                    let ny = y as i32 + dy;
-                    if nx < 0 || nx >= w as i32 || ny < 0 || ny >= h as i32 {
-                        continue;
-                    }
-
-                    if visible[ny as usize * w + nx as usize] {
-                        found = true;
-                        break 'outer;
-                    }
-                }
-            }
-
-            if found {
-                outline_pixels.push(idx);
-            }
-        }
-    }
-
-    // Fill outline pixels
-    for idx in outline_pixels {
-        rgba_data[idx] = outline_color.0;
-        rgba_data[idx + 1] = outline_color.1;
-        rgba_data[idx + 2] = outline_color.2;
-        rgba_data[idx + 3] = outline_color.3;
-    }
-}
-
-/// Get the current panel background luminance from SurfaceStyleManager.
-fn get_panel_background_luminance() -> f64 {
-    let styles = SurfaceStyleManager::global();
-    let bg_color = styles.background_color();
-
-    parse_hex_color(&bg_color)
-        .map(|(r, g, b)| pixel_luminance(r, g, b))
-        .unwrap_or(0.1) // Default to dark if parsing fails
+    (lighter + 0.05) / (darker + 0.05)
 }
 
 /// Load an icon from a custom theme path provided by the application.

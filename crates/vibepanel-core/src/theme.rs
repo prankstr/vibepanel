@@ -121,6 +121,9 @@ pub fn relative_luminance(r: u8, g: u8, b: u8) -> f64 {
 }
 
 /// Return true if the color is considered dark (low luminance).
+///
+/// Uses 0.179 as the threshold (WCAG-derived crossover where white/black text
+/// achieve equal contrast ratios against the background).
 pub fn is_dark_color(color: &str) -> bool {
     is_dark_color_with_threshold(color, 0.179)
 }
