@@ -30,7 +30,6 @@ use crate::widgets::warn_unknown_options;
 const DEFAULT_MAX_ICONS: usize = 12;
 const DEFAULT_PIXMAP_ICON_SIZE: i32 = 18;
 
-/// Tolerance for considering a pixel grayscale (max difference between R, G, B channels).
 const GRAYSCALE_TOLERANCE: u8 = 15;
 
 /// Configuration for the system tray widget.
@@ -95,7 +94,6 @@ struct MenuState {
     stack: Vec<Vec<TrayMenuEntry>>,
 }
 
-/// Cached theme values for contrast adjustment (avoids re-parsing colors per pixmap).
 #[derive(Clone, Copy)]
 struct ContrastParams {
     bg_luminance: f64,
@@ -110,7 +108,6 @@ struct WidgetState {
     /// Track the current button order to avoid unnecessary rebuilds.
     /// This prevents menu flickering when animated icons update rapidly.
     button_order: Vec<String>,
-    /// Cached contrast parameters, updated on theme change.
     contrast_params: ContrastParams,
 }
 
@@ -121,7 +118,6 @@ pub struct TrayWidget {
     theme_callback_id: Option<CallbackId>,
 }
 
-/// Compute contrast parameters from current theme colors.
 fn compute_contrast_params() -> ContrastParams {
     let styles = SurfaceStyleManager::global();
     let bg_color = styles.background_color();
@@ -186,19 +182,16 @@ impl TrayWidget {
         });
 
         // Subscribe to theme changes to invalidate pixmap cache
-        // (icon contrast adjustment depends on background color)
         {
             let state = self.state.clone();
             let content = self.base.content().clone();
             let root = self.base.widget().clone();
             let callback_id = ConfigManager::global().on_theme_change(move || {
-                // Update cached contrast params and clear pixmap cache
                 {
                     let mut st = state.borrow_mut();
                     st.contrast_params = compute_contrast_params();
                     st.pixmap_cache.clear();
                 }
-                // Re-sync to update icons
                 let state = state.clone();
                 let content = content.clone();
                 let root = root.clone();
@@ -462,20 +455,16 @@ fn get_cached_texture(
     state: &Rc<RefCell<WidgetState>>,
     pixmap: &TrayPixmap,
 ) -> Option<gdk::Texture> {
-    // Cache key based on pixmap identity; theme changes invalidate entire cache
     let cache_key = format!("{}x{}:{}", pixmap.width, pixmap.height, pixmap.hash_key);
 
-    // Check cache
     if let Some(texture) = state.borrow().pixmap_cache.get(&cache_key).cloned() {
         return Some(texture);
     }
 
-    // Create texture using cached contrast params
     let contrast_params = state.borrow().contrast_params;
     let texture = texture_from_pixmap(pixmap, &contrast_params)?;
 
-    // Cache it with bounded size to prevent unbounded growth from animated icons
-    // (spinners/progress indicators generate many unique hash_keys)
+    // Bounded size to prevent unbounded growth from animated icons
     {
         let mut st = state.borrow_mut();
         if st.pixmap_cache.len() >= 50 {
@@ -494,18 +483,14 @@ fn texture_from_pixmap(pixmap: &TrayPixmap, params: &ContrastParams) -> Option<g
 
     let stride = pixmap.width * 4;
 
-    // Convert ARGB to RGBA
     let mut rgba_data = argb_to_rgba(&pixmap.buffer);
 
-    // Improve visibility of low-contrast grayscale icons by scaling toward
-    // a theme-derived gray (ensures legible monochrome appearance)
+    // Adjust low-contrast grayscale icons toward theme text color
     if let Some(edge_analysis) = analyze_edge_pixels(&rgba_data, pixmap.width, pixmap.height) {
         let contrast = calculate_contrast_ratio(edge_analysis.avg_luminance, params.bg_luminance);
 
-        // Only adjust grayscale icons - colored icons are distinguishable by hue
         if edge_analysis.is_grayscale {
-            // WCAG minimum contrast for UI graphics is 3:1
-            const MIN_CONTRAST: f64 = 3.0;
+            const MIN_CONTRAST: f64 = 3.0; // WCAG minimum for UI graphics
 
             if contrast < MIN_CONTRAST {
                 debug!(
@@ -517,7 +502,6 @@ fn texture_from_pixmap(pixmap: &TrayPixmap, params: &ContrastParams) -> Option<g
         }
     }
 
-    // Create pixbuf from bytes
     let gbytes = glib::Bytes::from_owned(rgba_data);
     let pixbuf = Pixbuf::from_bytes(
         &gbytes,
@@ -529,7 +513,6 @@ fn texture_from_pixmap(pixmap: &TrayPixmap, params: &ContrastParams) -> Option<g
         stride,
     );
 
-    // Create texture from pixbuf
     Some(gdk::Texture::for_pixbuf(&pixbuf))
 }
 
@@ -560,26 +543,18 @@ fn argb_to_rgba(data: &glib::Bytes) -> Vec<u8> {
 }
 
 /// Check if an RGB pixel is grayscale (within tolerance).
-///
-/// Returns true if R, G, B channels are all within `GRAYSCALE_TOLERANCE` of each other.
 fn is_grayscale_pixel(r: u8, g: u8, b: u8) -> bool {
     r.abs_diff(g) <= GRAYSCALE_TOLERANCE
         && g.abs_diff(b) <= GRAYSCALE_TOLERANCE
         && r.abs_diff(b) <= GRAYSCALE_TOLERANCE
 }
 
-/// Result of analyzing icon edge pixels.
 struct EdgeAnalysis {
-    /// Average luminance of visible edge pixels (0.0 to 1.0).
     avg_luminance: f64,
-    /// Whether the visible edge pixels are predominantly grayscale.
     is_grayscale: bool,
 }
 
-/// Sample edge pixels (corners + midpoints) to analyze icon appearance.
-///
-/// Only considers pixels with alpha > 128 (visible pixels).
-/// Returns None if no visible edge pixels found.
+/// Sample edge pixels to analyze icon appearance.
 fn analyze_edge_pixels(rgba_data: &[u8], width: i32, height: i32) -> Option<EdgeAnalysis> {
     let w = width as usize;
     let h = height as usize;
@@ -637,7 +612,6 @@ fn analyze_edge_pixels(rgba_data: &[u8], width: i32, height: i32) -> Option<Edge
         let b = rgba_data[idx + 2];
         let a = rgba_data[idx + 3];
 
-        // Skip transparent pixels
         if a < ALPHA_THRESHOLD {
             continue;
         }
@@ -661,8 +635,7 @@ fn analyze_edge_pixels(rgba_data: &[u8], width: i32, height: i32) -> Option<Edge
     })
 }
 
-/// Adjust grayscale pixels in the icon toward a given gray, preserving antialiasing.
-/// Does not affect colored pixels.
+/// Scale grayscale pixels toward target gray, preserving antialiasing.
 fn adjust_grayscale_icon(rgba_data: &mut [u8], base_gray: u8) {
     // Blend 15% toward mid-gray (128) to soften the contrast
     let target_gray = ((base_gray as u16 * 85 + 128 * 15) / 100) as u8;
@@ -678,7 +651,6 @@ fn adjust_grayscale_icon(rgba_data: &mut [u8], base_gray: u8) {
         let b = rgba_data[idx + 2];
 
         if is_grayscale_pixel(r, g, b) {
-            // Use average as the pixel's brightness, scale proportionally
             let original_gray = ((r as u16 + g as u16 + b as u16) / 3) as f32;
             let new_gray = (original_gray * scale + 0.5) as u8;
             rgba_data[idx] = new_gray;
@@ -690,7 +662,6 @@ fn adjust_grayscale_icon(rgba_data: &mut [u8], base_gray: u8) {
     }
 }
 
-/// Calculate WCAG contrast ratio between two luminance values.
 fn calculate_contrast_ratio(lum1: f64, lum2: f64) -> f64 {
     let (lighter, darker) = if lum1 > lum2 {
         (lum1, lum2)
