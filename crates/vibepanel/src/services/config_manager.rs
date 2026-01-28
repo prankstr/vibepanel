@@ -442,27 +442,7 @@ impl ConfigManager {
 /// This detects when widget-specific styling options (like `background_color`)
 /// are added, removed, or changed in `[widgets.xxx]` sections.
 fn per_widget_styles_changed(old: &Config, new: &Config) -> bool {
-    let old_styles = &old.widgets.widget_configs;
-    let new_styles = &new.widgets.widget_configs;
-
-    // Check if the set of configured widgets changed
-    if old_styles.len() != new_styles.len() {
-        return true;
-    }
-
-    for (name, old_opts) in old_styles {
-        match new_styles.get(name) {
-            None => return true, // Widget config removed
-            Some(new_opts) => {
-                // Compare style properties only (not disabled or options - those are structural)
-                if old_opts.background_color != new_opts.background_color {
-                    return true;
-                }
-            }
-        }
-    }
-
-    false
+    old.widgets.widget_configs != new.widgets.widget_configs
 }
 
 /// Check if theme-related config has changed.

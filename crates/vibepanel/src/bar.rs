@@ -195,8 +195,9 @@ fn build_widget_or_group(
             island.add_css_class(class::WIDGET_GROUP);
 
             // Add the first widget's name as a CSS class for per-widget CSS variable targeting
+            // Normalize underscores to hyphens for CSS conventions
             if let Some(first_entry) = group.first() {
-                island.add_css_class(&first_entry.name);
+                island.add_css_class(&first_entry.name.replace('_', "-"));
             }
 
             // Create inner content box (matching BaseWidget structure)

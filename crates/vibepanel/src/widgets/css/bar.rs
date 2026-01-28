@@ -3,8 +3,11 @@
 //! Note: This module requires config values for screen_margin and spacing,
 //! so it returns a formatted String rather than a static str.
 
+use super::WIDGET_BG_WITH_OPACITY;
+
 /// Return bar CSS with config values interpolated.
 pub fn css(screen_margin: u32, spacing: u32) -> String {
+    let widget_bg = WIDGET_BG_WITH_OPACITY;
     format!(
         r#"
 /* ===== BAR ===== */
@@ -39,7 +42,7 @@ sectioned-bar.bar {{
 /* Widget - individual widget containers */
 /* color-mix() is inline here so per-widget --widget-background-color overrides work via CSS scoping */
 .widget {{
-    background-color: color-mix(in srgb, var(--widget-background-color) var(--widget-background-opacity), transparent);
+    background-color: {widget_bg};
     border-radius: var(--radius-widget);
     padding: var(--widget-padding-y) 10px;
     min-height: var(--widget-height);

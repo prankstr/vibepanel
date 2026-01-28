@@ -409,11 +409,6 @@ impl ThemePalette {
     --pixmap-icon-size: {pixmap_icon_size}px;
     /* Canonical icon box size for bar widgets - all icons sit in this size container */
     --icon-size: {text_icon_size}px;
-
-    /* ===== Computed Variables (convenience aliases) ===== */
-    /* Widget background with opacity - for use in custom CSS */
-    /* Note: Per-widget overrides use inline color-mix() for proper CSS scoping */
-    --widget-background: color-mix(in srgb, var(--widget-background-color) var(--widget-background-opacity), transparent);
 }}
 "#,
             bar_bg_with_opacity = self.bar_background_with_opacity(),
@@ -514,6 +509,9 @@ impl ThemePalette {
     /// }
     /// ```
     ///
+    /// Widget names are normalized to CSS conventions (underscores become hyphens).
+    /// For example, `[widgets.quick_settings]` generates selectors like `.quick-settings`.
+    ///
     /// This unified approach means:
     /// - Widgets and their popovers share the same styling source (TOML config)
     /// - Adding new style properties only requires updating this function
@@ -526,23 +524,37 @@ impl ThemePalette {
 
             // Background color override
             if let Some(ref color) = options.background_color {
-                rules.push(format!("--widget-background-color: {};", color));
+                // Validate and normalize hex color
+                if let Some((r, g, b)) = parse_hex_color(color) {
+                    // Normalize to full #rrggbb format for CSS
+                    let normalized = format!("#{:02x}{:02x}{:02x}", r, g, b);
+                    rules.push(format!("--widget-background-color: {};", normalized));
+                } else {
+                    tracing::warn!(
+                        "Invalid background_color '{}' for widget '{}' - expected hex color like '#ff0000' or 'ff0000'",
+                        color,
+                        widget_name
+                    );
+                }
             }
 
             // Only generate a rule if there are overrides
             if !rules.is_empty() {
                 let rules_str = rules.join("\n    ");
+                // Normalize widget name to CSS conventions (underscores -> hyphens)
+                let css_name = widget_name.replace('_', "-");
                 // Apply to widgets, widget groups, and their popovers
                 css.push_str(&format!(
                     r#"
 /* Per-widget overrides for {name} */
-.widget.{name},
-.widget-group.{name},
-.{name}-popover {{
+.widget.{css_name},
+.widget-group.{css_name},
+.{css_name}-popover {{
     {rules}
 }}
 "#,
                     name = widget_name,
+                    css_name = css_name,
                     rules = rules_str
                 ));
             }

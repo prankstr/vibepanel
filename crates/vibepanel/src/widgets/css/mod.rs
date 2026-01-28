@@ -17,6 +17,13 @@
 //! - `media` - Media player widget
 //! - `system` - System info popover
 
+/// CSS expression for widget background color with opacity applied.
+///
+/// Uses inline `color-mix()` so that per-widget `--widget-background-color` overrides
+/// (set via CSS class selectors like `.clock`, `.clock-popover`) work correctly
+/// through CSS variable scoping.
+pub const WIDGET_BG_WITH_OPACITY: &str = "color-mix(in srgb, var(--widget-background-color) var(--widget-background-opacity), transparent)";
+
 mod bar;
 mod base;
 mod battery;
@@ -35,7 +42,7 @@ use vibepanel_core::Config;
 ///
 /// These are truly shared styles that apply across multiple surfaces
 /// (bar, popovers, quick settings, etc).
-pub fn utility_css() -> &'static str {
+pub fn utility_css() -> String {
     base::css()
 }
 

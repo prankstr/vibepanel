@@ -787,7 +787,7 @@ impl WidgetPlacement {
 /// disabled = true
 /// show_percentage = true
 /// ```
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct WidgetOptions {
     /// If true, this widget is hidden from all sections where it would appear.
     #[serde(default)]

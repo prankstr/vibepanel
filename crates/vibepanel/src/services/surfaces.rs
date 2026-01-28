@@ -15,6 +15,7 @@ use tracing::debug;
 use vibepanel_core::SurfaceStyles;
 
 use crate::styles::{icon, surface};
+use crate::widgets::css::WIDGET_BG_WITH_OPACITY;
 
 // GTK 4.10 deprecated widget-scoped style contexts but didn't provide a replacement.
 // We need widget-scoped CSS to style individual surfaces without affecting the entire
@@ -347,7 +348,7 @@ impl SurfaceStyleManager {
 
         // Use inline color-mix() so per-widget overrides work via CSS scoping
         // (e.g., .clock-popover overrides --widget-background-color)
-        let bg = "color-mix(in srgb, var(--widget-background-color) var(--widget-background-opacity), transparent)";
+        let bg = WIDGET_BG_WITH_OPACITY;
 
         // Build CSS targeting the widget's CSS name
         // For Popover, we need to target both the popover and its contents
