@@ -12,9 +12,7 @@ use vibepanel_core::{Config, ThemePalette};
 
 use crate::sectioned_bar::SectionedBar;
 use crate::styles::class;
-use crate::widgets::{
-    self, BarState, QuickSettingsConfig, WidgetConfig, WidgetFactory, apply_widget_color,
-};
+use crate::widgets::{self, BarState, QuickSettingsConfig, WidgetConfig, WidgetFactory};
 
 /// Create and configure the bar window with layer-shell.
 ///
@@ -196,11 +194,9 @@ fn build_widget_or_group(
             island.add_css_class(class::WIDGET);
             island.add_css_class(class::WIDGET_GROUP);
 
-            // Apply first widget's background_color to the group island for unified background
-            if let Some(first_entry) = group.first()
-                && let Some(ref color) = first_entry.background_color
-            {
-                apply_widget_color(&island, color);
+            // Add the first widget's name as a CSS class for per-widget CSS variable targeting
+            if let Some(first_entry) = group.first() {
+                island.add_css_class(&first_entry.name);
             }
 
             // Create inner content box (matching BaseWidget structure)
@@ -315,11 +311,25 @@ pub fn load_css(config: &Config) {
 
     // Apply to default display with USER priority to override GTK themes
     if let Some(display) = gtk4::gdk::Display::default() {
+        // Remove the old theme CSS provider first to ensure clean reload
+        // (without this, removed config values would leave stale CSS rules)
+        THEME_CSS_PROVIDER.with(|cell| {
+            if let Some(old_provider) = cell.borrow_mut().take() {
+                gtk4::style_context_remove_provider_for_display(&display, &old_provider);
+            }
+        });
+
         gtk4::style_context_add_provider_for_display(
             &display,
             &provider,
             gtk4::STYLE_PROVIDER_PRIORITY_USER,
         );
+
+        // Store the new provider so we can remove it on next reload
+        THEME_CSS_PROVIDER.with(|cell| {
+            *cell.borrow_mut() = Some(provider);
+        });
+
         debug!(
             "CSS loaded and applied (dark_mode={})",
             palette.is_dark_mode
@@ -335,6 +345,11 @@ pub fn load_css(config: &Config) {
 /// Priority for user CSS - higher than everything else to ensure overrides work.
 /// USER = 800, we use 900 to be above all internal styles (which use USER + 10 max).
 const USER_CSS_PRIORITY: u32 = gtk4::STYLE_PROVIDER_PRIORITY_USER + 100;
+
+// Thread-local storage for the theme CSS provider so we can replace it on reload
+thread_local! {
+    static THEME_CSS_PROVIDER: RefCell<Option<gtk4::CssProvider>> = const { RefCell::new(None) };
+}
 
 // Thread-local storage for the user CSS provider so we can replace it on reload
 thread_local! {
@@ -423,11 +438,17 @@ fn generate_css(config: &Config, palette: &ThemePalette) -> String {
     // Get CSS variables from theme palette
     let css_vars = palette.css_vars_block();
 
+    // Per-widget CSS overrides (background_color, etc. from [widgets.xxx] sections)
+    let per_widget_css = ThemePalette::generate_per_widget_css(config);
+
     // Utility CSS shared across widgets and surfaces
     let utility_css = widgets::css::utility_css();
 
     // Widget-specific CSS
     let widget_css = widgets::css::widget_css(config);
 
-    format!("{}\n{}\n{}", css_vars, utility_css, widget_css)
+    format!(
+        "{}\n{}\n{}\n{}",
+        css_vars, per_widget_css, utility_css, widget_css
+    )
 }

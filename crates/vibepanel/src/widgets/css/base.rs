@@ -93,8 +93,9 @@ label link:active {
 }
 
 /* Popover/surface background */
+/* color-mix() is inline here so per-widget popover --widget-background-color overrides work via CSS scoping */
 .vp-surface-popover {
-    background-color: var(--color-background-widget);
+    background-color: color-mix(in srgb, var(--widget-background-color) var(--widget-background-opacity), transparent);
     border-radius: var(--radius-surface);
     box-shadow: var(--shadow-soft);
 }

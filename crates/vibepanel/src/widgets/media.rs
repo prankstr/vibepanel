@@ -56,8 +56,6 @@ pub struct MediaConfig {
     pub empty_text: String,
     /// Maximum text length (0 = unlimited).
     pub max_chars: usize,
-    /// Custom background color for this widget.
-    pub background_color: Option<String>,
     /// Opacity for the pop-out window (0.0 = fully transparent, 1.0 = fully opaque).
     ///
     /// Note: This field is parsed for config validation but read dynamically from
@@ -71,13 +69,7 @@ impl WidgetConfig for MediaConfig {
         warn_unknown_options(
             "media",
             entry,
-            &[
-                "template",
-                "empty_text",
-                "max_chars",
-                "background_color",
-                "popout_opacity",
-            ],
+            &["template", "empty_text", "max_chars", "popout_opacity"],
         );
 
         let template = entry
@@ -112,7 +104,6 @@ impl WidgetConfig for MediaConfig {
             template,
             empty_text,
             max_chars,
-            background_color: entry.background_color.clone(),
             popout_opacity,
         }
     }
@@ -124,7 +115,6 @@ impl Default for MediaConfig {
             template: DEFAULT_TEMPLATE.to_string(),
             empty_text: String::new(),
             max_chars: DEFAULT_MAX_CHARS,
-            background_color: None,
             popout_opacity: 1.0,
         }
     }
@@ -473,7 +463,7 @@ fn create_controls(parent_widget: &gtk4::Box) -> ControlsHandle {
 
 impl MediaWidget {
     pub fn new(config: MediaConfig) -> Self {
-        let base = BaseWidget::new(&[media::WIDGET], config.background_color.clone());
+        let base = BaseWidget::new(&[media::WIDGET]);
         base.set_tooltip("No media playing");
 
         let template_elements = parse_template(&config.template);
@@ -1053,7 +1043,6 @@ mod tests {
         let entry = WidgetEntry {
             name: "media".to_string(),
             options: Default::default(),
-            background_color: None,
         };
         let config = MediaConfig::from_entry(&entry);
         assert_eq!(config.template, "{art}{artist} - {title}{controls}");

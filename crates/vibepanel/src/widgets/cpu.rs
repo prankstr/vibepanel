@@ -32,8 +32,6 @@ pub struct CpuConfig {
     pub show_icon: bool,
     /// Whether to show the CPU usage percentage.
     pub show_percentage: bool,
-    /// Custom background color for this widget.
-    pub background_color: Option<String>,
 }
 
 impl WidgetConfig for CpuConfig {
@@ -55,7 +53,6 @@ impl WidgetConfig for CpuConfig {
         Self {
             show_icon,
             show_percentage,
-            background_color: entry.background_color.clone(),
         }
     }
 }
@@ -65,7 +62,6 @@ impl Default for CpuConfig {
         Self {
             show_icon: DEFAULT_SHOW_ICON,
             show_percentage: DEFAULT_SHOW_PERCENTAGE,
-            background_color: None,
         }
     }
 }
@@ -88,7 +84,7 @@ pub struct CpuWidget {
 impl CpuWidget {
     /// Create a new CPU widget with the given configuration.
     pub fn new(config: CpuConfig) -> Self {
-        let base = BaseWidget::new(&[widget::CPU], config.background_color.clone());
+        let base = BaseWidget::new(&[widget::CPU]);
 
         base.set_tooltip("CPU: unknown");
 
@@ -208,7 +204,6 @@ mod tests {
         let entry = WidgetEntry {
             name: "cpu".to_string(),
             options: Default::default(),
-            background_color: None,
         };
         let config = CpuConfig::from_entry(&entry);
         assert!(config.show_icon);
@@ -224,7 +219,6 @@ mod tests {
         let entry = WidgetEntry {
             name: "cpu".to_string(),
             options,
-            background_color: None,
         };
         let config = CpuConfig::from_entry(&entry);
         assert!(!config.show_icon);

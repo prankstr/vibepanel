@@ -303,22 +303,16 @@ impl SurfaceStyleManager {
     /// The styles are applied at base priority so CSS classes can override
     /// specific properties while GTK themes are still overridden.
     ///
+    /// Background color is determined by CSS variables:
+    /// - Default: Uses `--color-background-widget` from `:root`
+    /// - Per-widget override: Add a class like `.clock-popover` to the widget,
+    ///   which overrides `--widget-background-color` via generated CSS
+    ///
     /// # Arguments
     /// * `widget` - The widget to style
     /// * `with_padding` - Whether to apply padding to the widget
-    /// * `color_override` - Optional background color override (e.g., from parent widget)
-    pub fn apply_surface_styles(
-        &self,
-        widget: &impl IsA<gtk4::Widget>,
-        with_padding: bool,
-        color_override: Option<&str>,
-    ) {
-        self.apply_surface_styles_inner(
-            widget,
-            with_padding,
-            color_override,
-            "var(--radius-surface)",
-        );
+    pub fn apply_surface_styles(&self, widget: &impl IsA<gtk4::Widget>, with_padding: bool) {
+        self.apply_surface_styles_inner(widget, with_padding, "var(--radius-surface)");
     }
 
     /// Apply surface styles with a custom border radius.
@@ -326,23 +320,20 @@ impl SurfaceStyleManager {
     /// # Arguments
     /// * `widget` - The widget to style
     /// * `with_padding` - Whether to apply padding to the widget
-    /// * `color_override` - Optional background color override (e.g., from parent widget)
     /// * `radius` - CSS value for border-radius (e.g., "var(--radius-widget)")
     pub fn apply_surface_styles_with_radius(
         &self,
         widget: &impl IsA<gtk4::Widget>,
         with_padding: bool,
-        color_override: Option<&str>,
         radius: &str,
     ) {
-        self.apply_surface_styles_inner(widget, with_padding, color_override, radius);
+        self.apply_surface_styles_inner(widget, with_padding, radius);
     }
 
     fn apply_surface_styles_inner(
         &self,
         widget: &impl IsA<gtk4::Widget>,
         with_padding: bool,
-        color_override: Option<&str>,
         radius: &str,
     ) {
         let widget = widget.as_ref();
@@ -354,9 +345,9 @@ impl SurfaceStyleManager {
             String::new()
         };
 
-        // Use color override if provided, otherwise use CSS variable for consistency
-        // with widget_opacity setting
-        let bg = color_override.unwrap_or("var(--color-background-widget)");
+        // Use inline color-mix() so per-widget overrides work via CSS scoping
+        // (e.g., .clock-popover overrides --widget-background-color)
+        let bg = "color-mix(in srgb, var(--widget-background-color) var(--widget-background-opacity), transparent)";
 
         // Build CSS targeting the widget's CSS name
         // For Popover, we need to target both the popover and its contents

@@ -53,8 +53,6 @@ pub struct WorkspacesConfig {
     pub label_type: LabelType,
     /// Separator string between workspace indicators.
     pub separator: String,
-    /// Custom background color for this widget.
-    pub background_color: Option<String>,
 }
 
 impl WidgetConfig for WorkspacesConfig {
@@ -78,7 +76,6 @@ impl WidgetConfig for WorkspacesConfig {
         Self {
             label_type,
             separator,
-            background_color: entry.background_color.clone(),
         }
     }
 }
@@ -88,7 +85,6 @@ impl Default for WorkspacesConfig {
         Self {
             label_type: DEFAULT_LABEL_TYPE,
             separator: DEFAULT_SEPARATOR.to_string(),
-            background_color: None,
         }
     }
 }
@@ -110,7 +106,7 @@ impl WorkspacesWidget {
     ///   - For MangoWC: show all workspaces but with per-output window counts.
     ///   - For Hyprland: ignored (global workspace view).
     pub fn new(config: WorkspacesConfig, output_id: Option<String>) -> Self {
-        let base = BaseWidget::new(&[widget::WORKSPACES], config.background_color);
+        let base = BaseWidget::new(&[widget::WORKSPACES]);
 
         // Use the content box provided by BaseWidget
         let workspace_container = base.content().clone();
@@ -418,7 +414,6 @@ mod tests {
         WidgetEntry {
             name: name.to_string(),
             options,
-            background_color: None,
         }
     }
 

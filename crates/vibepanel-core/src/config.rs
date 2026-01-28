@@ -814,10 +814,6 @@ pub struct WidgetEntry {
 
     /// Merged widget-specific options from `[widgets.<name>]`.
     pub options: HashMap<String, toml::Value>,
-
-    /// Background color override (hex like "#f5c2e7").
-    /// None means use theme default.
-    pub background_color: Option<String>,
 }
 
 impl WidgetEntry {
@@ -826,29 +822,14 @@ impl WidgetEntry {
         Self {
             name: name.into(),
             options: HashMap::new(),
-            background_color: None,
         }
     }
 
     /// Create a widget entry with options from WidgetOptions.
     pub fn with_options(name: impl Into<String>, widget_options: &WidgetOptions) -> Self {
-        let name = name.into();
-
-        // Validate background_color if provided - warn on invalid hex colors
-        if let Some(ref color) = widget_options.background_color
-            && crate::theme::parse_hex_color(color).is_none()
-        {
-            tracing::warn!(
-                "Invalid background_color '{}' for widget '{}' - expected hex color like '#ff0000' or '#f00'",
-                color,
-                name
-            );
-        }
-
         Self {
-            name,
+            name: name.into(),
             options: widget_options.options.clone(),
-            background_color: widget_options.background_color.clone(),
         }
     }
 }

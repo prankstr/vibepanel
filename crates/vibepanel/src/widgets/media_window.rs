@@ -90,7 +90,7 @@ where
     main_box.set_size_request(280, 150);
 
     // Apply surface styles for consistent theming
-    SurfaceStyleManager::global().apply_surface_styles(&main_box, true, None);
+    SurfaceStyleManager::global().apply_surface_styles(&main_box, true);
 
     // Apply opacity to the entire window content (background + children)
     // We use CSS opacity on the main_box since Wayland doesn't support window-level opacity

@@ -904,7 +904,7 @@ fn create_network_action_widget(net: &WifiNetwork) -> gtk4::Widget {
 
         panel.append(&content_box);
         let style_mgr = SurfaceStyleManager::global();
-        style_mgr.apply_surface_styles(&panel, true, None);
+        style_mgr.apply_surface_styles(&panel, true);
         style_mgr.apply_pango_attrs_all(&content_box);
 
         popover.set_child(Some(&panel));

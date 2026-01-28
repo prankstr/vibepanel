@@ -165,7 +165,7 @@ impl NotificationToast {
         outer.add_css_class(notif::TOAST_CONTAINER);
 
         // Apply surface styling
-        SurfaceStyleManager::global().apply_surface_styles(&outer, false, None);
+        SurfaceStyleManager::global().apply_surface_styles(&outer, false);
 
         // Add urgency styling
         if notification.urgency == URGENCY_CRITICAL {

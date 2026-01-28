@@ -332,9 +332,9 @@ impl QuickSettingsWindow {
         outer.set_margin_start(4);
         outer.set_margin_end(4);
 
-        // Apply surface styles with optional background color override from widget config
-        let color_override = qs.cards_config.background_color.as_deref();
-        SurfaceStyleManager::global().apply_surface_styles(&outer, true, color_override);
+        // Apply surface styles - background now controlled via CSS variables
+        outer.add_css_class("quick-settings-popover");
+        SurfaceStyleManager::global().apply_surface_styles(&outer, true);
 
         let content = GtkBox::new(Orientation::Vertical, 0);
         content.add_css_class(qs::CONTROL_CENTER);

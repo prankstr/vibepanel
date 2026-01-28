@@ -198,10 +198,10 @@ fn show_player_menu(parent: &Button) {
 
     // Apply surface styling to the popover itself - this applies the popover-specific
     // CSS rules that set font-family on `popover.widget-menu > contents`
-    SurfaceStyleManager::global().apply_surface_styles(&popover, false, None);
+    SurfaceStyleManager::global().apply_surface_styles(&popover, false);
 
     // Also apply to panel for the content-specific rules
-    SurfaceStyleManager::global().apply_surface_styles(&panel, true, None);
+    SurfaceStyleManager::global().apply_surface_styles(&panel, true);
 
     // Apply Pango font attributes to all labels if enabled
     SurfaceStyleManager::global().apply_pango_attrs_all(&panel);

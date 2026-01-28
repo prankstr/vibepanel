@@ -37,8 +37,9 @@ sectioned-bar.bar {{
 }}
 
 /* Widget - individual widget containers */
+/* color-mix() is inline here so per-widget --widget-background-color overrides work via CSS scoping */
 .widget {{
-    background-color: var(--color-background-widget);
+    background-color: color-mix(in srgb, var(--widget-background-color) var(--widget-background-opacity), transparent);
     border-radius: var(--radius-widget);
     padding: var(--widget-padding-y) 10px;
     min-height: var(--widget-height);

@@ -227,7 +227,6 @@ impl OsdOverlay {
         SurfaceStyleManager::global().apply_surface_styles_with_radius(
             &container,
             true,
-            None,
             "var(--radius-widget-lg)",
         );
 
