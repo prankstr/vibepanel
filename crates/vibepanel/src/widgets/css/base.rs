@@ -29,7 +29,7 @@ pub fn css() -> String {
 /* Style GTK's native tooltips (used in popovers/windows where layer-shell tooltips don't work) */
 tooltip,
 tooltip.background {{
-    background-color: color-mix(in srgb, var(--color-background-widget) 90%, transparent);
+    background-color: color-mix(in srgb, var(--widget-background-color) 90%, transparent);
     border-radius: var(--radius-surface);
     border: none;
     padding: 0;

@@ -14,8 +14,6 @@
 //! ```ignore
 //! pub struct MyWidgetConfig {
 //!     pub some_option: bool,
-//!     /// Custom background color for this widget (inherited from WidgetEntry).
-//!     pub background_color: Option<String>,
 //! }
 //!
 //! impl WidgetConfig for MyWidgetConfig {
@@ -26,33 +24,33 @@
 //!             .get("some_option")
 //!             .and_then(|v| v.as_bool())
 //!             .unwrap_or(true);
-//!         Self {
-//!             some_option,
-//!             background_color: entry.background_color.clone(),  // Always clone background_color from entry
-//!         }
+//!         Self { some_option }
 //!     }
 //! }
 //!
 //! impl Default for MyWidgetConfig {
 //!     fn default() -> Self {
-//!         Self {
-//!             some_option: true,
-//!             background_color: None,
-//!         }
+//!         Self { some_option: true }
 //!     }
 //! }
 //! ```
 //!
-//! When constructing the widget, pass the background_color to `BaseWidget::new()`:
+//! When constructing the widget, the first CSS class passed to `BaseWidget::new()`
+//! determines the widget's identity for per-widget styling (e.g., `background_color`
+//! in config). This class is used to generate popover class names like `clock-popover`:
 //!
 //! ```ignore
 //! impl MyWidget {
 //!     pub fn new(config: MyWidgetConfig) -> Self {
-//!         let base = BaseWidget::new(&[widget::MY_WIDGET], config.background_color.clone());
+//!         // First class "my-widget" is used for CSS variable scoping
+//!         let base = BaseWidget::new(&[widget::MY_WIDGET]);
 //!         // ... rest of widget construction
 //!     }
 //! }
 //! ```
+//!
+//! Per-widget styling (like `background_color`) is configured in `[widgets.my_widget]`
+//! sections and applied via CSS variables. See `ThemePalette::generate_per_widget_css()`.
 
 mod base;
 mod battery;
@@ -114,20 +112,12 @@ use crate::services::battery::BatteryService;
 /// All widget configs should implement this trait to provide a consistent
 /// interface for constructing configuration from TOML entries and defaulting.
 ///
-/// # Background Color Field
-///
-/// All widget configs should include a `background_color: Option<String>` field and copy it
-/// from `entry.background_color.clone()` in `from_entry()`. This enables per-widget background
-/// color customization. The background_color should be passed to `BaseWidget::new()` during
-/// widget construction so it applies to both the widget and its popovers.
-///
 /// # Example
 ///
 /// ```ignore
 /// #[derive(Debug, Clone)]
 /// pub struct MyWidgetConfig {
 ///     pub enabled: bool,
-///     pub background_color: Option<String>,
 /// }
 ///
 /// impl WidgetConfig for MyWidgetConfig {
@@ -138,19 +128,13 @@ use crate::services::battery::BatteryService;
 ///             .get("enabled")
 ///             .and_then(|v| v.as_bool())
 ///             .unwrap_or(true);
-///         Self {
-///             enabled,
-///             background_color: entry.background_color.clone(),
-///         }
+///         Self { enabled }
 ///     }
 /// }
 ///
 /// impl Default for MyWidgetConfig {
 ///     fn default() -> Self {
-///         Self {
-///             enabled: true,
-///             background_color: None,
-///         }
+///         Self { enabled: true }
 ///     }
 /// }
 /// ```
@@ -159,7 +143,6 @@ pub trait WidgetConfig: Sized + Default {
     ///
     /// Implementations should extract options from `entry.options` and
     /// fall back to sensible defaults for missing or invalid values.
-    /// Always include `background_color: entry.background_color.clone()` to support per-widget colors.
     fn from_entry(entry: &WidgetEntry) -> Self;
 }
 

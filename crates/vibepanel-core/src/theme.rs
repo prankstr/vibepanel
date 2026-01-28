@@ -310,6 +310,9 @@ impl ThemePalette {
             r#"
 :root {{
     /* ===== Widget Styling (Base values, can be overridden per-widget) ===== */
+    /* These are combined via color-mix() in widget/popover CSS rules.
+     * --widget-background-opacity is a percentage with % suffix (e.g., "80%").
+     * To override in user CSS, use: --widget-background-opacity: 50%; */
     --widget-background-color: {widget_bg_color};
     --widget-background-opacity: {widget_bg_opacity}%;
 
@@ -989,6 +992,76 @@ mod tests {
         assert!(css.contains("--radius-bar:"));
         assert!(css.contains("--widget-height:"));
         assert!(css.contains("--font-family:"));
+    }
+
+    #[test]
+    fn test_generate_per_widget_css_with_background_color() {
+        use crate::config::WidgetOptions;
+
+        let mut config = Config::default();
+        config.widgets.widget_configs.insert(
+            "clock".to_string(),
+            WidgetOptions {
+                background_color: Some("#f5c2e7".to_string()),
+                ..Default::default()
+            },
+        );
+
+        let css = ThemePalette::generate_per_widget_css(&config);
+
+        // Should generate CSS targeting widget, widget-group, and popover
+        assert!(css.contains(".widget.clock"), "should target .widget.clock");
+        assert!(
+            css.contains(".widget-group.clock"),
+            "should target .widget-group.clock"
+        );
+        assert!(
+            css.contains(".clock-popover"),
+            "should target .clock-popover"
+        );
+        // Should set the CSS variable with normalized hex color
+        assert!(
+            css.contains("--widget-background-color: #f5c2e7"),
+            "should set --widget-background-color"
+        );
+    }
+
+    #[test]
+    fn test_generate_per_widget_css_normalizes_underscores() {
+        use crate::config::WidgetOptions;
+
+        let mut config = Config::default();
+        config.widgets.widget_configs.insert(
+            "quick_settings".to_string(),
+            WidgetOptions {
+                background_color: Some("#ff0000".to_string()),
+                ..Default::default()
+            },
+        );
+
+        let css = ThemePalette::generate_per_widget_css(&config);
+
+        // Underscores should be converted to hyphens for CSS class names
+        assert!(
+            css.contains(".widget.quick-settings"),
+            "should normalize underscores to hyphens"
+        );
+        assert!(
+            css.contains(".quick-settings-popover"),
+            "popover class should use hyphens"
+        );
+    }
+
+    #[test]
+    fn test_generate_per_widget_css_empty_without_overrides() {
+        let config = Config::default();
+        let css = ThemePalette::generate_per_widget_css(&config);
+
+        // No widget configs with background_color = empty CSS
+        assert!(
+            css.is_empty() || !css.contains("--widget-background-color"),
+            "should not generate CSS when no overrides configured"
+        );
     }
 
     #[test]

@@ -305,7 +305,7 @@ impl SurfaceStyleManager {
     /// specific properties while GTK themes are still overridden.
     ///
     /// Background color is determined by CSS variables:
-    /// - Default: Uses `--color-background-widget` from `:root`
+    /// - Default: Uses `--widget-background-color` from `:root`
     /// - Per-widget override: Add a class like `.clock-popover` to the widget,
     ///   which overrides `--widget-background-color` via generated CSS
     ///
