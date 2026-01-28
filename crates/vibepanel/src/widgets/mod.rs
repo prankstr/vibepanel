@@ -3,54 +3,15 @@
 //! Each widget is a self-contained GTK4 component that displays
 //! some piece of information (time, battery status, etc.).
 //!
-//! The `WidgetFactory` is used to construct widgets from config entries,
+//! The `WidgetFactory` constructs widgets from config entries,
 //! and `BarState` owns the widget handles to keep them alive.
 //!
-//! # Widget Configuration Pattern
+//! # Widget Configuration
 //!
-//! All widget configurations implement the `WidgetConfig` trait, which provides
-//! a standard interface for parsing configuration from TOML entries:
-//!
-//! ```ignore
-//! pub struct MyWidgetConfig {
-//!     pub some_option: bool,
-//! }
-//!
-//! impl WidgetConfig for MyWidgetConfig {
-//!     fn from_entry(entry: &WidgetEntry) -> Self {
-//!         warn_unknown_options("my_widget", entry, &["some_option"]);
-//!         let some_option = entry
-//!             .options
-//!             .get("some_option")
-//!             .and_then(|v| v.as_bool())
-//!             .unwrap_or(true);
-//!         Self { some_option }
-//!     }
-//! }
-//!
-//! impl Default for MyWidgetConfig {
-//!     fn default() -> Self {
-//!         Self { some_option: true }
-//!     }
-//! }
-//! ```
-//!
-//! When constructing the widget, the first CSS class passed to `BaseWidget::new()`
-//! determines the widget's identity for per-widget styling (e.g., `background_color`
-//! in config). This class is used to generate popover class names like `clock-popover`:
-//!
-//! ```ignore
-//! impl MyWidget {
-//!     pub fn new(config: MyWidgetConfig) -> Self {
-//!         // First class "my-widget" is used for CSS variable scoping
-//!         let base = BaseWidget::new(&[widget::MY_WIDGET]);
-//!         // ... rest of widget construction
-//!     }
-//! }
-//! ```
-//!
-//! Per-widget styling (like `background_color`) is configured in `[widgets.my_widget]`
-//! sections and applied via CSS variables. See `ThemePalette::generate_per_widget_css()`.
+//! Widget configs implement the `WidgetConfig` trait for parsing from TOML.
+//! The first CSS class passed to `BaseWidget::new()` determines the widget's
+//! identity for per-widget styling (e.g., `[widgets.clock].background_color`).
+//! This class is also used to generate popover class names like `clock-popover`.
 
 mod base;
 mod battery;

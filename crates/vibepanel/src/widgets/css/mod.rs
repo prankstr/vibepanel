@@ -17,11 +17,7 @@
 //! - `media` - Media player widget
 //! - `system` - System info popover
 
-/// CSS expression for widget background color with opacity applied.
-///
-/// Uses inline `color-mix()` so that per-widget `--widget-background-color` overrides
-/// (set via CSS class selectors like `.clock`, `.clock-popover`) work correctly
-/// through CSS variable scoping.
+/// Widget background with opacity applied via `color-mix()`.
 pub const WIDGET_BG_WITH_OPACITY: &str = "color-mix(in srgb, var(--widget-background-color) var(--widget-background-opacity), transparent)";
 
 mod bar;

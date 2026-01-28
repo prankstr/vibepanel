@@ -500,63 +500,40 @@ impl ThemePalette {
         }
     }
 
-    /// Generate per-widget CSS overrides for widgets with custom styling in config.
+    /// Generate per-widget CSS overrides from `[widgets.xxx]` config sections.
     ///
-    /// This generates CSS rules that override the default `--widget-*` variables for
-    /// specific widgets and their associated popovers. For example, if `[widgets.clock]`
-    /// has `background_color = "#f5c2e7"`, this generates:
-    ///
-    /// ```css
-    /// .widget.clock, .widget-group.clock, .clock-popover {
-    ///     --widget-background-color: #f5c2e7;
-    /// }
-    /// ```
-    ///
-    /// Widget names are normalized to CSS conventions (underscores become hyphens).
-    /// For example, `[widgets.quick_settings]` generates selectors like `.quick-settings`.
-    ///
-    /// This unified approach means:
-    /// - Widgets and their popovers share the same styling source (TOML config)
-    /// - Adding new style properties only requires updating this function
-    /// - User CSS can override via simple selectors (`.clock`, `.clock-popover`)
+    /// Generates rules like `.widget.clock, .clock-popover { --widget-background-color: #f5c2e7; }`.
+    /// Widget names are normalized to CSS conventions (underscores → hyphens).
     pub fn generate_per_widget_css(config: &Config) -> String {
         let mut css = String::new();
 
         for (widget_name, options) in &config.widgets.widget_configs {
             let mut rules = Vec::new();
 
-            // Background color override
             if let Some(ref color) = options.background_color {
-                // Validate and normalize hex color
                 if let Some((r, g, b)) = parse_hex_color(color) {
-                    // Normalize to full #rrggbb format for CSS
                     let normalized = format!("#{:02x}{:02x}{:02x}", r, g, b);
                     rules.push(format!("--widget-background-color: {};", normalized));
                 } else {
                     tracing::warn!(
-                        "Invalid background_color '{}' for widget '{}' - expected hex color like '#ff0000' or 'ff0000'",
+                        "Invalid background_color '{}' for widget '{}' - expected hex color",
                         color,
                         widget_name
                     );
                 }
             }
 
-            // Only generate a rule if there are overrides
             if !rules.is_empty() {
                 let rules_str = rules.join("\n    ");
-                // Normalize widget name to CSS conventions (underscores -> hyphens)
                 let css_name = widget_name.replace('_', "-");
-                // Apply to widgets, widget groups, and their popovers
                 css.push_str(&format!(
                     r#"
-/* Per-widget overrides for {name} */
 .widget.{css_name},
 .widget-group.{css_name},
 .{css_name}-popover {{
     {rules}
 }}
 "#,
-                    name = widget_name,
                     css_name = css_name,
                     rules = rules_str
                 ));
