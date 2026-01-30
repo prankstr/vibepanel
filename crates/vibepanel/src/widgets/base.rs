@@ -243,8 +243,8 @@ impl BaseWidget {
         let gesture_click = GestureClick::new();
         {
             let menus_for_cb = menus.clone();
-            let container_for_cb = container.clone();
-            gesture_click.connect_pressed(move |gesture, n_press, x, y| {
+            // Use connect_released for immediate response without double-click detection delay
+            gesture_click.connect_released(move |gesture, n_press, x, y| {
                 debug!(
                     "BaseWidget click: n_press={}, button={}",
                     n_press,
@@ -266,29 +266,32 @@ impl BaseWidget {
                     }
                 }
 
-                if n_press == 1 && gesture.current_button() == 1 {
-                    // First, dismiss any active popup (enables seamless transitions)
+                // Process every click regardless of n_press count
+                // (we don't use double-click, so treat them all as single clicks)
+                if gesture.current_button() == 1 {
+                    // Check if our own menu is visible before dismissing
+                    let my_menu_was_visible = menus_for_cb
+                        .borrow()
+                        .iter()
+                        .next()
+                        .map(|(_, menu)| menu.is_visible())
+                        .unwrap_or(false);
+
+                    // Dismiss any active popup (enables seamless transitions)
                     PopupTracker::global().dismiss_active();
 
                     if let Some((_name, menu)) = menus_for_cb.borrow().iter().next() {
-                        debug!("Toggling first menu from BaseWidget click");
-                        // Don't toggle - just show (we already dismissed any active)
-                        // This allows clicking directly from one popover to another
-                        if !menu.is_visible() {
+                        // If our menu was already open, we just closed it - don't re-open
+                        // If it wasn't open, open it now
+                        if !my_menu_was_visible {
+                            debug!("Opening menu from BaseWidget click");
                             menu.show();
+                        } else {
+                            debug!("Closed own menu from BaseWidget click");
                         }
                     } else {
                         debug!("BaseWidget click: no menus registered");
                     }
-                }
-
-                // Register this widget for seamless transitions
-                let widget_ptr = container_for_cb.as_ptr() as usize;
-                if let Some((_, menu)) = menus_for_cb.borrow().iter().next() {
-                    let menu_clone = menu.clone();
-                    PopupTracker::global().register_widget_menu(widget_ptr, move || {
-                        menu_clone.show();
-                    });
                 }
             });
         }
@@ -376,13 +379,6 @@ impl BaseWidget {
             builder,
             self.container.clone(),
         ));
-
-        // Register for seamless transitions
-        let widget_ptr = self.container.as_ptr() as usize;
-        let handle_for_tracker = handle.clone();
-        PopupTracker::global().register_widget_menu(widget_ptr, move || {
-            handle_for_tracker.show();
-        });
 
         self.menus
             .borrow_mut()

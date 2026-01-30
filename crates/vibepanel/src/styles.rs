@@ -583,6 +583,16 @@ pub mod surface {
 
     /// Popover title (`.vp-popover-title`).
     pub const POPOVER_TITLE: &str = "vp-popover-title";
+
+    /// Layer shell popover window (`.layer-shell-popover`).
+    ///
+    /// Applied to layer-shell based popover windows for proper focus handling.
+    pub const LAYER_SHELL_POPOVER: &str = "layer-shell-popover";
+
+    /// Layer shell click catcher (`.layer-shell-click-catcher`).
+    ///
+    /// Transparent fullscreen overlay for click-outside-to-close behavior.
+    pub const LAYER_SHELL_CLICK_CATCHER: &str = "layer-shell-click-catcher";
 }
 
 /// Icon-related classes.

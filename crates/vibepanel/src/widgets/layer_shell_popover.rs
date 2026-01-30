@@ -40,7 +40,6 @@ use gtk4::glib::{self, ControlFlow, Propagation};
 use gtk4::prelude::*;
 use gtk4::{
     Application, ApplicationWindow, Box as GtkBox, EventControllerKey, GestureClick, Orientation,
-    PickFlags,
 };
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use std::cell::{Cell, RefCell};
@@ -51,16 +50,6 @@ use crate::services::compositor::CompositorManager;
 use crate::services::config_manager::ConfigManager;
 use crate::services::surfaces::SurfaceStyleManager;
 use crate::styles::{class, surface};
-
-// =============================================================================
-// CSS Constants
-// =============================================================================
-
-/// CSS class for layer shell popover windows.
-pub const LAYER_SHELL_POPOVER: &str = "layer-shell-popover";
-
-/// CSS class for layer shell popover click catchers.
-pub const LAYER_SHELL_CLICK_CATCHER: &str = "layer-shell-click-catcher";
 
 // =============================================================================
 // Helper Functions - Shared Infrastructure
@@ -87,23 +76,18 @@ pub fn calculate_bar_exclusive_zone() -> i32 {
 /// Create a fullscreen click-catcher window for click-outside-to-close behavior.
 ///
 /// The click-catcher covers the entire screen except the bar area (via top margin).
-/// When clicked, it calls `on_dismiss` and optionally checks if the click was on
-/// a bar widget that should open its menu.
+/// When clicked, it calls `on_dismiss`. The top margin ensures bar widgets remain
+/// clickable for seamless transitions between menus.
 ///
 /// # Arguments
 ///
 /// * `app` - The GTK application
 /// * `on_dismiss` - Callback invoked when the catcher is clicked
-/// * `enable_seamless_transitions` - If true, checks for bar widgets at click position
 ///
 /// # Returns
 ///
 /// The click-catcher window. Caller is responsible for showing it and storing it.
-pub fn create_click_catcher<F>(
-    app: &Application,
-    on_dismiss: F,
-    enable_seamless_transitions: bool,
-) -> ApplicationWindow
+pub fn create_click_catcher<F>(app: &Application, on_dismiss: F) -> ApplicationWindow
 where
     F: Fn() + Clone + 'static,
 {
@@ -113,7 +97,7 @@ where
         .decorated(false)
         .build();
 
-    catcher.add_css_class(LAYER_SHELL_CLICK_CATCHER);
+    catcher.add_css_class(surface::LAYER_SHELL_CLICK_CATCHER);
     catcher.add_css_class(class::CLICK_CATCHER);
 
     // Layer shell configuration - fullscreen overlay behind the popover
@@ -143,13 +127,12 @@ where
         let on_dismiss = on_dismiss.clone();
         // Use connect_released to allow GTK to complete the gesture lifecycle
         // before hiding windows. This avoids "Broken accounting of active state" warnings.
-        gesture.connect_released(move |gesture, _, x, y| {
+        gesture.connect_released(move |_gesture, _, _x, _y| {
             on_dismiss();
-
-            // Check for seamless transition to bar widget menus
-            if enable_seamless_transitions && let Some(widget) = gesture.widget() {
-                check_bar_widget_at_position(&widget, x, y);
-            }
+            // Note: Seamless transitions to bar widgets happen automatically because
+            // the click catcher has a top margin that leaves the bar area uncovered.
+            // Clicks on bar widgets go directly to them, triggering their click handlers
+            // which call PopupTracker::dismiss_active() before opening their menus.
         });
     }
     catcher.add_controller(gesture);
@@ -261,93 +244,6 @@ pub fn setup_focus_loss_handler<F>(
                 pending_close_inner.set(Some(source_id));
             }
         });
-    }
-}
-
-/// Check if a click position corresponds to a bar widget and open its menu.
-///
-/// This enables seamless transitions: clicking on a bar widget while another
-/// popover is open will close the current popover and open the clicked widget's menu.
-///
-/// # Arguments
-///
-/// * `click_catcher` - The click catcher widget (used to find the application)
-/// * `x` - Click X coordinate in screen space
-/// * `y` - Click Y coordinate in screen space
-pub fn check_bar_widget_at_position(click_catcher: &gtk4::Widget, x: f64, y: f64) {
-    // Get the application from the click catcher's window
-    let Some(native) = click_catcher.native() else {
-        return;
-    };
-    let Some(window) = native.downcast_ref::<ApplicationWindow>() else {
-        return;
-    };
-    let Some(app) = window.application() else {
-        return;
-    };
-
-    // Find bar windows by CSS class
-    for window in app.windows() {
-        if !window.has_css_class(class::BAR_WINDOW) {
-            continue;
-        }
-
-        // Check if click is within bar bounds
-        let bar_width = window.width();
-        let bar_height = window.height();
-
-        // Click catcher has top margin = bar_exclusive_zone, so y=0 in catcher
-        // corresponds to the bottom of the bar. We need to check if the click
-        // is in the bar area (negative y relative to catcher, or using screen coords).
-        // Since the click catcher has a top margin, clicks at y=0 are at the bar bottom.
-        // We need to use pick() on the bar window with translated coordinates.
-
-        // The click coordinates are relative to the click catcher. Since the catcher
-        // has a top margin equal to bar_exclusive_zone, a click at the very top of
-        // the catcher (y=0) is actually at the bottom edge of the bar zone.
-        // To hit the bar, we need to account for this offset.
-
-        // Actually, the catcher doesn't cover the bar area at all (top margin).
-        // So clicks that reach the catcher are below the bar. But users click on
-        // bar widgets which are in the uncovered area - those clicks go directly
-        // to the bar, not through the catcher.
-
-        // Wait - the point of check_bar_widget_at_position is to handle clicks
-        // that ARE in the bar area. But if the catcher doesn't cover the bar...
-
-        // Looking at the QS implementation: the click catcher has a top margin
-        // so clicks on the bar go directly to bar widgets. The seamless transition
-        // happens because bar widgets use PopupTracker - when you click a bar widget,
-        // the capture-phase handler on the bar dismisses the active popup before
-        // the widget's click handler runs.
-
-        // So this function might actually be for a different case - when clicks
-        // come through somehow. Let me check the original QS code more carefully.
-
-        // In QS window.rs, check_bar_widget_at_position is called from the click
-        // catcher's released handler. But with the top margin, that shouldn't
-        // include bar clicks... unless the coordinates are screen-relative?
-
-        // Let's try using the bar's pick() with the click coordinates, assuming
-        // they're screen-relative (which they typically are for layer-shell surfaces).
-
-        if y < bar_height as f64 && x < bar_width as f64 && x >= 0.0 && y >= 0.0 {
-            // Try to pick a widget at this position in the bar
-            if let Some(target) = window.pick(x, y, PickFlags::DEFAULT) {
-                // Walk up to find a widget with the .widget class
-                let mut current: Option<gtk4::Widget> = Some(target);
-                while let Some(w) = current {
-                    if w.has_css_class(class::WIDGET) {
-                        // Found a bar widget - try to open its menu via PopupTracker
-                        let widget_ptr = w.as_ptr() as usize;
-                        crate::popup_tracker::PopupTracker::global()
-                            .open_menu_for_widget(widget_ptr);
-                        return;
-                    }
-                    current = w.parent();
-                }
-            }
-        }
     }
 }
 
@@ -486,15 +382,11 @@ impl LayerShellPopover {
 
         // Create and show click-catcher first
         let weak_self = Rc::downgrade(self);
-        let catcher = create_click_catcher(
-            &self.app,
-            move || {
-                if let Some(popover) = weak_self.upgrade() {
-                    popover.hide();
-                }
-            },
-            true, // enable seamless transitions
-        );
+        let catcher = create_click_catcher(&self.app, move || {
+            if let Some(popover) = weak_self.upgrade() {
+                popover.hide();
+            }
+        });
 
         let anchor = self.anchor.take();
         if let Some(ref monitor) = anchor.monitor {
@@ -534,7 +426,7 @@ impl LayerShellPopover {
             .build();
 
         // CSS classes
-        window.add_css_class(LAYER_SHELL_POPOVER);
+        window.add_css_class(surface::LAYER_SHELL_POPOVER);
         let popover_class = format!("{}-popover", self.widget_name);
         window.add_css_class(&popover_class);
 

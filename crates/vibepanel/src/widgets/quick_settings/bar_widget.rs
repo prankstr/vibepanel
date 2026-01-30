@@ -373,20 +373,26 @@ impl QuickSettingsWidget {
         // Gesture to toggle the Quick Settings window when clicked.
         let gesture = GestureClick::new();
         gesture.set_button(BUTTON_PRIMARY);
+        // Run in capture phase to handle click before BaseWidget's gesture
+        gesture.set_propagation_phase(gtk4::PropagationPhase::Capture);
 
         {
             let qs_window_handle = qs_window.clone();
             let root = base.widget().clone();
-            gesture.connect_pressed(move |gesture, n_press, _x, _y| {
+            // Use connect_released for immediate response without double-click delay
+            gesture.connect_released(move |gesture, _n_press, _x, _y| {
                 debug!(
                     "QuickSettingsWidget click: n_press={}, button={}",
-                    n_press,
+                    _n_press,
                     gesture.current_button()
                 );
 
-                if n_press != 1 || gesture.current_button() != BUTTON_PRIMARY {
+                if gesture.current_button() != BUTTON_PRIMARY {
                     return;
                 }
+
+                // Claim the gesture sequence to prevent BaseWidget's handler from firing
+                gesture.set_state(gtk4::EventSequenceState::Claimed);
 
                 if let Some(native) = root.native() {
                     let surface = native.surface();

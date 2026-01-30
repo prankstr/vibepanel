@@ -5,11 +5,11 @@
 //! and destroyed when closed, ensuring fresh state each time.
 
 use gtk4::gdk::{self, Monitor};
-use gtk4::glib::{self, ControlFlow, Propagation};
+use gtk4::glib::{self, ControlFlow};
 use gtk4::prelude::*;
 use gtk4::{
-    Application, ApplicationWindow, Box as GtkBox, Button, EventControllerKey, GestureClick, Label,
-    Orientation, PolicyType, Revealer, RevealerTransitionType, ScrolledWindow,
+    Application, ApplicationWindow, Box as GtkBox, Button, Label, Orientation, PolicyType,
+    Revealer, RevealerTransitionType, ScrolledWindow,
 };
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use std::cell::{Cell, RefCell};
@@ -18,15 +18,16 @@ use std::rc::{Rc, Weak};
 use crate::services::audio::AudioService;
 use crate::services::bluetooth::BluetoothService;
 use crate::services::brightness::BrightnessService;
-use crate::services::compositor::CompositorManager;
 use crate::services::config_manager::ConfigManager;
 use crate::services::idle_inhibitor::IdleInhibitorService;
 use crate::services::network::NetworkService;
 use crate::services::surfaces::SurfaceStyleManager;
 use crate::services::updates::UpdatesService;
 use crate::services::vpn::VpnService;
-use crate::styles::{class, qs, state, surface};
-use crate::widgets::layer_shell_popover::calculate_bar_exclusive_zone;
+use crate::styles::{qs, state, surface};
+use crate::widgets::layer_shell_popover::{
+    create_click_catcher, setup_esc_handler, setup_focus_loss_handler,
+};
 
 use super::audio_card::{
     self, AudioCardState, build_audio_details, build_audio_hint_label, build_audio_row,
@@ -63,7 +64,7 @@ pub struct QuickSettingsWindow {
     cards_config: QuickSettingsCardsConfig,
 
     /// Pending close timeout (for debounced focus-loss detection).
-    pending_close: Cell<Option<glib::SourceId>>,
+    pending_close: Rc<Cell<Option<glib::SourceId>>>,
 
     /// Scrolled window container for height limiting.
     scroll_container: ScrolledWindow,
@@ -119,7 +120,7 @@ impl QuickSettingsWindow {
             anchor_x: Cell::new(0),
             anchor_monitor: RefCell::new(None),
             cards_config,
-            pending_close: Cell::new(None),
+            pending_close: Rc::new(Cell::new(None)),
             scroll_container,
             wifi: Rc::new(WifiCardState::new()),
             bluetooth: Rc::new(BluetoothCardState::new()),
@@ -148,93 +149,29 @@ impl QuickSettingsWindow {
                 .set_data("vibepanel-qs-window", Rc::downgrade(&qs));
         }
 
-        // ESC key closes the panel.
+        // ESC key closes the panel
         {
             let qs_weak = Rc::downgrade(&qs);
-            let key_controller = EventControllerKey::new();
-            key_controller.connect_key_pressed(move |_, keyval, _, _| {
-                if keyval == gdk::Key::Escape {
+            setup_esc_handler(&qs.window, move || {
+                if let Some(qs) = qs_weak.upgrade() {
+                    qs.hide_panel();
+                }
+            });
+        }
+
+        // Set up auto-close behavior when focus is lost (compositor-aware)
+        {
+            let qs_weak = Rc::downgrade(&qs);
+            let pending_close = qs.pending_close.clone();
+            setup_focus_loss_handler(
+                &qs.window,
+                move || {
                     if let Some(qs) = qs_weak.upgrade() {
                         qs.hide_panel();
                     }
-                    Propagation::Stop
-                } else {
-                    Propagation::Proceed
-                }
-            });
-            qs.window.add_controller(key_controller);
-        }
-
-        // Set up auto-close behavior based on compositor.
-        //
-        // Different compositors have different focus behavior for layer-shell surfaces:
-        // - Niri/MangoWC: When external windows spawn, keyboard focus transfers away,
-        //   causing is-active to become false. The is-active approach works well.
-        // - Hyprland: Layer-shell surfaces retain keyboard focus even when other windows
-        //   spawn. Moving mouse over click-catcher also triggers is-active=false.
-        //   We use window-opened events instead.
-        let compositor_manager = CompositorManager::global();
-        let is_hyprland = compositor_manager.backend_name() == "Hyprland";
-
-        if is_hyprland {
-            // Hyprland: Subscribe to window-opened events and close when external window spawns
-            let qs_weak = Rc::downgrade(&qs);
-            compositor_manager.register_window_opened_callback(move |window_info| {
-                let Some(qs) = qs_weak.upgrade() else {
-                    return;
-                };
-
-                // Only close if QS is currently visible
-                if !qs.window.is_visible() {
-                    return;
-                }
-
-                // Don't close for vibepanel's own windows (class typically contains "vibepanel")
-                // This handles cases where we might spawn our own dialogs
-                let app_id_lower = window_info.app_id.to_lowercase();
-                if app_id_lower.contains("vibepanel") {
-                    return;
-                }
-
-                // External window opened - close QS panel
-                qs.hide_panel();
-            });
-        } else {
-            // Other compositors: Close panel when window loses focus (debounced to ignore
-            // momentary focus changes from internal clicks). When focus moves to an external
-            // window (e.g., VPN password dialog or terminal), is-active becomes false and
-            // stays false. Internal clicks cause a brief false→true bounce within ~1ms.
-            let qs_weak = Rc::downgrade(&qs);
-            qs.window
-                .connect_notify_local(Some("is-active"), move |window, _| {
-                    let Some(qs) = qs_weak.upgrade() else {
-                        return;
-                    };
-
-                    // Cancel any existing pending close
-                    if let Some(source_id) = qs.pending_close.take() {
-                        source_id.remove();
-                    }
-
-                    if !window.is_active() {
-                        // Focus lost - schedule close after short delay.
-                        // Will be cancelled if focus returns quickly (internal click).
-                        let qs_weak = Rc::downgrade(&qs);
-                        let source_id = glib::timeout_add_local_once(
-                            std::time::Duration::from_millis(50),
-                            move || {
-                                if let Some(qs) = qs_weak.upgrade() {
-                                    qs.pending_close.set(None);
-
-                                    if !qs.window.is_active() {
-                                        qs.hide_panel();
-                                    }
-                                }
-                            },
-                        );
-                        qs.pending_close.set(Some(source_id));
-                    }
-                });
+                },
+                pending_close,
+            );
         }
 
         // Subscribe to services
@@ -1166,13 +1103,27 @@ impl QuickSettingsWindow {
     }
 
     /// Show the panel and associated click-catcher.
-    fn show_panel(&self) {
+    fn show_panel(self: &Rc<Self>) {
         if let Some(monitor) = self.anchor_monitor.borrow().as_ref() {
             self.window.set_monitor(Some(monitor));
         }
 
-        // Create and show click-catcher
-        let catcher = self.create_click_catcher();
+        // Create and show click-catcher using shared helper
+        let app = self
+            .window
+            .application()
+            .expect("QuickSettingsWindow must have an associated Application");
+
+        let qs_weak = Rc::downgrade(self);
+        let catcher = create_click_catcher(&app, move || {
+            if let Some(qs) = qs_weak.upgrade() {
+                qs.hide_panel();
+            }
+        });
+
+        // Add QS-specific CSS class
+        catcher.add_css_class(qs::CLICK_CATCHER);
+
         if let Some(monitor) = self.anchor_monitor.borrow().as_ref() {
             catcher.set_monitor(Some(monitor));
         }
@@ -1220,95 +1171,6 @@ impl QuickSettingsWindow {
 
         // Close the main window
         self.window.close();
-    }
-
-    /// Create the fullscreen click-catcher window.
-    fn create_click_catcher(&self) -> ApplicationWindow {
-        let app_opt = self.window.application();
-        let app = app_opt
-            .as_ref()
-            .expect("QuickSettingsWindow must have an associated Application");
-
-        let catcher = ApplicationWindow::builder()
-            .application(app)
-            .title("vibepanel quick settings click catcher")
-            .decorated(false)
-            .build();
-
-        catcher.add_css_class(qs::CLICK_CATCHER);
-        catcher.add_css_class(class::CLICK_CATCHER);
-
-        catcher.init_layer_shell();
-        catcher.set_layer(Layer::Overlay);
-        catcher.set_exclusive_zone(-1);
-        catcher.set_anchor(Edge::Top, true);
-        catcher.set_anchor(Edge::Bottom, true);
-        catcher.set_anchor(Edge::Left, true);
-        catcher.set_anchor(Edge::Right, true);
-        catcher.set_keyboard_mode(KeyboardMode::OnDemand);
-
-        // Leave bar area uncovered for seamless transitions to other widgets
-        let bar_zone = calculate_bar_exclusive_zone();
-        catcher.set_margin(Edge::Top, bar_zone);
-
-        let overlay = GtkBox::new(Orientation::Vertical, 0);
-        overlay.set_hexpand(true);
-        overlay.set_vexpand(true);
-        catcher.set_child(Some(&overlay));
-
-        let gesture = GestureClick::new();
-        gesture.set_button(0);
-        {
-            let qs_weak = self.window.downgrade();
-            // Use connect_released instead of connect_pressed to allow GTK to complete
-            // the gesture lifecycle before hiding windows. Using connect_pressed causes
-            // "Broken accounting of active state" warnings on some systems because the
-            // gesture is interrupted mid-action when windows are hidden.
-            gesture.connect_released(move |_, _, _, _| {
-                if let Some(window) = qs_weak.upgrade() {
-                    // SAFETY: We stored Weak<QuickSettingsWindow> at window creation.
-                    // upgrade() safely returns None if dropped.
-                    unsafe {
-                        if let Some(weak_ptr) =
-                            window.data::<Weak<QuickSettingsWindow>>("vibepanel-qs-window")
-                            && let Some(qs) = weak_ptr.as_ref().upgrade()
-                        {
-                            qs.hide_panel();
-                        }
-                    }
-                }
-            });
-        }
-        catcher.add_controller(gesture);
-
-        // ESC key closes the panel (needed for Hyprland where keyboard focus
-        // may transfer to click-catcher when mouse moves over it)
-        {
-            let qs_weak = self.window.downgrade();
-            let key_controller = EventControllerKey::new();
-            key_controller.connect_key_pressed(move |_, keyval, _, _| {
-                if keyval == gdk::Key::Escape {
-                    if let Some(window) = qs_weak.upgrade() {
-                        // SAFETY: We stored Weak<QuickSettingsWindow> at window creation.
-                        // upgrade() safely returns None if dropped.
-                        unsafe {
-                            if let Some(weak_ptr) =
-                                window.data::<Weak<QuickSettingsWindow>>("vibepanel-qs-window")
-                                && let Some(qs) = weak_ptr.as_ref().upgrade()
-                            {
-                                qs.hide_panel();
-                            }
-                        }
-                    }
-                    Propagation::Stop
-                } else {
-                    Propagation::Proceed
-                }
-            });
-            catcher.add_controller(key_controller);
-        }
-
-        catcher
     }
 }
 
