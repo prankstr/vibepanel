@@ -26,6 +26,7 @@ use crate::services::surfaces::SurfaceStyleManager;
 use crate::services::updates::UpdatesService;
 use crate::services::vpn::VpnService;
 use crate::styles::{class, qs, state, surface};
+use crate::widgets::layer_shell_popover::calculate_bar_exclusive_zone;
 
 use super::audio_card::{
     self, AudioCardState, build_audio_details, build_audio_hint_label, build_audio_row,
@@ -1245,6 +1246,10 @@ impl QuickSettingsWindow {
         catcher.set_anchor(Edge::Left, true);
         catcher.set_anchor(Edge::Right, true);
         catcher.set_keyboard_mode(KeyboardMode::OnDemand);
+
+        // Leave bar area uncovered for seamless transitions to other widgets
+        let bar_zone = calculate_bar_exclusive_zone();
+        catcher.set_margin(Edge::Top, bar_zone);
 
         let overlay = GtkBox::new(Orientation::Vertical, 0);
         overlay.set_hexpand(true);

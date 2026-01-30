@@ -12,6 +12,16 @@ pub fn css() -> String {
         r#"
 /* ===== SHARED UTILITY CSS ===== */
 
+/* Layer-shell popover window - transparent so content can have proper shadow */
+window.layer-shell-popover {{
+    background: transparent;
+}}
+
+/* Layer-shell click catcher - transparent overlay */
+window.layer-shell-click-catcher {{
+    background: transparent;
+}}
+
 /* 
  * Icon sizing strategy:
  * - .material-symbol uses font-size: inherit (set in icons.rs)
@@ -102,6 +112,10 @@ label link:active {{
     background-color: {widget_bg};
     border-radius: var(--radius-surface);
     box-shadow: var(--shadow-soft);
+    padding: 16px;
+    font-family: var(--font-family);
+    font-size: var(--font-size);
+    color: var(--color-foreground-primary);
 }}
 
 popover.widget-menu {{

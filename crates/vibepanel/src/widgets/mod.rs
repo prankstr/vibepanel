@@ -19,6 +19,7 @@ mod battery_popover;
 mod calendar_popover;
 mod clock;
 mod cpu;
+pub mod layer_shell_popover;
 mod marquee_label;
 mod media;
 mod media_components;

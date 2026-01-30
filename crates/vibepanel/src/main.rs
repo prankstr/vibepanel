@@ -4,6 +4,7 @@
 
 mod bar;
 pub mod layout_math;
+pub mod popup_tracker;
 mod sectioned_bar;
 mod services;
 pub mod styles;
