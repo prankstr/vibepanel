@@ -226,7 +226,10 @@ pub fn setup_focus_loss_handler<F>(
                 source_id.remove();
             }
 
-            if !window.is_active() {
+            // Only act on focus loss if window is still visible.
+            // When we intentionally hide a window with set_visible(false), it also
+            // loses focus - we don't want to run the close callback in that case.
+            if !window.is_active() && window.is_visible() {
                 // Focus lost - schedule close after short delay
                 // Will be cancelled if focus returns quickly (internal click)
                 let window_weak = window_weak.clone();
@@ -237,6 +240,7 @@ pub fn setup_focus_loss_handler<F>(
                         pending_close_timeout.set(None);
                         if let Some(window) = window_weak.upgrade()
                             && !window.is_active()
+                            && window.is_visible()
                         {
                             on_close();
                         }

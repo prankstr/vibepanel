@@ -1,8 +1,9 @@
 //! Quick Settings window - global control center panel.
 //!
 //! Each bar creates its own QuickSettingsWindow instance via the
-//! QuickSettingsWindowHandle. The window is created on first open
-//! and destroyed when closed, ensuring fresh state each time.
+//! QuickSettingsWindowHandle. The window is created on each open and
+//! destroyed on close. Layer-shell surfaces don't reliably re-show
+//! after being hidden, so we always create fresh windows.
 
 use gtk4::gdk::{self, Monitor};
 use gtk4::glib::{self, ControlFlow};
@@ -1108,7 +1109,7 @@ impl QuickSettingsWindow {
             self.window.set_monitor(Some(monitor));
         }
 
-        // Create and show click-catcher using shared helper
+        // Create click-catcher
         let app = self
             .window
             .application()
@@ -1124,6 +1125,7 @@ impl QuickSettingsWindow {
         // Add QS-specific CSS class
         catcher.add_css_class(qs::CLICK_CATCHER);
 
+        // Set monitor and show click-catcher
         if let Some(monitor) = self.anchor_monitor.borrow().as_ref() {
             catcher.set_monitor(Some(monitor));
         }
@@ -1156,8 +1158,6 @@ impl QuickSettingsWindow {
     }
 
     /// Hide and destroy the panel and associated click-catcher.
-    ///
-    /// This closes and destroys both windows, ensuring fresh state on next open.
     fn hide_panel(&self) {
         // Cancel any pending focus-loss close
         if let Some(source_id) = self.pending_close.take() {
@@ -1169,21 +1169,21 @@ impl QuickSettingsWindow {
             catcher.close();
         }
 
-        // Close the main window
+        // Destroy the main window
         self.window.close();
     }
 }
 
 /// Handle passed to bar widgets so they can toggle the Quick Settings window.
 ///
-/// The handle manages the window lifecycle: creating a fresh window on open
-/// and destroying it on close. This ensures the window always starts with
-/// fresh state (no remembered scroll positions, expanded sections, etc.).
+/// The handle manages the window lifecycle: the window is created on each open
+/// and destroyed on close. Layer-shell surfaces don't reliably re-show after
+/// being hidden with set_visible(false), so we always create fresh windows.
 #[derive(Clone)]
 pub struct QuickSettingsWindowHandle {
     app: Application,
     cards_config: QuickSettingsCardsConfig,
-    /// The current window instance (if open). Shared across clones.
+    /// The current window instance (kept alive for reuse). Shared across clones.
     window: Rc<RefCell<Option<Rc<QuickSettingsWindow>>>>,
 }
 
@@ -1197,26 +1197,24 @@ impl QuickSettingsWindowHandle {
     }
 
     pub fn toggle_at(&self, x: i32, monitor: Option<Monitor>) {
-        // Check if window exists and is visible, extracting it to avoid holding borrow
-        // across GTK operations that might trigger callbacks.
-        let existing_window = {
-            let borrowed = self.window.borrow();
-            if borrowed.as_ref().is_some_and(|w| w.window.is_visible()) {
-                borrowed.clone()
-            } else {
-                None
-            }
-        };
+        // Check if window exists and is visible
+        let is_visible = self
+            .window
+            .borrow()
+            .as_ref()
+            .is_some_and(|w| w.window.is_visible());
 
-        // If window exists and is visible, close it
-        if let Some(window) = existing_window {
-            // Clear our reference first, before hide_panel() triggers GTK signals
-            *self.window.borrow_mut() = None;
-            window.hide_panel();
+        if is_visible {
+            // Window is visible - close and destroy it
+            if let Some(qs) = self.window.borrow_mut().take() {
+                qs.hide_panel();
+            }
             return;
         }
 
-        // Window doesn't exist or was closed externally - create fresh one
+        // Window not visible - create a new one
+        // (Layer-shell surfaces don't reliably re-show after being hidden,
+        // so we always create fresh)
         let qs = QuickSettingsWindow::new(&self.app, self.cards_config.clone());
         qs.set_anchor_position(x, monitor);
         qs.show_panel();
