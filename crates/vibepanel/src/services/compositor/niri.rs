@@ -661,33 +661,7 @@ impl NiriBackend {
                                     continue;
                                 }
 
-                                // Debug: log event types for window tracking
-                                let event_type = event
-                                    .as_object()
-                                    .map(|o| o.keys().next().cloned().unwrap_or_default())
-                                    .unwrap_or_default();
-                                if event_type.contains("Window") {
-                                    debug!("Niri raw event: {}", event);
-                                }
-
                                 let (ws_changed, win_changed) = Self::handle_event(&shared, &event);
-
-                                // Debug: log all window-related events
-                                if event.get("WindowFocusChanged").is_some()
-                                    || event.get("WindowOpenedOrChanged").is_some()
-                                    || event.get("WindowClosed").is_some()
-                                {
-                                    debug!(
-                                        "Niri event: {:?}, win_changed={}, focused={:?}",
-                                        event.as_object().map(|o| o.keys().collect::<Vec<_>>()),
-                                        win_changed,
-                                        shared
-                                            .focused_window
-                                            .read()
-                                            .as_ref()
-                                            .map(|w| (&w.app_id, &w.title))
-                                    );
-                                }
 
                                 if let Some((ref ws_cb, ref win_cb)) = callbacks {
                                     if ws_changed {

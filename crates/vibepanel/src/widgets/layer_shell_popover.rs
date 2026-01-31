@@ -80,6 +80,59 @@ const POPOVER_MIN_VALID_WIDTH: i32 = 20;
 // Helper Functions - Shared Infrastructure
 // =============================================================================
 
+/// Calculate the top margin for a popover based on bar configuration.
+///
+/// When the bar has a visible background (opacity > 0), the popover needs to
+/// account for bar padding in its positioning. This ensures consistent visual
+/// spacing regardless of bar transparency settings.
+///
+/// Used by both `LayerShellPopover` and Quick Settings for consistent positioning.
+pub fn calculate_popover_top_margin() -> i32 {
+    let config_mgr = ConfigManager::global();
+    let bar_padding = config_mgr.bar_padding() as i32;
+    let bar_opacity = config_mgr.bar_background_opacity();
+    let popover_offset = config_mgr.popover_offset() as i32;
+
+    if bar_opacity > 0.0 {
+        popover_offset - bar_padding
+    } else {
+        popover_offset
+    }
+}
+
+/// Calculate the right margin for a popover to center it on an anchor point.
+///
+/// This clamps the margin to keep the popover on-screen while centering it
+/// as closely as possible to the anchor X coordinate.
+///
+/// # Arguments
+///
+/// * `anchor_x` - X coordinate of the anchor point (widget center) in monitor coordinates
+/// * `monitor_width` - Width of the monitor
+/// * `window_width` - Actual or estimated width of the popover window
+/// * `min_edge_margin` - Minimum margin from screen edge
+///
+/// # Returns
+///
+/// The right margin to apply to the window, clamped to valid bounds.
+pub fn calculate_popover_right_margin(
+    anchor_x: i32,
+    monitor_width: i32,
+    window_width: i32,
+    min_edge_margin: i32,
+) -> i32 {
+    let right_margin = monitor_width - anchor_x - window_width / 2;
+    let max_margin = monitor_width.saturating_sub(window_width + min_edge_margin);
+
+    // Ensure min <= max to avoid clamp panic
+    if max_margin >= min_edge_margin {
+        right_margin.clamp(min_edge_margin, max_margin)
+    } else {
+        // Window is too wide for monitor, just use minimum margin
+        min_edge_margin.max(max_margin)
+    }
+}
+
 /// Get the appropriate keyboard mode for layer-shell popovers.
 ///
 /// - **Hyprland**: Uses `OnDemand` - Hyprland handles focus well and we use
@@ -87,8 +140,7 @@ const POPOVER_MIN_VALID_WIDTH: i32 = 20;
 /// - **Other compositors**: Uses `Exclusive` to maintain keyboard focus after
 ///   workspace switches (following DankMaterialShell's approach).
 pub fn popover_keyboard_mode() -> KeyboardMode {
-    let is_hyprland = CompositorManager::global().backend_name() == "Hyprland";
-    if is_hyprland {
+    if CompositorManager::global().supports_on_demand_keyboard() {
         KeyboardMode::OnDemand
     } else {
         KeyboardMode::Exclusive
@@ -575,23 +627,11 @@ impl LayerShellPopover {
 
         let geom = monitor.geometry();
 
-        // Get bar dimensions from config
-        let config_mgr = ConfigManager::global();
-        let bar_padding = config_mgr.bar_padding() as i32;
-        let bar_opacity = config_mgr.bar_background_opacity();
-        let popover_offset = config_mgr.popover_offset() as i32;
-
-        // Calculate top margin
-        let top_margin = if bar_opacity > 0.0 {
-            popover_offset - bar_padding
-        } else {
-            popover_offset
-        };
-        window.set_margin(Edge::Top, top_margin);
+        // Set top margin
+        window.set_margin(Edge::Top, calculate_popover_top_margin());
 
         // Calculate horizontal position (center on anchor_x)
         if anchor_x > 0 {
-            let monitor_width = geom.width();
             let window_width = {
                 let w = window.width();
                 if w > POPOVER_MIN_VALID_WIDTH {
@@ -600,14 +640,13 @@ impl LayerShellPopover {
                     POPOVER_DEFAULT_WIDTH_ESTIMATE
                 }
             };
-            let right_margin = monitor_width - anchor_x - window_width / 2;
-            let max_margin = monitor_width.saturating_sub(window_width + POPOVER_MIN_EDGE_MARGIN);
-            let clamped = if max_margin >= POPOVER_MIN_EDGE_MARGIN {
-                right_margin.clamp(POPOVER_MIN_EDGE_MARGIN, max_margin)
-            } else {
-                POPOVER_MIN_EDGE_MARGIN.max(max_margin)
-            };
-            window.set_margin(Edge::Right, clamped);
+            let right_margin = calculate_popover_right_margin(
+                anchor_x,
+                geom.width(),
+                window_width,
+                POPOVER_MIN_EDGE_MARGIN,
+            );
+            window.set_margin(Edge::Right, right_margin);
         } else {
             window.set_margin(Edge::Right, POPOVER_SHADOW_MARGIN);
         }

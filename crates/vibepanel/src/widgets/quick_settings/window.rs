@@ -29,8 +29,9 @@ use crate::services::updates::UpdatesService;
 use crate::services::vpn::VpnService;
 use crate::styles::{qs, state, surface};
 use crate::widgets::layer_shell_popover::{
-    Dismissible, calculate_bar_exclusive_zone, create_click_catcher, popover_keyboard_mode,
-    setup_esc_handler, setup_focus_loss_handler,
+    Dismissible, calculate_bar_exclusive_zone, calculate_popover_right_margin,
+    calculate_popover_top_margin, create_click_catcher, popover_keyboard_mode, setup_esc_handler,
+    setup_focus_loss_handler,
 };
 
 use super::audio_card::{
@@ -1084,7 +1085,7 @@ impl QuickSettingsWindow {
 
         let geom = monitor.geometry();
 
-        // Get bar dimensions from config
+        // Get bar dimensions from config for height calculation
         let config_mgr = ConfigManager::global();
         let bar_size = config_mgr.bar_size() as i32;
         let bar_padding = config_mgr.bar_padding() as i32;
@@ -1099,12 +1100,8 @@ impl QuickSettingsWindow {
             bar_size + 2 * screen_margin + popover_offset
         };
 
-        // Adjust for padding in exclusive zone when bar is visible
-        let top_margin = if bar_opacity > 0.0 {
-            popover_offset - bar_padding
-        } else {
-            popover_offset
-        };
+        // Set top margin using shared helper
+        let top_margin = calculate_popover_top_margin();
         self.window.set_margin(Edge::Top, top_margin);
 
         // Max height: screen minus bar zone, margins, and container padding
@@ -1118,10 +1115,8 @@ impl QuickSettingsWindow {
             self.scroll_container.set_max_content_height(max_height);
         }
 
+        // Set right margin using shared helper
         if anchor_x > 0 {
-            let monitor_width = geom.width();
-            // Use actual width if available, otherwise estimate based on content width
-            // plus margins/padding
             let window_width = {
                 let w = self.window.width();
                 if w > QUICK_SETTINGS_MIN_VALID_WIDTH {
@@ -1130,17 +1125,13 @@ impl QuickSettingsWindow {
                     QUICK_SETTINGS_WIDTH_ESTIMATE
                 }
             };
-            let right_margin = monitor_width - anchor_x - window_width / 2;
-            let max_margin =
-                monitor_width.saturating_sub(window_width + QUICK_SETTINGS_MIN_EDGE_MARGIN);
-            // Ensure min <= max to avoid clamp panic
-            let clamped = if max_margin >= QUICK_SETTINGS_MIN_EDGE_MARGIN {
-                right_margin.clamp(QUICK_SETTINGS_MIN_EDGE_MARGIN, max_margin)
-            } else {
-                // Window is too wide for monitor, just use minimum margin
-                QUICK_SETTINGS_MIN_EDGE_MARGIN.max(max_margin)
-            };
-            self.window.set_margin(Edge::Right, clamped);
+            let right_margin = calculate_popover_right_margin(
+                anchor_x,
+                geom.width(),
+                window_width,
+                QUICK_SETTINGS_MIN_EDGE_MARGIN,
+            );
+            self.window.set_margin(Edge::Right, right_margin);
         } else {
             self.window
                 .set_margin(Edge::Right, QUICK_SETTINGS_DEFAULT_RIGHT_MARGIN);

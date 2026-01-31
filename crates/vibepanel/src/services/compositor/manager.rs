@@ -200,6 +200,16 @@ impl CompositorManager {
         }
     }
 
+    /// Check if the compositor supports on-demand keyboard mode for layer-shell surfaces.
+    ///
+    /// Hyprland handles on-demand keyboard mode well, allowing layer-shell surfaces
+    /// to receive keyboard focus only when needed. Other compositors may require
+    /// exclusive keyboard mode to maintain proper focus after workspace switches.
+    pub fn supports_on_demand_keyboard(&self) -> bool {
+        // Currently only Hyprland reliably supports on-demand keyboard mode
+        self.backend_name() == "Hyprland"
+    }
+
     /// Handle a workspace update from the backend.
     /// Called via glib::idle_add_once from the backend thread.
     pub(crate) fn handle_workspace_update(&self, snapshot: WorkspaceSnapshot) {
