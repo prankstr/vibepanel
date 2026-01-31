@@ -536,39 +536,6 @@ impl NiriBackend {
             }
             drop(win_cache);
             window_changed = Self::update_focused_window_from_cache(shared);
-        } else if let Some(active_changed) = event.get("WorkspaceActiveWindowChanged") {
-            // NIRI: This event fires when the "active" window on a workspace changes.
-            // Unlike WindowFocusChanged, this fires even when a layer-shell surface
-            // has exclusive keyboard focus. The "active" window is the one that would
-            // have focus if no layer-shell surface was grabbing it - indicated by
-            // Niri's gray border on the window.
-            //
-            // When active_window_id changes, we signal a window change to trigger
-            // popover close. We use a synthetic WindowInfo with just the window ID
-            // to ensure the focus-loss handler sees a change.
-            debug!("WorkspaceActiveWindowChanged event: {:?}", active_changed);
-            if let Some(win_id) = active_changed
-                .get("active_window_id")
-                .and_then(|v| v.as_u64())
-            {
-                // Create a minimal WindowInfo - the important thing is that it's
-                // different from the previous one, triggering the callback.
-                let new_info = WindowInfo {
-                    title: format!("window-{}", win_id),
-                    app_id: String::new(),
-                    workspace_id: None,
-                    output: None,
-                };
-
-                let mut focused = shared.focused_window.write();
-                let changed = focused.as_ref() != Some(&new_info);
-                debug!(
-                    "WorkspaceActiveWindowChanged: win_id={}, changed={}",
-                    win_id, changed
-                );
-                *focused = Some(new_info);
-                window_changed = changed;
-            }
         }
 
         (workspace_changed, window_changed)

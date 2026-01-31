@@ -342,12 +342,6 @@ impl LayerShellPopover {
         self.show_internal();
     }
 
-    /// Show the popover using the previously set anchor position.
-    #[allow(dead_code)]
-    pub fn show(self: &Rc<Self>) {
-        self.show_internal();
-    }
-
     /// Hide the popover and destroy windows.
     pub fn hide(&self) {
         // Destroy click-catcher
@@ -358,16 +352,6 @@ impl LayerShellPopover {
         // Destroy main window
         if let Some(window) = self.window.borrow_mut().take() {
             window.close();
-        }
-    }
-
-    /// Toggle visibility at the given anchor position.
-    #[allow(dead_code)]
-    pub fn toggle_at(self: &Rc<Self>, x: i32, monitor: Option<Monitor>) {
-        if self.is_visible() {
-            self.hide();
-        } else {
-            self.show_at(x, monitor);
         }
     }
 
