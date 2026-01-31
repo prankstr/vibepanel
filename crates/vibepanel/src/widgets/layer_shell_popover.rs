@@ -32,7 +32,6 @@
 //! ```ignore
 //! let catcher = create_click_catcher(app, bar_zone, || { qs.hide_panel(); });
 //! setup_esc_handler(&window, || { qs.hide_panel(); });
-//! setup_focus_loss_handler(&window, || { qs.hide_panel(); });
 //! ```
 
 use gtk4::gdk::{self, Monitor};
@@ -44,9 +43,8 @@ use gtk4::{
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-use tracing::debug;
 
-use crate::services::compositor::{CallbackId, CompositorManager};
+use crate::services::compositor::CompositorManager;
 use crate::services::config_manager::ConfigManager;
 use crate::services::surfaces::SurfaceStyleManager;
 use crate::styles::{class, surface};
@@ -54,10 +52,6 @@ use crate::styles::{class, surface};
 // =============================================================================
 // Types
 // =============================================================================
-
-/// Tracked window identity for focus-loss detection.
-/// Uses (app_id, title, workspace_id) as a pseudo-unique identifier.
-type WindowIdentity = (String, String, Option<i32>);
 
 // =============================================================================
 // Constants
@@ -264,107 +258,6 @@ where
     window.add_controller(key_controller);
 }
 
-/// Set up focus-loss detection to auto-close popovers.
-///
-/// This monitors for focus changes via compositor IPC. When focus shifts to
-/// an external window (not vibepanel) **on the same workspace**, the popover
-/// is closed. This handles cases like spawning a terminal from the updates card
-/// or a VPN password dialog.
-///
-/// Focus changes due to workspace switching are ignored, allowing the popover
-/// to stay open across workspaces.
-///
-/// Works on all compositors (Hyprland, Niri, MangoWC) via the unified
-/// window focus callback system.
-///
-/// # Arguments
-///
-/// * `window` - The window to monitor
-/// * `on_close` - Callback invoked when focus shifts to an external window
-///
-/// # Returns
-///
-/// A `CallbackId` for the registered compositor callback.
-/// The caller should store this ID and call `CompositorManager::unregister_window_callback`
-/// when the popover is destroyed to clean up the callback.
-pub fn setup_focus_loss_handler<F>(window: &ApplicationWindow, on_close: F) -> CallbackId
-where
-    F: Fn() + Clone + 'static,
-{
-    let compositor_manager = CompositorManager::global();
-    let window_weak = window.downgrade();
-
-    // Track the last seen window info to detect actual focus changes
-    // and distinguish workspace switches from new window spawns.
-    let last_info: Rc<RefCell<Option<WindowIdentity>>> = Rc::new(RefCell::new(None));
-
-    // Subscribe to window focus changes - works on all compositors
-    compositor_manager.register_window_callback(move |window_info| {
-        let mut last = last_info.borrow_mut();
-        let current = (
-            window_info.app_id.clone(),
-            window_info.title.clone(),
-            window_info.workspace_id,
-        );
-
-        debug!(
-            "Focus handler: app_id={}, title={}, workspace_id={:?}",
-            window_info.app_id, window_info.title, window_info.workspace_id
-        );
-
-        // Check if this is a workspace switch (different workspace)
-        // Only consider it a workspace switch if BOTH have workspace IDs
-        let is_workspace_switch = last.as_ref().is_some_and(|(_, _, last_ws)| {
-            match (last_ws, window_info.workspace_id) {
-                (Some(l), Some(w)) => *l != w,
-                _ => false, // If either is None, don't treat as workspace switch
-            }
-        });
-
-        // Check if focus actually changed to a different window
-        // Use both app_id and title to distinguish multiple windows of same app
-        let is_same_window = last
-            .as_ref()
-            .is_some_and(|(id, title, _)| id == &window_info.app_id && title == &window_info.title);
-
-        debug!(
-            "Focus handler: is_workspace_switch={}, is_same_window={}, last={:?}",
-            is_workspace_switch, is_same_window, last
-        );
-
-        *last = Some(current);
-
-        // Ignore workspace switches - popover should stay open
-        if is_workspace_switch {
-            return;
-        }
-
-        // Ignore duplicate updates for same window
-        if is_same_window {
-            return;
-        }
-
-        let Some(window) = window_weak.upgrade() else {
-            return;
-        };
-
-        // Only close if visible
-        if !window.is_visible() {
-            return;
-        }
-
-        // Don't close for vibepanel's own windows
-        let app_id_lower = window_info.app_id.to_lowercase();
-        if app_id_lower.contains("vibepanel") {
-            return;
-        }
-
-        // Focus shifted to external window on same workspace - close
-        debug!("Closing popover: focus shifted to {}", window_info.app_id);
-        on_close();
-    })
-}
-
 // =============================================================================
 // LayerShellPopover - Complete Solution for Widget Menus
 // =============================================================================
@@ -406,10 +299,6 @@ pub struct LayerShellPopover {
 
     /// Anchor position for smart positioning
     anchor: Cell<PopoverAnchor>,
-
-    /// Compositor callback ID for focus-loss handling (Hyprland only).
-    /// Stored so we can unregister it when the popover is hidden/destroyed.
-    compositor_callback_id: RefCell<Option<CallbackId>>,
 }
 
 impl LayerShellPopover {
@@ -431,7 +320,6 @@ impl LayerShellPopover {
             window: RefCell::new(None),
             click_catcher: RefCell::new(None),
             anchor: Cell::new(PopoverAnchor::default()),
-            compositor_callback_id: RefCell::new(None),
         })
     }
 
@@ -462,9 +350,6 @@ impl LayerShellPopover {
 
     /// Hide the popover and destroy windows.
     pub fn hide(&self) {
-        // Unregister compositor callbacks (Hyprland focus-loss handling)
-        self.unregister_compositor_callback();
-
         // Destroy click-catcher
         if let Some(catcher) = self.click_catcher.borrow_mut().take() {
             catcher.close();
@@ -473,13 +358,6 @@ impl LayerShellPopover {
         // Destroy main window
         if let Some(window) = self.window.borrow_mut().take() {
             window.close();
-        }
-    }
-
-    /// Unregister any active compositor callback.
-    fn unregister_compositor_callback(&self) {
-        if let Some(id) = self.compositor_callback_id.borrow_mut().take() {
-            CompositorManager::global().unregister_window_callback(id);
         }
     }
 
@@ -600,18 +478,6 @@ impl LayerShellPopover {
             });
         }
 
-        // Focus loss handler
-        {
-            let weak_self = Rc::downgrade(self);
-            let callback_id = setup_focus_loss_handler(&window, move || {
-                if let Some(popover) = weak_self.upgrade() {
-                    popover.hide();
-                }
-            });
-            // Store the callback ID for cleanup on hide/drop
-            *self.compositor_callback_id.borrow_mut() = Some(callback_id);
-        }
-
         window
     }
 
@@ -674,7 +540,7 @@ impl LayerShellPopover {
 /// Trait for surfaces that can be dismissed (closed).
 ///
 /// This is implemented by both `LayerShellPopover` and Quick Settings to allow
-/// unified handling in `PopupTracker`.
+/// unified handling in `PopoverTracker`.
 pub trait Dismissible {
     /// Dismiss (hide/close) the surface.
     fn dismiss(&self);
@@ -690,12 +556,5 @@ impl Dismissible for LayerShellPopover {
 
     fn is_visible(&self) -> bool {
         self.is_visible()
-    }
-}
-
-impl Drop for LayerShellPopover {
-    fn drop(&mut self) {
-        // Unregister compositor callbacks to avoid callbacks to freed objects.
-        self.unregister_compositor_callback();
     }
 }

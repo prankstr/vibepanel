@@ -12,7 +12,7 @@ use gtk4::{
     Application, ApplicationWindow, Box as GtkBox, Button, Label, Orientation, PolicyType,
     Revealer, RevealerTransitionType, ScrolledWindow,
 };
-use gtk4_layer_shell::{Edge, Layer, LayerShell};
+use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
 
@@ -20,7 +20,6 @@ use crate::popover_tracker::PopoverTracker;
 use crate::services::audio::AudioService;
 use crate::services::bluetooth::BluetoothService;
 use crate::services::brightness::BrightnessService;
-use crate::services::compositor::CallbackId;
 use crate::services::config_manager::ConfigManager;
 use crate::services::idle_inhibitor::IdleInhibitorService;
 use crate::services::network::NetworkService;
@@ -31,7 +30,6 @@ use crate::styles::{qs, state, surface};
 use crate::widgets::layer_shell_popover::{
     Dismissible, calculate_bar_exclusive_zone, calculate_popover_right_margin,
     calculate_popover_top_margin, create_click_catcher, popover_keyboard_mode, setup_esc_handler,
-    setup_focus_loss_handler,
 };
 
 use super::audio_card::{
@@ -103,10 +101,6 @@ pub struct QuickSettingsWindow {
     /// Configuration for which cards are enabled.
     cards_config: QuickSettingsCardsConfig,
 
-    /// Compositor callback ID for focus-loss handling (Hyprland only).
-    /// Stored so we can unregister it when the panel is hidden/destroyed.
-    compositor_callback_id: RefCell<Option<CallbackId>>,
-
     /// Scrolled window container for height limiting.
     scroll_container: ScrolledWindow,
 
@@ -162,7 +156,6 @@ impl QuickSettingsWindow {
             anchor_x: Cell::new(0),
             anchor_monitor: RefCell::new(None),
             cards_config,
-            compositor_callback_id: RefCell::new(None),
             scroll_container,
             wifi: Rc::new(WifiCardState::new()),
             bluetooth: Rc::new(BluetoothCardState::new()),
@@ -201,18 +194,6 @@ impl QuickSettingsWindow {
             });
         }
 
-        // Set up auto-close behavior when focus is lost (compositor-aware)
-        {
-            let qs_weak = Rc::downgrade(&qs);
-            let callback_id = setup_focus_loss_handler(&qs.window, move || {
-                if let Some(qs) = qs_weak.upgrade() {
-                    qs.hide_panel();
-                }
-            });
-            // Store the callback ID for cleanup on hide
-            *qs.compositor_callback_id.borrow_mut() = Some(callback_id);
-        }
-
         // Subscribe to services
         Self::subscribe_to_services(&qs);
 
@@ -243,9 +224,13 @@ impl QuickSettingsWindow {
 
         if cfg.vpn {
             let qs_weak = Rc::downgrade(qs);
+            let close_on_connect = cfg.vpn_close_on_connect;
             VpnService::global().connect(move |snapshot| {
                 if let Some(qs) = qs_weak.upgrade() {
-                    vpn_card::on_vpn_changed(&qs.vpn, snapshot);
+                    let pending_succeeded = vpn_card::on_vpn_changed(&qs.vpn, snapshot);
+                    if pending_succeeded && close_on_connect {
+                        qs.hide_panel();
+                    }
                 }
             });
         }
@@ -754,6 +739,10 @@ impl QuickSettingsWindow {
                 let vpn = VpnService::global();
                 let snapshot = vpn.snapshot();
                 if let Some(primary) = snapshot.primary() {
+                    // Track connect attempt for close-on-success behavior
+                    if toggle.is_active() {
+                        vpn_card::add_pending_connect(&primary.uuid);
+                    }
                     vpn.set_connection_state(&primary.uuid, toggle.is_active());
                 }
             });
@@ -1194,9 +1183,9 @@ impl QuickSettingsWindow {
     }
 
     /// Hide and destroy the panel and associated click-catcher.
-    fn hide_panel(&self) {
-        // Unregister compositor callback (Hyprland focus-loss handling)
-        self.unregister_compositor_callback();
+    pub(super) fn hide_panel(&self) {
+        // Restore keyboard mode if it was released for VPN password dialogs
+        vpn_card::restore_keyboard_if_released();
 
         // Clear from popover tracker
         PopoverTracker::global().clear();
@@ -1210,13 +1199,26 @@ impl QuickSettingsWindow {
         self.window.close();
     }
 
-    /// Unregister any active compositor callback.
-    fn unregister_compositor_callback(&self) {
-        use crate::services::compositor::CompositorManager;
+    /// Temporarily release exclusive keyboard grab to allow external dialogs
+    /// (like password prompts) to receive keyboard input.
+    ///
+    /// This switches the keyboard mode to OnDemand. Call `restore_keyboard_mode()`
+    /// when the external interaction is complete.
+    pub(super) fn release_keyboard_grab(&self) {
+        tracing::debug!("QuickSettings: Switching keyboard mode to OnDemand");
+        self.window.set_keyboard_mode(KeyboardMode::OnDemand);
+    }
 
-        if let Some(id) = self.compositor_callback_id.borrow_mut().take() {
-            CompositorManager::global().unregister_window_callback(id);
-        }
+    /// Restore the default keyboard mode after releasing it temporarily.
+    ///
+    /// This switches back to the compositor-appropriate keyboard mode
+    /// (Exclusive for most compositors, OnDemand for Hyprland).
+    pub(super) fn restore_keyboard_mode(&self) {
+        tracing::debug!(
+            "QuickSettings: Restoring keyboard mode to {:?}",
+            popover_keyboard_mode()
+        );
+        self.window.set_keyboard_mode(popover_keyboard_mode());
     }
 }
 

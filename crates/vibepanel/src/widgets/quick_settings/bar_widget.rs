@@ -33,10 +33,10 @@ use vibepanel_core::config::WidgetEntry;
 /// cards they don't need in their config.toml:
 ///
 /// ```toml
-/// [[widgets.right]]
-/// name = "quick_settings"
+/// [widgets.quick_settings]
 /// vpn = false
 /// idle_inhibitor = false
+/// vpn_close_on_connect = true  # close panel when VPN connects successfully
 /// ```
 #[derive(Debug, Clone)]
 pub struct QuickSettingsCardsConfig {
@@ -49,6 +49,9 @@ pub struct QuickSettingsCardsConfig {
     pub mic: bool,
     pub brightness: bool,
     pub power: bool,
+    /// Close the Quick Settings panel when a VPN connection succeeds.
+    /// Defaults to `true`. Useful when VPN connections trigger password prompts.
+    pub vpn_close_on_connect: bool,
 }
 
 impl Default for QuickSettingsCardsConfig {
@@ -63,6 +66,7 @@ impl Default for QuickSettingsCardsConfig {
             mic: true,
             brightness: true,
             power: true,
+            vpn_close_on_connect: true,
         }
     }
 }
@@ -86,6 +90,7 @@ impl WidgetConfig for QuickSettingsConfig {
             "mic",
             "brightness",
             "power",
+            "vpn_close_on_connect",
         ];
         warn_unknown_options("quick_settings", entry, known_options);
 
@@ -108,6 +113,7 @@ impl WidgetConfig for QuickSettingsConfig {
                 mic: get_bool("mic"),
                 brightness: get_bool("brightness"),
                 power: get_bool("power"),
+                vpn_close_on_connect: get_bool("vpn_close_on_connect"),
             },
         }
     }

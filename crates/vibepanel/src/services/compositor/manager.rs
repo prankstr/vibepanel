@@ -142,13 +142,6 @@ impl CompositorManager {
         id
     }
 
-    /// Unregister a window callback by its ID.
-    ///
-    /// Returns `true` if the callback was found and removed.
-    pub fn unregister_window_callback(&self, id: CallbackId) -> bool {
-        self.window_callbacks.unregister(id)
-    }
-
     /// Get the list of workspaces from the backend.
     pub fn list_workspaces(&self) -> Vec<WorkspaceMeta> {
         if let Some(ref backend) = *self.backend.borrow() {

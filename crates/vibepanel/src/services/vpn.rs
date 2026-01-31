@@ -11,7 +11,6 @@
 //! - Notifies listeners on the GLib main loop with canonical snapshots
 
 use std::cell::{Cell, RefCell};
-use std::process::Command;
 use std::rc::Rc;
 use std::thread;
 use std::time::Duration;
@@ -48,6 +47,33 @@ const VPN_TYPES: &[&str] = &["wireguard", "vpn"]; // "vpn" is OpenVPN in NM
 /// signal. Gives NetworkManager time to update internal state.
 const STATE_REFRESH_DELAY_MS: u64 = 50;
 
+/// NetworkManager active connection states.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VpnState {
+    /// Connection state is unknown.
+    Unknown = 0,
+    /// Connection is activating (e.g., waiting for credentials).
+    Activating = 1,
+    /// Connection is fully activated and connected.
+    Activated = 2,
+    /// Connection is deactivating.
+    Deactivating = 3,
+    /// Connection has been deactivated.
+    Deactivated = 4,
+}
+
+impl From<u32> for VpnState {
+    fn from(value: u32) -> Self {
+        match value {
+            1 => VpnState::Activating,
+            2 => VpnState::Activated,
+            3 => VpnState::Deactivating,
+            4 => VpnState::Deactivated,
+            _ => VpnState::Unknown,
+        }
+    }
+}
+
 /// A VPN connection known to NetworkManager.
 #[derive(Debug, Clone)]
 pub struct VpnConnection {
@@ -57,6 +83,8 @@ pub struct VpnConnection {
     pub name: String,
     /// Whether this connection is currently active.
     pub active: bool,
+    /// Detailed connection state (for active connections).
+    pub state: VpnState,
     /// Whether autoconnect is enabled.
     pub autoconnect: bool,
     /// VPN type ("wireguard" or "vpn"/OpenVPN).
@@ -204,31 +232,157 @@ impl VpnService {
     /// Set the state of a VPN connection (connect or disconnect).
     pub fn set_connection_state(&self, uuid: &str, active: bool) {
         let uuid = uuid.to_string();
+        let connection = self.connection.borrow().clone();
 
-        // Use nmcli in a background thread to avoid blocking.
+        let Some(connection) = connection else {
+            warn!("VPN: Cannot set connection state - no D-Bus connection");
+            return;
+        };
+
+        // Use D-Bus in a background thread to avoid blocking.
         thread::spawn(move || {
-            let action = if active { "up" } else { "down" };
-            debug!("VPN: nmcli connection {} uuid {}", action, uuid);
-
-            let result = Command::new("nmcli")
-                .args(["connection", action, "uuid", &uuid])
-                .output();
-
-            match result {
-                Ok(output) => {
-                    if !output.status.success() {
-                        let stderr = String::from_utf8_lossy(&output.stderr);
-                        warn!("nmcli connection {} failed: {}", action, stderr.trim());
-                    }
-                }
-                Err(e) => {
-                    error!("Failed to run nmcli: {}", e);
-                }
+            if active {
+                Self::activate_connection_dbus(&connection, &uuid);
+            } else {
+                Self::deactivate_connection_dbus(&connection, &uuid);
             }
 
             // Request a refresh after the action completes.
             send_vpn_update(VpnUpdate::RequestRefresh);
         });
+    }
+
+    /// Activate a VPN connection via D-Bus.
+    ///
+    /// Uses NetworkManager's ActivateConnection method which properly triggers
+    /// secret agents (polkit) for connections that require authentication.
+    fn activate_connection_dbus(connection: &gio::DBusConnection, uuid: &str) {
+        // First, get the connection object path from UUID
+        let conn_path = match connection.call_sync(
+            Some(NM_SERVICE),
+            NM_SETTINGS_PATH,
+            NM_SETTINGS_IFACE,
+            "GetConnectionByUuid",
+            Some(&(uuid,).to_variant()),
+            Some(glib::VariantTy::new("(o)").unwrap()),
+            gio::DBusCallFlags::NONE,
+            5000,
+            None::<&gio::Cancellable>,
+        ) {
+            Ok(v) => {
+                let path_variant = v.child_value(0);
+                match path_variant.str() {
+                    Some(p) => p.to_string(),
+                    None => {
+                        warn!(
+                            "VPN: GetConnectionByUuid returned invalid path for {}",
+                            uuid
+                        );
+                        return;
+                    }
+                }
+            }
+            Err(e) => {
+                warn!("VPN: Failed to get connection path for {}: {}", uuid, e);
+                return;
+            }
+        };
+
+        debug!("VPN: Activating connection {} (path: {})", uuid, conn_path);
+
+        // Call ActivateConnection(connection, device, specific_object)
+        // Use "/" for device (auto-select) and specific_object (none)
+        let args = (
+            glib::variant::ObjectPath::try_from(conn_path.as_str()).unwrap(),
+            glib::variant::ObjectPath::try_from("/").unwrap(),
+            glib::variant::ObjectPath::try_from("/").unwrap(),
+        );
+
+        match connection.call_sync(
+            Some(NM_SERVICE),
+            NM_PATH,
+            NM_IFACE,
+            "ActivateConnection",
+            Some(&args.to_variant()),
+            Some(glib::VariantTy::new("(o)").unwrap()),
+            gio::DBusCallFlags::NONE,
+            30000, // 30s timeout for auth dialogs
+            None::<&gio::Cancellable>,
+        ) {
+            Ok(_) => debug!("VPN: Connection {} activation initiated", uuid),
+            Err(e) => warn!("VPN: Failed to activate connection {}: {}", uuid, e),
+        }
+    }
+
+    /// Deactivate a VPN connection via D-Bus.
+    fn deactivate_connection_dbus(connection: &gio::DBusConnection, uuid: &str) {
+        // Find the active connection path for this UUID
+        let active_path = match Self::find_active_connection_path(connection, uuid) {
+            Some(p) => p,
+            None => {
+                warn!("VPN: No active connection found for {}", uuid);
+                return;
+            }
+        };
+
+        debug!(
+            "VPN: Deactivating connection {} (active path: {})",
+            uuid, active_path
+        );
+
+        let args = (glib::variant::ObjectPath::try_from(active_path.as_str()).unwrap(),);
+
+        match connection.call_sync(
+            Some(NM_SERVICE),
+            NM_PATH,
+            NM_IFACE,
+            "DeactivateConnection",
+            Some(&args.to_variant()),
+            None,
+            gio::DBusCallFlags::NONE,
+            5000,
+            None::<&gio::Cancellable>,
+        ) {
+            Ok(_) => debug!("VPN: Connection {} deactivated", uuid),
+            Err(e) => warn!("VPN: Failed to deactivate connection {}: {}", uuid, e),
+        }
+    }
+
+    /// Find the active connection object path for a given UUID.
+    fn find_active_connection_path(connection: &gio::DBusConnection, uuid: &str) -> Option<String> {
+        // Get ActiveConnections property
+        let active_conns = connection
+            .call_sync(
+                Some(NM_SERVICE),
+                NM_PATH,
+                IFACE_PROPS,
+                "Get",
+                Some(&("org.freedesktop.NetworkManager", "ActiveConnections").to_variant()),
+                Some(glib::VariantTy::new("(v)").unwrap()),
+                gio::DBusCallFlags::NONE,
+                5000,
+                None::<&gio::Cancellable>,
+            )
+            .ok()?;
+
+        let inner = active_conns.child_value(0);
+        let paths_variant = inner.child_value(0);
+        let n_paths = paths_variant.n_children();
+
+        for i in 0..n_paths {
+            let path_variant = paths_variant.child_value(i);
+            let path = path_variant.str()?;
+
+            // Get UUID from this active connection
+            let active_uuid =
+                Self::get_dbus_property_string(connection, path, IFACE_ACTIVE, "Uuid");
+
+            if active_uuid.as_deref() == Some(uuid) {
+                return Some(path.to_string());
+            }
+        }
+
+        None
     }
 
     /// Apply an update from background threads to the service state.
@@ -587,13 +741,17 @@ impl VpnService {
             let autoconnect =
                 Self::get_bool_from_dict(&conn_section, "autoconnect").unwrap_or(false);
 
-            // Check if active.
-            let active = active_map.contains(&uuid);
+            // Check if active and get state.
+            let (active, state) = active_map
+                .get(&uuid)
+                .map(|s| (true, *s))
+                .unwrap_or((false, VpnState::Unknown));
 
             result.push(VpnConnection {
                 uuid,
                 name,
                 active,
+                state,
                 autoconnect,
                 vpn_type: conn_type,
             });
@@ -609,12 +767,12 @@ impl VpnService {
         result
     }
 
-    /// Get active VPN connection UUIDs.
+    /// Get active VPN connection UUIDs with their states.
     fn get_active_connections_sync(
         connection: &gio::DBusConnection,
-    ) -> std::collections::HashSet<String> {
-        use std::collections::HashSet;
-        let mut result: HashSet<String> = HashSet::new();
+    ) -> std::collections::HashMap<String, VpnState> {
+        use std::collections::HashMap;
+        let mut result: HashMap<String, VpnState> = HashMap::new();
 
         // Get ActiveConnections property.
         let active_conns = match connection.call_sync(
@@ -648,6 +806,9 @@ impl VpnService {
             // Get UUID and Type from the active connection.
             let uuid = Self::get_dbus_property_string(connection, path, IFACE_ACTIVE, "Uuid");
             let conn_type = Self::get_dbus_property_string(connection, path, IFACE_ACTIVE, "Type");
+            let state = Self::get_dbus_property_u32(connection, path, IFACE_ACTIVE, "State")
+                .map(VpnState::from)
+                .unwrap_or(VpnState::Unknown);
 
             let Some(uuid) = uuid else {
                 continue;
@@ -660,7 +821,7 @@ impl VpnService {
                 continue;
             }
 
-            result.insert(uuid);
+            result.insert(uuid, state);
         }
 
         result
@@ -690,6 +851,32 @@ impl VpnService {
         let inner = result.child_value(0);
         let value = inner.child_value(0);
         value.str().map(|s| s.to_string())
+    }
+
+    /// Helper: Get a D-Bus property as a u32.
+    fn get_dbus_property_u32(
+        connection: &gio::DBusConnection,
+        path: &str,
+        interface: &str,
+        property: &str,
+    ) -> Option<u32> {
+        let result = connection
+            .call_sync(
+                Some(NM_SERVICE),
+                path,
+                IFACE_PROPS,
+                "Get",
+                Some(&(interface, property).to_variant()),
+                Some(glib::VariantTy::new("(v)").unwrap()),
+                gio::DBusCallFlags::NONE,
+                5000,
+                None::<&gio::Cancellable>,
+            )
+            .ok()?;
+
+        let inner = result.child_value(0);
+        let value = inner.child_value(0);
+        value.get::<u32>()
     }
 
     /// Helper: Get a section from a settings dict (a{sa{sv}}).
