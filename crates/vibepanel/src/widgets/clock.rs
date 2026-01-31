@@ -85,9 +85,7 @@ impl ClockWidget {
         let label = base.add_label(Some("--:--"), &[wgt::CLOCK_LABEL]);
 
         let show_week_numbers = config.show_week_numbers;
-        base.create_menu("calendar", move || {
-            build_clock_calendar_popover(show_week_numbers)
-        });
+        base.create_menu(move || build_clock_calendar_popover(show_week_numbers));
 
         let timer_source = Rc::new(RefCell::new(None));
 

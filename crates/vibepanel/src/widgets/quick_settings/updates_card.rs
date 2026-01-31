@@ -7,14 +7,11 @@
 //! - Refresh and upgrade button handlers
 
 use std::cell::RefCell;
-use std::rc::{Rc, Weak};
+use std::rc::Rc;
 
 use gtk4::pango::{EllipsizeMode, WrapMode};
 use gtk4::prelude::*;
-use gtk4::{
-    ApplicationWindow, Box as GtkBox, Button, Label, Orientation, PolicyType, Revealer,
-    ScrolledWindow,
-};
+use gtk4::{Box as GtkBox, Button, Label, Orientation, PolicyType, Revealer, ScrolledWindow};
 use tracing::debug;
 
 use super::components::ToggleCard;
@@ -22,6 +19,7 @@ use super::ui_helpers::{
     ExpandableCard, ExpandableCardBase, ScanButton, clear_list_box, create_qs_list_box,
     set_icon_active, set_subtitle_active,
 };
+use super::window::current_quick_settings_window;
 use crate::services::surfaces::SurfaceStyleManager;
 use crate::services::updates::{UpdatesService, UpdatesSnapshot};
 use crate::styles::{color, qs, row};
@@ -60,25 +58,6 @@ impl ExpandableCard for UpdatesCardState {
     fn base(&self) -> &ExpandableCardBase {
         &self.base
     }
-}
-
-/// Find the QuickSettingsWindow by searching all toplevels.
-fn find_quick_settings_window() -> Option<Rc<super::window::QuickSettingsWindow>> {
-    for toplevel in gtk4::Window::list_toplevels() {
-        if let Ok(window) = toplevel.downcast::<ApplicationWindow>() {
-            // SAFETY: We store a Weak<QuickSettingsWindow> on the window at creation
-            // time with key "vibepanel-qs-window". upgrade() returns None if dropped.
-            unsafe {
-                if let Some(weak_ptr) =
-                    window.data::<Weak<super::window::QuickSettingsWindow>>("vibepanel-qs-window")
-                    && let Some(qs) = weak_ptr.as_ref().upgrade()
-                {
-                    return Some(qs);
-                }
-            }
-        }
-    }
-    None
 }
 
 /// Build the Updates card and revealer for the Quick Settings panel.
@@ -121,7 +100,7 @@ pub fn build_updates_card(state: &Rc<UpdatesCardState>) -> (GtkBox, Revealer, Op
                 let snapshot = UpdatesService::global().snapshot();
                 if let Some(pm) = snapshot.package_manager {
                     // Close the panel before spawning terminal
-                    if let Some(qs) = find_quick_settings_window() {
+                    if let Some(qs) = current_quick_settings_window() {
                         qs.hide_panel();
                     }
 

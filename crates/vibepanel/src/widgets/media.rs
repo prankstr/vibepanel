@@ -690,7 +690,7 @@ impl MediaWidget {
             debug!("Media window opened, bar widget hidden");
         };
 
-        let menu_handle = base.create_menu("media", move || {
+        let menu_handle = base.create_menu(move || {
             let on_popout_clone = on_popout.clone();
             let (widget, controller) = build_media_popover_with_controller(move || {
                 on_popout_clone();

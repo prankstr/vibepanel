@@ -110,7 +110,7 @@ impl BatteryWidget {
         let controller_for_builder = controller_cell.clone();
 
         // Create a popover menu for detailed battery info.
-        base.create_menu("battery", move || {
+        base.create_menu(move || {
             let (widget, controller) = build_battery_popover_with_controller();
             *controller_for_builder.borrow_mut() = Some(controller);
             widget

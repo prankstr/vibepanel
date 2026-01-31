@@ -180,6 +180,18 @@ pub trait CompositorBackend: Send + Sync {
     fn quit_compositor(&self) {
         // Default no-op
     }
+
+    /// Check if this compositor supports on-demand keyboard mode for layer-shell surfaces.
+    ///
+    /// When true, layer-shell surfaces can use `KeyboardMode::OnDemand` and the
+    /// compositor will handle focus transitions naturally. When false, surfaces
+    /// should use `KeyboardMode::Exclusive` to maintain proper focus after
+    /// workspace switches.
+    ///
+    /// Default is false (conservative - use exclusive mode).
+    fn supports_on_demand_keyboard(&self) -> bool {
+        false
+    }
 }
 
 #[cfg(test)]

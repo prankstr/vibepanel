@@ -465,7 +465,7 @@ impl SystemPopoverBinding {
         let controller: Rc<RefCell<Option<SystemPopoverController>>> = Rc::new(RefCell::new(None));
         let controller_for_builder = controller.clone();
 
-        base.create_menu("system", move || {
+        base.create_menu(move || {
             let (widget, ctrl) = build_system_popover_with_controller();
             *controller_for_builder.borrow_mut() = Some(ctrl);
             widget

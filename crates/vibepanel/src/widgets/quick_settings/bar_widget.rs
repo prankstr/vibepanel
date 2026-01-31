@@ -323,7 +323,7 @@ impl QuickSettingsWidget {
         if cards.vpn {
             let vpn_snapshot = VpnService::global().snapshot();
             let vpn_any_active = vpn_snapshot.any_active;
-            let vpn_icon_name_initial = vpn_icon_name(vpn_any_active);
+            let vpn_icon_name_initial = vpn_icon_name();
             let vpn_icon = base.add_icon(vpn_icon_name_initial, &[icon::ICON, icon::TEXT]);
 
             if vpn_any_active {
@@ -345,7 +345,7 @@ impl QuickSettingsWidget {
                 }
                 widget.remove_css_class(state::SERVICE_UNAVAILABLE);
 
-                let icon_name = vpn_icon_name(snapshot.any_active);
+                let icon_name = vpn_icon_name();
                 vpn_icon_handle.set_icon(icon_name);
 
                 if snapshot.any_active {

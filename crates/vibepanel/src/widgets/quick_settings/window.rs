@@ -16,7 +16,7 @@ use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
 
-use crate::popover_tracker::PopoverTracker;
+use crate::popover_tracker::{PopoverId, PopoverTracker};
 use crate::services::audio::AudioService;
 use crate::services::bluetooth::BluetoothService;
 use crate::services::brightness::BrightnessService;
@@ -50,6 +50,41 @@ use super::wifi_card::{
 };
 
 // =============================================================================
+// Thread-Local QuickSettingsWindow Reference
+// =============================================================================
+
+thread_local! {
+    /// Weak reference to the currently active QuickSettingsWindow.
+    ///
+    /// This is set when a QuickSettingsWindow is created and cleared when it closes.
+    /// Used by cards (Wi-Fi, Updates) that need to interact with the QS window
+    /// (e.g., closing the panel, showing dialogs).
+    static CURRENT_QS_WINDOW: RefCell<Option<Weak<QuickSettingsWindow>>> = const { RefCell::new(None) };
+}
+
+/// Get the currently active QuickSettingsWindow, if any.
+///
+/// Returns `Some(Rc<QuickSettingsWindow>)` if a QS window is currently open,
+/// `None` otherwise. Used by cards that need to interact with the window.
+pub(super) fn current_quick_settings_window() -> Option<Rc<QuickSettingsWindow>> {
+    CURRENT_QS_WINDOW.with(|cell| cell.borrow().as_ref().and_then(|weak| weak.upgrade()))
+}
+
+/// Set the current QuickSettingsWindow reference.
+fn set_current_qs_window(qs: &Rc<QuickSettingsWindow>) {
+    CURRENT_QS_WINDOW.with(|cell| {
+        *cell.borrow_mut() = Some(Rc::downgrade(qs));
+    });
+}
+
+/// Clear the current QuickSettingsWindow reference.
+fn clear_current_qs_window() {
+    CURRENT_QS_WINDOW.with(|cell| {
+        *cell.borrow_mut() = None;
+    });
+}
+
+// =============================================================================
 // Constants
 // =============================================================================
 
@@ -79,6 +114,15 @@ const QUICK_SETTINGS_MIN_VALID_WIDTH: i32 = 20;
 
 /// Default right margin when no anchor position specified.
 const QUICK_SETTINGS_DEFAULT_RIGHT_MARGIN: i32 = 8;
+
+/// Vertical spacing between toggle card rows.
+const CARD_ROW_SPACING: i32 = 8;
+
+/// Horizontal spacing between cards in a row.
+const CARD_ROW_GAP: i32 = 8;
+
+/// Top margin for the audio section (separating from toggle cards).
+const AUDIO_SECTION_TOP_MARGIN: i32 = 12;
 
 // =============================================================================
 // Quick Settings Window
@@ -129,7 +173,7 @@ impl QuickSettingsWindow {
         window.add_css_class(qs::WINDOW);
 
         // Layer shell configuration for panel behavior.
-        // Use Top layer so popups hide behind fullscreen apps (like DankMaterialShell)
+        // Use Top layer (not Overlay) to avoid appearing on top of fullscreen apps.
         window.init_layer_shell();
         window.set_layer(Layer::Top);
         window.set_exclusive_zone(0);
@@ -197,6 +241,12 @@ impl QuickSettingsWindow {
         // Subscribe to services
         Self::subscribe_to_services(&qs);
 
+        // Set VPN keyboard state's reference to this QS window for keyboard grab management
+        vpn_card::set_quick_settings_window(Rc::downgrade(&qs));
+
+        // Set the global current QS window reference for other cards
+        set_current_qs_window(&qs);
+
         qs
     }
 
@@ -224,11 +274,11 @@ impl QuickSettingsWindow {
 
         if cfg.vpn {
             let qs_weak = Rc::downgrade(qs);
-            let close_on_connect = cfg.vpn_close_on_connect;
+            let close_on_action = cfg.vpn_close_on_connect;
             VpnService::global().connect(move |snapshot| {
                 if let Some(qs) = qs_weak.upgrade() {
-                    let pending_succeeded = vpn_card::on_vpn_changed(&qs.vpn, snapshot);
-                    if pending_succeeded && close_on_connect {
+                    let action_completed = vpn_card::on_vpn_changed(&qs.vpn, snapshot);
+                    if action_completed && close_on_action {
                         qs.hide_panel();
                     }
                 }
@@ -417,11 +467,11 @@ impl QuickSettingsWindow {
         // Build rows dynamically with per-row accordion managers
         let mut is_first_row = true;
         for chunk in toggle_cards.chunks(2) {
-            let row = GtkBox::new(Orientation::Horizontal, 8);
+            let row = GtkBox::new(Orientation::Horizontal, CARD_ROW_GAP);
             row.add_css_class(qs::CARDS_ROW);
             row.set_homogeneous(true);
             if !is_first_row {
-                row.set_margin_top(8);
+                row.set_margin_top(CARD_ROW_SPACING);
             }
             is_first_row = false;
 
@@ -466,7 +516,7 @@ impl QuickSettingsWindow {
 
         if cfg.audio {
             let (audio_row, audio_revealer, audio_hint_label) = Self::build_audio_section(qs);
-            audio_row.set_margin_top(12);
+            audio_row.set_margin_top(AUDIO_SECTION_TOP_MARGIN);
             content.append(&audio_row);
             content.append(&audio_hint_label);
             content.append(&audio_revealer);
@@ -712,7 +762,7 @@ impl QuickSettingsWindow {
             "No connections".to_string()
         };
 
-        let vpn_icon = vpn_icon_name(vpn_any_active);
+        let vpn_icon = vpn_icon_name();
         let vpn_icon_active = vpn_any_active;
 
         let vpn_card = ToggleCard::builder()
@@ -1183,12 +1233,15 @@ impl QuickSettingsWindow {
     }
 
     /// Hide and destroy the panel and associated click-catcher.
+    ///
+    /// Note: This does NOT clear from PopoverTracker - the caller is responsible
+    /// for that (QuickSettingsWindowHandle or QuickSettingsDismissible).
     pub(super) fn hide_panel(&self) {
         // Restore keyboard mode if it was released for VPN password dialogs
         vpn_card::restore_keyboard_if_released();
 
-        // Clear from popover tracker
-        PopoverTracker::global().clear();
+        // Clear the global QS window reference
+        clear_current_qs_window();
 
         // Destroy click-catcher
         if let Some(catcher) = self.click_catcher.borrow_mut().take() {
@@ -1202,23 +1255,26 @@ impl QuickSettingsWindow {
     /// Temporarily release exclusive keyboard grab to allow external dialogs
     /// (like password prompts) to receive keyboard input.
     ///
-    /// This switches the keyboard mode to OnDemand. Call `restore_keyboard_mode()`
-    /// when the external interaction is complete.
+    /// This switches the keyboard mode to OnDemand on the main window only.
+    /// The click-catcher always remains at KeyboardMode::None (it should never
+    /// take keyboard focus). Call `restore_keyboard_mode()` when the external
+    /// interaction is complete.
     pub(super) fn release_keyboard_grab(&self) {
         tracing::debug!("QuickSettings: Switching keyboard mode to OnDemand");
         self.window.set_keyboard_mode(KeyboardMode::OnDemand);
+        // Note: Don't touch click-catcher - it must always be KeyboardMode::None
     }
 
     /// Restore the default keyboard mode after releasing it temporarily.
     ///
-    /// This switches back to the compositor-appropriate keyboard mode
-    /// (Exclusive for most compositors, OnDemand for Hyprland).
+    /// This switches the main window back to the compositor-appropriate keyboard
+    /// mode (Exclusive for most compositors, OnDemand for Hyprland). The
+    /// click-catcher always remains at KeyboardMode::None.
     pub(super) fn restore_keyboard_mode(&self) {
-        tracing::debug!(
-            "QuickSettings: Restoring keyboard mode to {:?}",
-            popover_keyboard_mode()
-        );
-        self.window.set_keyboard_mode(popover_keyboard_mode());
+        let mode = popover_keyboard_mode();
+        tracing::debug!("QuickSettings: Restoring keyboard mode to {:?}", mode);
+        self.window.set_keyboard_mode(mode);
+        // Note: Don't touch click-catcher - it must always be KeyboardMode::None
     }
 }
 
@@ -1231,8 +1287,14 @@ impl QuickSettingsWindow {
 pub struct QuickSettingsWindowHandle {
     app: Application,
     cards_config: QuickSettingsCardsConfig,
-    /// The current window instance (kept alive for reuse). Shared across clones.
+    /// The current window instance. Shared across clones via Rc.
     window: Rc<RefCell<Option<Rc<QuickSettingsWindow>>>>,
+    /// ID returned from PopoverTracker when QS is active.
+    ///
+    /// Wrapped in `Rc<Cell<>>` because it's shared with `QuickSettingsDismissible`
+    /// (which needs to clear it when dismissed) and mutated from multiple places
+    /// (toggle_at close path and Dismissible::dismiss).
+    tracker_id: Rc<Cell<Option<PopoverId>>>,
 }
 
 impl QuickSettingsWindowHandle {
@@ -1241,6 +1303,7 @@ impl QuickSettingsWindowHandle {
             app,
             cards_config,
             window: Rc::new(RefCell::new(None)),
+            tracker_id: Rc::new(Cell::new(None)),
         }
     }
 
@@ -1257,6 +1320,10 @@ impl QuickSettingsWindowHandle {
             if let Some(qs) = self.window.borrow_mut().take() {
                 qs.hide_panel();
             }
+            // Clear from tracker using our stored ID
+            if let Some(id) = self.tracker_id.take() {
+                PopoverTracker::global().clear_if_active(id);
+            }
             return;
         }
 
@@ -1271,11 +1338,13 @@ impl QuickSettingsWindowHandle {
         qs.show_panel();
         *self.window.borrow_mut() = Some(qs);
 
-        // Register with popup tracker for seamless transitions
+        // Register with popup tracker for seamless transitions and store the ID
         let dismissible = QuickSettingsDismissible {
             window: self.window.clone(),
+            tracker_id: self.tracker_id.clone(),
         };
-        PopoverTracker::global().set_active(Rc::new(dismissible));
+        let id = PopoverTracker::global().set_active(Rc::new(dismissible));
+        self.tracker_id.set(Some(id));
     }
 }
 
@@ -1285,6 +1354,7 @@ impl QuickSettingsWindowHandle {
 /// other popups can dismiss Quick Settings when opening.
 struct QuickSettingsDismissible {
     window: Rc<RefCell<Option<Rc<QuickSettingsWindow>>>>,
+    tracker_id: Rc<Cell<Option<PopoverId>>>,
 }
 
 impl Dismissible for QuickSettingsDismissible {
@@ -1292,6 +1362,8 @@ impl Dismissible for QuickSettingsDismissible {
         if let Some(qs) = self.window.borrow_mut().take() {
             qs.hide_panel();
         }
+        // Clear our tracker ID since we've been dismissed
+        self.tracker_id.set(None);
     }
 
     fn is_visible(&self) -> bool {

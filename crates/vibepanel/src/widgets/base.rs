@@ -5,11 +5,10 @@
 
 use gtk4::prelude::*;
 use gtk4::{Align, Box as GtkBox, GestureClick, Label, Orientation, Popover, PositionType};
-use std::cell::RefCell;
-use std::collections::HashMap;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use crate::popover_tracker::PopoverTracker;
+use crate::popover_tracker::{PopoverId, PopoverTracker};
 use crate::services::config_manager::ConfigManager;
 use crate::services::icons::{IconHandle, IconsService};
 use crate::services::tooltip::TooltipManager;
@@ -60,26 +59,34 @@ pub struct MenuHandle {
     widget_name: String,
     /// Parent widget container
     parent: GtkBox,
+    /// ID returned from PopoverTracker when this popover is active.
+    /// Used to correctly clear ourselves from the tracker on hide.
+    tracker_id: Cell<Option<PopoverId>>,
 }
 
 impl MenuHandle {
-    fn new<F>(widget_name: String, builder: F, parent: GtkBox) -> Self
+    fn new<F>(widget_name: String, builder: F, parent: GtkBox) -> Rc<Self>
     where
         F: Fn() -> gtk4::Widget + 'static,
     {
-        Self {
+        Rc::new(Self {
             popover: RefCell::new(None),
             builder: Rc::new(builder),
             widget_name,
             parent,
-        }
+            tracker_id: Cell::new(None),
+        })
     }
 
     /// Ensure the popover is created, creating it lazily if needed.
-    fn ensure_popover(&self) -> Rc<LayerShellPopover> {
+    ///
+    /// Returns `None` if the widget isn't attached to a window yet (shouldn't
+    /// happen in practice since this is called on user click, but we handle
+    /// it gracefully to avoid panics during teardown/hot-reload).
+    fn ensure_popover(&self) -> Option<Rc<LayerShellPopover>> {
         let mut popover_opt = self.popover.borrow_mut();
         if let Some(ref popover) = *popover_opt {
-            return popover.clone();
+            return Some(popover.clone());
         }
 
         // Get the application from the widget's window - should work now since
@@ -88,19 +95,39 @@ impl MenuHandle {
             .parent
             .root()
             .and_then(|r| r.downcast::<gtk4::Window>().ok())
-            .and_then(|w| w.application())
-            .expect("MenuHandle::ensure_popover called but widget has no application");
+            .and_then(|w| w.application());
+
+        let Some(app) = app else {
+            tracing::warn!(
+                "MenuHandle::ensure_popover called but widget '{}' has no application",
+                self.widget_name
+            );
+            return None;
+        };
 
         let builder = self.builder.clone();
         let popover = LayerShellPopover::new(&app, &self.widget_name, move || builder());
 
         *popover_opt = Some(popover.clone());
-        popover
+        Some(popover)
     }
 
     /// Get the anchor position for the popover.
     ///
-    /// Returns the widget's center X coordinate and the monitor it's on.
+    /// Returns the widget's center X coordinate (in monitor-local coordinates)
+    /// and the monitor it's on.
+    ///
+    /// # Coordinate Space
+    ///
+    /// The returned `anchor_x` is relative to the monitor's origin (0,0 at top-left
+    /// of the monitor), NOT global screen coordinates. This is correct because:
+    ///
+    /// 1. Layer-shell surfaces are per-monitor - the bar is anchored to a specific
+    ///    monitor and its native surface coordinates are relative to that monitor.
+    /// 2. `compute_bounds(&native)` returns coordinates relative to the native
+    ///    surface, which for layer-shell is the monitor-local coordinate space.
+    /// 3. The popover is also a layer-shell surface on the same monitor, so it
+    ///    uses the same coordinate space for its margin calculations.
     fn get_anchor_info(&self) -> (i32, Option<gtk4::gdk::Monitor>) {
         let Some(native) = self.parent.native() else {
             return (0, None);
@@ -112,9 +139,10 @@ impl MenuHandle {
 
         let widget_x = bounds.x() as i32;
         let widget_width = bounds.width() as i32;
+        // anchor_x is monitor-relative: the center X of the widget on its monitor
         let anchor_x = widget_x + widget_width / 2;
 
-        // Get monitor
+        // Get monitor - the popover will be placed on the same monitor
         let monitor = self
             .parent
             .root()
@@ -126,11 +154,14 @@ impl MenuHandle {
     }
 
     pub fn show(&self) {
-        let popover = self.ensure_popover();
+        let Some(popover) = self.ensure_popover() else {
+            return;
+        };
         let (anchor_x, monitor) = self.get_anchor_info();
 
-        // Register as active popup
-        PopoverTracker::global().set_active(popover.clone());
+        // Register as active popup and store the ID for later clearing
+        let id = PopoverTracker::global().set_active(popover.clone());
+        self.tracker_id.set(Some(id));
 
         popover.show_at(anchor_x, monitor);
     }
@@ -139,15 +170,9 @@ impl MenuHandle {
         if let Some(ref popover) = *self.popover.borrow() {
             popover.hide();
         }
-        PopoverTracker::global().clear();
-    }
-
-    #[allow(dead_code)]
-    pub fn toggle(&self) {
-        if self.is_visible() {
-            self.hide();
-        } else {
-            self.show();
+        // Clear from tracker using our stored ID (prevents clearing another's registration)
+        if let Some(id) = self.tracker_id.take() {
+            PopoverTracker::global().clear_if_active(id);
         }
     }
 
@@ -163,10 +188,17 @@ impl MenuHandle {
     /// Refresh the popover content if it's currently visible.
     ///
     /// For layer-shell popovers, this hides and re-shows the popover
-    /// to rebuild its content.
+    /// to rebuild its content. This may cause a brief visual flash,
+    /// but is necessary because layer-shell windows are recreated fresh
+    /// each time (to avoid stale state issues with layer-shell surfaces).
+    ///
+    /// Used by widgets like Notifications that need to update their
+    /// popover content dynamically while the popover is open.
     pub fn refresh_if_visible(&self) {
         if self.is_visible() {
-            let popover = self.ensure_popover();
+            let Some(popover) = self.ensure_popover() else {
+                return;
+            };
             let (anchor_x, monitor) = self.get_anchor_info();
             popover.hide();
             popover.show_at(anchor_x, monitor);
@@ -195,7 +227,8 @@ impl Dismissible for MenuHandle {
 pub struct BaseWidget {
     container: GtkBox,
     content: GtkBox,
-    menus: Rc<RefCell<HashMap<String, Rc<MenuHandle>>>>,
+    /// The widget's menu popover, if any. Each BaseWidget supports at most one menu.
+    menu: Rc<RefCell<Option<Rc<MenuHandle>>>>,
     /// Widget name for CSS class-based styling of popovers (e.g., "clock")
     widget_name: String,
     _gesture_click: GestureClick,
@@ -237,12 +270,11 @@ impl BaseWidget {
         content.set_baseline_position(gtk4::BaselinePosition::Center);
         container.append(&content);
 
-        let menus: Rc<RefCell<HashMap<String, Rc<MenuHandle>>>> =
-            Rc::new(RefCell::new(HashMap::new()));
+        let menu: Rc<RefCell<Option<Rc<MenuHandle>>>> = Rc::new(RefCell::new(None));
 
         let gesture_click = GestureClick::new();
         {
-            let menus_for_cb = menus.clone();
+            let menu_for_cb = menu.clone();
             // Use connect_released for immediate response without double-click detection delay
             gesture_click.connect_released(move |gesture, n_press, x, y| {
                 debug!(
@@ -251,7 +283,9 @@ impl BaseWidget {
                     gesture.current_button()
                 );
 
-                // Check if the click target is a button - if so, let the button handle it
+                // Check if the click target is inside an interactive widget that should
+                // handle its own clicks. Currently only checks for Button; if bar widgets
+                // gain other interactive children (Switch, Entry, etc.), add them here.
                 if let Some(widget) = gesture.widget()
                     && let Some(target) = widget.pick(x, y, gtk4::PickFlags::DEFAULT)
                 {
@@ -270,17 +304,16 @@ impl BaseWidget {
                 // (we don't use double-click, so treat them all as single clicks)
                 if gesture.current_button() == 1 {
                     // Check if our own menu is visible before dismissing
-                    let my_menu_was_visible = menus_for_cb
+                    let my_menu_was_visible = menu_for_cb
                         .borrow()
-                        .iter()
-                        .next()
-                        .map(|(_, menu)| menu.is_visible())
+                        .as_ref()
+                        .map(|m| m.is_visible())
                         .unwrap_or(false);
 
                     // Dismiss any active popup (enables seamless transitions)
                     PopoverTracker::global().dismiss_active();
 
-                    if let Some((_name, menu)) = menus_for_cb.borrow().iter().next() {
+                    if let Some(ref menu) = *menu_for_cb.borrow() {
                         // If our menu was already open, we just closed it - don't re-open
                         // If it wasn't open, open it now
                         if !my_menu_was_visible {
@@ -290,7 +323,7 @@ impl BaseWidget {
                             debug!("Closed own menu from BaseWidget click");
                         }
                     } else {
-                        debug!("BaseWidget click: no menus registered");
+                        debug!("BaseWidget click: no menu registered");
                     }
                 }
             });
@@ -301,7 +334,7 @@ impl BaseWidget {
         Self {
             container,
             content,
-            menus,
+            menu,
             widget_name,
             _gesture_click: gesture_click,
         }
@@ -368,22 +401,16 @@ impl BaseWidget {
     /// This creates a layer-shell popover with proper keyboard focus handling,
     /// ESC-to-close, and click-outside-to-close behavior.
     ///
+    /// Each BaseWidget supports at most one menu.
+    ///
     /// Note: The actual LayerShellPopover is created lazily on first use,
     /// since at widget construction time the widget isn't yet attached to a window.
-    pub fn create_menu<F>(&self, name: &str, builder: F) -> Rc<MenuHandle>
+    pub fn create_menu<F>(&self, builder: F) -> Rc<MenuHandle>
     where
         F: Fn() -> gtk4::Widget + 'static,
     {
-        let handle = Rc::new(MenuHandle::new(
-            self.widget_name.clone(),
-            builder,
-            self.container.clone(),
-        ));
-
-        self.menus
-            .borrow_mut()
-            .insert(name.to_string(), handle.clone());
-
+        let handle = MenuHandle::new(self.widget_name.clone(), builder, self.container.clone());
+        *self.menu.borrow_mut() = Some(handle.clone());
         handle
     }
 }

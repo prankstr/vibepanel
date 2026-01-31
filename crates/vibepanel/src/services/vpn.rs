@@ -12,6 +12,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -48,9 +49,10 @@ const VPN_TYPES: &[&str] = &["wireguard", "vpn"]; // "vpn" is OpenVPN in NM
 const STATE_REFRESH_DELAY_MS: u64 = 50;
 
 /// NetworkManager active connection states.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum VpnState {
     /// Connection state is unknown.
+    #[default]
     Unknown = 0,
     /// Connection is activating (e.g., waiting for credentials).
     Activating = 1,
@@ -140,7 +142,11 @@ impl VpnSnapshot {
 #[derive(Debug)]
 pub(crate) enum VpnUpdate {
     /// Full refresh of VPN connections complete.
-    ConnectionsRefreshed { connections: Vec<VpnConnection> },
+    ConnectionsRefreshed {
+        connections: Vec<VpnConnection>,
+        /// Object paths of active VPN connections (for signal subscriptions).
+        active_vpn_paths: Vec<String>,
+    },
     /// Request a refresh (from signal handler).
     RequestRefresh,
 }
@@ -169,8 +175,14 @@ pub struct VpnService {
     refresh_pending: Cell<bool>,
     /// D-Bus signal subscriptions (kept alive for the service lifetime).
     _signal_subscriptions: RefCell<Vec<gio::SignalSubscription>>,
+    /// Subscriptions for active VPN connection state changes.
+    /// These are recreated when active connections change.
+    active_conn_subscriptions: RefCell<Vec<gio::SignalSubscription>>,
     /// Last used VPN UUID (persisted across sessions).
     last_used_uuid: RefCell<Option<String>>,
+    /// Lock to serialize D-Bus operations (activate/deactivate).
+    /// Prevents race conditions when rapidly toggling connections.
+    operation_lock: Arc<Mutex<()>>,
 }
 
 impl VpnService {
@@ -194,7 +206,9 @@ impl VpnService {
             callbacks: Callbacks::new(),
             refresh_pending: Cell::new(false),
             _signal_subscriptions: RefCell::new(Vec::new()),
+            active_conn_subscriptions: RefCell::new(Vec::new()),
             last_used_uuid: RefCell::new(last_used_uuid),
+            operation_lock: Arc::new(Mutex::new(())),
         });
 
         // Initialize D-Bus connection.
@@ -239,8 +253,15 @@ impl VpnService {
             return;
         };
 
+        // Clone the lock for use in the background thread.
+        let lock = self.operation_lock.clone();
+
         // Use D-Bus in a background thread to avoid blocking.
+        // The mutex serializes operations to prevent race conditions when
+        // rapidly toggling connections.
         thread::spawn(move || {
+            let _guard = lock.lock().unwrap();
+
             if active {
                 Self::activate_connection_dbus(&connection, &uuid);
             } else {
@@ -389,9 +410,36 @@ impl VpnService {
     /// Called via glib::idle_add_once from send_vpn_update().
     pub(crate) fn apply_update(&self, update: VpnUpdate) {
         match update {
-            VpnUpdate::ConnectionsRefreshed { mut connections } => {
+            VpnUpdate::ConnectionsRefreshed {
+                mut connections,
+                active_vpn_paths,
+            } => {
                 let active_count = connections.iter().filter(|c| c.active).count();
                 let any_active = active_count > 0;
+
+                // Subscribe to state changes on active VPN connections.
+                // Clear old subscriptions first - they'll be dropped automatically.
+                self.active_conn_subscriptions.borrow_mut().clear();
+
+                if let Some(conn) = self.connection.borrow().as_ref() {
+                    let mut subs = Vec::new();
+                    for path in active_vpn_paths {
+                        // Subscribe to StateChanged signal on this active connection
+                        let sub = conn.subscribe_to_signal(
+                            Some(NM_SERVICE),
+                            Some(IFACE_ACTIVE),
+                            Some("StateChanged"),
+                            Some(&path),
+                            None,
+                            gio::DBusSignalFlags::NONE,
+                            move |_signal| {
+                                send_vpn_update(VpnUpdate::RequestRefresh);
+                            },
+                        );
+                        subs.push(sub);
+                    }
+                    *self.active_conn_subscriptions.borrow_mut() = subs;
+                }
 
                 // If a VPN became active, update last_used_uuid and persist
                 if let Some(active_conn) = connections.iter().find(|c| c.active) {
@@ -655,13 +703,19 @@ impl VpnService {
     fn refresh_connections_async(connection: gio::DBusConnection) {
         // Run in a background thread to avoid blocking.
         thread::spawn(move || {
-            let connections = Self::fetch_vpn_connections_sync(&connection);
-            send_vpn_update(VpnUpdate::ConnectionsRefreshed { connections });
+            let (connections, active_vpn_paths) = Self::fetch_vpn_connections_sync(&connection);
+            send_vpn_update(VpnUpdate::ConnectionsRefreshed {
+                connections,
+                active_vpn_paths,
+            });
         });
     }
 
     /// Synchronously fetch all VPN connections from NetworkManager.
-    fn fetch_vpn_connections_sync(connection: &gio::DBusConnection) -> Vec<VpnConnection> {
+    /// Returns (connections, active VPN object paths for signal subscription).
+    fn fetch_vpn_connections_sync(
+        connection: &gio::DBusConnection,
+    ) -> (Vec<VpnConnection>, Vec<String>) {
         let mut result = Vec::new();
 
         // Get list of connection paths from Settings.
@@ -679,12 +733,12 @@ impl VpnService {
             Ok(v) => v,
             Err(e) => {
                 warn!("VPN: Failed to list connections: {}", e);
-                return result;
+                return (result, Vec::new());
             }
         };
 
         // Get active connections from NetworkManager.
-        let active_map = Self::get_active_connections_sync(connection);
+        let (active_map, active_vpn_paths) = Self::get_active_connections_sync(connection);
 
         // Parse the array of object paths.
         let paths_variant = conn_paths.child_value(0);
@@ -757,22 +811,20 @@ impl VpnService {
             });
         }
 
-        // Sort: active first, then by name.
-        result.sort_by(|a, b| match (a.active, b.active) {
-            (true, false) => std::cmp::Ordering::Less,
-            (false, true) => std::cmp::Ordering::Greater,
-            _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
-        });
+        // Note: Sorting is handled by apply_update() which re-sorts with
+        // preferred UUID logic. No need to sort here.
 
-        result
+        (result, active_vpn_paths)
     }
 
-    /// Get active VPN connection UUIDs with their states.
+    /// Get active VPN connection UUIDs with their states and object paths.
+    /// Returns (uuid -> state map, list of VPN object paths for signal subscription).
     fn get_active_connections_sync(
         connection: &gio::DBusConnection,
-    ) -> std::collections::HashMap<String, VpnState> {
+    ) -> (std::collections::HashMap<String, VpnState>, Vec<String>) {
         use std::collections::HashMap;
         let mut result: HashMap<String, VpnState> = HashMap::new();
+        let mut vpn_paths: Vec<String> = Vec::new();
 
         // Get ActiveConnections property.
         let active_conns = match connection.call_sync(
@@ -789,7 +841,7 @@ impl VpnService {
             Ok(v) => v,
             Err(e) => {
                 debug!("VPN: Failed to get ActiveConnections: {}", e);
-                return result;
+                return (result, vpn_paths);
             }
         };
 
@@ -822,9 +874,10 @@ impl VpnService {
             }
 
             result.insert(uuid, state);
+            vpn_paths.push(path.to_string());
         }
 
-        result
+        (result, vpn_paths)
     }
 
     /// Helper: Get a D-Bus property as a string.

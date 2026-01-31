@@ -9,11 +9,9 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::rc::{Rc, Weak};
-use std::time::Duration;
 
-use gtk4::glib;
 use gtk4::prelude::*;
-use gtk4::{ApplicationWindow, Box as GtkBox, ListBox, Orientation, ScrolledWindow};
+use gtk4::{Box as GtkBox, ListBox, Orientation, ScrolledWindow};
 use tracing::debug;
 
 use super::components::ListRow;
@@ -21,6 +19,7 @@ use super::ui_helpers::{
     ExpandableCard, ExpandableCardBase, add_placeholder_row, build_accent_subtitle, clear_list_box,
     create_qs_list_box, create_row_action_label, set_icon_active, set_subtitle_active,
 };
+use super::window::QuickSettingsWindow;
 use crate::services::icons::IconsService;
 use crate::services::surfaces::SurfaceStyleManager;
 use crate::services::vpn::{VpnConnection, VpnService, VpnSnapshot};
@@ -29,60 +28,195 @@ use crate::styles::{color, icon, qs, row};
 // Global state for VPN keyboard grab management.
 // This needs to be global because QuickSettingsWindow is recreated each time it opens,
 // but we need to track pending connects across those recreations.
+
+/// Manages keyboard grab state during VPN authentication and tracks pending actions.
+///
+/// When a VPN connection is initiated that may require a password dialog,
+/// we release the keyboard grab so the dialog can receive input. This struct
+/// tracks which connections are pending and whether the grab was released.
+struct VpnKeyboardState {
+    /// UUIDs of VPN connections we initiated a connect for.
+    pending_connects: HashSet<String>,
+    /// UUIDs of VPN connections we initiated a disconnect for.
+    pending_disconnects: HashSet<String>,
+    /// Whether we've temporarily released keyboard grab.
+    keyboard_released: bool,
+    /// Weak reference to the QuickSettingsWindow for keyboard grab management.
+    /// This is set when the QS window is created and cleared when it closes.
+    qs_window: Option<Weak<QuickSettingsWindow>>,
+}
+
+impl VpnKeyboardState {
+    fn new() -> Self {
+        Self {
+            pending_connects: HashSet::new(),
+            pending_disconnects: HashSet::new(),
+            keyboard_released: false,
+            qs_window: None,
+        }
+    }
+
+    /// Set the QuickSettingsWindow reference for keyboard grab management.
+    fn set_qs_window(&mut self, qs: Weak<QuickSettingsWindow>) {
+        self.qs_window = Some(qs);
+    }
+
+    /// Clear the QuickSettingsWindow reference (called when QS closes).
+    fn clear_qs_window(&mut self) {
+        self.qs_window = None;
+    }
+
+    /// Add a pending connect and release keyboard grab.
+    fn begin_connect(&mut self, uuid: &str) {
+        self.pending_connects.insert(uuid.to_string());
+        if let Some(ref weak) = self.qs_window
+            && let Some(qs) = weak.upgrade()
+        {
+            debug!("VPN: Releasing keyboard grab for pending connect");
+            qs.release_keyboard_grab();
+            self.keyboard_released = true;
+        }
+    }
+
+    /// Add a pending disconnect.
+    fn begin_disconnect(&mut self, uuid: &str) {
+        self.pending_disconnects.insert(uuid.to_string());
+    }
+
+    /// Restore keyboard grab if it was released.
+    fn restore_if_released(&mut self) {
+        if self.keyboard_released {
+            debug!("VPN: Restoring keyboard mode");
+            if let Some(ref weak) = self.qs_window
+                && let Some(qs) = weak.upgrade()
+            {
+                qs.restore_keyboard_mode();
+            }
+            self.keyboard_released = false;
+        }
+    }
+
+    /// Clear all state (called when panel closes).
+    fn clear(&mut self) {
+        self.restore_if_released();
+        self.pending_connects.clear();
+        self.pending_disconnects.clear();
+        self.clear_qs_window();
+    }
+
+    /// Check and resolve pending connections based on VPN snapshot.
+    /// Returns (any_action_completed, should_restore_keyboard).
+    fn check_pending(&mut self, snapshot: &VpnSnapshot) -> (bool, bool) {
+        use crate::services::vpn::VpnState;
+
+        let has_pending = !self.pending_connects.is_empty() || !self.pending_disconnects.is_empty();
+        if !has_pending {
+            return (false, false);
+        }
+
+        let mut any_action_completed = false;
+        let mut should_restore = false;
+
+        // Check pending connects
+        if !self.pending_connects.is_empty() && self.keyboard_released {
+            let mut resolved = Vec::new();
+
+            for uuid in &self.pending_connects {
+                if let Some(conn) = snapshot.connections.iter().find(|c| &c.uuid == uuid) {
+                    match conn.state {
+                        VpnState::Activated => {
+                            resolved.push(uuid.clone());
+                            any_action_completed = true;
+                            should_restore = true;
+                        }
+                        VpnState::Deactivated | VpnState::Unknown => {
+                            resolved.push(uuid.clone());
+                            should_restore = true;
+                        }
+                        VpnState::Activating | VpnState::Deactivating => {
+                            // Still in progress, keep waiting
+                        }
+                    }
+                } else {
+                    // Connection no longer in snapshot (failed/cancelled)
+                    resolved.push(uuid.clone());
+                    should_restore = true;
+                }
+            }
+
+            for uuid in resolved {
+                self.pending_connects.remove(&uuid);
+            }
+        }
+
+        // Check pending disconnects
+        if !self.pending_disconnects.is_empty() {
+            let mut resolved = Vec::new();
+
+            for uuid in &self.pending_disconnects {
+                if let Some(conn) = snapshot.connections.iter().find(|c| &c.uuid == uuid) {
+                    match conn.state {
+                        VpnState::Deactivated | VpnState::Unknown => {
+                            resolved.push(uuid.clone());
+                            any_action_completed = true;
+                        }
+                        VpnState::Activated | VpnState::Activating | VpnState::Deactivating => {
+                            // Still active or in progress, keep waiting
+                        }
+                    }
+                } else {
+                    // Connection no longer in snapshot - disconnected
+                    resolved.push(uuid.clone());
+                    any_action_completed = true;
+                }
+            }
+
+            for uuid in resolved {
+                self.pending_disconnects.remove(&uuid);
+            }
+        }
+
+        (any_action_completed, should_restore)
+    }
+}
+
 thread_local! {
-    /// UUIDs of VPN connections we initiated a connect for (survives window recreation).
-    static PENDING_CONNECTS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
-    /// Whether we've temporarily released keyboard grab for a pending connect.
-    static KEYBOARD_GRAB_RELEASED: Cell<bool> = const { Cell::new(false) };
+    /// Global state for VPN keyboard grab management.
+    ///
+    /// This is thread-local (not per-QS-window) because QuickSettingsWindow is
+    /// recreated on each open, but pending connect/disconnect tracking must
+    /// survive those recreations. State is cleared when the panel closes via
+    /// `restore_keyboard_if_released()`.
+    static VPN_KEYBOARD_STATE: RefCell<VpnKeyboardState> = RefCell::new(VpnKeyboardState::new());
+}
+
+/// Set the QuickSettingsWindow reference for VPN keyboard grab management.
+///
+/// Called when QuickSettingsWindow is created to enable proper keyboard
+/// release/restore during VPN authentication dialogs.
+pub fn set_quick_settings_window(qs: Weak<QuickSettingsWindow>) {
+    VPN_KEYBOARD_STATE.with(|state| state.borrow_mut().set_qs_window(qs));
 }
 
 /// Add a VPN UUID to the pending connects set (for toggle-initiated connections).
 pub fn add_pending_connect(uuid: &str) {
-    PENDING_CONNECTS.with(|p| p.borrow_mut().insert(uuid.to_string()));
+    VPN_KEYBOARD_STATE.with(|state| state.borrow_mut().pending_connects.insert(uuid.to_string()));
 }
 
 /// Restore keyboard mode if it was released for VPN password dialogs.
 /// Called when Quick Settings panel is hidden.
 pub fn restore_keyboard_if_released() {
-    KEYBOARD_GRAB_RELEASED.with(|keyboard_cell| {
-        if keyboard_cell.get() {
-            debug!("VPN: Panel closing, restoring keyboard mode");
-            if let Some(qs) = find_quick_settings_window() {
-                qs.restore_keyboard_mode();
-            }
-            keyboard_cell.set(false);
-            // Also clear pending connects since we're closing
-            PENDING_CONNECTS.with(|p| p.borrow_mut().clear());
-        }
-    });
+    VPN_KEYBOARD_STATE.with(|state| state.borrow_mut().clear());
 }
 
 /// Return an icon name for VPN state.
 ///
-/// Uses standard GTK/Adwaita icon names.
-pub fn vpn_icon_name(_any_active: bool) -> &'static str {
+/// Uses standard GTK/Adwaita icon names. Currently returns a fixed icon name
+/// since VPN state variants aren't widely supported across themes.
+pub fn vpn_icon_name() -> &'static str {
     // Always returns "network-vpn" - some themes have state variants but
     // they're not widely supported.
     "network-vpn"
-}
-
-/// Find the QuickSettingsWindow by searching all toplevels.
-fn find_quick_settings_window() -> Option<Rc<super::window::QuickSettingsWindow>> {
-    for toplevel in gtk4::Window::list_toplevels() {
-        if let Ok(window) = toplevel.downcast::<ApplicationWindow>() {
-            // SAFETY: We store a Weak<QuickSettingsWindow> on the window at creation
-            // time with key "vibepanel-qs-window". upgrade() returns None if dropped.
-            unsafe {
-                if let Some(weak_ptr) =
-                    window.data::<Weak<super::window::QuickSettingsWindow>>("vibepanel-qs-window")
-                    && let Some(qs) = weak_ptr.as_ref().upgrade()
-                {
-                    return Some(qs);
-                }
-            }
-        }
-    }
-    None
 }
 
 /// State for the VPN card in the Quick Settings panel.
@@ -230,41 +364,14 @@ fn create_vpn_action_widget(_state: &Rc<VpnCardState>, conn: &VpnConnection) -> 
     action_label.connect_clicked(move |_| {
         let vpn = VpnService::global();
 
-        // When connecting (not disconnecting), release keyboard grab to allow
-        // external password dialogs (nm-applet, keyring unlock, etc.) to receive input.
-        // The grab will be restored when the VPN state changes.
-        if !is_active {
-            PENDING_CONNECTS.with(|p| p.borrow_mut().insert(uuid.clone()));
-
-            // Release keyboard grab so password dialogs can receive input
-            if let Some(qs) = find_quick_settings_window() {
-                debug!("VPN: Releasing keyboard grab for pending connect");
-                qs.release_keyboard_grab();
-                KEYBOARD_GRAB_RELEASED.with(|k| k.set(true));
-            } else {
-                debug!("VPN: Could not find QuickSettingsWindow to release keyboard grab");
-            }
-
-            // Set a timeout to restore keyboard grab if the connection doesn't resolve.
-            // This handles cases where the user cancels the password dialog or the
-            // connection fails without triggering a state change we can detect.
-            let uuid_timeout = uuid.clone();
-            glib::timeout_add_local_once(Duration::from_secs(30), move || {
-                // Remove this UUID from pending (it timed out)
-                PENDING_CONNECTS.with(|p| p.borrow_mut().remove(&uuid_timeout));
-
-                // Restore keyboard grab if we released it and no other pending connects
-                let should_restore = KEYBOARD_GRAB_RELEASED.with(|k| k.get())
-                    && PENDING_CONNECTS.with(|p| p.borrow().is_empty());
-
-                if should_restore {
-                    debug!("VPN: Timeout reached, restoring keyboard mode");
-                    if let Some(qs) = find_quick_settings_window() {
-                        qs.restore_keyboard_mode();
-                    }
-                    KEYBOARD_GRAB_RELEASED.with(|k| k.set(false));
-                }
-            });
+        if is_active {
+            // Track pending disconnect for close-on-action
+            VPN_KEYBOARD_STATE.with(|state| state.borrow_mut().begin_disconnect(&uuid));
+        } else {
+            // When connecting, release keyboard grab to allow external password dialogs
+            // (nm-applet, keyring unlock, etc.) to receive input.
+            // The grab will be restored when the VPN state changes or the panel closes.
+            VPN_KEYBOARD_STATE.with(|state| state.borrow_mut().begin_connect(&uuid));
         }
 
         vpn.set_connection_state(&uuid, !is_active);
@@ -275,96 +382,18 @@ fn create_vpn_action_widget(_state: &Rc<VpnCardState>, conn: &VpnConnection) -> 
 
 /// Handle VPN state changes from VpnService.
 ///
-/// Returns `true` if a pending connect succeeded (caller should close panel if configured).
+/// Returns `true` if a pending action completed (connect or disconnect),
+/// so caller can close the panel if configured.
 pub fn on_vpn_changed(state: &Rc<VpnCardState>, snapshot: &VpnSnapshot) -> bool {
-    use crate::services::vpn::VpnState;
-
     let primary = snapshot.primary();
     let has_connections = !snapshot.connections.is_empty();
 
-    // Check if any pending connect completed (succeeded or failed).
-    // We use the VPN state to determine when authentication is complete:
-    // - Activating (1): Still waiting for credentials - do NOT restore keyboard
-    // - Activated (2): Fully connected - restore keyboard
-    // - Deactivated (4): Connection failed/cancelled - restore keyboard
-    let mut pending_connect_succeeded = false;
-    let mut should_restore_keyboard = false;
+    // Check if any pending action completed and restore keyboard if needed
+    let (pending_action_completed, should_restore) =
+        VPN_KEYBOARD_STATE.with(|s| s.borrow_mut().check_pending(snapshot));
 
-    PENDING_CONNECTS.with(|pending_cell| {
-        let mut pending = pending_cell.borrow_mut();
-        let keyboard_released = KEYBOARD_GRAB_RELEASED.with(|k| k.get());
-
-        debug!(
-            "VPN on_vpn_changed: pending_connects = {:?}, keyboard_grab_released = {}",
-            *pending, keyboard_released
-        );
-
-        if !pending.is_empty() && keyboard_released {
-            // Check each pending UUID's state
-            let mut resolved_uuids = Vec::new();
-
-            for uuid in pending.iter() {
-                // Find this connection in the snapshot
-                if let Some(conn) = snapshot.connections.iter().find(|c| &c.uuid == uuid) {
-                    debug!("VPN on_vpn_changed: {} state={:?}", uuid, conn.state);
-
-                    match conn.state {
-                        VpnState::Activated => {
-                            // Fully connected - success!
-                            debug!(
-                                "VPN on_vpn_changed: {} is now ACTIVATED (fully connected)",
-                                uuid
-                            );
-                            resolved_uuids.push(uuid.clone());
-                            pending_connect_succeeded = true;
-                            should_restore_keyboard = true;
-                        }
-                        VpnState::Deactivated | VpnState::Unknown => {
-                            // Connection failed or was cancelled
-                            debug!(
-                                "VPN on_vpn_changed: {} is DEACTIVATED/UNKNOWN (failed)",
-                                uuid
-                            );
-                            resolved_uuids.push(uuid.clone());
-                            should_restore_keyboard = true;
-                        }
-                        VpnState::Activating => {
-                            // Still waiting for credentials - keep keyboard released
-                            debug!(
-                                "VPN on_vpn_changed: {} is ACTIVATING (waiting for creds)",
-                                uuid
-                            );
-                        }
-                        VpnState::Deactivating => {
-                            // Connection is being torn down
-                            debug!("VPN on_vpn_changed: {} is DEACTIVATING", uuid);
-                        }
-                    }
-                } else {
-                    // Connection no longer in snapshot - it was removed (failed)
-                    debug!(
-                        "VPN on_vpn_changed: {} no longer in snapshot (failed/cancelled)",
-                        uuid
-                    );
-                    resolved_uuids.push(uuid.clone());
-                    should_restore_keyboard = true;
-                }
-            }
-
-            // Remove resolved UUIDs from pending
-            for uuid in resolved_uuids {
-                pending.remove(&uuid);
-            }
-        }
-    });
-
-    // Restore keyboard mode if a pending connection was resolved
-    if should_restore_keyboard {
-        debug!("VPN on_vpn_changed: Connection resolved, restoring keyboard mode");
-        if let Some(qs) = find_quick_settings_window() {
-            qs.restore_keyboard_mode();
-        }
-        KEYBOARD_GRAB_RELEASED.with(|k| k.set(false));
+    if should_restore {
+        VPN_KEYBOARD_STATE.with(|s| s.borrow_mut().restore_if_released());
     }
 
     // Update toggle state and sensitivity
@@ -380,7 +409,7 @@ pub fn on_vpn_changed(state: &Rc<VpnCardState>, snapshot: &VpnSnapshot) -> bool 
 
     // Update VPN card icon and its active state class
     if let Some(icon_handle) = state.base.card_icon.borrow().as_ref() {
-        let icon_name = vpn_icon_name(snapshot.any_active);
+        let icon_name = vpn_icon_name();
         icon_handle.set_icon(icon_name);
         set_icon_active(icon_handle, snapshot.any_active);
     }
@@ -409,5 +438,5 @@ pub fn on_vpn_changed(state: &Rc<VpnCardState>, snapshot: &VpnSnapshot) -> bool 
         SurfaceStyleManager::global().apply_pango_attrs_all(list_box);
     }
 
-    pending_connect_succeeded
+    pending_action_completed
 }

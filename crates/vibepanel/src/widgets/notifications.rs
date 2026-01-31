@@ -329,7 +329,7 @@ impl NotificationsWidget {
         let menu_handle_cell: Rc<RefCell<Option<Rc<MenuHandle>>>> = Rc::new(RefCell::new(None));
         let menu_handle_for_builder = Rc::clone(&menu_handle_cell);
 
-        let menu_handle = self.base.create_menu("notifications", move || {
+        let menu_handle = self.base.create_menu(move || {
             // Mark as seen when popover opens
             inner.mark_as_seen();
 

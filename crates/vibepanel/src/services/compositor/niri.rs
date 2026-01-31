@@ -398,8 +398,7 @@ impl NiriBackend {
         Self::update_window_counts(shared);
 
         // If the window is focused, update focused window.
-        // Note: For Niri with layer-shell exclusive focus, WorkspaceActiveWindowChanged
-        // handles the popover close logic instead.
+        // Focus updates are used by WindowTitleService to display the active window title.
         if is_focused {
             return Self::update_focused_window_from_cache(shared);
         }
@@ -637,14 +636,10 @@ impl NiriBackend {
                                     if ws_changed {
                                         ws_cb(shared.workspace_snapshot.read().clone());
                                     }
-                                    if win_changed {
-                                        debug!("Window changed, checking focused_window...");
-                                        if let Some(ref win) = *shared.focused_window.read() {
-                                            debug!("Calling window callback with: {}", win.title);
-                                            win_cb(win.clone());
-                                        } else {
-                                            debug!("focused_window is None!");
-                                        }
+                                    if win_changed
+                                        && let Some(ref win) = *shared.focused_window.read()
+                                    {
+                                        win_cb(win.clone());
                                     }
                                 }
                             }

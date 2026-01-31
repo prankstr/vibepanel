@@ -23,6 +23,7 @@ use super::ui_helpers::{
     clear_list_box, create_qs_list_box, create_row_action_label, create_row_menu_action,
     create_row_menu_button, set_icon_active,
 };
+use super::window::current_quick_settings_window;
 use crate::services::icons::IconsService;
 use crate::services::network::{NetworkService, NetworkSnapshot, WifiNetwork};
 use crate::services::surfaces::SurfaceStyleManager;
@@ -164,29 +165,6 @@ pub fn update_network_subtitle(label: &Label, snapshot: &NetworkSnapshot) {
         label.remove_css_class(state::SUBTITLE_ACTIVE);
         label.add_css_class(color::MUTED);
     }
-}
-
-/// Find the QuickSettingsWindow by searching all toplevels.
-///
-/// Returns the QuickSettingsWindow if found and still alive, None otherwise.
-/// This searches through all application windows to find the one with
-/// the "vibepanel-qs-window" data attached.
-fn find_quick_settings_window() -> Option<Rc<super::window::QuickSettingsWindow>> {
-    for toplevel in gtk4::Window::list_toplevels() {
-        if let Ok(window) = toplevel.downcast::<ApplicationWindow>() {
-            // SAFETY: We store a Weak<QuickSettingsWindow> on the window at creation
-            // time with key "vibepanel-qs-window". upgrade() returns None if dropped.
-            unsafe {
-                if let Some(weak_ptr) =
-                    window.data::<Weak<super::window::QuickSettingsWindow>>("vibepanel-qs-window")
-                    && let Some(qs) = weak_ptr.as_ref().upgrade()
-                {
-                    return Some(qs);
-                }
-            }
-        }
-    }
-    None
 }
 
 /// State for the Wi-Fi card in the Quick Settings panel.
@@ -827,7 +805,7 @@ fn create_network_action_widget(net: &WifiNetwork) -> gtk4::Widget {
         action_label.connect_clicked(move |_| {
             if is_secured {
                 // Secured, unknown network: show password prompt
-                if let Some(qs) = find_quick_settings_window() {
+                if let Some(qs) = current_quick_settings_window() {
                     qs.show_wifi_password_dialog(&ssid_clone);
                 }
             } else {

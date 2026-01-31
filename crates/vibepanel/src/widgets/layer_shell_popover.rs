@@ -50,24 +50,34 @@ use crate::services::surfaces::SurfaceStyleManager;
 use crate::styles::{class, surface};
 
 // =============================================================================
-// Types
-// =============================================================================
-
-// =============================================================================
 // Constants
 // =============================================================================
 
 /// Margin around popover content for shadow rendering space.
+///
+/// GTK4 box-shadows extend beyond the widget bounds, so we need extra margin
+/// on the outer container to prevent shadow clipping. 8px provides adequate
+/// space for typical shadow configurations (2-4px blur with offset).
 const POPOVER_SHADOW_MARGIN: i32 = 8;
 
 /// Minimum margin from screen edge for popovers.
+///
+/// Prevents popovers from being flush against screen edges, which can look
+/// visually awkward and may interfere with edge-triggered compositor gestures.
 const POPOVER_MIN_EDGE_MARGIN: i32 = 4;
 
 /// Estimated popover width when actual width not yet available.
-/// Used for positioning calculations before the window is fully laid out.
+///
+/// Used for initial positioning calculations before the window is fully laid out.
+/// Based on Quick Settings width as a reasonable default for most popovers.
+/// If the actual width differs significantly, positioning is corrected after
+/// the window is realized.
 const POPOVER_DEFAULT_WIDTH_ESTIMATE: i32 = 320;
 
 /// Threshold for considering a window width valid (vs. not yet laid out).
+///
+/// Windows report very small widths before GTK completes layout. This threshold
+/// helps distinguish between "not yet laid out" and "intentionally small".
 const POPOVER_MIN_VALID_WIDTH: i32 = 20;
 
 // =============================================================================
@@ -99,10 +109,19 @@ pub fn calculate_popover_top_margin() -> i32 {
 /// This clamps the margin to keep the popover on-screen while centering it
 /// as closely as possible to the anchor X coordinate.
 ///
+/// # Coordinate Space
+///
+/// All parameters use **monitor-local coordinates** (0,0 at the monitor's top-left).
+/// This is correct because:
+/// - Layer-shell surfaces are anchored to specific monitors
+/// - `anchor_x` comes from `compute_bounds()` which returns monitor-relative coords
+/// - `monitor_width` is from `monitor.geometry().width()` (the monitor's own width)
+/// - The resulting margin is applied to a layer-shell surface on the same monitor
+///
 /// # Arguments
 ///
-/// * `anchor_x` - X coordinate of the anchor point (widget center) in monitor coordinates
-/// * `monitor_width` - Width of the monitor
+/// * `anchor_x` - X coordinate of the anchor point (widget center) in monitor-local coordinates
+/// * `monitor_width` - Width of the monitor (from `monitor.geometry().width()`)
 /// * `window_width` - Actual or estimated width of the popover window
 /// * `min_edge_margin` - Minimum margin from screen edge
 ///
@@ -129,10 +148,10 @@ pub fn calculate_popover_right_margin(
 
 /// Get the appropriate keyboard mode for layer-shell popovers.
 ///
-/// - **Hyprland**: Uses `OnDemand` - Hyprland handles focus well and we use
-///   window-opened callbacks for external window detection.
+/// - **Hyprland**: Uses `OnDemand` - Hyprland handles focus well and releases
+///   keyboard grab naturally when other windows are focused.
 /// - **Other compositors**: Uses `Exclusive` to maintain keyboard focus after
-///   workspace switches (following DankMaterialShell's approach).
+///   workspace switches.
 pub fn popover_keyboard_mode() -> KeyboardMode {
     if CompositorManager::global().supports_on_demand_keyboard() {
         KeyboardMode::OnDemand
@@ -187,8 +206,8 @@ where
     catcher.add_css_class(surface::LAYER_SHELL_CLICK_CATCHER);
     catcher.add_css_class(class::CLICK_CATCHER);
 
-    // Layer shell configuration - fullscreen surface behind the popover
-    // Use Top layer so popups hide behind fullscreen apps (like DankMaterialShell)
+    // Layer shell configuration - fullscreen surface behind the popover.
+    // Use Top layer (not Overlay) to avoid appearing on top of fullscreen apps.
     catcher.init_layer_shell();
     catcher.set_layer(Layer::Top);
     catcher.set_exclusive_zone(-1); // Cover everything
@@ -196,11 +215,12 @@ where
     catcher.set_anchor(Edge::Bottom, true);
     catcher.set_anchor(Edge::Left, true);
     catcher.set_anchor(Edge::Right, true);
-    catcher.set_keyboard_mode(KeyboardMode::OnDemand);
+    // Click-catcher should never take keyboard focus - its only purpose is
+    // catching clicks outside the popover. Keyboard focus belongs to the actual
+    // popover window which is shown after this.
+    catcher.set_keyboard_mode(KeyboardMode::None);
 
     // Leave the bar area uncovered so clicks/hovers pass through to bar widgets.
-    // This is simpler and more reliable than input regions on Wayland.
-    // TODO: When bar position support is added, set margin on the appropriate edge.
     catcher.set_margin(Edge::Top, bar_zone);
 
     // Content - add CSS class to the child widget for background styling
@@ -214,7 +234,6 @@ where
     let gesture = GestureClick::new();
     gesture.set_button(0); // All buttons
     {
-        let on_dismiss = on_dismiss.clone();
         // Use connect_released to allow GTK to complete the gesture lifecycle
         // before hiding windows. This avoids "Broken accounting of active state" warnings.
         gesture.connect_released(move |_gesture, _, _x, _y| {
@@ -223,20 +242,9 @@ where
     }
     catcher.add_controller(gesture);
 
-    // ESC key handler
-    {
-        let on_dismiss = on_dismiss.clone();
-        let key_controller = EventControllerKey::new();
-        key_controller.connect_key_pressed(move |_, keyval, _, _| {
-            if keyval == gdk::Key::Escape {
-                on_dismiss();
-                Propagation::Stop
-            } else {
-                Propagation::Proceed
-            }
-        });
-        catcher.add_controller(key_controller);
-    }
+    // Note: No ESC handler on click-catcher. ESC handling is done by the actual
+    // popover window via setup_esc_handler(). The click-catcher has KeyboardMode::None
+    // so it won't receive keyboard events anyway.
 
     catcher
 }
@@ -261,15 +269,6 @@ where
 // =============================================================================
 // LayerShellPopover - Complete Solution for Widget Menus
 // =============================================================================
-
-/// Configuration for positioning a layer-shell popover.
-#[derive(Debug, Clone, Default)]
-pub struct PopoverAnchor {
-    /// X coordinate of the anchor point (widget center) in monitor coordinates.
-    pub x: i32,
-    /// Target monitor for the popover.
-    pub monitor: Option<Monitor>,
-}
 
 /// A layer-shell popover for widget menus.
 ///
@@ -297,8 +296,10 @@ pub struct LayerShellPopover {
     /// Current click-catcher instance (if visible)
     click_catcher: RefCell<Option<ApplicationWindow>>,
 
-    /// Anchor position for smart positioning
-    anchor: Cell<PopoverAnchor>,
+    /// Anchor X coordinate (widget center) in monitor coordinates.
+    anchor_x: Cell<i32>,
+    /// Target monitor for the popover.
+    anchor_monitor: RefCell<Option<Monitor>>,
 }
 
 impl LayerShellPopover {
@@ -319,7 +320,8 @@ impl LayerShellPopover {
             builder: Rc::new(builder),
             window: RefCell::new(None),
             click_catcher: RefCell::new(None),
-            anchor: Cell::new(PopoverAnchor::default()),
+            anchor_x: Cell::new(0),
+            anchor_monitor: RefCell::new(None),
         })
     }
 
@@ -335,10 +337,8 @@ impl LayerShellPopover {
     ///
     /// Creates fresh window and click-catcher instances.
     pub fn show_at(self: &Rc<Self>, x: i32, monitor: Option<Monitor>) {
-        self.anchor.set(PopoverAnchor {
-            x,
-            monitor: monitor.clone(),
-        });
+        self.anchor_x.set(x);
+        *self.anchor_monitor.borrow_mut() = monitor;
         self.show_internal();
     }
 
@@ -356,15 +356,19 @@ impl LayerShellPopover {
     }
 
     fn show_internal(self: &Rc<Self>) {
+        // Guard against re-entrancy: if already visible, hide first to avoid
+        // orphaning the old window/click-catcher
+        if self.is_visible() {
+            self.hide();
+        }
+
         // Create the main window
         let window = self.create_window();
 
         // Set monitor if specified
-        let anchor = self.anchor.take();
-        if let Some(ref monitor) = anchor.monitor {
+        if let Some(ref monitor) = *self.anchor_monitor.borrow() {
             window.set_monitor(Some(monitor));
         }
-        self.anchor.set(anchor);
 
         // Create and show click-catcher first
         let bar_zone = calculate_bar_exclusive_zone();
@@ -375,11 +379,9 @@ impl LayerShellPopover {
             }
         });
 
-        let anchor = self.anchor.take();
-        if let Some(ref monitor) = anchor.monitor {
+        if let Some(ref monitor) = *self.anchor_monitor.borrow() {
             catcher.set_monitor(Some(monitor));
         }
-        self.anchor.set(anchor);
 
         catcher.set_visible(true);
         *self.click_catcher.borrow_mut() = Some(catcher.clone());
@@ -417,8 +419,8 @@ impl LayerShellPopover {
         let popover_class = format!("{}-popover", self.widget_name);
         window.add_css_class(&popover_class);
 
-        // Layer shell configuration
-        // Use Top layer so popups hide behind fullscreen apps (like DankMaterialShell)
+        // Layer shell configuration.
+        // Use Top layer (not Overlay) to avoid appearing on top of fullscreen apps.
         window.init_layer_shell();
         window.set_layer(Layer::Top);
         window.set_exclusive_zone(0);
@@ -470,11 +472,10 @@ impl LayerShellPopover {
             return;
         };
 
-        let anchor = self.anchor.take();
-        let anchor_x = anchor.x;
+        let anchor_x = self.anchor_x.get();
 
-        // Get monitor
-        let monitor_opt = anchor.monitor.clone().or_else(|| {
+        // Get monitor from anchor or fall back to primary
+        let monitor_opt = self.anchor_monitor.borrow().clone().or_else(|| {
             gdk::Display::default().and_then(|display| {
                 display
                     .monitors()
@@ -482,8 +483,6 @@ impl LayerShellPopover {
                     .and_then(|obj| obj.downcast::<Monitor>().ok())
             })
         });
-
-        self.anchor.set(anchor);
 
         let Some(monitor) = monitor_opt else {
             return;
