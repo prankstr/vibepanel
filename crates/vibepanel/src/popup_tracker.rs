@@ -82,7 +82,10 @@ impl PopupTracker {
 
     /// Dismiss the currently active popup (if any).
     pub fn dismiss_active(&self) {
-        if let Some(active) = self.active.borrow_mut().take()
+        // Take the active popup while releasing the borrow immediately.
+        // This is important because dismiss() may call clear() which needs to borrow.
+        let active = self.active.borrow_mut().take();
+        if let Some(active) = active
             && active.is_visible()
         {
             active.dismiss();

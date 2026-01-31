@@ -172,11 +172,21 @@ where
     window.add_controller(key_controller);
 }
 
-/// Set up auto-close behavior when the window loses focus.
+/// Set up auto-close behavior when the window should be dismissed.
 ///
-/// This is compositor-aware:
-/// - **Hyprland**: Uses window-opened events (layer-shell surfaces retain focus)
-/// - **Other compositors**: Uses `is-active` property with debouncing
+/// This is compositor-aware due to differences in how layer-shell surfaces
+/// interact with keyboard focus:
+///
+/// - **Hyprland**: Layer-shell surfaces with `KeyboardMode::OnDemand` retain
+///   keyboard focus even when external windows spawn (e.g., VPN auth dialogs).
+///   The `is-active` property doesn't reliably change. Instead, we use:
+///   - `window-opened` events: Close when an external (non-vibepanel) window opens
+///   - `workspace-changed` events: Close when the active workspace changes
+///
+/// - **Other compositors** (Mango/DWL, Niri): The `is-active` property reliably
+///   changes when focus moves elsewhere, including on workspace switch. We use
+///   debounced property watching to handle brief focus loss during internal
+///   interactions (e.g., clicking within the popover).
 ///
 /// # Arguments
 ///
@@ -196,7 +206,7 @@ pub fn setup_focus_loss_handler<F>(
     if is_hyprland {
         // Hyprland: Subscribe to window-opened events
         let window_weak = window.downgrade();
-        let on_close = on_close.clone();
+        let on_close_for_window = on_close.clone();
         compositor_manager.register_window_opened_callback(move |window_info| {
             let Some(window) = window_weak.upgrade() else {
                 return;
@@ -214,7 +224,33 @@ pub fn setup_focus_loss_handler<F>(
             }
 
             // External window opened - close
-            on_close();
+            on_close_for_window();
+        });
+
+        // Hyprland: Also subscribe to workspace changes
+        // Workspace switches don't trigger window-opened events or is-active changes,
+        // so we need to explicitly detect when the active workspace changes.
+        let window_weak = window.downgrade();
+        let on_close_for_workspace = on_close.clone();
+        let last_active = Rc::new(RefCell::new(
+            compositor_manager.get_workspace_snapshot().active_workspace,
+        ));
+        compositor_manager.register_workspace_callback(move |snapshot| {
+            let Some(window) = window_weak.upgrade() else {
+                return;
+            };
+
+            // Only close if visible
+            if !window.is_visible() {
+                return;
+            }
+
+            // Check if active workspace actually changed
+            let prev = last_active.borrow().clone();
+            if snapshot.active_workspace != prev {
+                *last_active.borrow_mut() = snapshot.active_workspace.clone();
+                on_close_for_workspace();
+            }
         });
     } else {
         // Other compositors: Debounced is-active property watch

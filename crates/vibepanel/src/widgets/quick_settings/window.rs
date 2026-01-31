@@ -16,6 +16,7 @@ use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
 
+use crate::popup_tracker::PopupTracker;
 use crate::services::audio::AudioService;
 use crate::services::bluetooth::BluetoothService;
 use crate::services::brightness::BrightnessService;
@@ -27,7 +28,7 @@ use crate::services::updates::UpdatesService;
 use crate::services::vpn::VpnService;
 use crate::styles::{qs, state, surface};
 use crate::widgets::layer_shell_popover::{
-    create_click_catcher, setup_esc_handler, setup_focus_loss_handler,
+    Dismissible, create_click_catcher, setup_esc_handler, setup_focus_loss_handler,
 };
 
 use super::audio_card::{
@@ -1164,6 +1165,9 @@ impl QuickSettingsWindow {
             source_id.remove();
         }
 
+        // Clear from popup tracker
+        PopupTracker::global().clear();
+
         // Destroy click-catcher
         if let Some(catcher) = self.click_catcher.borrow_mut().take() {
             catcher.close();
@@ -1212,6 +1216,9 @@ impl QuickSettingsWindowHandle {
             return;
         }
 
+        // Dismiss any other active popup before opening QS
+        PopupTracker::global().dismiss_active();
+
         // Window not visible - create a new one
         // (Layer-shell surfaces don't reliably re-show after being hidden,
         // so we always create fresh)
@@ -1219,5 +1226,34 @@ impl QuickSettingsWindowHandle {
         qs.set_anchor_position(x, monitor);
         qs.show_panel();
         *self.window.borrow_mut() = Some(qs);
+
+        // Register with popup tracker for seamless transitions
+        let dismissible = QuickSettingsDismissible {
+            window: self.window.clone(),
+        };
+        PopupTracker::global().set_active(Rc::new(dismissible));
+    }
+}
+
+/// Adapter to make QuickSettingsWindowHandle work with PopupTracker.
+///
+/// This wraps the shared window reference and implements `Dismissible` so that
+/// other popups can dismiss Quick Settings when opening.
+struct QuickSettingsDismissible {
+    window: Rc<RefCell<Option<Rc<QuickSettingsWindow>>>>,
+}
+
+impl Dismissible for QuickSettingsDismissible {
+    fn dismiss(&self) {
+        if let Some(qs) = self.window.borrow_mut().take() {
+            qs.hide_panel();
+        }
+    }
+
+    fn is_visible(&self) -> bool {
+        self.window
+            .borrow()
+            .as_ref()
+            .is_some_and(|w| w.window.is_visible())
     }
 }
