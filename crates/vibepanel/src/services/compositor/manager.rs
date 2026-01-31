@@ -207,6 +207,7 @@ impl CompositorManager {
     /// exclusive keyboard mode to maintain proper focus after workspace switches.
     pub fn supports_on_demand_keyboard(&self) -> bool {
         // Currently only Hyprland reliably supports on-demand keyboard mode
+        // without losing focus on workspace switches
         self.backend_name() == "Hyprland"
     }
 

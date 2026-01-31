@@ -307,16 +307,30 @@ where
             window_info.workspace_id,
         );
 
+        debug!(
+            "Focus handler: app_id={}, title={}, workspace_id={:?}",
+            window_info.app_id, window_info.title, window_info.workspace_id
+        );
+
         // Check if this is a workspace switch (different workspace)
-        let is_workspace_switch = last
-            .as_ref()
-            .is_some_and(|(_, _, last_ws)| *last_ws != window_info.workspace_id);
+        // Only consider it a workspace switch if BOTH have workspace IDs
+        let is_workspace_switch = last.as_ref().is_some_and(|(_, _, last_ws)| {
+            match (last_ws, window_info.workspace_id) {
+                (Some(l), Some(w)) => *l != w,
+                _ => false, // If either is None, don't treat as workspace switch
+            }
+        });
 
         // Check if focus actually changed to a different window
         // Use both app_id and title to distinguish multiple windows of same app
         let is_same_window = last
             .as_ref()
             .is_some_and(|(id, title, _)| id == &window_info.app_id && title == &window_info.title);
+
+        debug!(
+            "Focus handler: is_workspace_switch={}, is_same_window={}, last={:?}",
+            is_workspace_switch, is_same_window, last
+        );
 
         *last = Some(current);
 
