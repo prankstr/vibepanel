@@ -107,16 +107,6 @@ pub type WorkspaceCallback = Arc<dyn Fn(WorkspaceSnapshot) + Send + Sync>;
 /// Callback type for focused window updates.
 pub type WindowCallback = Arc<dyn Fn(WindowInfo) + Send + Sync>;
 
-/// Callback type for window-opened events.
-///
-/// This fires when a new window is created, providing info about the new window.
-/// Used by layer-shell surfaces (like Quick Settings) to detect when external
-/// windows spawn, which may indicate the panel should close.
-///
-/// Not all backends emit this event - it's primarily needed for Hyprland where
-/// keyboard focus doesn't automatically transfer to newly spawned windows.
-pub type WindowOpenedCallback = Arc<dyn Fn(WindowInfo) + Send + Sync>;
-
 /// Trait for compositor backend implementations.
 ///
 /// Each backend is responsible for:
@@ -189,18 +179,6 @@ pub trait CompositorBackend: Send + Sync {
     /// for compositors that don't support this.
     fn quit_compositor(&self) {
         // Default no-op
-    }
-
-    /// Set a callback to be invoked when a new window is opened.
-    ///
-    /// This is optional - backends that don't support this (or where it's not
-    /// needed) can use the default no-op implementation.
-    ///
-    /// Used by Hyprland backend where keyboard focus doesn't automatically
-    /// transfer to newly spawned windows, so we need an explicit signal
-    /// to detect when QS-triggered actions spawn external windows.
-    fn set_window_opened_callback(&self, _callback: Option<WindowOpenedCallback>) {
-        // Default no-op - most backends don't need this
     }
 }
 

@@ -28,3 +28,6 @@ pub use manager::CompositorManager;
 pub use mango::MangoBackend;
 pub use niri::NiriBackend;
 pub use types::*;
+
+// Re-export CallbackId for callers that need to unregister callbacks
+pub use crate::services::callbacks::CallbackId;

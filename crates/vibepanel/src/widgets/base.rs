@@ -9,7 +9,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use crate::popup_tracker::PopupTracker;
+use crate::popover_tracker::PopoverTracker;
 use crate::services::config_manager::ConfigManager;
 use crate::services::icons::{IconHandle, IconsService};
 use crate::services::tooltip::TooltipManager;
@@ -130,7 +130,7 @@ impl MenuHandle {
         let (anchor_x, monitor) = self.get_anchor_info();
 
         // Register as active popup
-        PopupTracker::global().set_active(popover.clone());
+        PopoverTracker::global().set_active(popover.clone());
 
         popover.show_at(anchor_x, monitor);
     }
@@ -139,7 +139,7 @@ impl MenuHandle {
         if let Some(ref popover) = *self.popover.borrow() {
             popover.hide();
         }
-        PopupTracker::global().clear();
+        PopoverTracker::global().clear();
     }
 
     #[allow(dead_code)]
@@ -278,7 +278,7 @@ impl BaseWidget {
                         .unwrap_or(false);
 
                     // Dismiss any active popup (enables seamless transitions)
-                    PopupTracker::global().dismiss_active();
+                    PopoverTracker::global().dismiss_active();
 
                     if let Some((_name, menu)) = menus_for_cb.borrow().iter().next() {
                         // If our menu was already open, we just closed it - don't re-open

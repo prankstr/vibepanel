@@ -12,14 +12,15 @@ use gtk4::{
     Application, ApplicationWindow, Box as GtkBox, Button, Label, Orientation, PolicyType,
     Revealer, RevealerTransitionType, ScrolledWindow,
 };
-use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
+use gtk4_layer_shell::{Edge, Layer, LayerShell};
 use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
 
-use crate::popup_tracker::PopupTracker;
+use crate::popover_tracker::PopoverTracker;
 use crate::services::audio::AudioService;
 use crate::services::bluetooth::BluetoothService;
 use crate::services::brightness::BrightnessService;
+use crate::services::compositor::CallbackId;
 use crate::services::config_manager::ConfigManager;
 use crate::services::idle_inhibitor::IdleInhibitorService;
 use crate::services::network::NetworkService;
@@ -28,7 +29,8 @@ use crate::services::updates::UpdatesService;
 use crate::services::vpn::VpnService;
 use crate::styles::{qs, state, surface};
 use crate::widgets::layer_shell_popover::{
-    Dismissible, create_click_catcher, setup_esc_handler, setup_focus_loss_handler,
+    Dismissible, calculate_bar_exclusive_zone, create_click_catcher, popover_keyboard_mode,
+    setup_esc_handler, setup_focus_loss_handler,
 };
 
 use super::audio_card::{
@@ -48,6 +50,41 @@ use super::wifi_card::{
     self, WifiCardState, build_network_subtitle, build_wifi_details, wifi_icon_name,
 };
 
+// =============================================================================
+// Constants
+// =============================================================================
+
+/// Default width of Quick Settings content area.
+const QUICK_SETTINGS_CONTENT_WIDTH: i32 = 320;
+
+/// Estimated total width including margins (content + padding).
+const QUICK_SETTINGS_WIDTH_ESTIMATE: i32 = 336;
+
+/// Outer margin around Quick Settings window content.
+const QUICK_SETTINGS_OUTER_MARGIN: i32 = 4;
+
+/// Bottom margin for Quick Settings positioning.
+const QUICK_SETTINGS_BOTTOM_MARGIN: i32 = 8;
+
+/// Container padding (surface padding + margins) for height calculation.
+const QUICK_SETTINGS_CONTAINER_PADDING: i32 = 24;
+
+/// Minimum height threshold to consider setting max scroll height.
+const QUICK_SETTINGS_MIN_HEIGHT_THRESHOLD: i32 = 100;
+
+/// Minimum margin from screen edge for positioning.
+const QUICK_SETTINGS_MIN_EDGE_MARGIN: i32 = 4;
+
+/// Threshold for considering a window width valid (vs. not yet laid out).
+const QUICK_SETTINGS_MIN_VALID_WIDTH: i32 = 20;
+
+/// Default right margin when no anchor position specified.
+const QUICK_SETTINGS_DEFAULT_RIGHT_MARGIN: i32 = 8;
+
+// =============================================================================
+// Quick Settings Window
+// =============================================================================
+
 /// Full Quick Settings window.
 ///
 /// A layer-shell surface with EXCLUSIVE keyboard mode, anchored below the bar
@@ -65,8 +102,9 @@ pub struct QuickSettingsWindow {
     /// Configuration for which cards are enabled.
     cards_config: QuickSettingsCardsConfig,
 
-    /// Pending close timeout (for debounced focus-loss detection).
-    pending_close: Rc<Cell<Option<glib::SourceId>>>,
+    /// Compositor callback ID for focus-loss handling (Hyprland only).
+    /// Stored so we can unregister it when the panel is hidden/destroyed.
+    compositor_callback_id: RefCell<Option<CallbackId>>,
 
     /// Scrolled window container for height limiting.
     scroll_container: ScrolledWindow,
@@ -95,9 +133,10 @@ impl QuickSettingsWindow {
         // This window is a floating control center panel.
         window.add_css_class(qs::WINDOW);
 
-        // Layer shell configuration for overlay panel behavior.
+        // Layer shell configuration for panel behavior.
+        // Use Top layer so popups hide behind fullscreen apps (like DankMaterialShell)
         window.init_layer_shell();
-        window.set_layer(Layer::Overlay);
+        window.set_layer(Layer::Top);
         window.set_exclusive_zone(0);
         window.set_anchor(Edge::Top, true);
         window.set_anchor(Edge::Right, true);
@@ -105,7 +144,7 @@ impl QuickSettingsWindow {
         window.set_anchor(Edge::Left, false);
         window.set_margin(Edge::Top, 0);
         window.set_margin(Edge::Right, 8);
-        window.set_keyboard_mode(KeyboardMode::OnDemand);
+        window.set_keyboard_mode(popover_keyboard_mode());
 
         // Create scroll container for height limiting.
         // Max height will be set in update_position() based on monitor geometry.
@@ -122,7 +161,7 @@ impl QuickSettingsWindow {
             anchor_x: Cell::new(0),
             anchor_monitor: RefCell::new(None),
             cards_config,
-            pending_close: Rc::new(Cell::new(None)),
+            compositor_callback_id: RefCell::new(None),
             scroll_container,
             wifi: Rc::new(WifiCardState::new()),
             bluetooth: Rc::new(BluetoothCardState::new()),
@@ -164,16 +203,13 @@ impl QuickSettingsWindow {
         // Set up auto-close behavior when focus is lost (compositor-aware)
         {
             let qs_weak = Rc::downgrade(&qs);
-            let pending_close = qs.pending_close.clone();
-            setup_focus_loss_handler(
-                &qs.window,
-                move || {
-                    if let Some(qs) = qs_weak.upgrade() {
-                        qs.hide_panel();
-                    }
-                },
-                pending_close,
-            );
+            let callback_id = setup_focus_loss_handler(&qs.window, move || {
+                if let Some(qs) = qs_weak.upgrade() {
+                    qs.hide_panel();
+                }
+            });
+            // Store the callback ID for cleanup on hide
+            *qs.compositor_callback_id.borrow_mut() = Some(callback_id);
         }
 
         // Subscribe to services
@@ -265,9 +301,9 @@ impl QuickSettingsWindow {
         outer.add_css_class(qs::WINDOW_CONTAINER);
         outer.add_css_class(surface::NO_FOCUS);
         outer.set_margin_top(0);
-        outer.set_margin_bottom(4);
-        outer.set_margin_start(4);
-        outer.set_margin_end(4);
+        outer.set_margin_bottom(QUICK_SETTINGS_OUTER_MARGIN);
+        outer.set_margin_start(QUICK_SETTINGS_OUTER_MARGIN);
+        outer.set_margin_end(QUICK_SETTINGS_OUTER_MARGIN);
 
         // Apply surface styles - background now controlled via CSS variables
         outer.add_css_class("quick-settings-popover");
@@ -277,7 +313,7 @@ impl QuickSettingsWindow {
         let content = GtkBox::new(Orientation::Vertical, 0);
         content.add_css_class(qs::CONTROL_CENTER);
         content.add_css_class(surface::WIDGET_MENU_CONTENT);
-        content.set_size_request(320, -1);
+        content.set_size_request(QUICK_SETTINGS_CONTENT_WIDTH, -1);
 
         let cfg = &qs.cards_config;
 
@@ -1072,35 +1108,42 @@ impl QuickSettingsWindow {
         self.window.set_margin(Edge::Top, top_margin);
 
         // Max height: screen minus bar zone, margins, and container padding
-        let bottom_margin = 8;
-        let container_padding = 24; // surface padding + margins
-        let max_height =
-            geom.height() - bar_exclusive_zone - top_margin - container_padding - bottom_margin;
+        let max_height = geom.height()
+            - bar_exclusive_zone
+            - top_margin
+            - QUICK_SETTINGS_CONTAINER_PADDING
+            - QUICK_SETTINGS_BOTTOM_MARGIN;
 
-        if max_height > 100 {
+        if max_height > QUICK_SETTINGS_MIN_HEIGHT_THRESHOLD {
             self.scroll_container.set_max_content_height(max_height);
         }
 
         if anchor_x > 0 {
             let monitor_width = geom.width();
-            // Use actual width if available, otherwise estimate based on content width (320px)
-            // plus margins/padding (~8px on each side)
+            // Use actual width if available, otherwise estimate based on content width
+            // plus margins/padding
             let window_width = {
                 let w = self.window.width();
-                if w > 20 { w } else { 336 }
+                if w > QUICK_SETTINGS_MIN_VALID_WIDTH {
+                    w
+                } else {
+                    QUICK_SETTINGS_WIDTH_ESTIMATE
+                }
             };
             let right_margin = monitor_width - anchor_x - window_width / 2;
-            let max_margin = monitor_width.saturating_sub(window_width + 4);
+            let max_margin =
+                monitor_width.saturating_sub(window_width + QUICK_SETTINGS_MIN_EDGE_MARGIN);
             // Ensure min <= max to avoid clamp panic
-            let clamped = if max_margin >= 4 {
-                right_margin.clamp(4, max_margin)
+            let clamped = if max_margin >= QUICK_SETTINGS_MIN_EDGE_MARGIN {
+                right_margin.clamp(QUICK_SETTINGS_MIN_EDGE_MARGIN, max_margin)
             } else {
                 // Window is too wide for monitor, just use minimum margin
-                4.max(max_margin)
+                QUICK_SETTINGS_MIN_EDGE_MARGIN.max(max_margin)
             };
             self.window.set_margin(Edge::Right, clamped);
         } else {
-            self.window.set_margin(Edge::Right, 8);
+            self.window
+                .set_margin(Edge::Right, QUICK_SETTINGS_DEFAULT_RIGHT_MARGIN);
         }
     }
 
@@ -1116,8 +1159,9 @@ impl QuickSettingsWindow {
             .application()
             .expect("QuickSettingsWindow must have an associated Application");
 
+        let bar_zone = calculate_bar_exclusive_zone();
         let qs_weak = Rc::downgrade(self);
-        let catcher = create_click_catcher(&app, move || {
+        let catcher = create_click_catcher(&app, bar_zone, move || {
             if let Some(qs) = qs_weak.upgrade() {
                 qs.hide_panel();
             }
@@ -1131,7 +1175,7 @@ impl QuickSettingsWindow {
             catcher.set_monitor(Some(monitor));
         }
         catcher.set_visible(true);
-        *self.click_catcher.borrow_mut() = Some(catcher);
+        *self.click_catcher.borrow_mut() = Some(catcher.clone());
 
         // Start with opacity 0 to avoid flicker while positioning
         self.window.set_opacity(0.0);
@@ -1160,13 +1204,11 @@ impl QuickSettingsWindow {
 
     /// Hide and destroy the panel and associated click-catcher.
     fn hide_panel(&self) {
-        // Cancel any pending focus-loss close
-        if let Some(source_id) = self.pending_close.take() {
-            source_id.remove();
-        }
+        // Unregister compositor callback (Hyprland focus-loss handling)
+        self.unregister_compositor_callback();
 
-        // Clear from popup tracker
-        PopupTracker::global().clear();
+        // Clear from popover tracker
+        PopoverTracker::global().clear();
 
         // Destroy click-catcher
         if let Some(catcher) = self.click_catcher.borrow_mut().take() {
@@ -1175,6 +1217,15 @@ impl QuickSettingsWindow {
 
         // Destroy the main window
         self.window.close();
+    }
+
+    /// Unregister any active compositor callback.
+    fn unregister_compositor_callback(&self) {
+        use crate::services::compositor::CompositorManager;
+
+        if let Some(id) = self.compositor_callback_id.borrow_mut().take() {
+            CompositorManager::global().unregister_window_callback(id);
+        }
     }
 }
 
@@ -1217,7 +1268,7 @@ impl QuickSettingsWindowHandle {
         }
 
         // Dismiss any other active popup before opening QS
-        PopupTracker::global().dismiss_active();
+        PopoverTracker::global().dismiss_active();
 
         // Window not visible - create a new one
         // (Layer-shell surfaces don't reliably re-show after being hidden,
@@ -1231,11 +1282,11 @@ impl QuickSettingsWindowHandle {
         let dismissible = QuickSettingsDismissible {
             window: self.window.clone(),
         };
-        PopupTracker::global().set_active(Rc::new(dismissible));
+        PopoverTracker::global().set_active(Rc::new(dismissible));
     }
 }
 
-/// Adapter to make QuickSettingsWindowHandle work with PopupTracker.
+/// Adapter to make QuickSettingsWindowHandle work with PopoverTracker.
 ///
 /// This wraps the shared window reference and implements `Dismissible` so that
 /// other popups can dismiss Quick Settings when opening.

@@ -18,9 +18,9 @@
 //! let manager = CompositorManager::global();
 //!
 //! // Register for workspace updates
-//! manager.register_workspace_callback(Arc::new(|snapshot| {
+//! manager.register_workspace_callback(|snapshot| {
 //!     // Handle workspace state change
-//! }));
+//! });
 //! ```
 
 use std::cell::RefCell;
@@ -32,14 +32,10 @@ use tracing::{debug, info};
 use vibepanel_core::config::AdvancedConfig;
 
 use super::{
-    BackendKind, CompositorBackend, WindowCallback, WindowInfo, WindowOpenedCallback,
-    WorkspaceCallback, WorkspaceMeta, WorkspaceSnapshot, factory,
+    BackendKind, CompositorBackend, WindowCallback, WindowInfo, WorkspaceCallback, WorkspaceMeta,
+    WorkspaceSnapshot, factory,
 };
-
-/// Local callback type (not Send+Sync, runs on GTK main loop).
-type LocalWorkspaceCallback = Rc<dyn Fn(&WorkspaceSnapshot)>;
-type LocalWindowCallback = Rc<dyn Fn(&WindowInfo)>;
-type LocalWindowOpenedCallback = Rc<dyn Fn(&WindowInfo)>;
+use crate::services::callbacks::{CallbackId, Callbacks};
 
 // Thread-local singleton storage for CompositorManager
 thread_local! {
@@ -53,12 +49,10 @@ thread_local! {
 pub struct CompositorManager {
     /// The compositor backend (owned).
     backend: RefCell<Option<Box<dyn CompositorBackend>>>,
-    /// Registered workspace callbacks (local, not Send+Sync).
-    workspace_callbacks: RefCell<Vec<LocalWorkspaceCallback>>,
-    /// Registered window callbacks (local, not Send+Sync).
-    window_callbacks: RefCell<Vec<LocalWindowCallback>>,
-    /// Registered window-opened callbacks (local, not Send+Sync).
-    window_opened_callbacks: RefCell<Vec<LocalWindowOpenedCallback>>,
+    /// Registered workspace callbacks.
+    workspace_callbacks: Callbacks<WorkspaceSnapshot>,
+    /// Registered window callbacks.
+    window_callbacks: Callbacks<WindowInfo>,
     /// Last known workspace snapshot (for new listeners).
     last_workspace_snapshot: RefCell<Option<WorkspaceSnapshot>>,
     /// Last known window info (for new listeners).
@@ -72,9 +66,8 @@ impl CompositorManager {
     fn new(advanced_config: &AdvancedConfig) -> Rc<Self> {
         let manager = Rc::new(Self {
             backend: RefCell::new(None),
-            workspace_callbacks: RefCell::new(Vec::new()),
-            window_callbacks: RefCell::new(Vec::new()),
-            window_opened_callbacks: RefCell::new(Vec::new()),
+            workspace_callbacks: Callbacks::new(),
+            window_callbacks: Callbacks::new(),
             last_workspace_snapshot: RefCell::new(None),
             last_window_info: RefCell::new(None),
             started: RefCell::new(false),
@@ -116,33 +109,44 @@ impl CompositorManager {
     /// Register a callback for workspace state changes.
     ///
     /// The callback will be immediately invoked with the current state if available.
-    pub fn register_workspace_callback<F>(&self, callback: F)
+    /// Returns a `CallbackId` that can be used to unregister the callback.
+    pub fn register_workspace_callback<F>(&self, callback: F) -> CallbackId
     where
         F: Fn(&WorkspaceSnapshot) + 'static,
     {
-        let callback = Rc::new(callback);
-        self.workspace_callbacks.borrow_mut().push(callback.clone());
+        let id = self.workspace_callbacks.register(callback);
 
         // Immediately send current state if available
         if let Some(ref snapshot) = *self.last_workspace_snapshot.borrow() {
-            callback(snapshot);
+            self.workspace_callbacks.notify_single(id, snapshot);
         }
+
+        id
     }
 
     /// Register a callback for window focus changes.
     ///
     /// The callback will be immediately invoked with the current state if available.
-    pub fn register_window_callback<F>(&self, callback: F)
+    /// Returns a `CallbackId` that can be used to unregister the callback.
+    pub fn register_window_callback<F>(&self, callback: F) -> CallbackId
     where
         F: Fn(&WindowInfo) + 'static,
     {
-        let callback = Rc::new(callback);
-        self.window_callbacks.borrow_mut().push(callback.clone());
+        let id = self.window_callbacks.register(callback);
 
         // Immediately send current state if available
         if let Some(ref info) = *self.last_window_info.borrow() {
-            callback(info);
+            self.window_callbacks.notify_single(id, info);
         }
+
+        id
+    }
+
+    /// Unregister a window callback by its ID.
+    ///
+    /// Returns `true` if the callback was found and removed.
+    pub fn unregister_window_callback(&self, id: CallbackId) -> bool {
+        self.window_callbacks.unregister(id)
     }
 
     /// Get the list of workspaces from the backend.
@@ -196,62 +200,6 @@ impl CompositorManager {
         }
     }
 
-    /// Register a callback for window-opened events.
-    ///
-    /// This is only supported by some backends (currently Hyprland). The callback
-    /// will be invoked on the GTK main thread when a new window is created.
-    ///
-    /// Used by Quick Settings to detect when external windows spawn (e.g., terminal
-    /// from update card, VPN password dialog), which should trigger panel close.
-    ///
-    /// Note: Unlike workspace/window callbacks, this does not replay state - it only
-    /// fires for new window creations after registration.
-    pub fn register_window_opened_callback<F>(&self, callback: F)
-    where
-        F: Fn(&WindowInfo) + 'static,
-    {
-        let callback = Rc::new(callback);
-        self.window_opened_callbacks.borrow_mut().push(callback);
-
-        // Set up the backend callback if this is the first registration
-        // and the backend supports it
-        self.setup_window_opened_backend_callback();
-    }
-
-    /// Set up the backend window-opened callback if needed.
-    ///
-    /// This is called when a window-opened callback is registered. It creates
-    /// a thread-safe wrapper that dispatches events to the GTK main loop.
-    fn setup_window_opened_backend_callback(&self) {
-        // Only set up if we have callbacks registered
-        if self.window_opened_callbacks.borrow().is_empty() {
-            return;
-        }
-
-        let Some(ref backend) = *self.backend.borrow() else {
-            return;
-        };
-
-        // Create thread-safe callback that dispatches to main loop
-        let on_window_opened: WindowOpenedCallback = Arc::new(move |window_info| {
-            let window_info = window_info.clone();
-            glib::idle_add_once(move || {
-                CompositorManager::global().handle_window_opened(window_info);
-            });
-        });
-
-        backend.set_window_opened_callback(Some(on_window_opened));
-    }
-
-    /// Handle a window-opened event from the backend.
-    /// Called via glib::idle_add_once from the backend thread.
-    fn handle_window_opened(&self, window_info: WindowInfo) {
-        // Dispatch to all registered callbacks
-        for cb in self.window_opened_callbacks.borrow().iter() {
-            cb(&window_info);
-        }
-    }
-
     /// Handle a workspace update from the backend.
     /// Called via glib::idle_add_once from the backend thread.
     pub(crate) fn handle_workspace_update(&self, snapshot: WorkspaceSnapshot) {
@@ -259,9 +207,7 @@ impl CompositorManager {
         *self.last_workspace_snapshot.borrow_mut() = Some(snapshot.clone());
 
         // Dispatch to all registered callbacks
-        for cb in self.workspace_callbacks.borrow().iter() {
-            cb(&snapshot);
-        }
+        self.workspace_callbacks.notify(&snapshot);
     }
 
     /// Handle a window update from the backend.
@@ -271,9 +217,7 @@ impl CompositorManager {
         *self.last_window_info.borrow_mut() = Some(window_info.clone());
 
         // Dispatch to all registered callbacks
-        for cb in self.window_callbacks.borrow().iter() {
-            cb(&window_info);
-        }
+        self.window_callbacks.notify(&window_info);
     }
 
     /// Initialize the backend.

@@ -361,38 +361,77 @@ impl NiriBackend {
     }
 
     /// Update a single window in the cache.
+    ///
+    /// Returns true if this should trigger a window callback (focus changed).
     fn update_single_window(shared: &SharedState, window: &Value) -> bool {
         let Some(win_id) = window.get("id").and_then(|v| v.as_u64()) else {
             return false;
         };
 
+        let title = window
+            .get("title")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let app_id = window
+            .get("app_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let workspace_id = window.get("workspace_id").and_then(|v| v.as_u64());
+        let is_focused = window
+            .get("is_focused")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        // Check if this is a NEW window (not in cache)
+        let is_new_window = !shared.windows.read().contains_key(&win_id);
+
         let data = WindowData {
             id: win_id,
-            title: window
-                .get("title")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-            app_id: window
-                .get("app_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-            workspace_id: window.get("workspace_id").and_then(|v| v.as_u64()),
-            is_focused: window
-                .get("is_focused")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false),
+            title: title.clone(),
+            app_id: app_id.clone(),
+            workspace_id,
+            is_focused,
         };
 
-        let is_focused = data.is_focused;
         shared.windows.write().insert(win_id, data);
 
         // Update window counts
         Self::update_window_counts(shared);
 
+        // If the window is focused, update focused window normally
         if is_focused {
             return Self::update_focused_window_from_cache(shared);
+        }
+
+        // NIRI WORKAROUND: When a layer-shell surface has keyboard focus,
+        // Niri doesn't send WindowFocusChanged events for regular windows.
+        // New windows spawn with is_focused=false even though they "would have"
+        // focus if no layer-shell surface was active.
+        //
+        // To support closing popovers when a new window spawns (e.g., terminal
+        // from updates card), we treat new windows as a pseudo-focus change.
+        // We update focused_window to the new window's info so the focus-loss
+        // handler can detect the change.
+        if is_new_window {
+            let id_map = shared.id_to_idx.read();
+            let id_to_output = shared.id_to_output.read();
+
+            let workspace_idx = workspace_id.and_then(|ws_id| id_map.get(&ws_id).copied());
+            let output = workspace_id.and_then(|ws_id| id_to_output.get(&ws_id).cloned());
+
+            let new_info = WindowInfo {
+                title,
+                app_id,
+                workspace_id: workspace_idx,
+                output,
+            };
+
+            let mut focused = shared.focused_window.write();
+            let changed = focused.as_ref() != Some(&new_info);
+            *focused = Some(new_info);
+            return changed;
         }
 
         false
@@ -622,7 +661,33 @@ impl NiriBackend {
                                     continue;
                                 }
 
+                                // Debug: log event types for window tracking
+                                let event_type = event
+                                    .as_object()
+                                    .map(|o| o.keys().next().cloned().unwrap_or_default())
+                                    .unwrap_or_default();
+                                if event_type.contains("Window") {
+                                    debug!("Niri raw event: {}", event);
+                                }
+
                                 let (ws_changed, win_changed) = Self::handle_event(&shared, &event);
+
+                                // Debug: log all window-related events
+                                if event.get("WindowFocusChanged").is_some()
+                                    || event.get("WindowOpenedOrChanged").is_some()
+                                    || event.get("WindowClosed").is_some()
+                                {
+                                    debug!(
+                                        "Niri event: {:?}, win_changed={}, focused={:?}",
+                                        event.as_object().map(|o| o.keys().collect::<Vec<_>>()),
+                                        win_changed,
+                                        shared
+                                            .focused_window
+                                            .read()
+                                            .as_ref()
+                                            .map(|w| (&w.app_id, &w.title))
+                                    );
+                                }
 
                                 if let Some((ref ws_cb, ref win_cb)) = callbacks {
                                     if ws_changed {
