@@ -23,8 +23,6 @@ use tracing::{debug, error, warn};
 use super::callbacks::Callbacks;
 use super::state;
 
-// D-Bus Constants
-
 /// NetworkManager service name.
 const NM_SERVICE: &str = "org.freedesktop.NetworkManager";
 /// NetworkManager main object path.
@@ -41,26 +39,21 @@ const IFACE_ACTIVE: &str = "org.freedesktop.NetworkManager.Connection.Active";
 /// D-Bus properties interface.
 const IFACE_PROPS: &str = "org.freedesktop.DBus.Properties";
 
-/// VPN connection types we care about.
 const VPN_TYPES: &[&str] = &["wireguard", "vpn"]; // "vpn" is OpenVPN in NM
 
-/// Delay (in ms) before refreshing connection state after an activation
-/// signal. Gives NetworkManager time to update internal state.
+/// Delay before refreshing connection state after activation signal.
 const STATE_REFRESH_DELAY_MS: u64 = 50;
 
 /// NetworkManager active connection states.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum VpnState {
-    /// Connection state is unknown.
     #[default]
     Unknown = 0,
     /// Connection is activating (e.g., waiting for credentials).
     Activating = 1,
     /// Connection is fully activated and connected.
     Activated = 2,
-    /// Connection is deactivating.
     Deactivating = 3,
-    /// Connection has been deactivated.
     Deactivated = 4,
 }
 
@@ -161,27 +154,17 @@ fn send_vpn_update(update: VpnUpdate) {
 
 /// Shared, process-wide VPN service for connection state and control.
 pub struct VpnService {
-    /// D-Bus connection (cached for signal subscriptions).
     connection: RefCell<Option<gio::DBusConnection>>,
-    /// NetworkManager main proxy.
     nm_proxy: RefCell<Option<gio::DBusProxy>>,
-    /// NetworkManager Settings proxy.
     settings_proxy: RefCell<Option<gio::DBusProxy>>,
-    /// Current snapshot of VPN state.
     snapshot: RefCell<VpnSnapshot>,
-    /// Registered callbacks for state changes.
     callbacks: Callbacks<VpnSnapshot>,
-    /// Whether a refresh is pending (for debouncing).
     refresh_pending: Cell<bool>,
-    /// D-Bus signal subscriptions (kept alive for the service lifetime).
     _signal_subscriptions: RefCell<Vec<gio::SignalSubscription>>,
-    /// Subscriptions for active VPN connection state changes.
-    /// These are recreated when active connections change.
+    /// Recreated when active connections change.
     active_conn_subscriptions: RefCell<Vec<gio::SignalSubscription>>,
-    /// Last used VPN UUID (persisted across sessions).
     last_used_uuid: RefCell<Option<String>>,
-    /// Lock to serialize D-Bus operations (activate/deactivate).
-    /// Prevents race conditions when rapidly toggling connections.
+    /// Serializes D-Bus operations to prevent race conditions when rapidly toggling.
     operation_lock: Arc<Mutex<()>>,
 }
 

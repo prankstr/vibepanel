@@ -1,23 +1,7 @@
-//! Popover tracker for managing active popovers and seamless transitions.
+//! Tracks the currently active popover for seamless transitions between bar widget menus.
 //!
-//! This module provides a global singleton that tracks which popover is currently
-//! active and enables seamless transitions between bar widget menus.
-//!
-//! # Architecture
-//!
-//! When a bar widget is clicked:
-//! 1. The widget's click handler calls `PopoverTracker::dismiss_active()`
-//! 2. Any existing popover is dismissed
-//! 3. The widget's menu is shown and registered via `set_active()`
-//!
-//! This enables clicking directly from one widget's menu to another without
-//! requiring the first menu to be explicitly closed.
-//!
-//! # Identity Tracking
-//!
-//! The tracker uses unique IDs rather than pointer equality because:
-//! - `Rc<dyn Dismissible>` pointer equality is unreliable (casting creates new fat pointers)
-//! - IDs are simple, unambiguous, and work correctly across all use cases
+//! Uses unique IDs rather than pointer equality because `Rc<dyn Dismissible>` casting
+//! creates new fat pointers that break pointer comparison.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -31,14 +15,8 @@ thread_local! {
 /// Unique identifier for a registered popover.
 pub type PopoverId = u64;
 
-/// Global popover tracker singleton.
-///
-/// Manages the currently active popover and provides seamless transitions
-/// between bar widget menus.
 pub struct PopoverTracker {
-    /// Currently active dismissible surface (if any), with its ID.
     active: RefCell<Option<(PopoverId, Rc<dyn Dismissible>)>>,
-    /// Next ID to assign.
     next_id: Cell<PopoverId>,
 }
 
@@ -46,15 +24,12 @@ impl Default for PopoverTracker {
     fn default() -> Self {
         Self {
             active: RefCell::new(None),
-            next_id: Cell::new(1), // Start at 1 so 0 can be "no ID"
+            next_id: Cell::new(1),
         }
     }
 }
 
 impl PopoverTracker {
-    /// Get the global PopoverTracker instance.
-    ///
-    /// Lazily initializes the singleton on first access.
     pub fn global() -> Rc<Self> {
         POPOVER_TRACKER_INSTANCE.with(|cell| {
             let mut opt = cell.borrow_mut();

@@ -49,16 +49,7 @@ use super::wifi_card::{
     self, WifiCardState, build_network_subtitle, build_wifi_details, wifi_icon_name,
 };
 
-// =============================================================================
-// Thread-Local QuickSettingsWindow Reference
-// =============================================================================
-
 thread_local! {
-    /// Weak reference to the currently active QuickSettingsWindow.
-    ///
-    /// This is set when a QuickSettingsWindow is created and cleared when it closes.
-    /// Used by cards (Wi-Fi, Updates) that need to interact with the QS window
-    /// (e.g., closing the panel, showing dialogs).
     static CURRENT_QS_WINDOW: RefCell<Option<Weak<QuickSettingsWindow>>> = const { RefCell::new(None) };
 }
 
@@ -84,71 +75,33 @@ fn clear_current_qs_window() {
     });
 }
 
-// =============================================================================
-// Constants
-// =============================================================================
-
-/// Default width of Quick Settings content area.
 const QUICK_SETTINGS_CONTENT_WIDTH: i32 = 320;
-
 /// Estimated total width including margins (content + padding).
 const QUICK_SETTINGS_WIDTH_ESTIMATE: i32 = 336;
-
-/// Outer margin around Quick Settings window content.
 const QUICK_SETTINGS_OUTER_MARGIN: i32 = 4;
-
-/// Bottom margin for Quick Settings positioning.
 const QUICK_SETTINGS_BOTTOM_MARGIN: i32 = 8;
-
 /// Container padding (surface padding + margins) for height calculation.
 const QUICK_SETTINGS_CONTAINER_PADDING: i32 = 24;
-
-/// Minimum height threshold to consider setting max scroll height.
 const QUICK_SETTINGS_MIN_HEIGHT_THRESHOLD: i32 = 100;
-
-/// Minimum margin from screen edge for positioning.
 const QUICK_SETTINGS_MIN_EDGE_MARGIN: i32 = 4;
-
-/// Threshold for considering a window width valid (vs. not yet laid out).
 const QUICK_SETTINGS_MIN_VALID_WIDTH: i32 = 20;
-
-/// Default right margin when no anchor position specified.
 const QUICK_SETTINGS_DEFAULT_RIGHT_MARGIN: i32 = 8;
-
-/// Vertical spacing between toggle card rows.
 const CARD_ROW_SPACING: i32 = 8;
-
-/// Horizontal spacing between cards in a row.
 const CARD_ROW_GAP: i32 = 8;
-
-/// Top margin for the audio section (separating from toggle cards).
 const AUDIO_SECTION_TOP_MARGIN: i32 = 12;
-
-// =============================================================================
-// Quick Settings Window
-// =============================================================================
 
 /// Full Quick Settings window.
 ///
-/// A layer-shell surface with EXCLUSIVE keyboard mode, anchored below the bar
-/// widget that was clicked. Uses a fullscreen click-catcher window for
-/// click-outside-to-close behavior.
 pub struct QuickSettingsWindow {
     window: ApplicationWindow,
-    /// Fullscreen transparent click-catcher shown behind the panel.
     click_catcher: RefCell<Option<ApplicationWindow>>,
-    /// Anchor X position: widget center X in monitor coordinates.
+    /// Anchor X position in monitor coordinates.
     anchor_x: Cell<i32>,
-    /// Monitor the widget is on (if known).
     anchor_monitor: RefCell<Option<Monitor>>,
-
-    /// Configuration for which cards are enabled.
     cards_config: QuickSettingsCardsConfig,
-
-    /// Scrolled window container for height limiting.
     scroll_container: ScrolledWindow,
 
-    // Card states (organized by panel)
+    // Card states
     pub wifi: Rc<WifiCardState>,
     pub bluetooth: Rc<BluetoothCardState>,
     pub vpn: Rc<VpnCardState>,

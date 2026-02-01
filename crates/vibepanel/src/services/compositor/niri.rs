@@ -26,24 +26,18 @@ use super::{
     WorkspaceSnapshot,
 };
 
-/// Reconnect backoff constants (in milliseconds).
 const RECONNECT_INITIAL_MS: u64 = 1000;
 const RECONNECT_MAX_MS: u64 = 30000;
 const RECONNECT_MULTIPLIER: f64 = 1.5;
 
-/// Shared state between main thread and event loop thread.
 struct SharedState {
-    /// Current workspace snapshot.
     workspace_snapshot: RwLock<WorkspaceSnapshot>,
-    /// Current focused window.
     focused_window: RwLock<Option<WindowInfo>>,
-    /// Workspace metadata (Niri uses dynamic workspaces).
     workspaces: RwLock<Vec<WorkspaceMeta>>,
     /// Map from Niri's u64 workspace ID to our 1-based index.
     id_to_idx: RwLock<HashMap<u64, i32>>,
     /// Map from Niri's u64 workspace ID to output name.
     id_to_output: RwLock<HashMap<u64, String>>,
-    /// Window cache for tracking focus.
     windows: RwLock<HashMap<u64, WindowData>>,
 }
 
@@ -60,24 +54,16 @@ impl Default for SharedState {
     }
 }
 
-/// Niri backend implementation using native socket IPC.
 pub struct NiriBackend {
-    /// Output allow-list (empty = all outputs).
     #[allow(dead_code)] // For future filtering support
     allowed_outputs: Vec<String>,
-    /// Whether the backend is running.
     running: Arc<AtomicBool>,
-    /// Handle to the event loop thread.
     event_thread: Mutex<Option<JoinHandle<()>>>,
-    /// Socket path (from environment).
     socket_path: RwLock<Option<String>>,
-    /// Shared state (accessible from both main thread and event loop).
     shared: Arc<SharedState>,
-    /// Callbacks.
     callbacks: Mutex<Option<(WorkspaceCallback, WindowCallback)>>,
 }
 
-/// Cached window data.
 #[derive(Debug, Clone)]
 struct WindowData {
     id: u64,
@@ -88,7 +74,6 @@ struct WindowData {
 }
 
 impl NiriBackend {
-    /// Create a new Niri backend.
     pub fn new(outputs: Option<Vec<String>>) -> Self {
         Self {
             allowed_outputs: outputs.unwrap_or_default(),
@@ -117,11 +102,9 @@ impl NiriBackend {
             }
         };
 
-        // Set timeout
         let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
         let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
 
-        // Send request
         let message = format!("{}\n", serde_json::to_string(request).ok()?);
         if let Err(e) = stream.write_all(message.as_bytes()) {
             error!("Failed to send request to Niri: {}", e);
@@ -131,7 +114,6 @@ impl NiriBackend {
         // Shutdown write side to signal end of request
         let _ = stream.shutdown(std::net::Shutdown::Write);
 
-        // Read response
         let mut response = String::new();
         let mut reader = BufReader::new(stream);
         if let Err(e) = reader.read_line(&mut response) {

@@ -27,38 +27,25 @@ use super::{
 /// Default workspaces for Hyprland (dynamic workspaces, but we expose 1-10).
 const DEFAULT_WORKSPACE_COUNT: i32 = 10;
 
-/// Reconnect backoff constants (in milliseconds).
 const RECONNECT_INITIAL_MS: u64 = 1000;
 const RECONNECT_MAX_MS: u64 = 30000;
 const RECONNECT_MULTIPLIER: f64 = 1.5;
 
-/// Hyprland backend implementation using native socket IPC.
 pub struct HyprlandBackend {
-    /// Output allow-list (empty = all outputs).
     allowed_outputs: RwLock<Vec<String>>,
-    /// Whether the backend is running (shared with event thread).
     running: Arc<AtomicBool>,
-    /// Handle to the event loop thread.
     event_thread: Mutex<Option<JoinHandle<()>>>,
-    /// Socket paths (resolved from environment).
     socket_path: RwLock<Option<String>>,
     event_socket_path: RwLock<Option<String>>,
-    /// Current workspace snapshot.
     workspace_snapshot: RwLock<WorkspaceSnapshot>,
-    /// Current focused window.
     focused_window: RwLock<Option<WindowInfo>>,
-    /// Static workspace metadata.
     workspaces: RwLock<Vec<WorkspaceMeta>>,
-    /// Callbacks.
     callbacks: Mutex<Option<(WorkspaceCallback, WindowCallback)>>,
-    /// Per-monitor active workspace tracking (monitor_name -> active_workspace_id).
     monitor_workspaces: RwLock<HashMap<String, i32>>,
-    /// Currently focused monitor name.
     focused_monitor: RwLock<Option<String>>,
 }
 
 impl HyprlandBackend {
-    /// Create a new Hyprland backend.
     pub fn new(outputs: Option<Vec<String>>) -> Self {
         // Pre-generate workspace metadata (Hyprland uses dynamic workspaces,
         // but we expose 1-10 for consistent UI)
@@ -121,7 +108,6 @@ impl HyprlandBackend {
             }
         };
 
-        // Set timeout
         let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
         let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
 

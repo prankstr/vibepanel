@@ -1,38 +1,11 @@
 //! Layer shell popover infrastructure for widget menus.
 //!
-//! This module provides a unified approach to creating popup menus that:
-//! - Use layer-shell surfaces for proper keyboard focus and focus return
-//! - Have click-catcher overlays for click-outside-to-close behavior
-//! - Handle ESC key to close
-//! - Support seamless transitions between menus
+//! Provides two levels of abstraction:
 //!
-//! # Architecture
+//! 1. **Helper functions** - Low-level utilities for layer-shell surfaces
+//!    that need click-catcher or focus handling.
 //!
-//! The module provides two levels of abstraction:
-//!
-//! 1. **Helper functions** - Low-level utilities that can be used by any layer-shell
-//!    surface (like Quick Settings) that needs click-catcher or focus handling.
-//!
-//! 2. **`LayerShellPopover`** - A complete popover solution for simple widget menus
-//!    that handles window creation, positioning, click-catcher, and lifecycle.
-//!
-//! # Usage
-//!
-//! For simple widget menus, use `LayerShellPopover`:
-//!
-//! ```ignore
-//! let popover = LayerShellPopover::new(app, "clock", move || {
-//!     build_calendar_content()
-//! });
-//! popover.show_at(anchor_x, Some(monitor));
-//! ```
-//!
-//! For complex surfaces like Quick Settings, use the helper functions directly:
-//!
-//! ```ignore
-//! let catcher = create_click_catcher(app, bar_zone, || { qs.hide_panel(); });
-//! setup_esc_handler(&window, || { qs.hide_panel(); });
-//! ```
+//! 2. **`LayerShellPopover`** - Complete popover solution for simple widget menus.
 
 use gtk4::gdk::{self, Monitor};
 use gtk4::glib::{self, ControlFlow, Propagation};
@@ -49,40 +22,19 @@ use crate::services::config_manager::ConfigManager;
 use crate::services::surfaces::SurfaceStyleManager;
 use crate::styles::{class, surface};
 
-// =============================================================================
-// Constants
-// =============================================================================
-
 /// Margin around popover content for shadow rendering space.
 ///
 /// GTK4 box-shadows extend beyond the widget bounds, so we need extra margin
-/// on the outer container to prevent shadow clipping. 8px provides adequate
-/// space for typical shadow configurations (2-4px blur with offset).
+/// on the outer container to prevent shadow clipping.
 const POPOVER_SHADOW_MARGIN: i32 = 8;
 
 /// Minimum margin from screen edge for popovers.
-///
-/// Prevents popovers from being flush against screen edges, which can look
-/// visually awkward and may interfere with edge-triggered compositor gestures.
 const POPOVER_MIN_EDGE_MARGIN: i32 = 4;
 
 /// Estimated popover width when actual width not yet available.
-///
-/// Used for initial positioning calculations before the window is fully laid out.
-/// Based on Quick Settings width as a reasonable default for most popovers.
-/// If the actual width differs significantly, positioning is corrected after
-/// the window is realized.
 const POPOVER_DEFAULT_WIDTH_ESTIMATE: i32 = 320;
 
-/// Threshold for considering a window width valid (vs. not yet laid out).
-///
-/// Windows report very small widths before GTK completes layout. This threshold
-/// helps distinguish between "not yet laid out" and "intentionally small".
 const POPOVER_MIN_VALID_WIDTH: i32 = 20;
-
-// =============================================================================
-// Helper Functions - Shared Infrastructure
-// =============================================================================
 
 /// Calculate the top margin for a popover based on bar configuration.
 ///
@@ -266,39 +218,18 @@ where
     window.add_controller(key_controller);
 }
 
-// =============================================================================
-// LayerShellPopover - Complete Solution for Widget Menus
-// =============================================================================
-
 /// A layer-shell popover for widget menus.
 ///
-/// This provides a complete solution for simple widget menus with:
-/// - Layer-shell window for proper focus handling
-/// - Click-catcher for click-outside-to-close
-/// - ESC key handling
-/// - Smart positioning relative to the anchor widget
-/// - Seamless transitions to other bar widget menus
-///
-/// # Lifecycle
-///
-/// The popover creates fresh windows on each `show()` call and destroys them
-/// on `hide()`. This ensures clean state without remembered scroll positions
-/// or expanded sections.
+/// Creates fresh windows on each `show()` call and destroys them on `hide()`,
+/// ensuring clean state without remembered scroll positions or expanded sections.
 pub struct LayerShellPopover {
     app: Application,
-    /// Widget name for CSS class generation (e.g., "clock" -> "clock-popover")
     widget_name: String,
-    /// Content builder - called each time the popover is shown
     builder: Rc<dyn Fn() -> gtk4::Widget>,
-
-    /// Current window instance (if visible)
     window: RefCell<Option<ApplicationWindow>>,
-    /// Current click-catcher instance (if visible)
     click_catcher: RefCell<Option<ApplicationWindow>>,
-
     /// Anchor X coordinate (widget center) in monitor coordinates.
     anchor_x: Cell<i32>,
-    /// Target monitor for the popover.
     anchor_monitor: RefCell<Option<Monitor>>,
 }
 
@@ -516,19 +447,9 @@ impl LayerShellPopover {
     }
 }
 
-// =============================================================================
-// Dismissible Trait Implementation
-// =============================================================================
-
-/// Trait for surfaces that can be dismissed (closed).
-///
-/// This is implemented by both `LayerShellPopover` and Quick Settings to allow
-/// unified handling in `PopoverTracker`.
+/// Trait for surfaces that can be dismissed.
 pub trait Dismissible {
-    /// Dismiss (hide/close) the surface.
     fn dismiss(&self);
-
-    /// Check if the surface is currently visible.
     fn is_visible(&self) -> bool;
 }
 

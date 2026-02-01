@@ -42,27 +42,17 @@ thread_local! {
     static COMPOSITOR_MANAGER: RefCell<Option<Rc<CompositorManager>>> = const { RefCell::new(None) };
 }
 
-/// Shared compositor manager that owns the backend and dispatches to multiple listeners.
-///
-/// This is a GTK main-thread singleton that wraps the compositor backend and
-/// multiplexes its callbacks to multiple registered listeners.
+/// GTK main-thread singleton that multiplexes backend callbacks to listeners.
 pub struct CompositorManager {
-    /// The compositor backend (owned).
     backend: RefCell<Option<Box<dyn CompositorBackend>>>,
-    /// Registered workspace callbacks.
     workspace_callbacks: Callbacks<WorkspaceSnapshot>,
-    /// Registered window callbacks.
     window_callbacks: Callbacks<WindowInfo>,
-    /// Last known workspace snapshot (for new listeners).
     last_workspace_snapshot: RefCell<Option<WorkspaceSnapshot>>,
-    /// Last known window info (for new listeners).
     last_window_info: RefCell<Option<WindowInfo>>,
-    /// Whether the backend has been started.
     started: RefCell<bool>,
 }
 
 impl CompositorManager {
-    /// Create a new CompositorManager with the given advanced configuration.
     fn new(advanced_config: &AdvancedConfig) -> Rc<Self> {
         let manager = Rc::new(Self {
             backend: RefCell::new(None),
