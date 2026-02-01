@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0](https://github.com/prankstr/vibepanel/compare/v0.6.4...v0.7.0) (2026-02-01)
+
+
+### Features
+
+* add shadow to popovers and menus ([67d8945](https://github.com/prankstr/vibepanel/commit/67d8945b25d5b79f895ea69077a17ccfc7a60e15))
+* **bar:** add padding config for vertical widget breathing room ([f701eda](https://github.com/prankstr/vibepanel/commit/f701eda512bcf9671bcecc5d32cacd7ae18ca781))
+* **bar:** widgets now get a hover background in the bar, handles groups ([f41d296](https://github.com/prankstr/vibepanel/commit/f41d2969567f134eeaaccc41f302599054592449))
+* **vpn:** better support for password-protected VPN connections ([9c96e1c](https://github.com/prankstr/vibepanel/commit/9c96e1c0973f79dca571d37cf7f8f51d0c3d8fa8))
+* **widgets:** migrate bar widget gtk.popovers to layer-shell surfaces ([#35](https://github.com/prankstr/vibepanel/issues/35)) ([9c96e1c](https://github.com/prankstr/vibepanel/commit/9c96e1c0973f79dca571d37cf7f8f51d0c3d8fa8))
+
+
+### Bug Fixes
+
+* **bar:** round widget hover background equally on both sides ([85b1cf1](https://github.com/prankstr/vibepanel/commit/85b1cf1763c3edbd9ba0e5297eeb4320ff16d6c5))
+* **bluetooth:** dynamically discover adapter instead of hardcoding hci0 ([#36](https://github.com/prankstr/vibepanel/issues/36)) ([d3789d0](https://github.com/prankstr/vibepanel/commit/d3789d03bfe0cd5848f6cd81bb2d20c957165eb6))
+* **calender:** switch month even if current day is to high ([304bc80](https://github.com/prankstr/vibepanel/commit/304bc804df51b4bec2df495e6d587a7f23d4afe6))
+* **icons:** improve app icon matching with StartupWMClass ([7573f36](https://github.com/prankstr/vibepanel/commit/7573f364b2f0c53ed7ca3e6149b1bcc71e948642))
+* **niri:** better per-output window title tracking ([217ba03](https://github.com/prankstr/vibepanel/commit/217ba033dc75a84709e33b709f9881ae34e28db0))
+* open popovers with shadows close to widgets again ([e37119f](https://github.com/prankstr/vibepanel/commit/e37119f4b2db69c8177ccd8ad3570046a6c356a2))
+* popover_offset setting now hot reloads, no restart required ([95a6ab1](https://github.com/prankstr/vibepanel/commit/95a6ab1b75ffdf37fac4f96ebb8e26debebb0c94))
+* scale more elements with bar size for better density adaptation ([0f114cb](https://github.com/prankstr/vibepanel/commit/0f114cbd62663d13a827834fec5d317aac293410))
+* **theme:** default to system monospace font ([3d6cdf4](https://github.com/prankstr/vibepanel/commit/3d6cdf4ad34eef35a6335cf728fb414b3d5d30ef))
+* **theme:** mode gtk now uses correct accent ([f02c6ad](https://github.com/prankstr/vibepanel/commit/f02c6ad8313d8dadf86f58c1b56c4de106bc81fc))
+* **tooltip:** correct tooltip position for right-anchored windows ([0299a08](https://github.com/prankstr/vibepanel/commit/0299a0861fc17367387be2dc9a4886d730f107f9))
+
+
+### Miscellaneous
+
+* release 0.7.0 ([6ab2c37](https://github.com/prankstr/vibepanel/commit/6ab2c373fc49437299b48415b7e66380013b2f50))
+
 ## [0.6.4](https://github.com/prankstr/vibepanel/compare/v0.6.3...v0.6.4) (2026-01-26)
 
 
