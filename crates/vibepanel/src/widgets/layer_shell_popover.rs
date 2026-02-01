@@ -148,12 +148,12 @@ pub fn calculate_popover_right_margin(
 
 /// Get the appropriate keyboard mode for layer-shell popovers.
 ///
-/// - **Hyprland**: Uses `OnDemand` - Hyprland handles focus well and releases
-///   keyboard grab naturally when other windows are focused.
+/// - **Hyprland**: Uses `OnDemand` because `Exclusive` mode breaks input handling
+///   entirely (clicks don't work, can't interact with other surfaces).
 /// - **Other compositors**: Uses `Exclusive` to maintain keyboard focus after
 ///   workspace switches.
 pub fn popover_keyboard_mode() -> KeyboardMode {
-    if CompositorManager::global().supports_on_demand_keyboard() {
+    if CompositorManager::global().backend_name() == "Hyprland" {
         KeyboardMode::OnDemand
     } else {
         KeyboardMode::Exclusive

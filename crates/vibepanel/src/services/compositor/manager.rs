@@ -183,18 +183,13 @@ impl CompositorManager {
             backend.quit_compositor();
         }
     }
-    /// Check if the compositor supports on-demand keyboard mode for layer-shell surfaces.
-    ///
-    /// Delegates to the backend's `supports_on_demand_keyboard()` method.
-    /// When true, layer-shell surfaces can use `KeyboardMode::OnDemand` and the
-    /// compositor will handle focus transitions naturally. When false, surfaces
-    /// should use `KeyboardMode::Exclusive` to maintain proper focus after
-    /// workspace switches.
-    pub fn supports_on_demand_keyboard(&self) -> bool {
+
+    /// Get the backend name (e.g., "Hyprland", "Niri", "MangoWC").
+    pub fn backend_name(&self) -> &'static str {
         if let Some(ref backend) = *self.backend.borrow() {
-            backend.supports_on_demand_keyboard()
+            backend.name()
         } else {
-            false // Conservative default
+            "unknown"
         }
     }
 

@@ -757,13 +757,6 @@ impl CompositorBackend for HyprlandBackend {
         let _ = self.send_command("dispatch exit");
     }
 
-    fn supports_on_demand_keyboard(&self) -> bool {
-        // Hyprland handles on-demand keyboard mode well, allowing layer-shell
-        // surfaces to receive keyboard focus naturally without issues after
-        // workspace switches.
-        true
-    }
-
     fn name(&self) -> &'static str {
         "Hyprland"
     }
