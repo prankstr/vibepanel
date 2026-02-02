@@ -58,6 +58,7 @@ where
     player_btn.set_focusable(false);
     player_btn.set_focus_on_click(false);
     player_btn.set_valign(Align::Center);
+    player_btn.add_css_class(surface::POPOVER_ICON_BTN);
     player_btn.add_css_class(media::PLAYER_SELECTOR_BTN);
 
     let player_icon = icons.create_icon("audio-speakers", &[icon::ICON]);
@@ -77,6 +78,7 @@ where
     popout_btn.set_focusable(false);
     popout_btn.set_focus_on_click(false);
     popout_btn.set_valign(Align::Center);
+    popout_btn.add_css_class(surface::POPOVER_ICON_BTN);
     popout_btn.add_css_class(media::POPOUT_BTN);
 
     let popout_icon = icons.create_icon("open_in_new", &[icon::ICON, media::POPOUT_ICON]);

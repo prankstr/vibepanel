@@ -68,31 +68,17 @@ pub fn css() -> &'static str {
     margin-bottom: 8px;
 }
 
-/* Shared styling for popover header buttons */
+/* Override base popover icon button size for denser media layout */
 .media-popout-btn,
 .media-player-selector-btn {
-    background: transparent;
-    border: none;
-    box-shadow: none;
-    min-width: 24px;
-    min-height: 24px;
-    padding: 0;
-    border-radius: var(--radius-widget);
-    color: var(--color-foreground-primary);
+    min-width: 20px;
+    min-height: 20px;
+    margin-top: 0;
 }
 
+/* open_in_new glyph sits slightly high; nudge down for visual centering */
 .media-popout-btn .icon-root {
     margin-top: 2px;
-}
-
-.media-popout-btn:hover,
-.media-player-selector-btn:hover {
-    background: var(--color-card-overlay-hover);
-}
-
-.media-popout-btn:active,
-.media-player-selector-btn:active {
-    opacity: 0.7;
 }
 
 /* Player selector menu - extends qs-row-menu-content */
