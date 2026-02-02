@@ -952,6 +952,9 @@ pub mod media {
     /// Media popover (`.media-popover`).
     pub const POPOVER: &str = "media-popover";
 
+    /// Media popover header row (`.media-popover-header`).
+    pub const HEADER: &str = "media-popover-header";
+
     /// Pop-out button in popover (`.media-popout-btn`).
     pub const POPOUT_BTN: &str = "media-popout-btn";
 

@@ -1,7 +1,7 @@
 //! Media popover - detailed media player controls and track information.
 
 use gtk4::prelude::*;
-use gtk4::{Align, Box as GtkBox, Button, Label, Orientation, Overlay, Popover, Widget};
+use gtk4::{Align, Box as GtkBox, Button, Label, Orientation, Popover, Widget};
 
 use crate::services::icons::IconsService;
 use crate::services::media::{MediaService, PlaybackStatus};
@@ -29,53 +29,35 @@ where
     let snapshot = media_service.snapshot();
     let icons = IconsService::global();
 
-    let container = GtkBox::new(Orientation::Vertical, 8);
+    // Root container
+    let root = GtkBox::new(Orientation::Vertical, 8);
+    root.add_css_class(media::POPOVER);
 
-    let content_row = GtkBox::new(Orientation::Horizontal, 12);
-    content_row.add_css_class(media::CONTENT);
+    // Main row: album art | info section
+    let main_row = GtkBox::new(Orientation::Horizontal, 12);
 
     // Album art
     let (art_container, art_picture, art_placeholder_box, art_state) =
         build_album_art(POPOVER_ART_SIZE);
-    content_row.append(&art_container);
+    art_container.set_valign(Align::Start);
+    main_row.append(&art_container);
 
-    // Info section
+    // Info section - stretches to album art height
     let info_section = GtkBox::new(Orientation::Vertical, 0);
-    info_section.set_valign(Align::End);
-    info_section.set_margin_start(12);
+    info_section.set_hexpand(true);
 
-    let (track_info_container, title_label, artist_label, album_label) = build_track_info(18, 4);
-    track_info_container.set_margin_bottom(16);
-    info_section.append(&track_info_container);
-
-    let (controls_container, prev_btn, play_pause_btn, play_pause_icon, next_btn) =
-        build_media_controls(&[]);
-    info_section.append(&controls_container);
-
-    content_row.append(&info_section);
-    container.append(&content_row);
-
-    // Seek section
-    let (seek_container, seek_scale, position_label, duration_label, is_seeking) =
-        build_seek_section(&[]);
-    container.append(&seek_container);
-
-    // Overlay with header buttons
-    let overlay = Overlay::new();
-    overlay.add_css_class(media::POPOVER);
-    overlay.set_child(Some(&container));
-
-    // Header buttons container (player selector + popout)
-    let header_btns = GtkBox::new(Orientation::Horizontal, 0);
-    header_btns.set_halign(Align::End);
-    header_btns.set_valign(Align::Start);
+    // Buttons row at the top, right-aligned
+    let buttons_row = GtkBox::new(Orientation::Horizontal, 4);
+    buttons_row.set_halign(Align::End);
+    buttons_row.set_valign(Align::Start);
+    buttons_row.add_css_class(media::HEADER);
 
     // Player selector button
     let player_btn = Button::new();
     player_btn.set_has_frame(false);
     player_btn.set_focusable(false);
     player_btn.set_focus_on_click(false);
-    player_btn.add_css_class(surface::POPOVER_ICON_BTN);
+    player_btn.set_valign(Align::Center);
     player_btn.add_css_class(media::PLAYER_SELECTOR_BTN);
 
     let player_icon = icons.create_icon("audio-speakers", &[icon::ICON]);
@@ -87,14 +69,14 @@ where
     player_btn.connect_clicked(|btn| {
         show_player_menu(btn);
     });
-    header_btns.append(&player_btn);
+    buttons_row.append(&player_btn);
 
     // Pop-out button
     let popout_btn = Button::new();
     popout_btn.set_has_frame(false);
     popout_btn.set_focusable(false);
     popout_btn.set_focus_on_click(false);
-    popout_btn.add_css_class(surface::POPOVER_ICON_BTN);
+    popout_btn.set_valign(Align::Center);
     popout_btn.add_css_class(media::POPOUT_BTN);
 
     let popout_icon = icons.create_icon("open_in_new", &[icon::ICON, media::POPOUT_ICON]);
@@ -104,9 +86,30 @@ where
 
     TooltipManager::global().set_styled_tooltip(&popout_btn, "Pop out");
     popout_btn.connect_clicked(move |_| on_popout());
-    header_btns.append(&popout_btn);
+    buttons_row.append(&popout_btn);
 
-    overlay.add_overlay(&header_btns);
+    info_section.append(&buttons_row);
+
+    // Track info
+    let (track_info_container, title_label, artist_label, album_label) = build_track_info(18, 4);
+    info_section.append(&track_info_container);
+
+    // Spacer to push controls to bottom
+    let info_spacer = GtkBox::new(Orientation::Vertical, 0);
+    info_spacer.set_vexpand(true);
+    info_section.append(&info_spacer);
+
+    let (controls_container, prev_btn, play_pause_btn, play_pause_icon, next_btn) =
+        build_media_controls(&[]);
+    info_section.append(&controls_container);
+
+    main_row.append(&info_section);
+    root.append(&main_row);
+
+    // Seek section
+    let (seek_container, seek_scale, position_label, duration_label, is_seeking) =
+        build_seek_section(&[]);
+    root.append(&seek_container);
 
     let controller = MediaPopoverController {
         title_label,
@@ -127,7 +130,7 @@ where
 
     controller.update_from_snapshot(&snapshot);
 
-    (overlay.upcast::<Widget>(), controller)
+    (root.upcast::<Widget>(), controller)
 }
 
 /// Show the player selector menu.

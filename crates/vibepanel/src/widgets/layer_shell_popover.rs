@@ -347,8 +347,6 @@ impl LayerShellPopover {
 
         // CSS classes
         window.add_css_class(surface::LAYER_SHELL_POPOVER);
-        let popover_class = format!("{}-popover", self.widget_name);
-        window.add_css_class(&popover_class);
 
         // Layer shell configuration.
         // Use Top layer (not Overlay) to avoid appearing on top of fullscreen apps.
@@ -364,6 +362,7 @@ impl LayerShellPopover {
         // Build content
         let content = (self.builder)();
         content.add_css_class(surface::POPOVER);
+        let popover_class = format!("{}-popover", self.widget_name);
         content.add_css_class(&popover_class);
 
         // Wrap in container with margins for shadow space

@@ -61,22 +61,38 @@ pub fn css() -> &'static str {
     min-width: 340px;
 }
 
-/* Popout button */
-.media-popout-btn {
-    min-width: 24px;
-    min-height: 24px;
-    padding: 0px;
+/* Popover header buttons row */
+.media-popover-header {
     margin-top: -8px;
     margin-right: -8px;
+    margin-bottom: 8px;
 }
 
-/* Player selector button */
+/* Shared styling for popover header buttons */
+.media-popout-btn,
 .media-player-selector-btn {
+    background: transparent;
+    border: none;
+    box-shadow: none;
     min-width: 24px;
     min-height: 24px;
-    padding: 0px;
-    margin-top: -8px;
-    margin-right: 4px;
+    padding: 0;
+    border-radius: var(--radius-widget);
+    color: var(--color-foreground-primary);
+}
+
+.media-popout-btn .icon-root {
+    margin-top: 2px;
+}
+
+.media-popout-btn:hover,
+.media-player-selector-btn:hover {
+    background: var(--color-card-overlay-hover);
+}
+
+.media-popout-btn:active,
+.media-player-selector-btn:active {
+    opacity: 0.7;
 }
 
 /* Player selector menu - extends qs-row-menu-content */
