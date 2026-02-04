@@ -19,7 +19,9 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -143,31 +145,88 @@ impl AudioSnapshot {
 }
 
 /// Commands sent from the main thread to the Pulse worker thread.
+///
+/// These commands are processed asynchronously by the PulseAudio worker thread.
+/// Volume operations are clamped to [0, 150] before being sent.
 #[derive(Debug)]
 enum AudioCommand {
-    /// Set volume as a percentage (0–150).
+    /// Set volume to an absolute percentage (0–150).
+    ///
+    /// Values are clamped to [0, 150] before sending. Values above 100 represent
+    /// overdrive/amplification. The command is silently ignored if no default
+    /// sink is available or if the sink's control is unavailable (e.g., 0 channels).
     SetVolume(u32),
-    /// Set volume relative to current (e.g., +5 or -5).
+
+    /// Adjust volume relative to the current level.
+    ///
+    /// The delta is added to the current volume percentage. The result is clamped
+    /// to [0, 150]. Positive values increase volume, negative values decrease it.
+    /// Example: `SetVolumeRelative(-5)` decreases volume by 5 percentage points.
     SetVolumeRelative(i32),
-    /// Set mute state for the default sink.
+
+    /// Set the mute state for the default audio output sink.
+    ///
+    /// Pass `true` to mute, `false` to unmute. The UI is notified immediately
+    /// for responsiveness, before the PulseAudio operation completes.
     SetMuted(bool),
-    /// Toggle mute state for the default sink.
+
+    /// Toggle the mute state for the default audio output sink.
+    ///
+    /// If currently muted, unmutes; if currently unmuted, mutes.
+    /// The UI is notified immediately for responsiveness.
     ToggleMute,
-    /// Set mic volume as a percentage (0–150).
+
+    /// Set microphone volume to an absolute percentage (0–150).
+    ///
+    /// Values are clamped to [0, 150] before sending. Silently ignored if
+    /// no default source is available or if mic control is unavailable.
     SetMicVolume(u32),
-    /// Set mute state for the default source (mic).
+
+    /// Set the mute state for the default audio input source (microphone).
+    ///
+    /// Pass `true` to mute, `false` to unmute. The UI is notified immediately
+    /// for responsiveness, before the PulseAudio operation completes.
     SetMicMuted(bool),
-    /// Toggle mute state for the default source (mic).
+
+    /// Toggle the mute state for the default audio input source (microphone).
+    ///
+    /// If currently muted, unmutes; if currently unmuted, mutes.
     ToggleMicMute,
-    /// Set the default sink by name.
+
+    /// Set the default audio output sink by its PulseAudio name.
+    ///
+    /// The name should match the `name` field from `SinkInfoSnapshot`.
+    /// A server event will trigger a full state refresh after the change.
     SetDefaultSink(String),
-    /// Set the default source by name.
+
+    /// Set the default audio input source by its PulseAudio name.
+    ///
+    /// The name should match the `name` field from `SourceInfoSnapshot`.
+    /// A server event will trigger a full state refresh after the change.
     SetDefaultSource(String),
-    /// Request a full state refresh.
+
+    /// Request a full state refresh from PulseAudio.
+    ///
+    /// Fetches server info, sink list, source list, and default device details.
+    /// Useful for recovering from missed events or forcing a sync.
     Refresh,
-    /// Record an externally-requested volume change (for behavioral detection).
+
+    /// Record that an external tool requested a volume change.
+    ///
+    /// This is used for behavioral detection: when volume changes are made
+    /// via external tools (e.g., `pactl`, `wpctl`, WM keybinds) that bypass
+    /// the AudioService, we track the "expected" value so the behavioral
+    /// heuristic can detect if the backend is ignoring changes.
+    ///
+    /// The OSD IPC handler calls this when receiving volume messages from
+    /// external sources. Does not actually change volume—the external tool
+    /// already did that.
     NoteExternalVolumeRequest(u32),
-    /// Shut down the worker thread.
+
+    /// Shut down the worker thread gracefully.
+    ///
+    /// Disconnects from PulseAudio and exits the worker loop. Called when
+    /// `AudioService` is dropped.
     Shutdown,
 }
 
@@ -452,46 +511,143 @@ impl Drop for AudioService {
     }
 }
 
-/// Internal state for the Pulse worker thread.
+/// Internal state for the PulseAudio worker thread.
+///
+/// This state is shared between the worker thread and PulseAudio callbacks
+/// via `Arc<Mutex<PulseWorkerState>>`. All fields are updated asynchronously
+/// from PulseAudio events and polled by the main thread when building
+/// `AudioStateUpdate` snapshots.
+///
+/// # Field Groups
+///
+/// The fields are organized into logical groups:
+/// - **Sink (output) state**: volume, muted, sinks, default_sink_*, channel_count, control_available
+/// - **Source (input) state**: mic_*, sources, default_source_*, mic_channel_count, mic_control_available  
+/// - **Connection state**: available
+/// - **Behavioral detection**: last_volume_request, stuck_attempts
 #[derive(Default)]
 struct PulseWorkerState {
-    /// Current volume percentage.
+    // ===== Sink (Output Device) State =====
+
+    /// Current volume of the default sink as a percentage (0–150).
+    ///
+    /// Values above 100 represent overdrive/amplification. Updated whenever
+    /// we receive sink info from PulseAudio. Not updated if the sink reports
+    /// invalid volume data (e.g., 0 channels during startup).
     volume: u32,
-    /// Whether the default sink is muted.
+
+    /// Whether the default audio output sink is currently muted.
+    ///
+    /// This is independent of volume—a sink can be muted at any volume level.
     muted: bool,
-    /// Whether the default source is muted.
-    mic_muted: Option<bool>,
-    /// Current mic volume percentage.
-    mic_volume: Option<u32>,
-    /// List of available sinks.
+
+    /// All available audio output sinks discovered from PulseAudio.
+    ///
+    /// Updated whenever sinks are added, removed, or their properties change.
+    /// Each entry contains the sink name, description, and default status.
     sinks: Vec<SinkInfoSnapshot>,
-    /// Name of the current default sink.
+
+    /// The PulseAudio name of the current default audio output sink.
+    ///
+    /// This is the internal identifier used by PulseAudio (e.g., "alsa_output.pci-0000_00_1f.3.analog-stereo").
+    /// Used to match sink info updates and to set the default sink.
     default_sink_name: Option<String>,
-    /// Index of the current default sink.
+
+    /// The PulseAudio index of the current default audio output sink.
+    ///
+    /// Used for efficient lookups when setting volume/mute by index rather than name.
+    /// May be `None` briefly during startup before sink info is received.
     default_sink_index: Option<u32>,
-    /// List of available sources.
-    sources: Vec<SourceInfoSnapshot>,
-    /// Name of the current default source.
-    default_source_name: Option<String>,
-    /// Index of the current default source.
-    default_source_index: Option<u32>,
-    /// Whether we're connected.
-    available: bool,
-    /// Number of channels in the default sink (0 = invalid/not yet active).
+
+    /// Number of audio channels in the default sink's volume structure.
+    ///
+    /// Typically 2 for stereo, but varies by device. A value of 0 indicates
+    /// the sink is not yet active or has invalid audio specs (common on Asahi
+    /// Linux before audio is first played). Volume operations are blocked when
+    /// this is 0 to prevent PulseAudio assertion failures.
     channel_count: u8,
-    /// Number of channels in the default source (0 = invalid/not yet active).
-    mic_channel_count: u8,
-    /// Whether volume control is currently available.
+
+    /// Whether volume control operations are safe to perform on the default sink.
+    ///
+    /// This is `false` when:
+    /// - `channel_count` is 0
+    /// - Volume/channel_map/sample_spec validation fails
+    /// - Behavioral detection indicates the backend is ignoring volume changes
+    ///
+    /// When `false`, volume operations are silently skipped to avoid crashes
+    /// or user-visible errors.
     control_available: bool,
-    /// Whether mic control is currently available.
+
+    // ===== Source (Input Device / Microphone) State =====
+
+    /// Whether the default audio input source (microphone) is muted.
+    ///
+    /// `None` if we haven't yet received source info from PulseAudio.
+    /// Once set, remains `Some` for the session lifetime.
+    mic_muted: Option<bool>,
+
+    /// Current volume of the default source (microphone) as a percentage (0–150).
+    ///
+    /// `None` if we haven't yet received source info. Values above 100
+    /// represent gain/amplification.
+    mic_volume: Option<u32>,
+
+    /// All available audio input sources (microphones) discovered from PulseAudio.
+    ///
+    /// Monitor sources (which mirror output audio) are filtered out since
+    /// they're not useful as microphone inputs for most users.
+    sources: Vec<SourceInfoSnapshot>,
+
+    /// The PulseAudio name of the current default audio input source.
+    ///
+    /// Used to identify the active microphone device.
+    default_source_name: Option<String>,
+
+    /// The PulseAudio index of the current default audio input source.
+    ///
+    /// Used for efficient lookups when setting mic volume/mute.
+    default_source_index: Option<u32>,
+
+    /// Number of audio channels in the default source's volume structure.
+    ///
+    /// Typically 1 for mono microphones. A value of 0 indicates the source
+    /// is not yet active. Mic volume operations are blocked when this is 0.
+    mic_channel_count: u8,
+
+    /// Whether mic volume control operations are safe to perform.
+    ///
+    /// Similar to `control_available` but for the default source.
     mic_control_available: bool,
-    /// Last volume percentage we attempted to set (for behavioral detection).
-    /// `None` if we haven't tried to set volume yet.
+
+    // ===== Connection State =====
+
+    /// Whether we have an active connection to the PulseAudio server.
+    ///
+    /// Set to `true` once we receive initial server info, `false` if the
+    /// connection is lost. Used by the UI to show connection status.
+    available: bool,
+
+    // ===== Behavioral Detection State =====
+    // These fields detect when PulseAudio/PipeWire silently ignores volume
+    // changes, which happens on some systems (e.g., Asahi Linux with DSP
+    // filter chains) until audio is actively playing.
+
+    /// The last volume percentage we attempted to set.
+    ///
+    /// `None` if no volume change has been requested since startup or since
+    /// the last successful volume change was confirmed. Used to detect when
+    /// the backend ignores our volume requests.
     last_volume_request: Option<u32>,
-    /// Number of consecutive times the reported volume failed to track
-    /// our requested volume. Reset to 0 when volume changes are observed.
+
+    /// Counter for consecutive failed volume change attempts.
+    ///
+    /// Incremented when the reported volume doesn't change after we requested
+    /// a change. Reset to 0 when any volume change is observed (from us or
+    /// externally). When this reaches 2, `control_available` is set to `false`
+    /// indicating the backend is unresponsive to volume commands.
     stuck_attempts: u8,
 }
+
 
 /// Main function for the PulseAudio worker thread.
 fn pulse_worker_thread(command_rx: Receiver<AudioCommand>) {
@@ -532,7 +688,7 @@ fn pulse_worker_thread(command_rx: Receiver<AudioCommand>) {
     let state = Arc::new(Mutex::new(PulseWorkerState::default()));
 
     {
-        let mut ml = mainloop.lock().unwrap_or_else(|e| e.into_inner());
+        let mut ml = mainloop.lock();
         if ml.start().is_err() {
             error!("AudioService: failed to start PulseAudio mainloop");
             return;
@@ -540,10 +696,10 @@ fn pulse_worker_thread(command_rx: Receiver<AudioCommand>) {
     }
 
     {
-        let mut ml = mainloop.lock().unwrap_or_else(|e| e.into_inner());
+        let mut ml = mainloop.lock();
         ml.lock();
 
-        let mut ctx = context.lock().unwrap_or_else(|e| e.into_inner());
+        let mut ctx = context.lock();
         if ctx.connect(None, ContextFlagSet::NOFLAGS, None).is_err() {
             error!("AudioService: failed to connect to PulseAudio server");
             ml.unlock();
@@ -556,9 +712,9 @@ fn pulse_worker_thread(command_rx: Receiver<AudioCommand>) {
     // Wait for the context to be ready.
     loop {
         let ctx_state = {
-            let mut ml = mainloop.lock().unwrap_or_else(|e| e.into_inner());
+            let mut ml = mainloop.lock();
             ml.lock();
-            let ctx = context.lock().unwrap_or_else(|e| e.into_inner());
+            let ctx = context.lock();
             let s = ctx.get_state();
             ml.unlock();
             s
@@ -620,9 +776,9 @@ fn pulse_worker_thread(command_rx: Receiver<AudioCommand>) {
     }
 
     {
-        let mut ml = mainloop.lock().unwrap_or_else(|e| e.into_inner());
+        let mut ml = mainloop.lock();
         ml.lock();
-        let mut ctx = context.lock().unwrap_or_else(|e| e.into_inner());
+        let mut ctx = context.lock();
         ctx.disconnect();
         ml.unlock();
         ml.stop();
@@ -636,10 +792,10 @@ fn setup_subscriptions(
     context: Arc<Mutex<Context>>,
     state: Arc<Mutex<PulseWorkerState>>,
 ) {
-    let mut ml = mainloop.lock().unwrap_or_else(|e| e.into_inner());
+    let mut ml = mainloop.lock();
     ml.lock();
 
-    let mut ctx = context.lock().unwrap_or_else(|e| e.into_inner());
+    let mut ctx = context.lock();
 
     // Set up the subscription callback.
     let state_for_cb = Arc::clone(&state);
@@ -713,7 +869,7 @@ fn handle_command(
             );
         }
         AudioCommand::SetVolumeRelative(delta) => {
-            let current = state.lock().unwrap_or_else(|e| e.into_inner()).volume;
+            let current = state.lock().volume;
             let new_volume = (current as i32 + delta).clamp(0, 150) as u32;
             set_sink_volume(
                 Arc::clone(&mainloop),
@@ -731,7 +887,7 @@ fn handle_command(
             );
         }
         AudioCommand::ToggleMute => {
-            let current_muted = state.lock().unwrap_or_else(|e| e.into_inner()).muted;
+            let current_muted = state.lock().muted;
             set_sink_mute(
                 Arc::clone(&mainloop),
                 Arc::clone(&context),
@@ -750,7 +906,6 @@ fn handle_command(
         AudioCommand::ToggleMicMute => {
             let current_muted = state
                 .lock()
-                .unwrap_or_else(|e| e.into_inner())
                 .mic_muted
                 .unwrap_or(false);
             set_source_mute(
@@ -783,7 +938,7 @@ fn handle_command(
             // Record the externally-requested volume for behavioral detection.
             // Don't actually send a PA command - the external tool already did that.
             {
-                let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
+                let mut st = state.lock();
                 st.last_volume_request = Some(percent);
                 debug!(
                     "AudioService: noted external volume request {}% (for behavioral detection)",
@@ -810,10 +965,10 @@ fn fetch_full_state(
     state: Arc<Mutex<PulseWorkerState>>,
 ) {
     // First, get server info to find the default sink/source names.
-    let mut ml = mainloop.lock().unwrap_or_else(|e| e.into_inner());
+    let mut ml = mainloop.lock();
     ml.lock();
 
-    let ctx = context.lock().unwrap_or_else(|e| e.into_inner());
+    let ctx = context.lock();
     let introspect = ctx.introspect();
 
     let state_for_cb = Arc::clone(&state);
@@ -826,7 +981,7 @@ fn fetch_full_state(
     introspect.get_server_info(move |info| {
         // Ensure we only process once.
         {
-            let mut c = called.lock().unwrap_or_else(|e| e.into_inner());
+            let mut c = called.lock();
             if *c {
                 return;
             }
@@ -837,7 +992,7 @@ fn fetch_full_state(
         let default_source_name = info.default_source_name.as_ref().map(|s| s.to_string());
 
         {
-            let mut st = state_for_cb.lock().unwrap_or_else(|e| e.into_inner());
+            let mut st = state_for_cb.lock();
             st.default_sink_name = default_sink_name.clone();
             st.available = true;
         }
@@ -874,7 +1029,7 @@ fn fetch_full_state_from_callback(
     context: Arc<Mutex<Context>>,
     state: Arc<Mutex<PulseWorkerState>>,
 ) {
-    let ctx = context.lock().unwrap_or_else(|e| e.into_inner());
+    let ctx = context.lock();
     let introspect = ctx.introspect();
 
     let state_for_cb = Arc::clone(&state);
@@ -886,7 +1041,7 @@ fn fetch_full_state_from_callback(
     introspect.get_server_info(move |info| {
         // Ensure we only process once.
         {
-            let mut c = called.lock().unwrap_or_else(|e| e.into_inner());
+            let mut c = called.lock();
             if *c {
                 return;
             }
@@ -897,7 +1052,7 @@ fn fetch_full_state_from_callback(
         let default_source_name = info.default_source_name.as_ref().map(|s| s.to_string());
 
         {
-            let mut st = state_for_cb.lock().unwrap_or_else(|e| e.into_inner());
+            let mut st = state_for_cb.lock();
             st.default_sink_name = default_sink_name.clone();
             st.available = true;
         }
@@ -929,7 +1084,7 @@ fn fetch_full_state_from_callback(
 
 /// Inner version called from within a callback (mainloop already locked).
 fn fetch_sinks_inner(context: Arc<Mutex<Context>>, state: Arc<Mutex<PulseWorkerState>>) {
-    let ctx = context.lock().unwrap_or_else(|e| e.into_inner());
+    let ctx = context.lock();
     let introspect = ctx.introspect();
 
     // Collect sinks in a temporary Vec.
@@ -953,7 +1108,6 @@ fn fetch_sinks_inner(context: Arc<Mutex<Context>>, state: Arc<Mutex<PulseWorkerS
 
                 let default_name = state_for_cb
                     .lock()
-                    .unwrap_or_else(|e| e.into_inner())
                     .default_sink_name
                     .clone();
                 let is_default = default_name.as_ref().map(|n| n == &name).unwrap_or(false);
@@ -969,7 +1123,6 @@ fn fetch_sinks_inner(context: Arc<Mutex<Context>>, state: Arc<Mutex<PulseWorkerS
 
                 collected_for_cb
                     .lock()
-                    .unwrap_or_else(|e| e.into_inner())
                     .push(SinkInfoSnapshot {
                         name,
                         description,
@@ -980,13 +1133,13 @@ fn fetch_sinks_inner(context: Arc<Mutex<Context>>, state: Arc<Mutex<PulseWorkerS
             ListResult::End => {
                 // All sinks collected; update state.
                 let sinks = std::mem::take(
-                    &mut *collected_for_cb.lock().unwrap_or_else(|e| e.into_inner()),
+                    &mut *collected_for_cb.lock(),
                 );
                 {
-                    let mut st = state_for_cb.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut st = state_for_cb.lock();
                     st.sinks = sinks;
                 }
-                send_state_update(&state_for_cb.lock().unwrap_or_else(|e| e.into_inner()));
+                send_state_update(&state_for_cb.lock());
             }
             ListResult::Error => {
                 warn!("AudioService: error fetching sink list");
@@ -1001,7 +1154,7 @@ fn fetch_sink_by_name_inner(
     state: Arc<Mutex<PulseWorkerState>>,
     name: &str,
 ) {
-    let ctx = context.lock().unwrap_or_else(|e| e.into_inner());
+    let ctx = context.lock();
     let introspect = ctx.introspect();
 
     let state_for_cb = Arc::clone(&state);
@@ -1009,7 +1162,7 @@ fn fetch_sink_by_name_inner(
     introspect.get_sink_info_by_name(name, move |result| {
         if let ListResult::Item(info) = result {
             update_sink_state(&state_for_cb, info);
-            send_state_update(&state_for_cb.lock().unwrap_or_else(|e| e.into_inner()));
+            send_state_update(&state_for_cb.lock());
         }
     });
 }
@@ -1022,7 +1175,6 @@ fn fetch_default_sink(
 ) {
     let sink_index = state
         .lock()
-        .unwrap_or_else(|e| e.into_inner())
         .default_sink_index;
 
     let Some(index) = sink_index else {
@@ -1030,10 +1182,10 @@ fn fetch_default_sink(
         return;
     };
 
-    let mut ml = mainloop.lock().unwrap_or_else(|e| e.into_inner());
+    let mut ml = mainloop.lock();
     ml.lock();
 
-    let ctx = context.lock().unwrap_or_else(|e| e.into_inner());
+    let ctx = context.lock();
     let introspect = ctx.introspect();
 
     let state_for_cb = Arc::clone(&state);
@@ -1041,7 +1193,7 @@ fn fetch_default_sink(
     introspect.get_sink_info_by_index(index, move |result| {
         if let ListResult::Item(info) = result {
             update_sink_state(&state_for_cb, info);
-            send_state_update(&state_for_cb.lock().unwrap_or_else(|e| e.into_inner()));
+            send_state_update(&state_for_cb.lock());
         }
     });
 
@@ -1054,7 +1206,7 @@ fn fetch_sink_by_index_from_callback(
     state: Arc<Mutex<PulseWorkerState>>,
     index: u32,
 ) {
-    let ctx = context.lock().unwrap_or_else(|e| e.into_inner());
+    let ctx = context.lock();
     let introspect = ctx.introspect();
 
     let state_for_cb = Arc::clone(&state);
@@ -1063,14 +1215,14 @@ fn fetch_sink_by_index_from_callback(
         if let ListResult::Item(info) = result {
             // Only update if this is the default sink.
             let is_default = {
-                let st = state_for_cb.lock().unwrap_or_else(|e| e.into_inner());
+                let st = state_for_cb.lock();
                 st.default_sink_index == Some(info.index)
                     || st.default_sink_name.as_deref() == info.name.as_ref().map(|s| s.as_ref())
             };
 
             if is_default {
                 update_sink_state(&state_for_cb, info);
-                send_state_update(&state_for_cb.lock().unwrap_or_else(|e| e.into_inner()));
+                send_state_update(&state_for_cb.lock());
             }
         }
     });
@@ -1081,7 +1233,7 @@ fn fetch_default_source_from_callback(
     context: Arc<Mutex<Context>>,
     state: Arc<Mutex<PulseWorkerState>>,
 ) {
-    let ctx = context.lock().unwrap_or_else(|e| e.into_inner());
+    let ctx = context.lock();
     let introspect = ctx.introspect();
 
     // First get server info to find the default source name.
@@ -1094,7 +1246,7 @@ fn fetch_default_source_from_callback(
     introspect.get_server_info(move |info| {
         // Ensure we only process once.
         {
-            let mut c = called.lock().unwrap_or_else(|e| e.into_inner());
+            let mut c = called.lock();
             if *c {
                 return;
             }
@@ -1104,14 +1256,14 @@ fn fetch_default_source_from_callback(
         let default_source_name = info.default_source_name.as_ref().map(|s| s.to_string());
 
         {
-            let mut st = state_for_cb.lock().unwrap_or_else(|e| e.into_inner());
+            let mut st = state_for_cb.lock();
             st.default_source_name = default_source_name.clone();
         }
 
         if let Some(source_name) = default_source_name {
             // We're inside a callback, so the mainloop is already locked.
             // Just get the context and call introspect directly.
-            let ctx2 = context_for_source.lock().unwrap_or_else(|e| e.into_inner());
+            let ctx2 = context_for_source.lock();
             let introspect2 = ctx2.introspect();
 
             let state_for_source = Arc::clone(&state_for_cb);
@@ -1119,7 +1271,7 @@ fn fetch_default_source_from_callback(
             introspect2.get_source_info_by_name(&source_name, move |result| {
                 if let ListResult::Item(info) = result {
                     update_source_state(&state_for_source, info);
-                    send_state_update(&state_for_source.lock().unwrap_or_else(|e| e.into_inner()));
+                    send_state_update(&state_for_source.lock());
                 }
             });
         }
@@ -1131,7 +1283,7 @@ fn fetch_default_source_from_callback(
 
 /// Inner version called from within a callback (mainloop already locked).
 fn fetch_sources_inner(context: Arc<Mutex<Context>>, state: Arc<Mutex<PulseWorkerState>>) {
-    let ctx = context.lock().unwrap_or_else(|e| e.into_inner());
+    let ctx = context.lock();
     let introspect = ctx.introspect();
 
     // Collect sources in a temporary Vec.
@@ -1160,7 +1312,6 @@ fn fetch_sources_inner(context: Arc<Mutex<Context>>, state: Arc<Mutex<PulseWorke
 
                 let default_name = state_for_cb
                     .lock()
-                    .unwrap_or_else(|e| e.into_inner())
                     .default_source_name
                     .clone();
                 let is_default = default_name.as_ref().map(|n| n == &name).unwrap_or(false);
@@ -1173,7 +1324,6 @@ fn fetch_sources_inner(context: Arc<Mutex<Context>>, state: Arc<Mutex<PulseWorke
 
                 collected_for_cb
                     .lock()
-                    .unwrap_or_else(|e| e.into_inner())
                     .push(SourceInfoSnapshot {
                         name,
                         description,
@@ -1184,13 +1334,13 @@ fn fetch_sources_inner(context: Arc<Mutex<Context>>, state: Arc<Mutex<PulseWorke
             ListResult::End => {
                 // All sources collected; update state.
                 let sources = std::mem::take(
-                    &mut *collected_for_cb.lock().unwrap_or_else(|e| e.into_inner()),
+                    &mut *collected_for_cb.lock(),
                 );
                 {
-                    let mut st = state_for_cb.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut st = state_for_cb.lock();
                     st.sources = sources;
                 }
-                send_state_update(&state_for_cb.lock().unwrap_or_else(|e| e.into_inner()));
+                send_state_update(&state_for_cb.lock());
             }
             ListResult::Error => {
                 warn!("AudioService: error fetching source list");
@@ -1204,7 +1354,7 @@ fn update_source_state(
     state: &Arc<Mutex<PulseWorkerState>>,
     info: &libpulse_binding::context::introspect::SourceInfo,
 ) {
-    let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
+    let mut st = state.lock();
 
     // Get channel count from the source's volume structure
     let channel_count = info.volume.len();
@@ -1241,7 +1391,7 @@ fn fetch_source_by_index_from_callback(
     state: Arc<Mutex<PulseWorkerState>>,
     index: u32,
 ) {
-    let ctx = context.lock().unwrap_or_else(|e| e.into_inner());
+    let ctx = context.lock();
     let introspect = ctx.introspect();
 
     let state_for_cb = Arc::clone(&state);
@@ -1250,21 +1400,21 @@ fn fetch_source_by_index_from_callback(
         if let ListResult::Item(info) = result {
             // Only update if this is the default source.
             let is_default = {
-                let st = state_for_cb.lock().unwrap_or_else(|e| e.into_inner());
+                let st = state_for_cb.lock();
                 st.default_source_index == Some(info.index)
                     || st.default_source_name.as_deref() == info.name.as_ref().map(|s| s.as_ref())
             };
 
             if is_default {
                 update_source_state(&state_for_cb, info);
-                send_state_update(&state_for_cb.lock().unwrap_or_else(|e| e.into_inner()));
+                send_state_update(&state_for_cb.lock());
             }
         }
     });
 }
 
 fn update_sink_state(state: &Arc<Mutex<PulseWorkerState>>, info: &SinkInfo) {
-    let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
+    let mut st = state.lock();
 
     // Get channel count from the sink's volume structure
     let channel_count = info.volume.len();
@@ -1392,7 +1542,7 @@ fn set_sink_volume(
     percent: u32,
 ) {
     let (sink_index, channel_count, control_available) = {
-        let st = state.lock().unwrap_or_else(|e| e.into_inner());
+        let st = state.lock();
         (
             st.default_sink_index,
             st.channel_count,
@@ -1417,10 +1567,10 @@ fn set_sink_volume(
         return;
     }
 
-    let mut ml = mainloop.lock().unwrap_or_else(|e| e.into_inner());
+    let mut ml = mainloop.lock();
     ml.lock();
 
-    let ctx = context.lock().unwrap_or_else(|e| e.into_inner());
+    let ctx = context.lock();
     let mut introspect = ctx.introspect();
 
     // Calculate the volume value.
@@ -1434,7 +1584,7 @@ fn set_sink_volume(
 
     // Update cached state immediately for responsiveness.
     {
-        let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut st = state.lock();
         st.volume = percent;
         st.last_volume_request = Some(percent); // Track for behavioral detection
     }
@@ -1450,7 +1600,6 @@ fn set_sink_mute(
 ) {
     let sink_index = match state
         .lock()
-        .unwrap_or_else(|e| e.into_inner())
         .default_sink_index
     {
         Some(idx) => idx,
@@ -1460,17 +1609,17 @@ fn set_sink_mute(
         }
     };
 
-    let mut ml = mainloop.lock().unwrap_or_else(|e| e.into_inner());
+    let mut ml = mainloop.lock();
     ml.lock();
 
-    let ctx = context.lock().unwrap_or_else(|e| e.into_inner());
+    let ctx = context.lock();
     let mut introspect = ctx.introspect();
 
     introspect.set_sink_mute_by_index(sink_index, muted, None);
 
     // Update cached state immediately for responsiveness.
     {
-        let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut st = state.lock();
         st.muted = muted;
     }
 
@@ -1478,7 +1627,7 @@ fn set_sink_mute(
 
     // Notify UI of the change immediately (don't wait for PA event)
     {
-        let st = state.lock().unwrap_or_else(|e| e.into_inner());
+        let st = state.lock();
         send_state_update(&st);
     }
 }
@@ -1491,7 +1640,6 @@ fn set_source_mute(
 ) {
     let source_index = match state
         .lock()
-        .unwrap_or_else(|e| e.into_inner())
         .default_source_index
     {
         Some(idx) => idx,
@@ -1501,17 +1649,17 @@ fn set_source_mute(
         }
     };
 
-    let mut ml = mainloop.lock().unwrap_or_else(|e| e.into_inner());
+    let mut ml = mainloop.lock();
     ml.lock();
 
-    let ctx = context.lock().unwrap_or_else(|e| e.into_inner());
+    let ctx = context.lock();
     let mut introspect = ctx.introspect();
 
     introspect.set_source_mute_by_index(source_index, muted, None);
 
     // Update cached state immediately for responsiveness.
     {
-        let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut st = state.lock();
         st.mic_muted = Some(muted);
     }
 
@@ -1519,7 +1667,7 @@ fn set_source_mute(
 
     // Notify UI of the change immediately (don't wait for PA event)
     {
-        let st = state.lock().unwrap_or_else(|e| e.into_inner());
+        let st = state.lock();
         send_state_update(&st);
     }
 }
@@ -1531,7 +1679,7 @@ fn set_source_volume(
     percent: u32,
 ) {
     let (source_index, channel_count, control_available) = {
-        let st = state.lock().unwrap_or_else(|e| e.into_inner());
+        let st = state.lock();
         (
             st.default_source_index,
             st.mic_channel_count,
@@ -1556,10 +1704,10 @@ fn set_source_volume(
         return;
     }
 
-    let mut ml = mainloop.lock().unwrap_or_else(|e| e.into_inner());
+    let mut ml = mainloop.lock();
     ml.lock();
 
-    let ctx = context.lock().unwrap_or_else(|e| e.into_inner());
+    let ctx = context.lock();
     let mut introspect = ctx.introspect();
 
     // Calculate the volume value.
@@ -1573,7 +1721,7 @@ fn set_source_volume(
 
     // Update cached state immediately for responsiveness.
     {
-        let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut st = state.lock();
         st.mic_volume = Some(percent);
     }
 
@@ -1581,20 +1729,20 @@ fn set_source_volume(
 }
 
 fn set_default_sink(mainloop: Arc<Mutex<Mainloop>>, context: Arc<Mutex<Context>>, name: &str) {
-    let mut ml = mainloop.lock().unwrap_or_else(|e| e.into_inner());
+    let mut ml = mainloop.lock();
     ml.lock();
 
-    let mut ctx = context.lock().unwrap_or_else(|e| e.into_inner());
+    let mut ctx = context.lock();
     ctx.set_default_sink(name, |_success| {});
 
     ml.unlock();
 }
 
 fn set_default_source(mainloop: Arc<Mutex<Mainloop>>, context: Arc<Mutex<Context>>, name: &str) {
-    let mut ml = mainloop.lock().unwrap_or_else(|e| e.into_inner());
+    let mut ml = mainloop.lock();
     ml.lock();
 
-    let mut ctx = context.lock().unwrap_or_else(|e| e.into_inner());
+    let mut ctx = context.lock();
     ctx.set_default_source(name, |_success| {});
 
     ml.unlock();
@@ -1832,13 +1980,13 @@ impl AudioCli {
         let introspect = self.context.introspect();
         introspect.get_server_info(move |info| {
             if let Some(name) = info.default_sink_name.as_ref() {
-                *result_clone.lock().unwrap_or_else(|e| e.into_inner()) = Some(name.to_string());
+                *result_clone.lock() = Some(name.to_string());
             }
-            *done_clone.lock().unwrap_or_else(|e| e.into_inner()) = true;
+            *done_clone.lock() = true;
         });
 
         // Iterate until done.
-        while !*done.lock().unwrap_or_else(|e| e.into_inner()) {
+        while !*done.lock() {
             match self.mainloop.iterate(true) {
                 IterateResult::Success(_) => {}
                 IterateResult::Quit(_) | IterateResult::Err(_) => return None,
@@ -1846,7 +1994,7 @@ impl AudioCli {
         }
 
         // Read result from shared state (don't use Arc::try_unwrap as callback may still be held).
-        result.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        result.lock().clone()
     }
 
     /// Fetch sink info by name.
@@ -1884,7 +2032,7 @@ impl AudioCli {
                 let available =
                     channel_count > 0 && volume_valid && channel_map_valid && sample_spec_valid;
 
-                let mut r = result_clone.lock().unwrap_or_else(|e| e.into_inner());
+                let mut r = result_clone.lock();
                 r.0 = Some(volume_percent);
                 r.1 = Some(info.mute);
                 r.2 = Some(info.index);
@@ -1895,12 +2043,12 @@ impl AudioCli {
                 list_result,
                 ListResult::End | ListResult::Error | ListResult::Item(_)
             ) {
-                *done_clone.lock().unwrap_or_else(|e| e.into_inner()) = true;
+                *done_clone.lock() = true;
             }
         });
 
         // Iterate until done.
-        while !*done.lock().unwrap_or_else(|e| e.into_inner()) {
+        while !*done.lock() {
             match self.mainloop.iterate(true) {
                 IterateResult::Success(_) => {}
                 IterateResult::Quit(_) | IterateResult::Err(_) => return,
@@ -1908,7 +2056,7 @@ impl AudioCli {
         }
 
         // Read results from the shared state.
-        let r = result.lock().unwrap_or_else(|e| e.into_inner());
+        let r = result.lock();
         if let Some(v) = r.0 {
             self.volume = v;
         }
