@@ -25,8 +25,10 @@ use super::ui_helpers::{
 };
 use super::window::current_quick_settings_window;
 use crate::services::icons::IconsService;
-use crate::services::network::{NetworkService, NetworkSnapshot, WifiNetwork};
 use crate::services::surfaces::SurfaceStyleManager;
+use crate::services::wifi::{
+    NetworkService, NetworkSnapshot, WifiConnectionState, WifiNetwork, WifiService, WifiSnapshot,
+};
 use crate::styles::{button, color, icon, qs, row, state, surface};
 use crate::widgets::base::configure_popover;
 
@@ -94,7 +96,7 @@ pub struct NetworkSubtitleResult {
 /// - "Ethernet" (wired only)
 /// - "SSID" (Wi-Fi only)
 /// - "Disconnected" / "Off"
-pub fn build_network_subtitle(snapshot: &NetworkSnapshot) -> NetworkSubtitleResult {
+pub fn build_network_subtitle(snapshot: &WifiSnapshot) -> NetworkSubtitleResult {
     use gtk4::pango::EllipsizeMode;
 
     let container = GtkBox::new(Orientation::Horizontal, 4);
@@ -125,31 +127,32 @@ pub fn build_network_subtitle(snapshot: &NetworkSnapshot) -> NetworkSubtitleResu
 /// - Disconnected (has Wi-Fi): "Disconnected"
 /// - Wi-Fi disabled: "Off"
 /// - Ethernet-only system, disconnected: "Disconnected"
-pub fn get_network_subtitle_text(snapshot: &NetworkSnapshot) -> String {
+pub fn get_network_subtitle_text(snapshot: &WifiSnapshot) -> String {
     // Service unavailable (e.g., NetworkManager not running)
-    if !snapshot.available {
+    if !snapshot.available() {
         return "Unavailable".to_string();
     }
 
-    let wifi_enabled = snapshot.wifi_enabled.unwrap_or(false);
-    let is_connecting = snapshot.connecting_ssid.is_some();
+    let wifi_enabled = snapshot.wifi_enabled().unwrap_or(false);
+    let is_connecting = snapshot.connection_state() == WifiConnectionState::Connecting;
 
-    match (snapshot.wired_connected, is_connecting, &snapshot.ssid) {
+    match (
+        snapshot.wired_connected(),
+        is_connecting,
+        &snapshot.active_ssid(),
+    ) {
         // Wired connected cases
         (true, true, _) => format!(
             "Ethernet \u{2022} Connecting to {}",
-            snapshot.connecting_ssid.as_ref().unwrap()
+            snapshot.active_ssid().as_ref().unwrap()
         ),
         (true, false, Some(ssid)) => format!("Ethernet \u{2022} {}", ssid),
         (true, false, None) => "Ethernet".to_string(),
 
         // Wi-Fi only cases
-        (false, true, _) => format!(
-            "Connecting to {}",
-            snapshot.connecting_ssid.as_ref().unwrap()
-        ),
-        (false, false, Some(ssid)) => ssid.clone(),
-        (false, false, None) if !snapshot.has_wifi_device => "Disconnected".to_string(),
+        (false, true, _) => format!("Connecting to {}", snapshot.active_ssid().as_ref().unwrap()),
+        (false, false, Some(ssid)) => ssid.to_string().clone(),
+        (false, false, None) if !snapshot.has_wifi_device() => "Disconnected".to_string(),
         (false, false, None) if wifi_enabled => "Disconnected".to_string(),
         (false, false, None) => "Off".to_string(),
     }
@@ -158,16 +161,16 @@ pub fn get_network_subtitle_text(snapshot: &NetworkSnapshot) -> String {
 /// Determine if the network subtitle should be styled as "active" (connected).
 ///
 /// Returns true when any network is connected and not in a connecting state.
-pub fn is_network_subtitle_active(snapshot: &NetworkSnapshot) -> bool {
-    let wifi_connected = snapshot.ssid.is_some();
-    let is_connecting = snapshot.connecting_ssid.is_some();
-    let any_connected = snapshot.wired_connected || wifi_connected;
+pub fn is_network_subtitle_active(snapshot: &WifiSnapshot) -> bool {
+    let state = snapshot.connection_state();
+    let is_connecting = state == WifiConnectionState::Connecting;
+    let any_connected = snapshot.wired_connected() || state == WifiConnectionState::Connected;
 
     any_connected && !is_connecting
 }
 
 /// Update the network subtitle label based on connection state.
-pub fn update_network_subtitle(label: &Label, snapshot: &NetworkSnapshot) {
+pub fn update_network_subtitle(label: &Label, snapshot: &WifiSnapshot) {
     label.set_label(&get_network_subtitle_text(snapshot));
 
     if is_network_subtitle_active(snapshot) {
@@ -289,7 +292,7 @@ pub fn build_wifi_details(
     let container = GtkBox::new(Orientation::Vertical, 0);
 
     // Get current network state for initial values
-    let snapshot = NetworkService::global().snapshot();
+    let snapshot = WifiService::global().snapshot();
 
     // Ethernet row (above Wi-Fi controls, shown only when connected)
     let ethernet_row = build_ethernet_row(&snapshot);
@@ -310,13 +313,13 @@ pub fn build_wifi_details(
     wifi_label.add_css_class(color::PRIMARY);
     wifi_label.add_css_class(qs::WIFI_SWITCH_LABEL);
     wifi_label.set_valign(gtk4::Align::Center);
-    wifi_label.set_visible(snapshot.has_ethernet_device);
+    wifi_label.set_visible(snapshot.has_ethernet_device());
     wifi_switch_row.append(&wifi_label);
 
     let wifi_switch = Switch::new();
     wifi_switch.set_valign(gtk4::Align::Center);
-    wifi_switch.set_active(snapshot.wifi_enabled.unwrap_or(false));
-    wifi_switch.set_visible(snapshot.has_ethernet_device);
+    wifi_switch.set_active(snapshot.wifi_enabled().unwrap_or(false));
+    wifi_switch.set_visible(snapshot.has_ethernet_device());
     wifi_switch_row.append(&wifi_switch);
 
     // Spacer to push scan button to the right
@@ -326,7 +329,7 @@ pub fn build_wifi_details(
 
     // Scan button (always visible)
     let scan_button = ScanButton::new(|| {
-        NetworkService::global().scan_networks();
+        WifiService::global().scan();
     });
     wifi_switch_row.append(scan_button.widget());
 
@@ -513,7 +516,7 @@ fn add_wifi_disabled_placeholder(list_box: &ListBox) {
 /// Build a standalone Ethernet section widget (not in a ListBox).
 /// Includes a header label and connection details row.
 /// Returns a GtkBox that can be shown/hidden based on connection state.
-fn build_ethernet_row(snapshot: &NetworkSnapshot) -> GtkBox {
+fn build_ethernet_row(snapshot: &WifiSnapshot) -> GtkBox {
     let icons = IconsService::global();
 
     // Main container for the entire Ethernet section
@@ -540,17 +543,16 @@ fn build_ethernet_row(snapshot: &NetworkSnapshot) -> GtkBox {
 
     // Get connection name for title, fallback to interface name, then generic
     let title = snapshot
-        .wired_name
-        .as_deref()
-        .or(snapshot.wired_iface.as_deref())
+        .wired_name()
+        .or(snapshot.wired_iface())
         .unwrap_or("Wired Connection");
 
     // Build subtitle extra parts: interface name, speed
     let mut extra_parts: Vec<String> = Vec::new();
-    if let Some(ref iface) = snapshot.wired_iface {
-        extra_parts.push(iface.clone());
+    if let Some(ref iface) = snapshot.wired_iface() {
+        extra_parts.push(iface.to_string());
     }
-    if let Some(speed) = snapshot.wired_speed {
+    if let Some(speed) = snapshot.wired_speed() {
         if speed >= 1000 {
             let gbps = speed as f64 / 1000.0;
             if gbps.fract() == 0.0 {
@@ -589,7 +591,7 @@ fn build_ethernet_row(snapshot: &NetworkSnapshot) -> GtkBox {
     container.append(&connection_row);
 
     // Initially visible only if wired is connected
-    container.set_visible(snapshot.wired_connected);
+    container.set_visible(snapshot.wired_connected());
 
     container
 }
@@ -606,7 +608,7 @@ pub fn update_ethernet_row(state: &WifiCardState, snapshot: &NetworkSnapshot) {
 }
 
 /// Populate the Wi-Fi list with network data from snapshot.
-pub fn populate_wifi_list(state: &WifiCardState, list_box: &ListBox, snapshot: &NetworkSnapshot) {
+pub fn populate_wifi_list(state: &WifiCardState, list_box: &ListBox, snapshot: &WifiSnapshot) {
     // Unparent and unrealize the password box BEFORE clearing the list.
     // This is critical: when clear_list_box removes rows, the password box would become
     // orphaned but still realized. Then when we try to add it to a new row, GTK fails
@@ -621,15 +623,15 @@ pub fn populate_wifi_list(state: &WifiCardState, list_box: &ListBox, snapshot: &
     clear_list_box(list_box);
 
     // Check if Wi-Fi is disabled (or no Wi-Fi device exists)
-    let wifi_enabled = snapshot.wifi_enabled.unwrap_or(false);
-    let has_wifi = snapshot.has_wifi_device;
+    let wifi_enabled = snapshot.wifi_enabled().unwrap_or(false);
+    let has_wifi = snapshot.has_wifi_device();
 
     if !wifi_enabled || !has_wifi {
         // Wi-Fi is off or unavailable
         if has_wifi && !wifi_enabled {
             // Device has Wi-Fi but it's disabled - show "Wi-Fi is disabled"
             add_wifi_disabled_placeholder(list_box);
-        } else if !snapshot.wired_connected {
+        } else if !snapshot.wired_connected() {
             // No Wi-Fi device and no Ethernet - show "No network connections"
             add_no_connections_state(list_box);
         }
@@ -637,24 +639,24 @@ pub fn populate_wifi_list(state: &WifiCardState, list_box: &ListBox, snapshot: &
         return;
     }
 
-    if !snapshot.is_ready {
+    if !snapshot.is_ready() {
         add_placeholder_row(list_box, "Scanning for networks...");
         return;
     }
 
-    if snapshot.networks.is_empty() {
+    if snapshot.networks().is_empty() {
         add_placeholder_row(list_box, "No networks found");
         return;
     }
 
     let icons = IconsService::global();
     let target_ssid = state.password_target_ssid.borrow().clone();
-    let connecting_ssid = snapshot.connecting_ssid.clone();
+    let connecting_ssid = snapshot.connecting_ssid();
     let mut inserted_password_row = false;
 
-    for net in &snapshot.networks {
+    for net in snapshot.networks() {
         // Check if this network is currently being connected to
-        let is_connecting = connecting_ssid.as_ref() == Some(&net.ssid);
+        let is_connecting = connecting_ssid == Some(net.ssid.as_str());
 
         // Build subtitle parts (excluding "Connected" which gets special treatment)
         let mut extra_parts: Vec<String> = Vec::new();
@@ -756,12 +758,13 @@ pub fn populate_wifi_list(state: &WifiCardState, list_box: &ListBox, snapshot: &
             let security = net.security.clone();
             let known = net.known;
             let active = net.active;
+            let path = net.path.clone();
             row_result.row.connect_activate(move |_| {
-                let service = NetworkService::global();
+                let service = WifiService::global();
                 if active {
                     service.disconnect();
                 } else if security == "open" || known {
-                    service.connect_to_ssid(&ssid, None);
+                    service.connect_to_network(&ssid, None, path.as_deref());
                 }
                 // Secured, unknown networks: handled by the "Connect" button gesture
             });
@@ -814,16 +817,25 @@ fn create_network_action_widget(net: &WifiNetwork) -> gtk4::Widget {
         let action_label = create_row_action_label("Connect");
         let ssid_clone = ssid.clone();
         let is_secured = net.security != "open";
+        let path = net.path.clone();
         action_label.connect_clicked(move |_| {
+            let service = WifiService::global();
             if is_secured {
-                // Secured, unknown network: show password prompt
-                if let Some(qs) = current_quick_settings_window() {
-                    qs.show_wifi_password_dialog(&ssid_clone);
+                // Secured, unknown network: behavior depends on backend
+                let snapshot = service.snapshot();
+                if matches!(snapshot, WifiSnapshot::Iwd(_)) {
+                    // IWD: call connect first, which triggers agent callback
+                    // The agent callback will show the password dialog
+                    service.connect_to_network(&ssid_clone, None, path.as_deref());
+                } else {
+                    // NetworkManager: show password dialog first, then connect with password
+                    if let Some(qs) = current_quick_settings_window() {
+                        qs.show_wifi_password_dialog(&ssid_clone);
+                    }
                 }
             } else {
                 // Open network: connect directly without password
-                let network = NetworkService::global();
-                network.connect_to_ssid(&ssid_clone, None);
+                service.connect_to_network(&ssid_clone, None, path.as_deref());
             }
         });
         return action_label.upcast();
@@ -835,6 +847,8 @@ fn create_network_action_widget(net: &WifiNetwork) -> gtk4::Widget {
     let is_active_clone = is_active;
     let is_known_clone = is_known;
     let ssid_for_actions = ssid.clone();
+    let path_for_actions = net.path.clone();
+    let path_for_forget = net.known_network_path.clone();
 
     menu_btn.connect_clicked(move |btn| {
         let popover = Popover::new();
@@ -855,23 +869,24 @@ fn create_network_action_widget(net: &WifiNetwork) -> gtk4::Widget {
                 if let Some(p) = popover_weak.upgrade() {
                     p.popdown();
                 }
-                let network = NetworkService::global();
+                let network = WifiService::global();
                 debug!("wifi_disconnect_from_menu ssid={}", ssid_clone);
                 network.disconnect();
             });
             content_box.append(&action);
         } else {
             let ssid_clone = ssid_for_actions.clone();
+            let path_clone = path_for_actions.clone();
             let popover_weak = popover.downgrade();
             let action = create_row_menu_action("Connect", move || {
                 // Close popover first to avoid "still has children" warning
                 if let Some(p) = popover_weak.upgrade() {
                     p.popdown();
                 }
-                let network = NetworkService::global();
+                let network = WifiService::global();
                 debug!("wifi_connect_from_menu ssid={}", ssid_clone);
                 // Known networks connect without password prompt
-                network.connect_to_ssid(&ssid_clone, None);
+                network.connect_to_network(&ssid_clone, None, path_clone.as_deref());
             });
             content_box.append(&action);
         }
@@ -879,15 +894,16 @@ fn create_network_action_widget(net: &WifiNetwork) -> gtk4::Widget {
         // Forget action for known networks
         if is_known_clone {
             let ssid_clone = ssid_for_actions.clone();
+            let path_clone = path_for_forget.clone();
             let popover_weak = popover.downgrade();
             let action = create_row_menu_action("Forget", move || {
                 // Close popover first to avoid "still has children" warning
                 if let Some(p) = popover_weak.upgrade() {
                     p.popdown();
                 }
-                let network = NetworkService::global();
+                let network = WifiService::global();
                 debug!("wifi_forget_from_menu ssid={}", ssid_clone);
-                network.forget_network(&ssid_clone);
+                network.forget(&ssid_clone, path_clone.as_deref());
             });
             content_box.append(&action);
         }
@@ -941,7 +957,7 @@ pub fn show_password_dialog_with_error(state: &WifiCardState, ssid: &str, show_e
     }
 
     if let Some(list_box) = state.base.list_box.borrow().as_ref() {
-        let snapshot = NetworkService::global().snapshot();
+        let snapshot = WifiService::global().snapshot();
         populate_wifi_list(state, list_box, &snapshot);
     }
 }
@@ -962,8 +978,10 @@ fn on_password_entry_mapped(state: &WifiCardState, entry: &Entry) {
 fn on_password_cancel_clicked(state: &WifiCardState) {
     hide_password_dialog(state);
 
-    // Clear any failed connection state so we don't re-show the dialog
-    NetworkService::global().clear_failed_state();
+    // Cancel any pending IWD auth and clear failed state
+    let service = WifiService::global();
+    service.cancel_auth();
+    service.clear_failed_state();
 }
 
 /// Hide the password dialog and reset its state.
@@ -984,7 +1002,7 @@ fn hide_password_dialog(state: &WifiCardState) {
     *state.password_target_ssid.borrow_mut() = None;
 
     if let Some(list_box) = state.base.list_box.borrow().as_ref() {
-        let snapshot = NetworkService::global().snapshot();
+        let snapshot = WifiService::global().snapshot();
         populate_wifi_list(state, list_box, &snapshot);
     }
 }
@@ -1009,8 +1027,17 @@ fn on_password_connect_clicked(state: &WifiCardState, window: WeakRef<Applicatio
     // Show connecting state: disable inputs, start animation
     set_password_connecting_state(state, true, Some(window));
 
-    let service = NetworkService::global();
-    service.connect_to_ssid(&ssid, Some(&password));
+    let service = WifiService::global();
+    let snapshot = service.snapshot();
+
+    // Check if this is an IWD auth request (agent callback pending)
+    if snapshot.auth_request_ssid().is_some() {
+        // IWD agent pattern: submit the password to the pending D-Bus invocation
+        service.submit_password(&password);
+    } else {
+        // NetworkManager pattern: connect with password directly
+        service.connect_to_network(&ssid, Some(&password), None);
+    }
 }
 
 /// Set the password dialog to connecting/idle state.
@@ -1090,16 +1117,16 @@ fn set_password_connecting_state(
 }
 
 /// Update the Wi-Fi subtitle based on connection state.
-pub fn update_subtitle(state: &WifiCardState, snapshot: &NetworkSnapshot) {
+pub fn update_subtitle(state: &WifiCardState, snapshot: &WifiSnapshot) {
     if let Some(label) = state.subtitle_label.borrow().as_ref() {
         update_network_subtitle(label, snapshot);
     }
 }
 
 /// Update the scan button UI and animate while scanning.
-pub fn update_scan_ui(state: &WifiCardState, snapshot: &NetworkSnapshot) {
-    let scanning = snapshot.scanning;
-    let wifi_enabled = snapshot.wifi_enabled.unwrap_or(false);
+pub fn update_scan_ui(state: &WifiCardState, snapshot: &WifiSnapshot) {
+    let scanning = snapshot.scanning();
+    let wifi_enabled = snapshot.wifi_enabled().unwrap_or(false);
 
     if let Some(scan_btn) = state.scan_button.borrow().as_ref() {
         scan_btn.set_visible(wifi_enabled);
@@ -1108,56 +1135,124 @@ pub fn update_scan_ui(state: &WifiCardState, snapshot: &NetworkSnapshot) {
     }
 }
 
-/// Handle network state changes from NetworkService.
+/// Handle network state changes from WifiService.
 pub fn on_network_changed(
     state: &WifiCardState,
-    snapshot: &NetworkSnapshot,
+    snapshot: &WifiSnapshot,
     window: &ApplicationWindow,
 ) {
-    // Handle password dialog state based on connection result
-    let current_target = state.password_target_ssid.borrow().clone();
-    if let Some(ref target_ssid) = current_target {
-        if let Some(ref failed_ssid) = snapshot.failed_ssid {
-            if failed_ssid == target_ssid {
-                // Connection failed for our target - show error and re-enable form
-                debug!("Connection failed for '{}', showing error", failed_ssid);
-                set_password_connecting_state(state, false, None);
-                if let Some(error_label) = state.password_error_label.borrow().as_ref() {
-                    error_label.add_css_class(color::ERROR);
-                    error_label.set_label("Wrong password");
+    // Handle password dialog state based on connection result (NetworkManager only)
+    if let WifiSnapshot::NetworkManager(nm_snap) = snapshot {
+        let current_target = state.password_target_ssid.borrow().clone();
+        if let Some(ref target_ssid) = current_target {
+            if let Some(ref failed_ssid) = nm_snap.failed_ssid {
+                if failed_ssid == target_ssid {
+                    // Connection failed for our target - show error and re-enable form
+                    debug!("Connection failed for '{}', showing error", failed_ssid);
+                    set_password_connecting_state(state, false, None);
+                    if let Some(error_label) = state.password_error_label.borrow().as_ref() {
+                        error_label.add_css_class(color::ERROR);
+                        error_label.set_label("Wrong password");
+                    }
+                    // Clear the failed state so we don't re-trigger
+                    NetworkService::global().clear_failed_state();
                 }
-                // Clear the failed state so we don't re-trigger
+            } else if nm_snap.ssid.as_ref() == Some(target_ssid)
+                && nm_snap.connecting_ssid.is_none()
+            {
+                // Successfully connected to target - hide dialog and clear state
+                debug!(
+                    "Successfully connected to '{}', hiding password dialog",
+                    target_ssid
+                );
+                hide_password_dialog(state);
+            }
+            // If connecting_ssid matches target, keep showing animation (do nothing)
+        } else if let Some(ref failed_ssid) = nm_snap.failed_ssid {
+            // No dialog open but connection failed - show dialog with error if window is mapped
+            if window.is_mapped() {
+                debug!(
+                    "Connection failed for '{}', showing password dialog with error",
+                    failed_ssid
+                );
+                show_password_dialog_with_error(state, failed_ssid, true);
+            } else {
+                debug!(
+                    "Connection failed for '{}', but window is closed - clearing failed state",
+                    failed_ssid
+                );
                 NetworkService::global().clear_failed_state();
             }
-        } else if snapshot.ssid.as_ref() == Some(target_ssid) && snapshot.connecting_ssid.is_none()
-        {
-            // Successfully connected to target - hide dialog and clear state
-            debug!(
-                "Successfully connected to '{}', hiding password dialog",
-                target_ssid
-            );
-            hide_password_dialog(state);
         }
-        // If connecting_ssid matches target, keep showing animation (do nothing)
-    } else if let Some(ref failed_ssid) = snapshot.failed_ssid {
-        // No dialog open but connection failed - show dialog with error if window is mapped
-        if window.is_mapped() {
-            debug!(
-                "Connection failed for '{}', showing password dialog with error",
-                failed_ssid
-            );
-            show_password_dialog_with_error(state, failed_ssid, true);
-        } else {
-            debug!(
-                "Connection failed for '{}', but window is closed - clearing failed state",
-                failed_ssid
-            );
-            NetworkService::global().clear_failed_state();
+    }
+
+    // Handle IWD auth requests and failed state
+    if let WifiSnapshot::Iwd(iwd_snap) = snapshot {
+        let current_target = state.password_target_ssid.borrow().clone();
+
+        // Check for auth request (IWD is asking for password)
+        if let Some(ref auth_request) = iwd_snap.auth_request
+            && current_target.as_ref() != Some(&auth_request.ssid)
+        {
+            // New auth request - show password dialog
+            if window.is_mapped() {
+                debug!(
+                    "IWD requesting passphrase for '{}', showing password dialog",
+                    auth_request.ssid
+                );
+                show_password_dialog(state, &auth_request.ssid);
+            } else {
+                // Window is closed - cancel the auth request
+                debug!(
+                    "IWD requesting passphrase for '{}', but window is closed - cancelling",
+                    auth_request.ssid
+                );
+                WifiService::global().cancel_auth();
+            }
+        }
+
+        // Check for failed connection
+        if let Some(ref target_ssid) = current_target {
+            if let Some(ref failed_ssid) = iwd_snap.failed_ssid {
+                if failed_ssid == target_ssid {
+                    // Connection failed for our target - show error and re-enable form
+                    debug!("IWD connection failed for '{}', showing error", failed_ssid);
+                    set_password_connecting_state(state, false, None);
+                    if let Some(error_label) = state.password_error_label.borrow().as_ref() {
+                        error_label.add_css_class(color::ERROR);
+                        error_label.set_label("Wrong password");
+                    }
+                    // Clear the failed state so we don't re-trigger
+                    WifiService::global().clear_failed_state();
+                }
+            } else if iwd_snap.ssid.as_ref() == Some(target_ssid) && iwd_snap.connected() {
+                // Successfully connected to target - hide dialog and clear state
+                debug!(
+                    "IWD successfully connected to '{}', hiding password dialog",
+                    target_ssid
+                );
+                hide_password_dialog(state);
+            }
+        } else if let Some(ref failed_ssid) = iwd_snap.failed_ssid {
+            // No dialog open but connection failed - show dialog with error if window is mapped
+            if window.is_mapped() {
+                debug!(
+                    "IWD connection failed for '{}', showing password dialog with error",
+                    failed_ssid
+                );
+                show_password_dialog_with_error(state, failed_ssid, true);
+            } else {
+                debug!(
+                    "IWD connection failed for '{}', but window is closed - clearing failed state",
+                    failed_ssid
+                );
+                WifiService::global().clear_failed_state();
+            }
         }
     }
 
     // Update Wi-Fi toggle and switch state (with signal blocking to prevent feedback loop)
-    let enabled = snapshot.wifi_enabled.unwrap_or(false);
+    let enabled = snapshot.wifi_enabled().unwrap_or(false);
     state.updating_toggle.set(true);
 
     // Update card toggle
@@ -1168,28 +1263,28 @@ pub fn on_network_changed(
         // Card toggle is only sensitive on WiFi-only devices (no ethernet port) and when service is available
         // When ethernet is present, users must use the switch in expanded view
         toggle.set_sensitive(
-            snapshot.available && snapshot.has_wifi_device && !snapshot.has_ethernet_device,
+            snapshot.available() && snapshot.has_wifi_device() && !snapshot.has_ethernet_device(),
         );
     }
 
     // Update Wi-Fi label and switch visibility (only show when ethernet device present)
     if let Some(wifi_label) = state.wifi_label.borrow().as_ref() {
-        wifi_label.set_visible(snapshot.has_ethernet_device);
+        wifi_label.set_visible(snapshot.has_ethernet_device());
     }
     if let Some(wifi_switch) = state.wifi_switch.borrow().as_ref() {
-        wifi_switch.set_visible(snapshot.has_ethernet_device);
+        wifi_switch.set_visible(snapshot.has_ethernet_device());
         if wifi_switch.is_active() != enabled {
             wifi_switch.set_active(enabled);
         }
         // Switch should only be sensitive if Wi-Fi device exists and service is available
-        wifi_switch.set_sensitive(snapshot.available && snapshot.has_wifi_device);
+        wifi_switch.set_sensitive(snapshot.available() && snapshot.has_wifi_device());
     }
 
     state.updating_toggle.set(false);
 
     // Update card title based on whether ethernet device exists
     if let Some(title_label) = state.title_label.borrow().as_ref() {
-        let expected_title = if snapshot.has_ethernet_device {
+        let expected_title = if snapshot.has_ethernet_device() {
             "Network"
         } else {
             "Wi-Fi"
@@ -1201,29 +1296,28 @@ pub fn on_network_changed(
 
     // Update Wi-Fi card icon and its active state class
     if let Some(icon_handle) = state.base.card_icon.borrow().as_ref() {
-        let enabled = snapshot.wifi_enabled.unwrap_or(false);
         let icon_name = wifi_icon_name(
-            snapshot.available,
-            snapshot.connected,
+            snapshot.available(),
+            snapshot.connected(),
             enabled,
-            snapshot.wired_connected,
-            snapshot.has_wifi_device,
+            snapshot.wired_connected(),
+            snapshot.has_wifi_device(),
         );
         icon_handle.set_icon(icon_name);
 
         // Service unavailable - use warning styling
-        if !snapshot.available {
+        if !snapshot.available() {
             icon_handle.add_css_class(state::SERVICE_UNAVAILABLE);
             icon_handle.remove_css_class(qs::WIFI_DISABLED_ICON);
             icon_handle.remove_css_class(state::ICON_ACTIVE);
         } else {
             icon_handle.remove_css_class(state::SERVICE_UNAVAILABLE);
 
-            let icon_active = (enabled && snapshot.connected) || snapshot.wired_connected;
+            let icon_active = (enabled && snapshot.connected()) || snapshot.wired_connected();
             set_icon_active(icon_handle, icon_active);
 
             // Additional disabled styling for Wi-Fi
-            if !enabled && !snapshot.wired_connected {
+            if !enabled && !snapshot.wired_connected() {
                 icon_handle.add_css_class(qs::WIFI_DISABLED_ICON);
             } else {
                 icon_handle.remove_css_class(qs::WIFI_DISABLED_ICON);
@@ -1231,16 +1325,19 @@ pub fn on_network_changed(
         }
     }
 
-    // Update Wi-Fi subtitle
+    // Update Wi-Fi subtitle (works with any backend)
     update_subtitle(state, snapshot);
 
-    // Update Ethernet row visibility
-    update_ethernet_row(state, snapshot);
+    // NetworkManager-specific UI updates (ethernet row)
+    if let WifiSnapshot::NetworkManager(nm_snap) = snapshot {
+        // Update Ethernet row visibility
+        update_ethernet_row(state, nm_snap);
+    }
 
-    // Update scan button UI (label + animation)
+    // Update scan button UI (works for all backends)
     update_scan_ui(state, snapshot);
 
-    // Update network list - but skip if password dialog is visible to avoid layout shifts
+    // Update network list for all backends - skip if password dialog is visible to avoid layout shifts
     let password_dialog_visible = state
         .password_box
         .borrow()
@@ -1421,7 +1518,8 @@ mod tests {
     fn test_subtitle_wired_only() {
         let mut snapshot = test_snapshot();
         snapshot.wired_connected = true;
-        assert_eq!(get_network_subtitle_text(&snapshot), "Ethernet");
+        let wrapped = WifiSnapshot::NetworkManager(snapshot);
+        assert_eq!(get_network_subtitle_text(&wrapped), "Ethernet");
     }
 
     #[test]
@@ -1429,8 +1527,9 @@ mod tests {
         let mut snapshot = test_snapshot();
         snapshot.wired_connected = true;
         snapshot.ssid = Some("MyNetwork".to_string());
+        let wrapped = WifiSnapshot::NetworkManager(snapshot);
         assert_eq!(
-            get_network_subtitle_text(&snapshot),
+            get_network_subtitle_text(&wrapped),
             "Ethernet \u{2022} MyNetwork"
         );
     }
@@ -1440,8 +1539,9 @@ mod tests {
         let mut snapshot = test_snapshot();
         snapshot.wired_connected = true;
         snapshot.connecting_ssid = Some("MyNetwork".to_string());
+        let wrapped = WifiSnapshot::NetworkManager(snapshot);
         assert_eq!(
-            get_network_subtitle_text(&snapshot),
+            get_network_subtitle_text(&wrapped),
             "Ethernet \u{2022} Connecting to MyNetwork"
         );
     }
@@ -1450,15 +1550,17 @@ mod tests {
     fn test_subtitle_wifi_connected() {
         let mut snapshot = test_snapshot();
         snapshot.ssid = Some("HomeWifi".to_string());
-        assert_eq!(get_network_subtitle_text(&snapshot), "HomeWifi");
+        let wrapped = WifiSnapshot::NetworkManager(snapshot);
+        assert_eq!(get_network_subtitle_text(&wrapped), "HomeWifi");
     }
 
     #[test]
     fn test_subtitle_wifi_connecting() {
         let mut snapshot = test_snapshot();
         snapshot.connecting_ssid = Some("HomeWifi".to_string());
+        let wrapped = WifiSnapshot::NetworkManager(snapshot);
         assert_eq!(
-            get_network_subtitle_text(&snapshot),
+            get_network_subtitle_text(&wrapped),
             "Connecting to HomeWifi"
         );
     }
@@ -1466,14 +1568,16 @@ mod tests {
     #[test]
     fn test_subtitle_wifi_disconnected() {
         let snapshot = test_snapshot();
-        assert_eq!(get_network_subtitle_text(&snapshot), "Disconnected");
+        let wrapped = WifiSnapshot::NetworkManager(snapshot);
+        assert_eq!(get_network_subtitle_text(&wrapped), "Disconnected");
     }
 
     #[test]
     fn test_subtitle_wifi_disabled() {
         let mut snapshot = test_snapshot();
         snapshot.wifi_enabled = Some(false);
-        assert_eq!(get_network_subtitle_text(&snapshot), "Off");
+        let wrapped = WifiSnapshot::NetworkManager(snapshot);
+        assert_eq!(get_network_subtitle_text(&wrapped), "Off");
     }
 
     #[test]
@@ -1482,14 +1586,16 @@ mod tests {
         snapshot.has_wifi_device = false;
         snapshot.has_ethernet_device = true;
         snapshot.wifi_enabled = None;
-        assert_eq!(get_network_subtitle_text(&snapshot), "Disconnected");
+        let wrapped = WifiSnapshot::NetworkManager(snapshot);
+        assert_eq!(get_network_subtitle_text(&wrapped), "Disconnected");
     }
 
     #[test]
     fn test_subtitle_service_unavailable() {
         let mut snapshot = test_snapshot();
         snapshot.available = false;
-        assert_eq!(get_network_subtitle_text(&snapshot), "Unavailable");
+        let wrapped = WifiSnapshot::NetworkManager(snapshot);
+        assert_eq!(get_network_subtitle_text(&wrapped), "Unavailable");
     }
 
     // Tests for is_network_subtitle_active()
@@ -1498,14 +1604,17 @@ mod tests {
     fn test_subtitle_active_when_wired_connected() {
         let mut snapshot = test_snapshot();
         snapshot.wired_connected = true;
-        assert!(is_network_subtitle_active(&snapshot));
+        let wrapped = WifiSnapshot::NetworkManager(snapshot);
+        assert!(is_network_subtitle_active(&wrapped));
     }
 
     #[test]
     fn test_subtitle_active_when_wifi_connected() {
         let mut snapshot = test_snapshot();
+        snapshot.connected = true;
         snapshot.ssid = Some("Network".to_string());
-        assert!(is_network_subtitle_active(&snapshot));
+        let wrapped = WifiSnapshot::NetworkManager(snapshot);
+        assert!(is_network_subtitle_active(&wrapped));
     }
 
     #[test]
@@ -1513,20 +1622,23 @@ mod tests {
         let mut snapshot = test_snapshot();
         snapshot.wired_connected = true;
         snapshot.ssid = Some("Network".to_string());
-        assert!(is_network_subtitle_active(&snapshot));
+        let wrapped = WifiSnapshot::NetworkManager(snapshot);
+        assert!(is_network_subtitle_active(&wrapped));
     }
 
     #[test]
     fn test_subtitle_not_active_when_connecting() {
         let mut snapshot = test_snapshot();
         snapshot.connecting_ssid = Some("Network".to_string());
-        assert!(!is_network_subtitle_active(&snapshot));
+        let wrapped = WifiSnapshot::NetworkManager(snapshot);
+        assert!(!is_network_subtitle_active(&wrapped));
     }
 
     #[test]
     fn test_subtitle_not_active_when_disconnected() {
         let snapshot = test_snapshot();
-        assert!(!is_network_subtitle_active(&snapshot));
+        let wrapped = WifiSnapshot::NetworkManager(snapshot);
+        assert!(!is_network_subtitle_active(&wrapped));
     }
 
     #[test]
@@ -1534,8 +1646,9 @@ mod tests {
         let mut snapshot = test_snapshot();
         snapshot.wired_connected = true;
         snapshot.connecting_ssid = Some("Network".to_string());
+        let wrapped = WifiSnapshot::NetworkManager(snapshot);
         // Even though wired is connected, we're in a "connecting" state for Wi-Fi
         // so subtitle should not be fully active (shows connecting animation)
-        assert!(!is_network_subtitle_active(&snapshot));
+        assert!(!is_network_subtitle_active(&wrapped));
     }
 }

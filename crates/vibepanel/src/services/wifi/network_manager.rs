@@ -24,16 +24,17 @@ use gtk4::gio::{self, prelude::*};
 use gtk4::glib::{self, Variant, VariantTy};
 use tracing::{debug, error, warn};
 
-use super::callbacks::Callbacks;
+use crate::services::callbacks::Callbacks;
+use crate::services::wifi::WifiNetwork;
 
 // D-Bus Constants
 
 /// NetworkManager service name.
-const NM_SERVICE: &str = "org.freedesktop.NetworkManager";
+pub const NM_SERVICE: &str = "org.freedesktop.NetworkManager";
 /// NetworkManager main object path.
-const NM_PATH: &str = "/org/freedesktop/NetworkManager";
+pub const NM_PATH: &str = "/org/freedesktop/NetworkManager";
 /// NetworkManager main interface.
-const NM_IFACE: &str = "org.freedesktop.NetworkManager";
+pub const NM_IFACE: &str = "org.freedesktop.NetworkManager";
 /// Device interface for type detection.
 const IFACE_DEV: &str = "org.freedesktop.NetworkManager.Device";
 /// Wireless device interface.
@@ -49,21 +50,6 @@ const IFACE_ACTIVE_CONN: &str = "org.freedesktop.NetworkManager.Connection.Activ
 const ETHERNET_DEVICE_TYPE: u32 = 1;
 /// NetworkManager device type for Wi-Fi (NM_DEVICE_TYPE_WIFI = 2).
 const WIFI_DEVICE_TYPE: u32 = 2;
-
-/// A Wi-Fi network visible in the scan results.
-#[derive(Debug, Clone)]
-pub struct WifiNetwork {
-    /// Network SSID (name).
-    pub ssid: String,
-    /// Signal strength percentage (0-100).
-    pub strength: i32,
-    /// Security type ("open" or "secured").
-    pub security: String,
-    /// Whether this is the currently connected network.
-    pub active: bool,
-    /// Whether NetworkManager has a saved connection profile for this SSID.
-    pub known: bool,
-}
 
 /// Canonical snapshot of Wi-Fi state.
 #[derive(Debug, Clone)]
@@ -1107,7 +1093,9 @@ impl NetworkService {
             strength,
             security,
             active: is_active,
+            known_network_path: None,
             known: is_known,
+            path: None,
         })
     }
 
@@ -1272,7 +1260,14 @@ impl NetworkService {
     }
 
     /// Connect to a Wi-Fi network by SSID.
-    pub fn connect_to_ssid(&self, ssid: &str, password: Option<&str>) {
+    ///
+    /// Uses `nmcli device wifi connect` to establish the connection.
+    /// If a password is provided, it's passed to nmcli.
+    ///
+    /// # Parameters
+    /// - `ssid`: Network name to connect to
+    /// - `password`: Optional password for secured networks
+    pub fn connect_to_network(&self, ssid: &str, password: Option<&str>) {
         let ssid = ssid.trim().to_string();
         if ssid.is_empty() {
             return;

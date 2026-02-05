@@ -18,9 +18,9 @@ use super::wifi_card::wifi_icon_name;
 use crate::services::audio::{AudioService, AudioSnapshot};
 use crate::services::bluetooth::{BluetoothService, BluetoothSnapshot};
 use crate::services::config_manager::ConfigManager;
-use crate::services::network::{NetworkService, NetworkSnapshot};
 use crate::services::tooltip::TooltipManager;
 use crate::services::vpn::{VpnService, VpnSnapshot};
+use crate::services::wifi::{WifiService, WifiSnapshot};
 use crate::styles::{icon, qs, state, widget};
 use crate::widgets::BaseWidget;
 use crate::widgets::WidgetConfig;
@@ -245,13 +245,13 @@ impl QuickSettingsWidget {
 
         // Wi-Fi icon
         if cards.wifi {
-            let wifi_snapshot = NetworkService::global().snapshot();
-            let wifi_enabled = wifi_snapshot.wifi_enabled.unwrap_or(false);
-            let wifi_connected = wifi_snapshot.connected;
-            let wired_connected = wifi_snapshot.wired_connected;
-            let has_wifi_device = wifi_snapshot.has_wifi_device;
+            let wifi_snapshot = WifiService::global().snapshot();
+            let wifi_enabled = wifi_snapshot.wifi_enabled().unwrap_or(false);
+            let wifi_connected = wifi_snapshot.connected();
+            let wired_connected = wifi_snapshot.wired_connected();
+            let has_wifi_device = wifi_snapshot.has_wifi_device();
             let wifi_icon_name_initial = wifi_icon_name(
-                wifi_snapshot.available,
+                wifi_snapshot.available(),
                 wifi_connected,
                 wifi_enabled,
                 wired_connected,
@@ -266,12 +266,12 @@ impl QuickSettingsWidget {
                 wifi_icon.widget().add_css_class(state::ICON_ACTIVE);
             }
 
-            // Subscribe to NetworkService updates
+            // Subscribe to WifiService updates
             let wifi_icon_handle = wifi_icon.clone();
-            NetworkService::global().connect(move |snapshot: &NetworkSnapshot| {
+            WifiService::global().connect(move |snapshot: &WifiSnapshot| {
                 let widget = wifi_icon_handle.widget();
 
-                if !snapshot.available {
+                if !snapshot.available() {
                     widget.add_css_class(state::SERVICE_UNAVAILABLE);
                     widget.remove_css_class(qs::WIFI_DISABLED_ICON);
                     widget.remove_css_class(state::ICON_ACTIVE);
@@ -282,13 +282,13 @@ impl QuickSettingsWidget {
                 }
                 widget.remove_css_class(state::SERVICE_UNAVAILABLE);
 
-                let enabled = snapshot.wifi_enabled.unwrap_or(false);
-                let connected = snapshot.connected;
-                let wired_connected = snapshot.wired_connected;
-                let has_wifi_device = snapshot.has_wifi_device;
+                let enabled = snapshot.wifi_enabled().unwrap_or(false);
+                let connected = snapshot.connected();
+                let wired_connected = snapshot.wired_connected();
+                let has_wifi_device = snapshot.has_wifi_device();
 
                 let icon_name = wifi_icon_name(
-                    snapshot.available,
+                    snapshot.available(),
                     connected,
                     enabled,
                     wired_connected,
@@ -308,18 +308,28 @@ impl QuickSettingsWidget {
                     widget.remove_css_class(state::ICON_ACTIVE);
                 }
 
-                let tooltip = if wired_connected {
-                    "Ethernet connected".to_string()
-                } else if connected {
-                    let ssid = snapshot.ssid.as_deref().unwrap_or("Connected");
-                    let strength = snapshot.strength;
-                    if strength > 0 {
-                        format!("{}\nSignal: {}%", ssid, strength)
+                // Tooltip - NetworkManager specific details
+                let tooltip = if let WifiSnapshot::NetworkManager(nm_snap) = snapshot {
+                    if nm_snap.wired_connected {
+                        "Ethernet connected".to_string()
+                    } else if nm_snap.connected {
+                        let ssid = nm_snap.ssid.as_deref().unwrap_or("Connected");
+                        let strength = nm_snap.strength;
+                        if strength > 0 {
+                            format!("{}\nSignal: {}%", ssid, strength)
+                        } else {
+                            ssid.to_string()
+                        }
                     } else {
-                        ssid.to_string()
+                        "Disconnected".to_string()
                     }
                 } else {
-                    "Disconnected".to_string()
+                    // IWD - basic tooltip for now
+                    if connected {
+                        "Connected".to_string()
+                    } else {
+                        "Disconnected".to_string()
+                    }
                 };
                 TooltipManager::global().set_styled_tooltip(&widget, &tooltip);
             });

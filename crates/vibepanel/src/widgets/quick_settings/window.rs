@@ -22,10 +22,10 @@ use crate::services::bluetooth::BluetoothService;
 use crate::services::brightness::BrightnessService;
 use crate::services::config_manager::ConfigManager;
 use crate::services::idle_inhibitor::IdleInhibitorService;
-use crate::services::network::NetworkService;
 use crate::services::surfaces::SurfaceStyleManager;
 use crate::services::updates::UpdatesService;
 use crate::services::vpn::VpnService;
+use crate::services::wifi::WifiService;
 use crate::styles::{qs, state, surface};
 use crate::widgets::layer_shell_popover::{
     Dismissible, calculate_bar_exclusive_zone, calculate_popover_right_margin,
@@ -209,7 +209,7 @@ impl QuickSettingsWindow {
 
         if cfg.wifi {
             let qs_weak = Rc::downgrade(qs);
-            NetworkService::global().connect(move |snapshot| {
+            WifiService::global().connect(move |snapshot| {
                 if let Some(qs) = qs_weak.upgrade() {
                     wifi_card::on_network_changed(&qs.wifi, snapshot, &qs.window);
                 }
@@ -498,19 +498,19 @@ impl QuickSettingsWindow {
     /// Returns `(card, revealer, expander_button)` - caller is responsible for
     /// accordion registration via `AccordionManager::setup_expander`.
     fn build_wifi_card(qs: &Rc<Self>) -> (GtkBox, Revealer, Option<Button>) {
-        let network = NetworkService::global();
-        let snapshot = network.snapshot();
+        let wifi_service = WifiService::global();
+        let snapshot = wifi_service.snapshot();
 
-        let wifi_enabled = snapshot.wifi_enabled.unwrap_or(false);
-        let wifi_connected = snapshot.connected;
-        let wired_connected = snapshot.wired_connected;
-        let has_wifi_device = snapshot.has_wifi_device;
+        let wifi_enabled = snapshot.wifi_enabled().unwrap_or(false);
+        let wifi_connected = snapshot.connected();
+        let wired_connected = snapshot.wired_connected();
+        let has_wifi_device = snapshot.has_wifi_device();
 
         // Build custom subtitle widget with connection status icons
         let subtitle_result = build_network_subtitle(&snapshot);
 
         let icon_name = wifi_icon_name(
-            snapshot.available,
+            snapshot.available(),
             wifi_connected,
             wifi_enabled,
             wired_connected,
@@ -519,7 +519,7 @@ impl QuickSettingsWindow {
         let icon_active = (wifi_enabled && wifi_connected) || wired_connected;
 
         // Card title: "Network" if ethernet device exists, "Wi-Fi" otherwise
-        let card_title = if snapshot.has_ethernet_device {
+        let card_title = if snapshot.has_ethernet_device() {
             "Network"
         } else {
             "Wi-Fi"
@@ -539,7 +539,7 @@ impl QuickSettingsWindow {
         wifi_card.card.add_css_class(qs::WIFI);
 
         // Disable toggle if no Wi-Fi device (toggle controls Wi-Fi, not ethernet)
-        if !snapshot.has_wifi_device {
+        if !snapshot.has_wifi_device() {
             wifi_card.toggle.set_sensitive(false);
         }
 
@@ -558,7 +558,7 @@ impl QuickSettingsWindow {
                 if wifi_state.updating_toggle.get() {
                     return;
                 }
-                NetworkService::global().set_wifi_enabled(toggle.is_active());
+                WifiService::global().set_wifi_enabled(toggle.is_active());
             });
         }
 
@@ -596,7 +596,7 @@ impl QuickSettingsWindow {
                     if wifi_state.updating_toggle.get() {
                         return glib::Propagation::Proceed;
                     }
-                    NetworkService::global().set_wifi_enabled(enabled);
+                    WifiService::global().set_wifi_enabled(enabled);
                     glib::Propagation::Proceed
                 });
         }
@@ -1193,6 +1193,13 @@ impl QuickSettingsWindow {
     pub(super) fn hide_panel(&self) {
         // Restore keyboard mode if it was released for VPN password dialogs
         vpn_card::restore_keyboard_if_released();
+
+        // Cancel any pending IWD auth request (safe to call if none pending)
+        WifiService::global().cancel_auth();
+
+        // Clear focus from any focused widget (e.g., password Entry) before closing.
+        // This prevents GTK "did not receive focus-out event" warnings.
+        gtk4::prelude::RootExt::set_focus(&self.window, None::<&gtk4::Widget>);
 
         // Clear the global QS window reference
         clear_current_qs_window();
