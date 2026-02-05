@@ -346,7 +346,7 @@ impl QuickSettingsWindow {
                 on_toggle: None,
             });
         }
-        if cfg.vpn {
+        if cfg.vpn && VpnService::global().snapshot().available {
             let (card, revealer, expander_button) = Self::build_vpn_card(qs);
             toggle_cards.push(ToggleCardInfo {
                 card,
