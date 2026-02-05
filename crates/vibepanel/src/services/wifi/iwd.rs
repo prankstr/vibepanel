@@ -455,22 +455,40 @@ impl IwdService {
     }
 
     fn has_station_interface(path: &str) -> bool {
-        gio::DBusProxy::for_bus_sync(
+        let proxy = match gio::DBusProxy::for_bus_sync(
             gio::BusType::System,
-            gio::DBusProxyFlags::NONE,
+            // Use minimal flags - we only need to check if the interface exists.
+            gio::DBusProxyFlags::DO_NOT_LOAD_PROPERTIES
+                | gio::DBusProxyFlags::DO_NOT_CONNECT_SIGNALS,
             None::<&gio::DBusInterfaceInfo>,
             IWD_SERVICE,
             path,
             IFACE_STATION,
             None::<&gio::Cancellable>,
-        )
-        .is_ok()
+        ) {
+            Ok(p) => p,
+            Err(_) => return false,
+        };
+
+        // Verify the interface actually exists by trying to get a property.
+        // Proxy creation succeeds even for non-existent interfaces.
+        proxy
+            .call_sync(
+                "org.freedesktop.DBus.Properties.Get",
+                Some(&(IFACE_STATION, "State").to_variant()),
+                gio::DBusCallFlags::NONE,
+                1000,
+                None::<&gio::Cancellable>,
+            )
+            .is_ok()
     }
 
     fn has_adapter_interface(path: &str) -> Option<bool> {
         let proxy = match gio::DBusProxy::for_bus_sync(
             gio::BusType::System,
-            gio::DBusProxyFlags::NONE,
+            // Use minimal flags - full property loading can fail in a background thread.
+            gio::DBusProxyFlags::DO_NOT_LOAD_PROPERTIES
+                | gio::DBusProxyFlags::DO_NOT_CONNECT_SIGNALS,
             None::<&gio::DBusInterfaceInfo>,
             IWD_SERVICE,
             path,
@@ -481,12 +499,19 @@ impl IwdService {
             Err(_) => return None,
         };
 
-        // Return the Powered state, defaulting to false if property is missing.
-        // This ensures adapter discovery succeeds even if IWD doesn't report the property.
+        // Fetch Powered property via D-Bus call. If this fails, the interface doesn't
+        // exist on this object path (e.g., it's a known network, not an adapter).
         proxy
-            .cached_property("Powered")
+            .call_sync(
+                "org.freedesktop.DBus.Properties.Get",
+                Some(&(IFACE_ADAPTER, "Powered").to_variant()),
+                gio::DBusCallFlags::NONE,
+                1000,
+                None::<&gio::Cancellable>,
+            )
+            .ok()
+            .and_then(|v| v.child_value(0).get::<glib::Variant>())
             .and_then(|v| v.get::<bool>())
-            .or(Some(false))
     }
 
     fn read_network_name(path: &str) -> Option<String> {
@@ -623,7 +648,14 @@ impl IwdService {
             state.as_deref(),
             Some(STATE_CONNECTED | STATE_CONNECTING | STATE_ROAMING)
         ) {
-            name_path.and_then(|path| Self::read_network_name(&path))
+            name_path.and_then(|path| {
+                self.snapshot
+                    .borrow()
+                    .networks
+                    .iter()
+                    .find(|n| n.path.as_deref() == Some(path.as_str()))
+                    .map(|n| n.ssid.clone())
+            })
         } else {
             None
         };
@@ -1138,8 +1170,15 @@ impl IwdService {
             }
         };
 
-        // Get SSID from network path
-        let ssid = Self::read_network_name(&network_path).unwrap_or_else(|| "Unknown".to_string());
+        // Get SSID from cached network list to avoid blocking D-Bus call on main thread.
+        let ssid = this
+            .snapshot
+            .borrow()
+            .networks
+            .iter()
+            .find(|n| n.path.as_deref() == Some(network_path.as_str()))
+            .map(|n| n.ssid.clone())
+            .unwrap_or_else(|| "Unknown".to_string());
 
         debug!(
             "IwdService: RequestPassphrase for network '{}' ({})",

@@ -142,15 +142,14 @@ pub fn get_network_subtitle_text(snapshot: &WifiSnapshot) -> String {
         &snapshot.active_ssid(),
     ) {
         // Wired connected cases
-        (true, true, _) => format!(
-            "Ethernet \u{2022} Connecting to {}",
-            snapshot.active_ssid().as_ref().unwrap()
-        ),
+        (true, true, Some(ssid)) => format!("Ethernet \u{2022} Connecting to {}", ssid),
+        (true, true, None) => "Ethernet \u{2022} Connecting...".to_string(),
         (true, false, Some(ssid)) => format!("Ethernet \u{2022} {}", ssid),
         (true, false, None) => "Ethernet".to_string(),
 
         // Wi-Fi only cases
-        (false, true, _) => format!("Connecting to {}", snapshot.active_ssid().as_ref().unwrap()),
+        (false, true, Some(ssid)) => format!("Connecting to {}", ssid),
+        (false, true, None) => "Connecting...".to_string(),
         (false, false, Some(ssid)) => ssid.to_string().clone(),
         (false, false, None) if !snapshot.has_wifi_device() => "Disconnected".to_string(),
         (false, false, None) if wifi_enabled => "Disconnected".to_string(),
