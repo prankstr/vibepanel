@@ -5,19 +5,27 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use tracing::{debug, error, warn};
 
+use std::collections::HashMap;
+
 use super::WifiNetwork;
 
 const IWD_SERVICE: &str = "net.connman.iwd";
 const IWD_ROOT_PATH: &str = "/net/connman/iwd";
-const IFACE_INTROSPECTABLE: &str = "org.freedesktop.DBus.Introspectable";
 const IFACE_ADAPTER: &str = "net.connman.iwd.Adapter";
 const IFACE_STATION: &str = "net.connman.iwd.Station";
 const IFACE_NETWORK: &str = "net.connman.iwd.Network";
 const IFACE_KNOWN_NETWORK: &str = "net.connman.iwd.KnownNetwork";
+const OBJECT_MANAGER_IFACE: &str = "org.freedesktop.DBus.ObjectManager";
+const PROPERTIES_IFACE: &str = "org.freedesktop.DBus.Properties";
 
 const AGENT_IFACE: &str = "net.connman.iwd.Agent";
 const AGENT_MANAGER_IFACE: &str = "net.connman.iwd.AgentManager";
 const AGENT_PATH: &str = "/org/vibepanel/iwd/agent";
+
+/// Maximum number of SSID resolution attempts via network refresh before
+/// giving up. Prevents an infinite loop when the connected network's SSID
+/// is never found in the cached network list.
+const MAX_SSID_RESOLVE_ATTEMPTS: u8 = 3;
 
 // Station state constants (from net.connman.iwd.Station State property)
 const STATE_CONNECTING: &str = "connecting";
@@ -62,7 +70,6 @@ enum IwdUpdate {
     StationDiscovered {
         path: String,
     },
-    ServiceUnavailable,
     NetworksRefreshed {
         networks: Vec<WifiNetwork>,
     },
@@ -76,6 +83,14 @@ enum IwdUpdate {
 #[derive(Debug, Clone)]
 pub struct IwdAuthRequest {
     pub ssid: String,
+}
+
+/// Cached network properties from GetManagedObjects, keyed by object path.
+struct NetworkProps {
+    name: String,
+    net_type: String,
+    connected: bool,
+    known_network_path: Option<String>,
 }
 
 struct PendingAuth {
@@ -147,7 +162,13 @@ pub struct IwdService {
     agent_registration_id: RefCell<Option<gio::RegistrationId>>,
     pending_auth: RefCell<Option<PendingAuth>>,
     scan_in_progress: Cell<bool>,
+    /// Counter for SSID resolution attempts when connected but SSID not found
+    /// in the cached network list. Capped at MAX_SSID_RESOLVE_ATTEMPTS to
+    /// prevent an infinite refresh_networks_async loop.
+    ssid_resolve_attempts: Cell<u8>,
     watcher_proxy: RefCell<Option<gio::DBusProxy>>,
+    /// D-Bus signal subscriptions (kept alive for the service lifetime).
+    _signal_subscriptions: RefCell<Vec<gio::SignalSubscription>>,
 }
 
 impl IwdService {
@@ -163,7 +184,9 @@ impl IwdService {
             agent_registration_id: RefCell::new(None),
             pending_auth: RefCell::new(None),
             scan_in_progress: Cell::new(false),
+            ssid_resolve_attempts: Cell::new(0),
             watcher_proxy: RefCell::new(None),
+            _signal_subscriptions: RefCell::new(Vec::new()),
         });
 
         Self::init_dbus(&service);
@@ -218,8 +241,70 @@ impl IwdService {
 
                 this.connection.replace(Some(connection.clone()));
 
-                // Create a proxy to monitor IWD service name owner changes
-                let this_weak = Rc::downgrade(&this);
+                // Subscribe to PropertiesChanged from IWD (any object path)
+                let this_weak2 = Rc::downgrade(&this);
+                let sub1 = connection.subscribe_to_signal(
+                    Some(IWD_SERVICE),
+                    Some(PROPERTIES_IFACE),
+                    Some("PropertiesChanged"),
+                    None,
+                    None,
+                    gio::DBusSignalFlags::NONE,
+                    move |signal| {
+                        let Some(this) = this_weak2.upgrade() else {
+                            return;
+                        };
+                        // Check which interface changed properties
+                        let iface_name: Option<String> = signal.parameters.child_value(0).get();
+                        match iface_name.as_deref() {
+                            Some(IFACE_ADAPTER) => this.update_adapter_state(),
+                            Some(IFACE_STATION) => this.update_station_state(),
+                            _ => {}
+                        }
+                    },
+                );
+
+                // Subscribe to InterfacesAdded from IWD ObjectManager
+                let this_weak3 = Rc::downgrade(&this);
+                let sub2 = connection.subscribe_to_signal(
+                    Some(IWD_SERVICE),
+                    Some(OBJECT_MANAGER_IFACE),
+                    Some("InterfacesAdded"),
+                    None,
+                    None,
+                    gio::DBusSignalFlags::NONE,
+                    move |signal| {
+                        let Some(this) = this_weak3.upgrade() else {
+                            return;
+                        };
+                        Self::handle_interfaces_added(&this, signal.parameters);
+                    },
+                );
+
+                // Subscribe to InterfacesRemoved from IWD ObjectManager
+                let this_weak4 = Rc::downgrade(&this);
+                let sub3 = connection.subscribe_to_signal(
+                    Some(IWD_SERVICE),
+                    Some(OBJECT_MANAGER_IFACE),
+                    Some("InterfacesRemoved"),
+                    None,
+                    None,
+                    gio::DBusSignalFlags::NONE,
+                    move |signal| {
+                        let Some(this) = this_weak4.upgrade() else {
+                            return;
+                        };
+                        Self::handle_interfaces_removed(&this, signal.parameters);
+                    },
+                );
+
+                // Store subscriptions to keep them alive
+                this._signal_subscriptions
+                    .borrow_mut()
+                    .extend([sub1, sub2, sub3]);
+
+                // Create a watcher proxy to monitor IWD service name owner changes
+                let this_weak5 = Rc::downgrade(&this);
                 gio::DBusProxy::new(
                     &connection,
                     gio::DBusProxyFlags::DO_NOT_LOAD_PROPERTIES
@@ -230,7 +315,7 @@ impl IwdService {
                     "org.freedesktop.DBus.Peer",
                     None::<&gio::Cancellable>,
                     move |res| {
-                        let this = match this_weak.upgrade() {
+                        let this = match this_weak5.upgrade() {
                             Some(this) => this,
                             None => return,
                         };
@@ -239,26 +324,24 @@ impl IwdService {
                             Ok(p) => p,
                             Err(e) => {
                                 debug!("Failed to create IWD watcher proxy: {}", e);
-                                // Still try to discover - service might be available
-                                Self::start_discovery();
+                                // Still try to discover — service might be available
+                                Self::discover_from_managed_objects(&this);
                                 return;
                             }
                         };
 
                         // Monitor for IWD service appearing/disappearing
-                        let this_weak = Rc::downgrade(&this);
+                        let this_weak6 = Rc::downgrade(&this);
                         proxy.connect_notify_local(Some("g-name-owner"), move |proxy, _| {
-                            let Some(this) = this_weak.upgrade() else {
+                            let Some(this) = this_weak6.upgrade() else {
                                 return;
                             };
 
                             let has_owner = proxy.name_owner().is_some();
                             if has_owner {
-                                // Service reappeared - rediscover IWD devices
                                 debug!("IWD service appeared, rediscovering devices");
-                                Self::start_discovery();
+                                Self::discover_from_managed_objects(&this);
                             } else {
-                                // Service disappeared - mark unavailable and clear proxies
                                 debug!("IWD service disappeared");
                                 this.clear_proxies();
                                 this.set_unavailable();
@@ -268,9 +351,9 @@ impl IwdService {
                         // Store the watcher proxy to keep it alive
                         this.watcher_proxy.replace(Some(proxy.clone()));
 
-                        // Check if service is currently available and start discovery
+                        // Check if service is currently available
                         if proxy.name_owner().is_some() {
-                            Self::start_discovery();
+                            Self::discover_from_managed_objects(&this);
                         } else {
                             debug!("IWD service not available at startup");
                             this.set_unavailable();
@@ -281,22 +364,141 @@ impl IwdService {
         );
     }
 
-    /// Start device discovery in a background thread.
-    fn start_discovery() {
-        std::thread::spawn(move || match Self::discover_paths() {
-            Ok((adapter_path, station_path, powered)) => {
-                debug!(
-                    "Found iwd adapter at: {} (powered: {}), station at: {}",
-                    adapter_path, powered, station_path
-                );
-                send_network_update(IwdUpdate::AdapterDiscovered { path: adapter_path });
-                send_network_update(IwdUpdate::StationDiscovered { path: station_path });
+    /// Discover IWD adapter and station via ObjectManager's GetManagedObjects.
+    /// Called from main thread (async D-Bus call).
+    fn discover_from_managed_objects(this: &Rc<Self>) {
+        let Some(connection) = this.connection.borrow().clone() else {
+            return;
+        };
+
+        let this_weak = Rc::downgrade(this);
+        connection.call(
+            Some(IWD_SERVICE),
+            "/",
+            OBJECT_MANAGER_IFACE,
+            "GetManagedObjects",
+            None,
+            None,
+            gio::DBusCallFlags::NONE,
+            5000,
+            None::<&gio::Cancellable>,
+            move |res| {
+                let Some(this) = this_weak.upgrade() else {
+                    return;
+                };
+                match res {
+                    Ok(result) => {
+                        Self::process_managed_objects(&this, &result);
+                    }
+                    Err(e) => {
+                        debug!("GetManagedObjects failed: {}", e);
+                        this.set_unavailable();
+                    }
+                }
+            },
+        );
+    }
+
+    /// Parse GetManagedObjects result to find adapter and station paths.
+    fn process_managed_objects(this: &Rc<Self>, result: &Variant) {
+        let dict = result.child_value(0);
+        let n = dict.n_children();
+
+        let mut adapter_path: Option<String> = None;
+        let mut station_path: Option<String> = None;
+
+        for i in 0..n {
+            let entry = dict.child_value(i);
+            let path: Option<String> = entry.child_value(0).get();
+            let Some(path) = path else { continue };
+
+            let ifaces = entry.child_value(1);
+            let n_ifaces = ifaces.n_children();
+            for j in 0..n_ifaces {
+                let iface_entry = ifaces.child_value(j);
+                let iface_name: Option<String> = iface_entry.child_value(0).get();
+                match iface_name.as_deref() {
+                    Some(IFACE_ADAPTER) if adapter_path.is_none() => {
+                        debug!("Found IWD adapter at: {}", path);
+                        adapter_path = Some(path.clone());
+                    }
+                    Some(IFACE_STATION) if station_path.is_none() => {
+                        debug!("Found IWD station at: {}", path);
+                        station_path = Some(path.clone());
+                    }
+                    _ => {}
+                }
             }
-            Err(e) => {
-                error!("Failed to discover iwd: {}", e);
-                send_network_update(IwdUpdate::ServiceUnavailable)
+        }
+
+        if let Some(path) = adapter_path {
+            this.apply_update(IwdUpdate::AdapterDiscovered { path });
+        }
+        if let Some(path) = station_path {
+            this.apply_update(IwdUpdate::StationDiscovered { path });
+        }
+
+        if this.adapter_path.borrow().is_none() && this.station_path.borrow().is_none() {
+            debug!("No IWD adapter or station found in managed objects");
+            this.set_unavailable();
+        }
+    }
+
+    /// Handle InterfacesAdded signal — detect new adapter/station objects.
+    fn handle_interfaces_added(this: &Rc<Self>, params: &Variant) {
+        // InterfacesAdded(OBJPATH, DICT<STRING,DICT<STRING,VARIANT>>)
+        let path: Option<String> = params.child_value(0).get();
+        let Some(path) = path else { return };
+
+        let ifaces = params.child_value(1);
+        let n_ifaces = ifaces.n_children();
+        for j in 0..n_ifaces {
+            let iface_entry = ifaces.child_value(j);
+            let iface_name: Option<String> = iface_entry.child_value(0).get();
+            match iface_name.as_deref() {
+                Some(IFACE_ADAPTER) if this.adapter_path.borrow().is_none() => {
+                    debug!("IWD adapter added: {}", path);
+                    this.apply_update(IwdUpdate::AdapterDiscovered { path: path.clone() });
+                }
+                Some(IFACE_STATION) if this.station_path.borrow().is_none() => {
+                    debug!("IWD station added: {}", path);
+                    this.apply_update(IwdUpdate::StationDiscovered { path: path.clone() });
+                }
+                _ => {}
             }
-        });
+        }
+    }
+
+    /// Handle InterfacesRemoved signal — detect adapter/station removal.
+    fn handle_interfaces_removed(this: &Rc<Self>, params: &Variant) {
+        // InterfacesRemoved(OBJPATH, ARRAY<STRING>)
+        let path: Option<String> = params.child_value(0).get();
+        let Some(path) = path else { return };
+
+        let removed_ifaces = params.child_value(1);
+        let n = removed_ifaces.n_children();
+        let mut lost_adapter = false;
+        let mut lost_station = false;
+
+        for i in 0..n {
+            let iface_name: Option<String> = removed_ifaces.child_value(i).get();
+            match iface_name.as_deref() {
+                Some(IFACE_ADAPTER) if this.adapter_path.borrow().as_deref() == Some(&path) => {
+                    debug!("IWD adapter removed: {}", path);
+                    lost_adapter = true;
+                }
+                Some(IFACE_STATION) if this.station_path.borrow().as_deref() == Some(&path) => {
+                    debug!("IWD station removed: {}", path);
+                    lost_station = true;
+                }
+                _ => {}
+            }
+        }
+
+        if lost_adapter || lost_station {
+            this.clear_proxies();
+            this.set_unavailable();
+        }
     }
 
     /// Clear all D-Bus proxies when service becomes unavailable.
@@ -354,9 +556,6 @@ impl IwdService {
                 let this = IwdService::global();
                 Self::setup_station_proxy(&this, &path);
             }
-            IwdUpdate::ServiceUnavailable => {
-                self.set_unavailable();
-            }
             IwdUpdate::NetworksRefreshed { networks } => {
                 let mut snapshot = self.snapshot.borrow_mut();
                 snapshot.networks = networks;
@@ -364,6 +563,7 @@ impl IwdService {
                 let snapshot_clone = snapshot.clone();
                 drop(snapshot);
                 self.callbacks.notify(&snapshot_clone);
+                self.update_station_state();
             }
             IwdUpdate::ConnectionFailed { ssid } => {
                 // Connection failed before agent was invoked - set failed_ssid for UI feedback
@@ -385,133 +585,6 @@ impl IwdService {
         let snapshot_clone = snapshot.clone();
         drop(snapshot);
         self.callbacks.notify(&snapshot_clone);
-    }
-
-    fn discover_paths() -> Result<(String, String, bool), String> {
-        // Find adapter under root
-        let children = Self::introspect_children(IWD_ROOT_PATH)?;
-        let (adapter_path, powered) = children
-            .into_iter()
-            .map(|name| format!("{}/{}", IWD_ROOT_PATH, name))
-            .find_map(|path| Self::has_adapter_interface(&path).map(|p| (path, p)))
-            .ok_or("No adapter found")?;
-
-        // Find station under adapter
-        let children = Self::introspect_children(&adapter_path)?;
-        let station_path = children
-            .into_iter()
-            .map(|name| format!("{}/{}", adapter_path, name))
-            .find(|path| Self::has_station_interface(path))
-            .ok_or("No station found")?;
-
-        Ok((adapter_path, station_path, powered))
-    }
-
-    fn introspect_children(path: &str) -> Result<Vec<String>, String> {
-        let proxy = gio::DBusProxy::for_bus_sync(
-            gio::BusType::System,
-            gio::DBusProxyFlags::NONE,
-            None::<&gio::DBusInterfaceInfo>,
-            IWD_SERVICE,
-            path,
-            IFACE_INTROSPECTABLE,
-            None::<&gio::Cancellable>,
-        )
-        .map_err(|e| format!("Failed to create introspect proxy for {}: {}", path, e))?;
-
-        let result = proxy
-            .call_sync(
-                "Introspect",
-                None,
-                gio::DBusCallFlags::NONE,
-                5000,
-                None::<&gio::Cancellable>,
-            )
-            .map_err(|e| format!("Introspect failed for {}: {}", path, e))?;
-
-        let xml = result
-            .child_value(0)
-            .get::<String>()
-            .ok_or_else(|| format!("Failed to get XML from {}", path))?;
-
-        Ok(Self::parse_child_nodes(&xml))
-    }
-
-    fn parse_child_nodes(xml: &str) -> Vec<String> {
-        let mut nodes = Vec::new();
-
-        for line in xml.lines() {
-            if let Some(start) = line.find("<node name=\"") {
-                let after_quote = start + 12;
-
-                if let Some(end) = line[after_quote..].find('"') {
-                    let name = &line[after_quote..after_quote + end];
-                    nodes.push(name.to_string());
-                }
-            }
-        }
-
-        nodes
-    }
-
-    fn has_station_interface(path: &str) -> bool {
-        let proxy = match gio::DBusProxy::for_bus_sync(
-            gio::BusType::System,
-            // Use minimal flags - we only need to check if the interface exists.
-            gio::DBusProxyFlags::DO_NOT_LOAD_PROPERTIES
-                | gio::DBusProxyFlags::DO_NOT_CONNECT_SIGNALS,
-            None::<&gio::DBusInterfaceInfo>,
-            IWD_SERVICE,
-            path,
-            IFACE_STATION,
-            None::<&gio::Cancellable>,
-        ) {
-            Ok(p) => p,
-            Err(_) => return false,
-        };
-
-        // Verify the interface actually exists by trying to get a property.
-        // Proxy creation succeeds even for non-existent interfaces.
-        proxy
-            .call_sync(
-                "org.freedesktop.DBus.Properties.Get",
-                Some(&(IFACE_STATION, "State").to_variant()),
-                gio::DBusCallFlags::NONE,
-                1000,
-                None::<&gio::Cancellable>,
-            )
-            .is_ok()
-    }
-
-    fn has_adapter_interface(path: &str) -> Option<bool> {
-        let proxy = match gio::DBusProxy::for_bus_sync(
-            gio::BusType::System,
-            // Use minimal flags - full property loading can fail in a background thread.
-            gio::DBusProxyFlags::DO_NOT_LOAD_PROPERTIES
-                | gio::DBusProxyFlags::DO_NOT_CONNECT_SIGNALS,
-            None::<&gio::DBusInterfaceInfo>,
-            IWD_SERVICE,
-            path,
-            IFACE_ADAPTER,
-            None::<&gio::Cancellable>,
-        ) {
-            Ok(p) => p,
-            Err(_) => return None,
-        };
-
-        // Fetch Powered property via D-Bus call. If this fails, the interface doesn't
-        // exist on this object path (e.g., it's a known network, not an adapter).
-        proxy
-            .call_sync(
-                "org.freedesktop.DBus.Properties.Get",
-                Some(&(IFACE_ADAPTER, "Powered").to_variant()),
-                gio::DBusCallFlags::NONE,
-                1000,
-                None::<&gio::Cancellable>,
-            )
-            .ok()
-            .and_then(|v| v.child_value(0).get::<glib::Variant>())
-            .and_then(|v| v.get::<bool>())
     }
 
     fn read_network_name(path: &str) -> Option<String> {
@@ -644,10 +717,12 @@ impl IwdService {
             .cached_property("ConnectedNetwork")
             .and_then(|v| v.get::<String>());
 
-        let ssid = if matches!(
+        let is_connected_or_connecting = matches!(
             state.as_deref(),
             Some(STATE_CONNECTED | STATE_CONNECTING | STATE_ROAMING)
-        ) {
+        );
+
+        let ssid = if is_connected_or_connecting {
             name_path.and_then(|path| {
                 self.snapshot
                     .borrow()
@@ -657,20 +732,46 @@ impl IwdService {
                     .map(|n| n.ssid.clone())
             })
         } else {
+            // Not connected — reset SSID resolve attempts
+            self.ssid_resolve_attempts.set(0);
             None
         };
 
-        let should_fetch_networks = {
+        // Track SSID resolution attempts to prevent infinite refresh loop
+        if is_connected_or_connecting && ssid.is_some() {
+            // SSID resolved successfully — reset counter
+            self.ssid_resolve_attempts.set(0);
+        }
+
+        // Single borrow to read previous state for change detection
+        let (should_fetch_networks, scan_just_completed) = {
             let snap = self.snapshot.borrow();
             let was_connected =
                 matches!(snap.state.as_deref(), Some(STATE_CONNECTED | STATE_ROAMING));
             let is_connected = matches!(state.as_deref(), Some(STATE_CONNECTED | STATE_ROAMING));
-            snap.networks.is_empty() || (!was_connected && is_connected)
-        };
+            let needs_fetch = snap.networks.is_empty() || (!was_connected && is_connected);
 
-        let scan_just_completed = {
-            let snap = self.snapshot.borrow();
-            snap.scanning && !scanning
+            // If we need to fetch because SSID is unresolved while connected,
+            // check the retry limit to avoid an infinite loop.
+            let should_fetch = if needs_fetch && is_connected && ssid.is_none() {
+                let attempts = self.ssid_resolve_attempts.get();
+                if attempts >= MAX_SSID_RESOLVE_ATTEMPTS {
+                    debug!(
+                        "SSID resolution failed after {} attempts, giving up",
+                        attempts
+                    );
+                    false
+                } else {
+                    self.ssid_resolve_attempts.set(attempts + 1);
+                    true
+                }
+            } else {
+                needs_fetch
+            };
+
+            let scan_done = snap.scanning && !scanning;
+
+            (should_fetch, scan_done)
         };
 
         // Clear our scan_in_progress guard when IWD reports scan complete
@@ -740,6 +841,19 @@ impl IwdService {
 
     /// Connect to a Wi-Fi network by its D-Bus object path.
     pub fn connect_to_network(&self, path: &str) {
+        // Reset SSID resolve attempts for the new connection
+        self.ssid_resolve_attempts.set(0);
+
+        {
+            let mut snapshot = self.snapshot.borrow_mut();
+            if snapshot.failed_ssid.is_some() {
+                snapshot.failed_ssid = None;
+                let snapshot_clone = snapshot.clone();
+                drop(snapshot);
+                self.callbacks.notify(&snapshot_clone);
+            }
+        }
+
         let path = path.to_string();
         std::thread::spawn(move || {
             // Get the SSID first for error reporting
@@ -770,13 +884,28 @@ impl IwdService {
                 30000,
                 None::<&gio::Cancellable>,
             ) {
-                // Only report failure if this wasn't an agent-related error.
-                // Agent errors (wrong password) are handled by the Cancel callback.
-                let is_agent_error = gio::DBusError::remote_error(&e)
-                    .map(|name| name.starts_with("net.connman.iwd.Agent"))
-                    .unwrap_or(false);
-                if !is_agent_error {
-                    warn!("Connect failed: {}", e);
+                // Check the error type to determine how to handle it
+                let error_name = gio::DBusError::remote_error(&e);
+                let error_name_str = error_name.as_ref().map(|s| s.as_str()).unwrap_or("");
+
+                // Agent errors (wrong password) are handled by the Cancel callback
+                let is_agent_error = error_name_str.starts_with("net.connman.iwd.Agent");
+
+                let is_transient_error = matches!(
+                    error_name_str,
+                    "net.connman.iwd.Aborted"
+                        | "net.connman.iwd.InProgress"
+                        | "net.connman.iwd.NotAvailable"
+                        | "net.connman.iwd.Failed"
+                );
+
+                if is_transient_error {
+                    debug!(
+                        "Connect got transient error '{}', not treating as failure",
+                        error_name_str
+                    );
+                } else if !is_agent_error {
+                    warn!("Connect failed: {} (error: {})", e, error_name_str);
                     if let Some(ssid) = ssid {
                         send_network_update(IwdUpdate::ConnectionFailed { ssid });
                     }
@@ -882,6 +1011,7 @@ impl IwdService {
     }
 
     fn get_networks_sync(proxy: &gio::DBusProxy) -> Vec<WifiNetwork> {
+        // Step 1: Get ordered networks from Station (provides path + signal strength)
         let result = match proxy.call_sync(
             "GetOrderedNetworks",
             None,
@@ -895,6 +1025,11 @@ impl IwdService {
                 return Vec::new();
             }
         };
+
+        // Step 2: Get all managed objects in a single call for property lookup
+        let managed_props = Self::fetch_network_properties();
+
+        // Step 3: Build network list by joining ordered networks with managed object properties
         let array = result.child_value(0);
         let count = array.n_children();
         let mut networks = Vec::new();
@@ -909,33 +1044,21 @@ impl IwdService {
             let signal_raw: i16 = tuple.child_value(1).get().unwrap_or(-10000);
             let strength = dbm_to_percent(signal_raw);
 
-            let net_proxy = match gio::DBusProxy::for_bus_sync(
-                gio::BusType::System,
-                gio::DBusProxyFlags::NONE,
-                None::<&gio::DBusInterfaceInfo>,
-                IWD_SERVICE,
-                &path,
-                IFACE_NETWORK,
-                None::<&gio::Cancellable>,
-            ) {
-                Ok(p) => p,
-                Err(_) => continue,
-            };
-            let ssid = net_proxy
-                .cached_property("Name")
-                .and_then(|v| v.get::<String>())
-                .unwrap_or_default();
-            let net_type = net_proxy
-                .cached_property("Type")
-                .and_then(|v| v.get::<String>())
-                .unwrap_or_else(|| "open".to_string());
-            let connected = net_proxy
-                .cached_property("Connected")
-                .and_then(|v| v.get::<bool>())
-                .unwrap_or(false);
-            let known_network_path = net_proxy
-                .cached_property("KnownNetwork")
-                .and_then(|v| v.get::<String>());
+            // Look up properties from managed objects HashMap
+            let (ssid, net_type, connected, known_network_path) =
+                if let Some(props) = managed_props.get(&path) {
+                    (
+                        props.name.clone(),
+                        props.net_type.clone(),
+                        props.connected,
+                        props.known_network_path.clone(),
+                    )
+                } else {
+                    // Fallback: network not found in managed objects (shouldn't normally happen)
+                    debug!("Network {} not found in managed objects, skipping", path);
+                    continue;
+                };
+
             let security = if net_type == "open" {
                 "open"
             } else {
@@ -953,6 +1076,101 @@ impl IwdService {
             });
         }
         networks
+    }
+
+    /// Fetch all IWD network properties via GetManagedObjects in a single D-Bus call.
+    /// Returns a HashMap keyed by object path with network properties.
+    /// Called from background thread (sync D-Bus).
+    fn fetch_network_properties() -> HashMap<String, NetworkProps> {
+        let mut props_map = HashMap::new();
+
+        let om_proxy = match gio::DBusProxy::for_bus_sync(
+            gio::BusType::System,
+            gio::DBusProxyFlags::DO_NOT_LOAD_PROPERTIES
+                | gio::DBusProxyFlags::DO_NOT_CONNECT_SIGNALS,
+            None::<&gio::DBusInterfaceInfo>,
+            IWD_SERVICE,
+            "/",
+            OBJECT_MANAGER_IFACE,
+            None::<&gio::Cancellable>,
+        ) {
+            Ok(p) => p,
+            Err(e) => {
+                debug!("Failed to create ObjectManager proxy: {}", e);
+                return props_map;
+            }
+        };
+
+        let result = match om_proxy.call_sync(
+            "GetManagedObjects",
+            None,
+            gio::DBusCallFlags::NONE,
+            5000,
+            None::<&gio::Cancellable>,
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                debug!("GetManagedObjects failed: {}", e);
+                return props_map;
+            }
+        };
+
+        let dict = result.child_value(0);
+        let n = dict.n_children();
+        for i in 0..n {
+            let entry = dict.child_value(i);
+            let path: Option<String> = entry.child_value(0).get();
+            let Some(path) = path else { continue };
+
+            let ifaces = entry.child_value(1);
+            let n_ifaces = ifaces.n_children();
+            for j in 0..n_ifaces {
+                let iface_entry = ifaces.child_value(j);
+                let iface_name: Option<String> = iface_entry.child_value(0).get();
+                if iface_name.as_deref() != Some(IFACE_NETWORK) {
+                    continue;
+                }
+
+                // Parse network properties from this interface's property dict
+                let props_variant = iface_entry.child_value(1);
+                let n_props = props_variant.n_children();
+                let mut name = String::new();
+                let mut net_type = "open".to_string();
+                let mut connected = false;
+                let mut known_network_path: Option<String> = None;
+
+                for k in 0..n_props {
+                    let prop = props_variant.child_value(k);
+                    let key: Option<String> = prop.child_value(0).get();
+                    let Some(key) = key else { continue };
+                    let value = prop.child_value(1);
+                    let inner = value.child_value(0);
+
+                    match key.as_str() {
+                        "Name" => name = inner.get::<String>().unwrap_or_default(),
+                        "Type" => {
+                            net_type = inner.get::<String>().unwrap_or_else(|| "open".to_string())
+                        }
+                        "Connected" => connected = inner.get::<bool>().unwrap_or(false),
+                        "KnownNetwork" => known_network_path = inner.get::<String>(),
+                        _ => {}
+                    }
+                }
+
+                props_map.insert(
+                    path.clone(),
+                    NetworkProps {
+                        name,
+                        net_type,
+                        connected,
+                        known_network_path,
+                    },
+                );
+                break; // Only one Network interface per object
+            }
+        }
+
+        props_map
     }
 
     /// Register the IWD Agent for handling password authentication.
