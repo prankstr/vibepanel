@@ -216,6 +216,25 @@ impl WifiSnapshot {
             Self::Iwd(inner) => inner.auth_request.as_ref().map(|r| r.ssid.as_str()),
         }
     }
+
+    /// Get the SSID of the network that failed to connect, if any.
+    pub fn failed_ssid(&self) -> Option<&str> {
+        match self {
+            Self::NetworkManager(inner) => inner.failed_ssid.as_deref(),
+            Self::Iwd(inner) => inner.failed_ssid.as_deref(),
+        }
+    }
+
+    /// Get the human-readable reason for the last connection failure.
+    ///
+    /// - IWD: specific reasons like "Wrong password", "Connection failed", etc.
+    /// - NetworkManager: always `None` (NM doesn't provide granular failure reasons).
+    pub fn failed_reason(&self) -> Option<&str> {
+        match self {
+            Self::NetworkManager(_) => None,
+            Self::Iwd(inner) => inner.failed_reason.as_deref(),
+        }
+    }
 }
 
 /// Unified Wi-Fi service that abstracts over NetworkManager and IWD backends.
@@ -314,6 +333,8 @@ impl WifiService {
                         "IWD connect_to_network called without path for SSID '{}' - ignoring",
                         ssid
                     );
+                    // Report failure so the UI can exit "Connecting..." state.
+                    inner.set_failed_ssid(ssid, "Network not found");
                 }
             }
         }

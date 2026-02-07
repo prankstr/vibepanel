@@ -20,8 +20,8 @@ use tracing::debug;
 use super::components::ListRow;
 use super::ui_helpers::{
     ExpandableCard, ExpandableCardBase, ScanButton, add_placeholder_row, build_accent_subtitle,
-    clear_list_box, create_qs_list_box, create_row_action_label, create_row_menu_action,
-    create_row_menu_button, set_icon_active,
+    build_error_subtitle, clear_list_box, create_qs_list_box, create_row_action_label,
+    create_row_menu_action, create_row_menu_button, set_icon_active,
 };
 use super::window::current_quick_settings_window;
 use crate::services::icons::IconsService;
@@ -651,6 +651,8 @@ pub fn populate_wifi_list(state: &WifiCardState, list_box: &ListBox, snapshot: &
     let icons = IconsService::global();
     let target_ssid = state.password_target_ssid.borrow().clone();
     let connecting_ssid = snapshot.connecting_ssid();
+    let failed_ssid = snapshot.failed_ssid();
+    let failed_reason = snapshot.failed_reason();
     let mut inserted_password_row = false;
 
     for net in snapshot.networks() {
@@ -725,7 +727,10 @@ pub fn populate_wifi_list(state: &WifiCardState, list_box: &ListBox, snapshot: &
             create_network_action_widget(net)
         };
 
-        // Build row with either connected subtitle widget or plain text
+        // Check if this network has a non-password failure to show inline
+        let is_failed = failed_ssid == Some(net.ssid.as_str());
+
+        // Build row with either connected subtitle widget, error subtitle, or plain text
         let mut row_builder = ListRow::builder()
             .title(&net.ssid)
             .leading_widget(leading_icon)
@@ -736,6 +741,12 @@ pub fn populate_wifi_list(state: &WifiCardState, list_box: &ListBox, snapshot: &
             // Active network: accent "Connected" + muted extras
             let extra_refs: Vec<&str> = extra_parts.iter().map(|s| s.as_str()).collect();
             let subtitle_widget = build_accent_subtitle("Connected", &extra_refs);
+            row_builder = row_builder.subtitle_widget(subtitle_widget.upcast());
+        } else if is_failed {
+            // Failed network: error-colored reason + muted extras
+            let reason = failed_reason.unwrap_or("Connection failed");
+            let extra_refs: Vec<&str> = extra_parts.iter().map(|s| s.as_str()).collect();
+            let subtitle_widget = build_error_subtitle(reason, &extra_refs);
             row_builder = row_builder.subtitle_widget(subtitle_widget.upcast());
         } else {
             // Not connected: plain subtitle
@@ -981,9 +992,12 @@ fn on_password_entry_mapped(state: &WifiCardState, entry: &Entry) {
 fn on_password_cancel_clicked(state: &WifiCardState) {
     hide_password_dialog(state);
 
-    // Cancel any pending IWD auth and clear failed state
+    // Cancel any pending IWD auth, abort active connection, and clear failed state
     let service = WifiService::global();
     service.cancel_auth();
+    if service.snapshot().connecting_ssid().is_some() {
+        service.disconnect();
+    }
     service.clear_failed_state();
 }
 
@@ -1038,8 +1052,15 @@ fn on_password_connect_clicked(state: &WifiCardState, window: WeakRef<Applicatio
         // IWD agent pattern: submit the password to the pending D-Bus invocation
         service.submit_password(&password);
     } else {
-        // NetworkManager pattern: connect with password directly
-        service.connect_to_network(&ssid, Some(&password), None);
+        // No pending IWD auth request — connect with password directly.
+        // NetworkManager doesn't need a path; IWD does, so look it up from
+        // the current snapshot.
+        let path = snapshot
+            .networks()
+            .iter()
+            .find(|n| n.ssid == ssid)
+            .and_then(|n| n.path.clone());
+        service.connect_to_network(&ssid, Some(&password), path.as_deref());
     }
 }
 
@@ -1054,8 +1075,9 @@ fn set_password_connecting_state(
     if let Some(entry) = state.password_entry.borrow().as_ref() {
         entry.set_sensitive(!connecting);
     }
-    if let Some(btn) = state.password_cancel_button.borrow().as_ref() {
-        btn.set_sensitive(!connecting);
+    // Cancel button stays enabled during connect so the user can abort.
+    if !connecting && let Some(btn) = state.password_cancel_button.borrow().as_ref() {
+        btn.set_sensitive(true);
     }
     if let Some(btn) = state.password_connect_button.borrow().as_ref() {
         btn.set_sensitive(!connecting);
@@ -1157,6 +1179,13 @@ pub fn on_network_changed(
                         error_label.add_css_class(color::ERROR);
                         error_label.set_label("Wrong password");
                     }
+                    // Repopulate the network list so the previously-connected network
+                    // no longer shows "Connected" (the list is normally skipped when
+                    // the password dialog is visible).
+                    if let Some(list_box) = state.base.list_box.borrow().as_ref() {
+                        populate_wifi_list(state, list_box, snapshot);
+                        SurfaceStyleManager::global().apply_pango_attrs_all(list_box);
+                    }
                     // Clear the failed state so we don't re-trigger
                     NetworkService::global().clear_failed_state();
                 }
@@ -1169,23 +1198,34 @@ pub fn on_network_changed(
                     target_ssid
                 );
                 hide_password_dialog(state);
+            } else if nm_snap.connected
+                && nm_snap.ssid.as_ref() != Some(target_ssid)
+                && nm_snap.connecting_ssid.is_none()
+            {
+                // Connected to a different network while password dialog was open
+                // (user clicked a saved network). Hide the stale dialog.
+                debug!(
+                    "NM connected to '{}' while password dialog was open for '{}', hiding dialog",
+                    nm_snap.ssid.as_deref().unwrap_or("?"),
+                    target_ssid
+                );
+                hide_password_dialog(state);
             }
             // If connecting_ssid matches target, keep showing animation (do nothing)
-        } else if let Some(ref failed_ssid) = nm_snap.failed_ssid {
-            // No dialog open but connection failed - show dialog with error if window is mapped
-            if window.is_mapped() {
-                debug!(
-                    "Connection failed for '{}', showing password dialog with error",
-                    failed_ssid
-                );
-                show_password_dialog_with_error(state, failed_ssid, Some("Wrong password"));
-            } else {
-                debug!(
-                    "Connection failed for '{}', but window is closed - clearing failed state",
-                    failed_ssid
-                );
+        } else if let Some(ref _failed_ssid) = nm_snap.failed_ssid {
+            // No dialog open but connection failed.
+            // Don't show password dialog — NM doesn't tell us the failure reason,
+            // so prompting for a password is misleading when the cause could be
+            // DHCP timeout, AP unreachable, driver error, etc.
+            // The inline error subtitle on the network row (handled by
+            // populate_wifi_list) is shown instead.
+            debug!(
+                "NM connection failed for '{}', showing inline error",
+                _failed_ssid
+            );
+            glib::timeout_add_local_once(std::time::Duration::from_secs(5), move || {
                 NetworkService::global().clear_failed_state();
-            }
+            });
         }
     }
 
@@ -1232,6 +1272,13 @@ pub fn on_network_changed(
                         error_label.add_css_class(color::ERROR);
                         error_label.set_label(reason);
                     }
+                    // Repopulate the network list so the previously-connected network
+                    // no longer shows "Connected" (the list is normally skipped when
+                    // the password dialog is visible).
+                    if let Some(list_box) = state.base.list_box.borrow().as_ref() {
+                        populate_wifi_list(state, list_box, snapshot);
+                        SurfaceStyleManager::global().apply_pango_attrs_all(list_box);
+                    }
                     // Clear the failed state so we don't re-trigger
                     WifiService::global().clear_failed_state();
                 }
@@ -1242,25 +1289,50 @@ pub fn on_network_changed(
                     target_ssid
                 );
                 hide_password_dialog(state);
+            } else if iwd_snap.connected() && iwd_snap.ssid.as_deref() != Some(target_ssid) {
+                // Connected to a different network while password dialog was open
+                // (user clicked a saved network). Hide the stale dialog.
+                debug!(
+                    "IWD connected to '{}' while password dialog was open for '{}', hiding dialog",
+                    iwd_snap.ssid.as_deref().unwrap_or("?"),
+                    target_ssid
+                );
+                hide_password_dialog(state);
             }
         } else if let Some(ref failed_ssid) = iwd_snap.failed_ssid {
-            // No dialog open but connection failed - show dialog with error if window is mapped
+            // No dialog open but connection failed.
+            // Only show password dialog for auth failures ("Wrong password").
+            // For other failures (e.g., DHCP timeout, driver error, AP unreachable),
+            // show the error inline on the network row instead of misleadingly
+            // prompting for a password.
             let reason = iwd_snap
                 .failed_reason
                 .as_deref()
                 .unwrap_or("Connection failed");
-            if window.is_mapped() {
+            let is_auth_failure = reason == "Wrong password";
+
+            if is_auth_failure && window.is_mapped() {
                 debug!(
-                    "IWD connection failed for '{}': {}, showing password dialog with error",
-                    failed_ssid, reason
+                    "IWD auth failed for '{}', showing password dialog with error",
+                    failed_ssid
                 );
                 show_password_dialog_with_error(state, failed_ssid, Some(reason));
-            } else {
+            } else if is_auth_failure {
                 debug!(
-                    "IWD connection failed for '{}', but window is closed - clearing failed state",
+                    "IWD auth failed for '{}', but window is closed - clearing failed state",
                     failed_ssid
                 );
                 WifiService::global().clear_failed_state();
+            } else {
+                // Non-auth failure: show inline on network row (handled by populate_wifi_list).
+                // Schedule delayed clear so the error is visible for a few seconds.
+                debug!(
+                    "IWD connection failed for '{}': {}, showing inline error",
+                    failed_ssid, reason
+                );
+                glib::timeout_add_local_once(std::time::Duration::from_secs(5), move || {
+                    WifiService::global().clear_failed_state();
+                });
             }
         }
     }

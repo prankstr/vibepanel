@@ -3,6 +3,7 @@ use gtk4::gio::{self, prelude::*};
 use gtk4::glib::{self, Variant};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::time::Duration;
 use tracing::{debug, error, warn};
 
 use std::collections::HashMap;
@@ -169,6 +170,10 @@ pub struct IwdService {
     agent_registration_id: RefCell<Option<gio::RegistrationId>>,
     pending_auth: RefCell<Option<PendingAuth>>,
     scan_in_progress: Cell<bool>,
+    /// Whether a debounced network list refresh is pending (from IFACE_NETWORK
+    /// add/remove signals). Prevents stacking multiple refreshes when IWD
+    /// emits rapid ObjectManager signals (e.g., during forget).
+    network_refresh_pending: Cell<bool>,
     /// Counter for SSID resolution attempts when connected but SSID not found
     /// in the cached network list. Capped at MAX_SSID_RESOLVE_ATTEMPTS to
     /// prevent an infinite refresh_networks_async loop.
@@ -191,6 +196,7 @@ impl IwdService {
             agent_registration_id: RefCell::new(None),
             pending_auth: RefCell::new(None),
             scan_in_progress: Cell::new(false),
+            network_refresh_pending: Cell::new(false),
             ssid_resolve_attempts: Cell::new(0),
             watcher_proxy: RefCell::new(None),
             _signal_subscriptions: RefCell::new(Vec::new()),
@@ -471,6 +477,9 @@ impl IwdService {
                     debug!("IWD station added: {}", path);
                     Self::apply_update(this, IwdUpdate::StationDiscovered { path: path.clone() });
                 }
+                Some(IFACE_NETWORK) => {
+                    Self::schedule_network_refresh(this);
+                }
                 _ => {}
             }
         }
@@ -497,6 +506,9 @@ impl IwdService {
                 Some(IFACE_STATION) if this.station_path.borrow().as_deref() == Some(&path) => {
                     debug!("IWD station removed: {}", path);
                     lost_station = true;
+                }
+                Some(IFACE_NETWORK) => {
+                    Self::schedule_network_refresh(this);
                 }
                 _ => {}
             }
@@ -1069,6 +1081,26 @@ impl IwdService {
                 }
             },
         );
+    }
+
+    /// Schedule a debounced network list refresh (100ms delay).
+    ///
+    /// Called when ObjectManager signals indicate a Network object was added
+    /// or removed (e.g., during forget, or when IWD re-creates Network objects
+    /// after a scan). The delay coalesces rapid signals to avoid redundant
+    /// D-Bus calls.
+    fn schedule_network_refresh(this: &Rc<Self>) {
+        if this.network_refresh_pending.get() {
+            return;
+        }
+        this.network_refresh_pending.set(true);
+        let weak = Rc::downgrade(this);
+        glib::timeout_add_local_once(Duration::from_millis(100), move || {
+            if let Some(this) = weak.upgrade() {
+                this.network_refresh_pending.set(false);
+                this.refresh_networks_async();
+            }
+        });
     }
 
     fn refresh_networks_async(&self) {

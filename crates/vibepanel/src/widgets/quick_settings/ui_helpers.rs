@@ -78,6 +78,37 @@ pub fn set_subtitle_active(label: &Label, active: bool) {
     }
 }
 
+/// Build a subtitle widget with an error-colored primary word followed by muted parts.
+///
+/// Creates an HBox containing:
+/// - Primary word label with error color (e.g., "Connection failed")
+/// - " · part1 · part2 · ..." label with muted color
+///
+/// Used for Wi-Fi rows when a non-password connection failure occurs.
+pub fn build_error_subtitle(error_word: &str, extra_parts: &[&str]) -> GtkBox {
+    use gtk4::pango::EllipsizeMode;
+
+    let hbox = GtkBox::new(Orientation::Horizontal, 0);
+
+    // Primary word in error color
+    let error_label = Label::new(Some(error_word));
+    error_label.add_css_class(color::ERROR);
+    error_label.add_css_class(row::QS_SUBTITLE);
+    hbox.append(&error_label);
+
+    // Remaining parts in muted color
+    if !extra_parts.is_empty() {
+        let rest = format!(" \u{2022} {}", extra_parts.join(" \u{2022} "));
+        let rest_label = Label::new(Some(&rest));
+        rest_label.add_css_class(color::MUTED);
+        rest_label.add_css_class(row::QS_SUBTITLE);
+        rest_label.set_ellipsize(EllipsizeMode::End);
+        hbox.append(&rest_label);
+    }
+
+    hbox
+}
+
 /// Build a subtitle widget with an accent-colored primary word followed by muted parts.
 ///
 /// Creates an HBox containing:
