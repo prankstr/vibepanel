@@ -1,3 +1,4 @@
+use crate::services::callbacks::CallbackId;
 use gtk4::gio::{self, prelude::*};
 use std::rc::Rc;
 use tracing::{debug, warn};
@@ -8,29 +9,36 @@ pub use iwd::{IwdService, IwdSnapshot};
 use network_manager::{NM_IFACE, NM_PATH, NM_SERVICE};
 pub use network_manager::{NetworkService, NetworkSnapshot};
 
+/// Whether a Wi-Fi network requires authentication.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SecurityType {
+    Open,
+    Secured,
+}
+
+impl SecurityType {
+    pub fn is_secured(self) -> bool {
+        self == Self::Secured
+    }
+}
+
 /// A Wi-Fi network visible in the scan results.
 ///
-/// This struct is used by both NetworkManager and IWD backends. Some fields
+/// Used by both NetworkManager and IWD backends. Some fields
 /// are backend-specific and will be `None` when using the other backend.
 #[derive(Debug, Clone)]
 pub struct WifiNetwork {
-    /// Network SSID (name). Used by both backends.
     pub ssid: String,
-    /// Signal strength percentage (0-100). Used by both backends.
-    /// - NetworkManager: directly from AccessPoint.Strength (0-100)
-    /// - IWD: converted from dBm*100 via `dbm_to_percent()`
+    /// Signal strength percentage (0-100).
     pub strength: i32,
-    /// Security type ("open" or "secured"). Used by both backends.
-    pub security: String,
-    /// Whether this is the currently connected network. Used by both backends.
+    pub security: SecurityType,
+    /// Whether this is the currently connected network.
     pub active: bool,
-    /// Whether there is a saved connection profile for this SSID. Used by both backends.
+    /// Whether there is a saved connection profile for this SSID.
     pub known: bool,
-    /// D-Bus path to the KnownNetwork object.
-    /// IWD-specific: Used for `forget_network()`. Always `None` for NetworkManager.
+    /// IWD-only: D-Bus path to the KnownNetwork object (for `forget_network()`).
     pub known_network_path: Option<String>,
-    /// D-Bus path to the Network object.
-    /// IWD-specific: Used for `connect_to_network()`. Always `None` for NetworkManager.
+    /// IWD-only: D-Bus path to the Network object (for `connect_to_network()`).
     pub path: Option<String>,
 }
 
@@ -289,23 +297,27 @@ impl WifiService {
         INSTANCE.with(|s| s.clone())
     }
 
-    pub fn connect<F>(&self, callback: F)
+    pub fn connect<F>(&self, callback: F) -> CallbackId
     where
         F: Fn(&WifiSnapshot) + 'static,
     {
         match &self.backend {
-            WifiBackend::NetworkManager(inner) => {
-                inner.connect(move |snap| {
-                    let wrapped = WifiSnapshot::NetworkManager(snap.clone());
-                    callback(&wrapped);
-                });
-            }
-            WifiBackend::Iwd(inner) => {
-                inner.connect(move |snap| {
-                    let wrapped = WifiSnapshot::Iwd(snap.clone());
-                    callback(&wrapped);
-                });
-            }
+            WifiBackend::NetworkManager(inner) => inner.connect(move |snap| {
+                let wrapped = WifiSnapshot::NetworkManager(snap.clone());
+                callback(&wrapped);
+            }),
+            WifiBackend::Iwd(inner) => inner.connect(move |snap| {
+                let wrapped = WifiSnapshot::Iwd(snap.clone());
+                callback(&wrapped);
+            }),
+        }
+    }
+
+    /// Unregister a previously registered callback.
+    pub fn unsubscribe(&self, id: CallbackId) {
+        match &self.backend {
+            WifiBackend::NetworkManager(inner) => inner.unsubscribe(id),
+            WifiBackend::Iwd(inner) => inner.unsubscribe(id),
         }
     }
 
@@ -428,6 +440,9 @@ impl WifiService {
 ///
 /// Checks for NetworkManager first (the most common Linux network manager).
 /// If NetworkManager is not available, falls back to IWD.
+///
+/// Called once at startup when the [`WifiService`] singleton is created;
+/// the chosen backend is fixed for the lifetime of the process.
 ///
 /// Note: If neither backend is available, IWD is still returned but will
 /// mark itself as unavailable after D-Bus initialization fails.

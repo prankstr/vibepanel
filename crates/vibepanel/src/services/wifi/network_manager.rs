@@ -24,8 +24,8 @@ use gtk4::gio::{self, prelude::*};
 use gtk4::glib::{self, Variant, VariantTy};
 use tracing::{debug, error, warn};
 
-use crate::services::callbacks::Callbacks;
-use crate::services::wifi::WifiNetwork;
+use crate::services::callbacks::{CallbackId, Callbacks};
+use crate::services::wifi::{SecurityType, WifiNetwork};
 
 // D-Bus Constants
 
@@ -218,15 +218,21 @@ impl NetworkService {
     }
 
     /// Register a callback to be invoked whenever the network state changes.
-    pub fn connect<F>(&self, callback: F)
+    pub fn connect<F>(&self, callback: F) -> CallbackId
     where
         F: Fn(&NetworkSnapshot) + 'static,
     {
-        self.callbacks.register(callback);
+        let id = self.callbacks.register(callback);
 
-        // Immediately send current snapshot.
+        // Immediately send current snapshot to the new callback only.
         let snapshot = self.snapshot.borrow().clone();
-        self.callbacks.notify(&snapshot);
+        self.callbacks.notify_single(id, &snapshot);
+        id
+    }
+
+    /// Unregister a previously registered callback.
+    pub fn unsubscribe(&self, id: CallbackId) {
+        self.callbacks.unregister(id);
     }
 
     /// Return the current network snapshot.
@@ -1081,8 +1087,11 @@ impl NetworkService {
             .and_then(|v| v.get::<u32>())
             .unwrap_or(0);
 
-        let secured = flags != 0 || wpa_flags != 0 || rsn_flags != 0;
-        let security = if secured { "secured" } else { "open" }.to_string();
+        let security = if flags != 0 || wpa_flags != 0 || rsn_flags != 0 {
+            SecurityType::Secured
+        } else {
+            SecurityType::Open
+        };
 
         let ssid_str = ssid.unwrap_or_default();
         let is_active = active_path.as_ref().is_some_and(|ap| ap == path);
@@ -1141,10 +1150,10 @@ impl NetworkService {
     fn dedupe_networks(networks: Vec<WifiNetwork>) -> Vec<WifiNetwork> {
         use std::collections::HashMap;
 
-        let mut merged: HashMap<(String, String), WifiNetwork> = HashMap::new();
+        let mut merged: HashMap<(String, SecurityType), WifiNetwork> = HashMap::new();
 
         for net in networks {
-            let key = (net.ssid.clone(), net.security.clone());
+            let key = (net.ssid.clone(), net.security);
             if let Some(existing) = merged.get_mut(&key) {
                 existing.active = existing.active || net.active;
                 existing.strength = existing.strength.max(net.strength);

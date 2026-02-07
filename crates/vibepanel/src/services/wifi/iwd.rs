@@ -1,4 +1,4 @@
-use crate::services::callbacks::Callbacks;
+use crate::services::callbacks::{CallbackId, Callbacks};
 use gtk4::gio::{self, prelude::*};
 use gtk4::glib::{self, Variant};
 use std::cell::{Cell, RefCell};
@@ -8,7 +8,7 @@ use tracing::{debug, error, warn};
 
 use std::collections::HashMap;
 
-use super::WifiNetwork;
+use super::{SecurityType, WifiNetwork};
 
 const IWD_SERVICE: &str = "net.connman.iwd";
 const IWD_ROOT_PATH: &str = "/net/connman/iwd";
@@ -32,6 +32,11 @@ const MAX_SSID_RESOLVE_ATTEMPTS: u8 = 3;
 const STATE_CONNECTING: &str = "connecting";
 const STATE_CONNECTED: &str = "connected";
 const STATE_ROAMING: &str = "roaming";
+
+/// Delay (ms) before refreshing the network list after an ObjectManager signal.
+/// Coalesces rapid add/remove bursts (e.g., after scan or forget) into a single
+/// D-Bus call.
+const NETWORK_REFRESH_DEBOUNCE_MS: u64 = 100;
 
 /// IWD Agent interface introspection XML for D-Bus registration.
 const AGENT_INTROSPECTION: &str = r#"
@@ -168,8 +173,17 @@ pub struct IwdService {
     station_proxy: RefCell<Option<gio::DBusProxy>>,
     station_path: RefCell<Option<String>>,
     agent_registration_id: RefCell<Option<gio::RegistrationId>>,
+    /// Whether the agent has been successfully registered with IWD's AgentManager.
+    /// Tracked separately from `agent_registration_id` (D-Bus object registration)
+    /// because `RegisterAgent` can fail independently after the object is exported.
+    agent_registered_with_manager: Cell<bool>,
     pending_auth: RefCell<Option<PendingAuth>>,
     scan_in_progress: Cell<bool>,
+    /// Whether a network list refresh is currently running in a background
+    /// thread. Prevents spawning redundant threads when multiple paths
+    /// trigger `refresh_networks_async` concurrently (e.g., state change +
+    /// scan complete + ObjectManager signal burst).
+    refresh_in_progress: Cell<bool>,
     /// Whether a debounced network list refresh is pending (from IFACE_NETWORK
     /// add/remove signals). Prevents stacking multiple refreshes when IWD
     /// emits rapid ObjectManager signals (e.g., during forget).
@@ -194,8 +208,10 @@ impl IwdService {
             station_path: RefCell::new(None),
             connection: RefCell::new(None),
             agent_registration_id: RefCell::new(None),
+            agent_registered_with_manager: Cell::new(false),
             pending_auth: RefCell::new(None),
             scan_in_progress: Cell::new(false),
+            refresh_in_progress: Cell::new(false),
             network_refresh_pending: Cell::new(false),
             ssid_resolve_attempts: Cell::new(0),
             watcher_proxy: RefCell::new(None),
@@ -217,15 +233,21 @@ impl IwdService {
     }
 
     /// Register a callback to be invoked whenever the network state changes.
-    pub fn connect<F>(&self, callback: F)
+    pub fn connect<F>(&self, callback: F) -> CallbackId
     where
         F: Fn(&IwdSnapshot) + 'static,
     {
-        self.callbacks.register(callback);
+        let id = self.callbacks.register(callback);
 
-        // Immediately send current snapshot.
+        // Immediately send current snapshot to the new callback only.
         let snapshot = self.snapshot.borrow().clone();
-        self.callbacks.notify(&snapshot);
+        self.callbacks.notify_single(id, &snapshot);
+        id
+    }
+
+    /// Unregister a previously registered callback.
+    pub fn unsubscribe(&self, id: CallbackId) {
+        self.callbacks.unregister(id);
     }
 
     pub fn snapshot(&self) -> IwdSnapshot {
@@ -549,6 +571,7 @@ impl IwdService {
         ) {
             let _ = conn.unregister_object(reg_id);
         }
+        self.agent_registered_with_manager.set(false);
     }
 
     /// Clear only station-related state when WiFi is powered off.
@@ -626,6 +649,7 @@ impl IwdService {
                 Self::setup_station_proxy(this, &path);
             }
             IwdUpdate::NetworksRefreshed { networks } => {
+                this.refresh_in_progress.set(false);
                 let mut snapshot = this.snapshot.borrow_mut();
                 snapshot.networks = networks;
                 snapshot.initial_scan_complete = true;
@@ -637,8 +661,11 @@ impl IwdService {
             IwdUpdate::ConnectionFailed { ssid, reason } => {
                 let mut snapshot = this.snapshot.borrow_mut();
                 // Don't overwrite a more specific failure reason (e.g., "Wrong password"
-                // set by the agent Cancel callback) with a generic "Connection failed".
-                if snapshot.failed_ssid.is_some() {
+                // set by the agent Cancel callback) with a generic "Connection failed",
+                // but only if it's for the same network.
+                if snapshot.failed_ssid.as_deref() == Some(ssid.as_str())
+                    && snapshot.failed_reason.is_some()
+                {
                     return;
                 }
                 snapshot.failed_ssid = Some(ssid);
@@ -664,7 +691,7 @@ impl IwdService {
     fn read_network_name(path: &str) -> Option<String> {
         let proxy = match gio::DBusProxy::for_bus_sync(
             gio::BusType::System,
-            gio::DBusProxyFlags::NONE,
+            gio::DBusProxyFlags::DO_NOT_CONNECT_SIGNALS,
             None::<&gio::DBusInterfaceInfo>,
             IWD_SERVICE,
             path,
@@ -920,13 +947,28 @@ impl IwdService {
 
         {
             let mut snapshot = self.snapshot.borrow_mut();
-            if snapshot.failed_ssid.is_some() {
-                snapshot.failed_ssid = None;
-                snapshot.failed_reason = None;
-                let snapshot_clone = snapshot.clone();
-                drop(snapshot);
-                self.callbacks.notify(&snapshot_clone);
+
+            // Clear any previous failed state
+            snapshot.failed_ssid = None;
+            snapshot.failed_reason = None;
+
+            // Set connecting state immediately for UI feedback (before the
+            // background thread calls Network.Connect and IWD's PropertiesChanged
+            // signal arrives). This matches NetworkManager's behavior where
+            // connecting_ssid is set before spawning.
+            let ssid = snapshot
+                .networks
+                .iter()
+                .find(|n| n.path.as_deref() == Some(path))
+                .map(|n| n.ssid.clone());
+            if let Some(ref ssid) = ssid {
+                snapshot.ssid = Some(ssid.clone());
+                snapshot.state = Some(STATE_CONNECTING.to_string());
             }
+
+            let snapshot_clone = snapshot.clone();
+            drop(snapshot);
+            self.callbacks.notify(&snapshot_clone);
         }
 
         let path = path.to_string();
@@ -1095,18 +1137,27 @@ impl IwdService {
         }
         this.network_refresh_pending.set(true);
         let weak = Rc::downgrade(this);
-        glib::timeout_add_local_once(Duration::from_millis(100), move || {
-            if let Some(this) = weak.upgrade() {
-                this.network_refresh_pending.set(false);
-                this.refresh_networks_async();
-            }
-        });
+        glib::timeout_add_local_once(
+            Duration::from_millis(NETWORK_REFRESH_DEBOUNCE_MS),
+            move || {
+                if let Some(this) = weak.upgrade() {
+                    this.network_refresh_pending.set(false);
+                    this.refresh_networks_async();
+                }
+            },
+        );
     }
 
     fn refresh_networks_async(&self) {
+        if self.refresh_in_progress.get() {
+            return;
+        }
+
         let Some(proxy) = self.station_proxy.borrow().clone() else {
             return;
         };
+
+        self.refresh_in_progress.set(true);
 
         std::thread::spawn(move || {
             let networks = Self::get_networks_sync(&proxy);
@@ -1164,11 +1215,10 @@ impl IwdService {
                 };
 
             let security = if net_type == "open" {
-                "open"
+                SecurityType::Open
             } else {
-                "secured"
-            }
-            .to_string();
+                SecurityType::Secured
+            };
             networks.push(WifiNetwork {
                 ssid,
                 strength,
@@ -1279,9 +1329,16 @@ impl IwdService {
 
     /// Register the IWD Agent for handling password authentication.
     fn register_agent(this: &Rc<Self>) {
-        // Guard against duplicate registration
+        // D-Bus object already exported — only retry AgentManager registration if needed
         if this.agent_registration_id.borrow().is_some() {
-            debug!("IwdService: agent already registered, skipping");
+            if !this.agent_registered_with_manager.get() {
+                debug!(
+                    "IwdService: agent object exists but not registered with AgentManager, retrying"
+                );
+                if let Some(connection) = this.connection.borrow().clone() {
+                    Self::register_with_agent_manager(this, &connection);
+                }
+            }
             return;
         }
 
@@ -1353,9 +1410,9 @@ impl IwdService {
             AGENT_MANAGER_IFACE,
             None::<&gio::Cancellable>,
             move |res| {
-                if this_weak.upgrade().is_none() {
+                let Some(this) = this_weak.upgrade() else {
                     return;
-                }
+                };
 
                 let proxy = match res {
                     Ok(p) => p,
@@ -1370,6 +1427,7 @@ impl IwdService {
                     .expect("AGENT_PATH constant must be a valid D-Bus object path");
                 let args = (agent_path,).to_variant();
 
+                let this_weak = Rc::downgrade(&this);
                 proxy.call(
                     "RegisterAgent",
                     Some(&args),
@@ -1386,6 +1444,9 @@ impl IwdService {
                                 error!("IwdService: RegisterAgent failed: {}", e);
                                 return;
                             }
+                        }
+                        if let Some(this) = this_weak.upgrade() {
+                            this.agent_registered_with_manager.set(true);
                         }
                         debug!("IwdService: agent registered with AgentManager");
                     },

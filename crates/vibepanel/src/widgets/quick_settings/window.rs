@@ -20,6 +20,7 @@ use crate::popover_tracker::{PopoverId, PopoverTracker};
 use crate::services::audio::AudioService;
 use crate::services::bluetooth::BluetoothService;
 use crate::services::brightness::BrightnessService;
+use crate::services::callbacks::CallbackId;
 use crate::services::config_manager::ConfigManager;
 use crate::services::idle_inhibitor::IdleInhibitorService;
 use crate::services::surfaces::SurfaceStyleManager;
@@ -100,6 +101,8 @@ pub struct QuickSettingsWindow {
     anchor_monitor: RefCell<Option<Monitor>>,
     cards_config: QuickSettingsCardsConfig,
     scroll_container: ScrolledWindow,
+    /// WiFi service callback ID, used to unsubscribe on close.
+    wifi_callback_id: Cell<Option<CallbackId>>,
 
     // Card states
     pub wifi: Rc<WifiCardState>,
@@ -154,6 +157,7 @@ impl QuickSettingsWindow {
             anchor_monitor: RefCell::new(None),
             cards_config,
             scroll_container,
+            wifi_callback_id: Cell::new(None),
             wifi: Rc::new(WifiCardState::new()),
             bluetooth: Rc::new(BluetoothCardState::new()),
             vpn: Rc::new(VpnCardState::new()),
@@ -209,11 +213,12 @@ impl QuickSettingsWindow {
 
         if cfg.wifi {
             let qs_weak = Rc::downgrade(qs);
-            WifiService::global().connect(move |snapshot| {
+            let id = WifiService::global().connect(move |snapshot| {
                 if let Some(qs) = qs_weak.upgrade() {
                     wifi_card::on_network_changed(&qs.wifi, snapshot, &qs.window);
                 }
             });
+            qs.wifi_callback_id.set(Some(id));
         }
 
         if cfg.bluetooth {
@@ -1196,6 +1201,11 @@ impl QuickSettingsWindow {
 
         // Cancel any pending IWD auth request (safe to call if none pending)
         WifiService::global().cancel_auth();
+
+        // Unsubscribe from WiFi service to clean up the dead callback
+        if let Some(id) = self.wifi_callback_id.take() {
+            WifiService::global().unsubscribe(id);
+        }
 
         // Clear focus from any focused widget (e.g., password Entry) before closing.
         // This prevents GTK "did not receive focus-out event" warnings.

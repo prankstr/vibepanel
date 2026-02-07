@@ -321,6 +321,8 @@ impl QuickSettingsWidget {
                             } else {
                                 ssid.to_string()
                             }
+                        } else if nm_snap.wifi_enabled == Some(false) {
+                            "Wi-Fi Off".to_string()
                         } else {
                             "Disconnected".to_string()
                         }
@@ -339,6 +341,8 @@ impl QuickSettingsWidget {
                             } else {
                                 ssid.to_string()
                             }
+                        } else if iwd_snap.wifi_enabled == Some(false) {
+                            "Wi-Fi Off".to_string()
                         } else {
                             "Disconnected".to_string()
                         }

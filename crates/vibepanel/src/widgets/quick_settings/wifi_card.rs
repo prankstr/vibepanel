@@ -26,9 +26,7 @@ use super::ui_helpers::{
 use super::window::current_quick_settings_window;
 use crate::services::icons::IconsService;
 use crate::services::surfaces::SurfaceStyleManager;
-use crate::services::wifi::{
-    NetworkService, NetworkSnapshot, WifiConnectionState, WifiNetwork, WifiService, WifiSnapshot,
-};
+use crate::services::wifi::{WifiConnectionState, WifiNetwork, WifiService, WifiSnapshot};
 use crate::styles::{button, color, icon, qs, row, state, surface};
 use crate::widgets::base::configure_popover;
 
@@ -596,9 +594,9 @@ fn build_ethernet_row(snapshot: &WifiSnapshot) -> GtkBox {
 }
 
 /// Update the Ethernet row visibility and content based on connection state.
-pub fn update_ethernet_row(state: &WifiCardState, snapshot: &NetworkSnapshot) {
+pub fn update_ethernet_row(state: &WifiCardState, snapshot: &WifiSnapshot) {
     if let Some(ethernet_row) = state.ethernet_row.borrow().as_ref() {
-        ethernet_row.set_visible(snapshot.wired_connected);
+        ethernet_row.set_visible(snapshot.wired_connected());
 
         // If connected and row is visible, we might want to update the subtitle
         // For now, the subtitle is static after creation. If we need dynamic updates,
@@ -664,7 +662,7 @@ pub fn populate_wifi_list(state: &WifiCardState, list_box: &ListBox, snapshot: &
         if is_connecting {
             extra_parts.push("Connecting...".to_string());
         }
-        if net.security != "open" {
+        if net.security.is_secured() {
             extra_parts.push("Secured".to_string());
         }
         // Don't show "Saved" while connecting (nmcli creates profile before auth completes)
@@ -765,7 +763,7 @@ pub fn populate_wifi_list(state: &WifiCardState, list_box: &ListBox, snapshot: &
         // Connect row activation to the primary network action
         if !is_connecting {
             let ssid = net.ssid.clone();
-            let security = net.security.clone();
+            let security = net.security;
             let known = net.known;
             let active = net.active;
             let path = net.path.clone();
@@ -773,7 +771,7 @@ pub fn populate_wifi_list(state: &WifiCardState, list_box: &ListBox, snapshot: &
                 let service = WifiService::global();
                 if active {
                     service.disconnect();
-                } else if security == "open" || known {
+                } else if !security.is_secured() || known {
                     service.connect_to_network(&ssid, None, path.as_deref());
                 }
                 // Secured, unknown networks: handled by the "Connect" button gesture
@@ -826,7 +824,7 @@ fn create_network_action_widget(net: &WifiNetwork) -> gtk4::Widget {
         // Single action: just "Connect" as accent-colored text
         let action_label = create_row_action_label("Connect");
         let ssid_clone = ssid.clone();
-        let is_secured = net.security != "open";
+        let is_secured = net.security.is_secured();
         let path = net.path.clone();
         action_label.connect_clicked(move |_| {
             let service = WifiService::global();
@@ -1187,7 +1185,7 @@ pub fn on_network_changed(
                         SurfaceStyleManager::global().apply_pango_attrs_all(list_box);
                     }
                     // Clear the failed state so we don't re-trigger
-                    NetworkService::global().clear_failed_state();
+                    WifiService::global().clear_failed_state();
                 }
             } else if nm_snap.ssid.as_ref() == Some(target_ssid)
                 && nm_snap.connecting_ssid.is_none()
@@ -1224,7 +1222,7 @@ pub fn on_network_changed(
                 _failed_ssid
             );
             glib::timeout_add_local_once(std::time::Duration::from_secs(5), move || {
-                NetworkService::global().clear_failed_state();
+                WifiService::global().clear_failed_state();
             });
         }
     }
@@ -1414,11 +1412,8 @@ pub fn on_network_changed(
     // Update Wi-Fi subtitle (works with any backend)
     update_subtitle(state, snapshot);
 
-    // NetworkManager-specific UI updates (ethernet row)
-    if let WifiSnapshot::NetworkManager(nm_snap) = snapshot {
-        // Update Ethernet row visibility
-        update_ethernet_row(state, nm_snap);
-    }
+    // Update Ethernet row visibility (NM shows/hides, IWD always hidden)
+    update_ethernet_row(state, snapshot);
 
     // Update scan button UI (works for all backends)
     update_scan_ui(state, snapshot);
@@ -1439,6 +1434,7 @@ pub fn on_network_changed(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::wifi::{IwdSnapshot, NetworkSnapshot};
 
     #[test]
     fn test_wifi_icon_name_connected() {
@@ -1736,5 +1732,103 @@ mod tests {
         // Even though wired is connected, we're in a "connecting" state for Wi-Fi
         // so subtitle should not be fully active (shows connecting animation)
         assert!(!is_network_subtitle_active(&wrapped));
+    }
+
+    // --- IWD-specific tests ---
+
+    /// Create a base IWD snapshot for testing.
+    fn iwd_snapshot() -> IwdSnapshot {
+        IwdSnapshot {
+            available: true,
+            ssid: None,
+            state: None,
+            wifi_enabled: Some(true),
+            scanning: false,
+            networks: Vec::new(),
+            auth_request: None,
+            failed_ssid: None,
+            failed_reason: None,
+            initial_scan_complete: true,
+        }
+    }
+
+    #[test]
+    fn test_iwd_subtitle_connected() {
+        let mut snap = iwd_snapshot();
+        snap.state = Some("connected".to_string());
+        snap.ssid = Some("HomeWifi".to_string());
+        let wrapped = WifiSnapshot::Iwd(snap);
+        assert_eq!(get_network_subtitle_text(&wrapped), "HomeWifi");
+    }
+
+    #[test]
+    fn test_iwd_subtitle_connecting() {
+        let mut snap = iwd_snapshot();
+        snap.state = Some("connecting".to_string());
+        snap.ssid = Some("HomeWifi".to_string());
+        let wrapped = WifiSnapshot::Iwd(snap);
+        assert_eq!(
+            get_network_subtitle_text(&wrapped),
+            "Connecting to HomeWifi"
+        );
+    }
+
+    #[test]
+    fn test_iwd_subtitle_disconnected() {
+        let snap = iwd_snapshot();
+        let wrapped = WifiSnapshot::Iwd(snap);
+        assert_eq!(get_network_subtitle_text(&wrapped), "Disconnected");
+    }
+
+    #[test]
+    fn test_iwd_subtitle_disabled() {
+        let mut snap = iwd_snapshot();
+        snap.wifi_enabled = Some(false);
+        let wrapped = WifiSnapshot::Iwd(snap);
+        assert_eq!(get_network_subtitle_text(&wrapped), "Off");
+    }
+
+    #[test]
+    fn test_iwd_subtitle_unavailable() {
+        let mut snap = iwd_snapshot();
+        snap.available = false;
+        let wrapped = WifiSnapshot::Iwd(snap);
+        assert_eq!(get_network_subtitle_text(&wrapped), "Unavailable");
+    }
+
+    #[test]
+    fn test_iwd_subtitle_active_when_connected() {
+        let mut snap = iwd_snapshot();
+        snap.state = Some("connected".to_string());
+        snap.ssid = Some("Network".to_string());
+        let wrapped = WifiSnapshot::Iwd(snap);
+        assert!(is_network_subtitle_active(&wrapped));
+    }
+
+    #[test]
+    fn test_iwd_subtitle_not_active_when_connecting() {
+        let mut snap = iwd_snapshot();
+        snap.state = Some("connecting".to_string());
+        snap.ssid = Some("Network".to_string());
+        let wrapped = WifiSnapshot::Iwd(snap);
+        assert!(!is_network_subtitle_active(&wrapped));
+    }
+
+    #[test]
+    fn test_iwd_subtitle_not_active_when_disconnected() {
+        let snap = iwd_snapshot();
+        let wrapped = WifiSnapshot::Iwd(snap);
+        assert!(!is_network_subtitle_active(&wrapped));
+    }
+
+    #[test]
+    fn test_iwd_subtitle_roaming() {
+        let mut snap = iwd_snapshot();
+        snap.state = Some("roaming".to_string());
+        snap.ssid = Some("RoamNet".to_string());
+        let wrapped = WifiSnapshot::Iwd(snap);
+        // Roaming is considered connected
+        assert_eq!(get_network_subtitle_text(&wrapped), "RoamNet");
+        assert!(is_network_subtitle_active(&wrapped));
     }
 }
