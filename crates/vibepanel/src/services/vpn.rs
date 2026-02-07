@@ -459,7 +459,13 @@ impl VpnService {
                 });
 
                 let mut snapshot = self.snapshot.borrow_mut();
-                snapshot.available = true;
+                let nm_running = self
+                    .nm_proxy
+                    .borrow()
+                    .as_ref()
+                    .and_then(|p| p.name_owner())
+                    .is_some();
+                snapshot.available = nm_running;
                 snapshot.connections = connections;
                 snapshot.any_active = any_active;
                 snapshot.active_count = active_count;
@@ -672,9 +678,19 @@ impl VpnService {
 
                         this._signal_subscriptions.borrow_mut().extend([sub1, sub2]);
 
-                        // Trigger initial refresh.
-                        this.refresh_pending.set(false);
-                        this.queue_refresh();
+                        // Only trigger initial refresh if NetworkManager is actually running.
+                        let nm_running = this
+                            .nm_proxy
+                            .borrow()
+                            .as_ref()
+                            .and_then(|p| p.name_owner())
+                            .is_some();
+                        if nm_running {
+                            this.refresh_pending.set(false);
+                            this.queue_refresh();
+                        } else {
+                            debug!("VPN: NetworkManager not running, skipping initial refresh");
+                        }
                     },
                 );
             },

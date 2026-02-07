@@ -974,9 +974,12 @@ impl IwdService {
                     if let Some(ssid) = ssid {
                         let reason = match error_name_str {
                             "net.connman.iwd.NotFound" => "Network not found".to_string(),
-                            other => {
-                                format!("Connection failed ({})", other)
-                            }
+                            "net.connman.iwd.Failed" => "Connection failed".to_string(),
+                            "net.connman.iwd.NotSupported" => "Not supported".to_string(),
+                            "net.connman.iwd.NotConfigured" => "Not configured".to_string(),
+                            "net.connman.iwd.PermissionDenied" => "Permission denied".to_string(),
+                            "net.connman.iwd.NotConnected" => "Not connected".to_string(),
+                            _ => "Connection failed".to_string(),
                         };
                         send_network_update(IwdUpdate::ConnectionFailed { ssid, reason });
                     }

@@ -355,7 +355,9 @@ impl QuickSettingsWidget {
             let vpn_icon_name_initial = vpn_icon_name();
             let vpn_icon = base.add_icon(vpn_icon_name_initial, &[icon::ICON, icon::TEXT]);
 
-            if vpn_any_active {
+            if !vpn_snapshot.available {
+                vpn_icon.widget().set_visible(false);
+            } else if vpn_any_active {
                 vpn_icon.widget().add_css_class(state::ICON_ACTIVE);
             }
 
@@ -365,14 +367,10 @@ impl QuickSettingsWidget {
                 let widget = vpn_icon_handle.widget();
 
                 if !snapshot.available {
-                    widget.add_css_class(state::SERVICE_UNAVAILABLE);
-                    widget.remove_css_class(state::ICON_ACTIVE);
-                    vpn_icon_handle.set_icon("network-vpn-disabled-symbolic");
-                    TooltipManager::global()
-                        .set_styled_tooltip(&widget, "VPN: Service unavailable");
+                    widget.set_visible(false);
                     return;
                 }
-                widget.remove_css_class(state::SERVICE_UNAVAILABLE);
+                widget.set_visible(true);
 
                 let icon_name = vpn_icon_name();
                 vpn_icon_handle.set_icon(icon_name);
