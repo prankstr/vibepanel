@@ -10,7 +10,7 @@ use std::collections::HashMap;
 
 use super::{SecurityType, WifiNetwork};
 
-const IWD_SERVICE: &str = "net.connman.iwd";
+pub(super) const IWD_SERVICE: &str = "net.connman.iwd";
 const IWD_ROOT_PATH: &str = "/net/connman/iwd";
 const IFACE_ADAPTER: &str = "net.connman.iwd.Adapter";
 const IFACE_STATION: &str = "net.connman.iwd.Station";
@@ -22,16 +22,35 @@ const PROPERTIES_IFACE: &str = "org.freedesktop.DBus.Properties";
 const AGENT_IFACE: &str = "net.connman.iwd.Agent";
 const AGENT_MANAGER_IFACE: &str = "net.connman.iwd.AgentManager";
 const AGENT_PATH: &str = "/org/vibepanel/iwd/agent";
+/// D-Bus error returned by the agent when cancelling an auth request.
+const AGENT_ERROR_CANCELED: &str = "net.connman.iwd.Agent.Error.Canceled";
+const DBUS_PEER_IFACE: &str = "org.freedesktop.DBus.Peer";
 
 /// Maximum number of SSID resolution attempts via network refresh before
 /// giving up. Prevents an infinite loop when the connected network's SSID
 /// is never found in the cached network list.
 const MAX_SSID_RESOLVE_ATTEMPTS: u8 = 3;
 
-// Station state constants (from net.connman.iwd.Station State property)
-const STATE_CONNECTING: &str = "connecting";
-const STATE_CONNECTED: &str = "connected";
-const STATE_ROAMING: &str = "roaming";
+/// IWD station state (from `net.connman.iwd.Station` `State` property).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StationState {
+    Connecting,
+    Connected,
+    Roaming,
+    Disconnected,
+}
+
+impl StationState {
+    /// Parse the D-Bus string value into a `StationState`.
+    fn from_dbus(s: &str) -> Self {
+        match s {
+            "connecting" => Self::Connecting,
+            "connected" => Self::Connected,
+            "roaming" => Self::Roaming,
+            _ => Self::Disconnected,
+        }
+    }
+}
 
 /// Delay (ms) before refreshing the network list after an ObjectManager signal.
 /// Coalesces rapid add/remove bursts (e.g., after scan or forget) into a single
@@ -104,15 +123,22 @@ struct NetworkProps {
 
 struct PendingAuth {
     invocation: gio::DBusMethodInvocation,
+    /// GLib timeout source that fires after AUTH_TIMEOUT_SECS to auto-cancel.
+    timeout_source: Option<glib::SourceId>,
 }
+
+/// Timeout (seconds) for pending auth requests. If the user doesn't submit
+/// a password within this window, the request is automatically cancelled
+/// and the D-Bus invocation returns an error to IWD.
+const AUTH_TIMEOUT_SECS: u32 = 30;
 
 /// Canonical snapshot of Wi-Fi state from IWD.
 #[derive(Debug, Clone)]
 pub struct IwdSnapshot {
     pub available: bool,
     pub ssid: Option<String>,
-    /// IWD station state (STATE_CONNECTING, STATE_CONNECTED, STATE_ROAMING).
-    pub state: Option<String>,
+    /// IWD station state.
+    pub state: Option<StationState>,
     pub wifi_enabled: Option<bool>,
     pub scanning: bool,
     pub networks: Vec<WifiNetwork>,
@@ -144,12 +170,15 @@ impl IwdSnapshot {
 
     /// Whether currently connected to a Wi-Fi network.
     pub fn connected(&self) -> bool {
-        matches!(self.state.as_deref(), Some(STATE_CONNECTED | STATE_ROAMING))
+        matches!(
+            self.state,
+            Some(StationState::Connected | StationState::Roaming)
+        )
     }
 
     /// Whether currently connecting to a Wi-Fi network.
     pub fn connecting(&self) -> bool {
-        self.state.as_deref() == Some(STATE_CONNECTING)
+        self.state == Some(StationState::Connecting)
     }
 }
 
@@ -195,6 +224,16 @@ pub struct IwdService {
     watcher_proxy: RefCell<Option<gio::DBusProxy>>,
     /// D-Bus signal subscriptions (kept alive for the service lifetime).
     _signal_subscriptions: RefCell<Vec<gio::SignalSubscription>>,
+    /// Network (path, SSID) currently being connected to (C5: race guard for password dialog).
+    /// Set in `connect_to_network()`, checked in `handle_request_passphrase()`.
+    /// Cleared on successful connection, disconnection, or auth completion.
+    connecting_network: RefCell<Option<(String, String)>>,
+    /// Stashed password for IWD retry flow. When a wrong-password retry triggers
+    /// a new `connect_to_network()` call with a password, IWD ignores it (IWD's
+    /// auth is agent-based). We stash the password here so that when IWD fires
+    /// `RequestPassphrase`, we can auto-submit it instead of showing the password
+    /// dialog again. Consumed (taken) on first use.
+    pending_password: RefCell<Option<String>>,
 }
 
 impl IwdService {
@@ -216,6 +255,8 @@ impl IwdService {
             ssid_resolve_attempts: Cell::new(0),
             watcher_proxy: RefCell::new(None),
             _signal_subscriptions: RefCell::new(Vec::new()),
+            connecting_network: RefCell::new(None),
+            pending_password: RefCell::new(None),
         });
 
         Self::init_dbus(&service);
@@ -347,7 +388,7 @@ impl IwdService {
                     None::<&gio::DBusInterfaceInfo>,
                     Some(IWD_SERVICE),
                     IWD_ROOT_PATH,
-                    "org.freedesktop.DBus.Peer",
+                    DBUS_PEER_IFACE,
                     None::<&gio::Cancellable>,
                     move |res| {
                         let this = match this_weak5.upgrade() {
@@ -555,14 +596,26 @@ impl IwdService {
         *self.station_proxy.borrow_mut() = None;
         *self.adapter_path.borrow_mut() = None;
         *self.station_path.borrow_mut() = None;
+        *self.connecting_network.borrow_mut() = None;
+        *self.pending_password.borrow_mut() = None;
 
-        // Cancel any pending auth
-        if let Some(pending) = self.pending_auth.borrow_mut().take() {
-            pending.invocation.return_dbus_error(
-                "net.connman.iwd.Agent.Error.Canceled",
-                "Service unavailable",
-            );
+        // Cancel any pending auth (including its timeout)
+        if let Some(mut pending) = self.pending_auth.borrow_mut().take() {
+            if let Some(source_id) = pending.timeout_source.take() {
+                source_id.remove();
+            }
+            pending
+                .invocation
+                .return_dbus_error(AGENT_ERROR_CANCELED, "Service unavailable");
         }
+
+        // Reset operational flags so they don't stay stuck after service
+        // disappearance (clear_proxies is the full teardown path, so reset
+        // everything that clear_station resets plus adapter-level state).
+        self.scan_in_progress.set(false);
+        self.refresh_in_progress.set(false);
+        self.network_refresh_pending.set(false);
+        self.ssid_resolve_attempts.set(0);
 
         // Unregister agent D-Bus object so re-registration succeeds on service reappear
         if let (Some(conn), Some(reg_id)) = (
@@ -581,12 +634,25 @@ impl IwdService {
     fn clear_station(&self) {
         *self.station_proxy.borrow_mut() = None;
         *self.station_path.borrow_mut() = None;
+        *self.connecting_network.borrow_mut() = None;
+        *self.pending_password.borrow_mut() = None;
 
-        // Cancel any pending auth (station is gone, auth can't succeed)
-        if let Some(pending) = self.pending_auth.borrow_mut().take() {
+        // Reset operational flags so they don't stay stuck after service
+        // disappearance mid-operation (e.g., suspend/resume killing IWD
+        // while a scan is in progress).
+        self.scan_in_progress.set(false);
+        self.refresh_in_progress.set(false);
+        self.network_refresh_pending.set(false);
+        self.ssid_resolve_attempts.set(0);
+
+        // Cancel any pending auth (including its timeout — station is gone, auth can't succeed)
+        if let Some(mut pending) = self.pending_auth.borrow_mut().take() {
+            if let Some(source_id) = pending.timeout_source.take() {
+                source_id.remove();
+            }
             pending
                 .invocation
-                .return_dbus_error("net.connman.iwd.Agent.Error.Canceled", "WiFi powered off");
+                .return_dbus_error(AGENT_ERROR_CANCELED, "WiFi powered off");
         }
 
         // Clear station-related snapshot fields without marking unavailable
@@ -666,10 +732,21 @@ impl IwdService {
                 if snapshot.failed_ssid.as_deref() == Some(ssid.as_str())
                     && snapshot.failed_reason.is_some()
                 {
-                    return;
+                    return; // borrow_mut dropped implicitly on return
                 }
                 snapshot.failed_ssid = Some(ssid);
                 snapshot.failed_reason = Some(reason);
+
+                // Safety-net state reset: if we're still in Connecting state, reset
+                // to Disconnected. This handles the case where IWD never received a
+                // Connect() call (e.g., proxy creation failed in the background
+                // thread), so no PropertiesChanged signal will arrive to reset state.
+                if snapshot.state == Some(StationState::Connecting) {
+                    snapshot.state = Some(StationState::Disconnected);
+                }
+                // Also clear the connecting_network race guard
+                *this.connecting_network.borrow_mut() = None;
+
                 let snapshot_clone = snapshot.clone();
                 drop(snapshot);
                 this.callbacks.notify(&snapshot_clone);
@@ -807,7 +884,8 @@ impl IwdService {
 
         let state = proxy
             .cached_property("State")
-            .and_then(|v| v.get::<String>());
+            .and_then(|v| v.get::<String>())
+            .map(|s| StationState::from_dbus(&s));
 
         let scanning = proxy
             .cached_property("Scanning")
@@ -819,8 +897,8 @@ impl IwdService {
             .and_then(|v| v.get::<String>());
 
         let is_connected_or_connecting = matches!(
-            state.as_deref(),
-            Some(STATE_CONNECTED | STATE_CONNECTING | STATE_ROAMING)
+            state,
+            Some(StationState::Connected | StationState::Connecting | StationState::Roaming)
         );
 
         let ssid = if is_connected_or_connecting {
@@ -845,16 +923,22 @@ impl IwdService {
         }
 
         // Single borrow to read previous state for change detection
-        let (should_fetch_networks, scan_just_completed) = {
+        let (should_fetch_networks, scan_just_completed, is_ssid_resolve) = {
             let snap = self.snapshot.borrow();
-            let was_connected =
-                matches!(snap.state.as_deref(), Some(STATE_CONNECTED | STATE_ROAMING));
-            let is_connected = matches!(state.as_deref(), Some(STATE_CONNECTED | STATE_ROAMING));
-            let needs_fetch = snap.networks.is_empty() || (!was_connected && is_connected);
+            let was_connected = matches!(
+                snap.state,
+                Some(StationState::Connected | StationState::Roaming)
+            );
+            let is_connected =
+                matches!(state, Some(StationState::Connected | StationState::Roaming));
+            let needs_fetch = snap.networks.is_empty()
+                || (!was_connected && is_connected)
+                || (is_connected && ssid.is_none());
 
             // If we need to fetch because SSID is unresolved while connected,
             // check the retry limit to avoid an infinite loop.
-            let should_fetch = if needs_fetch && is_connected && ssid.is_none() {
+            let is_ssid_resolve = needs_fetch && is_connected && ssid.is_none();
+            let should_fetch = if is_ssid_resolve {
                 let attempts = self.ssid_resolve_attempts.get();
                 if attempts >= MAX_SSID_RESOLVE_ATTEMPTS {
                     debug!(
@@ -863,7 +947,9 @@ impl IwdService {
                     );
                     false
                 } else {
-                    self.ssid_resolve_attempts.set(attempts + 1);
+                    // Don't increment here — let refresh_networks_async() do it
+                    // so the counter only advances when a refresh actually starts
+                    // (not when skipped due to refresh_in_progress guard).
                     true
                 }
             } else {
@@ -872,7 +958,7 @@ impl IwdService {
 
             let scan_done = snap.scanning && !scanning;
 
-            (should_fetch, scan_done)
+            (should_fetch, scan_done, is_ssid_resolve)
         };
 
         // Clear our scan_in_progress guard when IWD reports scan complete
@@ -883,6 +969,15 @@ impl IwdService {
         let mut snapshot = self.snapshot.borrow_mut();
         let mut changed = false;
         if snapshot.state != state {
+            // Clear the connecting_network race guard when the connection
+            // attempt finishes (success or failure). This prevents stale
+            // paths from rejecting future auth requests.
+            if matches!(
+                state,
+                Some(StationState::Connected | StationState::Disconnected) | None
+            ) {
+                *self.connecting_network.borrow_mut() = None;
+            }
             snapshot.state = state;
             changed = true;
         }
@@ -910,7 +1005,7 @@ impl IwdService {
 
         // Trigger async network refresh if needed (after releasing borrow)
         if should_fetch_networks || scan_just_completed {
-            self.refresh_networks_async();
+            self.refresh_networks_async(is_ssid_resolve && should_fetch_networks);
         }
     }
 
@@ -922,11 +1017,15 @@ impl IwdService {
         };
         debug!("set_wifi_enabled: setting Powered to {}", enabled);
         std::thread::spawn(move || {
-            // Set Powered property via D-Bus Properties interface
+            // Set the Powered property via the standard D-Bus Properties interface.
+            // We use the fully-qualified method name "org.freedesktop.DBus.Properties.Set"
+            // which bypasses the proxy's own g-interface-name (IFACE_ADAPTER) and routes
+            // to the Properties interface on the same object path.
+            // D-Bus Properties.Set expects signature (ssv): interface, property, variant-boxed value.
             let variant = Variant::tuple_from_iter([
                 IFACE_ADAPTER.to_variant(),
                 "Powered".to_variant(),
-                enabled.to_variant().to_variant(),
+                enabled.to_variant().to_variant(), // double to_variant() boxes the bool as (v)
             ]);
             if let Err(e) = proxy.call_sync(
                 "org.freedesktop.DBus.Properties.Set",
@@ -945,6 +1044,9 @@ impl IwdService {
         // Reset SSID resolve attempts for the new connection
         self.ssid_resolve_attempts.set(0);
 
+        // Resolve the SSID from the cached network list before spawning the
+        // background thread. This is passed as a fallback for error reporting.
+        let cached_ssid;
         {
             let mut snapshot = self.snapshot.borrow_mut();
 
@@ -961,11 +1063,21 @@ impl IwdService {
                 .iter()
                 .find(|n| n.path.as_deref() == Some(path))
                 .map(|n| n.ssid.clone());
+
+            // C5: Store the network (path, SSID) we're connecting to for race guard
+            // in handle_request_passphrase(). The SSID is also used as a fallback
+            // when the cached network list is stale during agent auth.
+            *self.connecting_network.borrow_mut() =
+                Some((path.to_string(), ssid.clone().unwrap_or_default()));
+
+            // Always set Connecting state for UI feedback, even if the SSID
+            // isn't in our cached network list (it may be stale).
+            snapshot.state = Some(StationState::Connecting);
             if let Some(ref ssid) = ssid {
                 snapshot.ssid = Some(ssid.clone());
-                snapshot.state = Some(STATE_CONNECTING.to_string());
             }
 
+            cached_ssid = ssid;
             let snapshot_clone = snapshot.clone();
             drop(snapshot);
             self.callbacks.notify(&snapshot_clone);
@@ -973,8 +1085,13 @@ impl IwdService {
 
         let path = path.to_string();
         std::thread::spawn(move || {
-            // Get the SSID first for error reporting
-            let ssid = Self::read_network_name(&path);
+            // Try a fresh SSID read, fall back to the cached one from the network list.
+            // Using a fallback ensures ConnectionFailed is always sent even if
+            // read_network_name() fails (e.g., IWD service is flaky), preventing
+            // the UI from getting stuck in "Connecting" state.
+            let ssid = Self::read_network_name(&path)
+                .or(cached_ssid)
+                .unwrap_or_else(|| "Unknown network".to_string());
 
             let proxy = match gio::DBusProxy::for_bus_sync(
                 gio::BusType::System,
@@ -988,12 +1105,10 @@ impl IwdService {
                 Ok(p) => p,
                 Err(e) => {
                     warn!("Failed to create network proxy: {}", e);
-                    if let Some(ssid) = ssid {
-                        send_network_update(IwdUpdate::ConnectionFailed {
-                            ssid,
-                            reason: "Network not found".to_string(),
-                        });
-                    }
+                    send_network_update(IwdUpdate::ConnectionFailed {
+                        ssid,
+                        reason: "Network not found".to_string(),
+                    });
                     return;
                 }
             };
@@ -1019,24 +1134,30 @@ impl IwdService {
                 );
 
                 if is_transient_error {
-                    debug!(
-                        "Connect got transient error '{}', not treating as failure",
-                        error_name_str
-                    );
+                    debug!("Connect got transient error '{}': {}", error_name_str, e);
+                    // InProgress means another connect is already in flight —
+                    // that attempt will resolve the state via PropertiesChanged.
+                    // NotAvailable/Aborted may not trigger a PropertiesChanged,
+                    // so send ConnectionFailed to reset the UI and avoid being
+                    // stuck in "Connecting..." indefinitely.
+                    if error_name_str != "net.connman.iwd.InProgress" {
+                        send_network_update(IwdUpdate::ConnectionFailed {
+                            ssid,
+                            reason: super::CONNECTION_FAILURE_REASON.to_string(),
+                        });
+                    }
                 } else if !is_agent_error {
                     warn!("Connect failed: {} (error: {})", e, error_name_str);
-                    if let Some(ssid) = ssid {
-                        let reason = match error_name_str {
-                            "net.connman.iwd.NotFound" => "Network not found".to_string(),
-                            "net.connman.iwd.Failed" => "Connection failed".to_string(),
-                            "net.connman.iwd.NotSupported" => "Not supported".to_string(),
-                            "net.connman.iwd.NotConfigured" => "Not configured".to_string(),
-                            "net.connman.iwd.PermissionDenied" => "Permission denied".to_string(),
-                            "net.connman.iwd.NotConnected" => "Not connected".to_string(),
-                            _ => "Connection failed".to_string(),
-                        };
-                        send_network_update(IwdUpdate::ConnectionFailed { ssid, reason });
-                    }
+                    let reason = match error_name_str {
+                        "net.connman.iwd.NotFound" => "Network not found".to_string(),
+                        "net.connman.iwd.Failed" => super::CONNECTION_FAILURE_REASON.to_string(),
+                        "net.connman.iwd.NotSupported" => "Not supported".to_string(),
+                        "net.connman.iwd.NotConfigured" => "Not configured".to_string(),
+                        "net.connman.iwd.PermissionDenied" => "Permission denied".to_string(),
+                        "net.connman.iwd.NotConnected" => "Not connected".to_string(),
+                        _ => super::CONNECTION_FAILURE_REASON.to_string(),
+                    };
+                    send_network_update(IwdUpdate::ConnectionFailed { ssid, reason });
                 }
             }
         });
@@ -1089,7 +1210,7 @@ impl IwdService {
             } else {
                 glib::idle_add_once(|| {
                     let service = IwdService::global();
-                    service.refresh_networks_async();
+                    service.refresh_networks_async(false);
                 });
             }
         });
@@ -1116,10 +1237,14 @@ impl IwdService {
             30000, // 30 second timeout for scan
             None::<&gio::Cancellable>,
             |res| {
+                // Callback runs on main thread — safe to access global directly.
+                // Always clear scan_in_progress here: if IWD was already scanning
+                // when we called Scan, the Scanning property won't toggle from
+                // true→false, so the property-change handler in update_station_state
+                // would never clear the flag.
+                IwdService::global().scan_in_progress.set(false);
                 if let Err(e) = res {
                     debug!("Scan failed: {}", e);
-                    // Callback runs on main thread — safe to access global directly
-                    IwdService::global().scan_in_progress.set(false);
                 }
             },
         );
@@ -1142,13 +1267,13 @@ impl IwdService {
             move || {
                 if let Some(this) = weak.upgrade() {
                     this.network_refresh_pending.set(false);
-                    this.refresh_networks_async();
+                    this.refresh_networks_async(false);
                 }
             },
         );
     }
 
-    fn refresh_networks_async(&self) {
+    fn refresh_networks_async(&self, is_ssid_resolve: bool) {
         if self.refresh_in_progress.get() {
             return;
         }
@@ -1159,7 +1284,22 @@ impl IwdService {
 
         self.refresh_in_progress.set(true);
 
+        // Only increment the SSID resolve counter when a refresh actually
+        // starts (not when skipped by the refresh_in_progress guard above).
+        if is_ssid_resolve {
+            let attempts = self.ssid_resolve_attempts.get();
+            self.ssid_resolve_attempts.set(attempts + 1);
+        }
+
+        // I4: If this is an SSID resolve retry (attempts > 0), add a small backoff
+        // delay in the background thread to avoid hammering D-Bus.
+        let resolve_attempts = self.ssid_resolve_attempts.get();
+
         std::thread::spawn(move || {
+            if resolve_attempts > 0 {
+                let delay_ms = 200 * (resolve_attempts as u64);
+                std::thread::sleep(Duration::from_millis(delay_ms));
+            }
             let networks = Self::get_networks_sync(&proxy);
             send_network_update(IwdUpdate::NetworksRefreshed { networks });
         });
@@ -1306,7 +1446,10 @@ impl IwdService {
                             net_type = inner.get::<String>().unwrap_or_else(|| "open".to_string())
                         }
                         "Connected" => connected = inner.get::<bool>().unwrap_or(false),
-                        "KnownNetwork" => known_network_path = inner.get::<String>(),
+                        "KnownNetwork" => {
+                            known_network_path =
+                                inner.get::<String>().filter(|p| p != "/" && !p.is_empty())
+                        }
                         _ => {}
                     }
                 }
@@ -1398,8 +1541,22 @@ impl IwdService {
     }
 
     /// Register our agent with IWD's AgentManager.
+    ///
+    /// On transient failure (I2), retries once after a short delay.
+    /// On `AlreadyExists` (I3), attempts `UnregisterAgent` followed by `RegisterAgent`.
     fn register_with_agent_manager(this: &Rc<Self>, connection: &gio::DBusConnection) {
+        Self::register_with_agent_manager_inner(this, connection, false);
+    }
+
+    /// Inner implementation for agent manager registration.
+    /// `is_retry` prevents infinite retry loops — only one retry is attempted.
+    fn register_with_agent_manager_inner(
+        this: &Rc<Self>,
+        connection: &gio::DBusConnection,
+        is_retry: bool,
+    ) {
         let this_weak = Rc::downgrade(this);
+        let conn_clone = connection.clone();
 
         gio::DBusProxy::new(
             connection,
@@ -1428,6 +1585,7 @@ impl IwdService {
                 let args = (agent_path,).to_variant();
 
                 let this_weak = Rc::downgrade(&this);
+                let proxy_clone = proxy.clone();
                 proxy.call(
                     "RegisterAgent",
                     Some(&args),
@@ -1435,22 +1593,95 @@ impl IwdService {
                     5000,
                     None::<&gio::Cancellable>,
                     move |res| {
-                        if let Err(e) = res {
-                            // AlreadyExists is fine (agent already registered)
-                            let is_already_exists = gio::DBusError::remote_error(&e)
-                                .map(|e| e == "net.connman.iwd.AlreadyExists")
-                                .unwrap_or(false);
-                            if !is_already_exists {
-                                error!("IwdService: RegisterAgent failed: {}", e);
-                                return;
+                        let Some(this) = this_weak.upgrade() else {
+                            return;
+                        };
+
+                        match res {
+                            Ok(_) => {
+                                this.agent_registered_with_manager.set(true);
+                                debug!("IwdService: agent registered with AgentManager");
+                            }
+                            Err(e) => {
+                                let error_name = gio::DBusError::remote_error(&e);
+                                let error_str =
+                                    error_name.as_ref().map(|s| s.as_str()).unwrap_or("");
+
+                                if error_str == "net.connman.iwd.AlreadyExists" {
+                                    // I3: Agent name conflict — attempt UnregisterAgent + re-register
+                                    if !is_retry {
+                                        debug!("IwdService: agent already registered, unregistering and retrying");
+                                        Self::unregister_and_reregister(&this, &proxy_clone, &conn_clone);
+                                    } else {
+                                        // Already retried — accept as registered
+                                        this.agent_registered_with_manager.set(true);
+                                        debug!("IwdService: agent already registered (retry), treating as success");
+                                    }
+                                } else if !is_retry {
+                                    // I2: Transient failure — retry once after 2s
+                                    warn!("IwdService: RegisterAgent failed: {}, retrying in 2s", e);
+                                    let this_weak = Rc::downgrade(&this);
+                                    glib::timeout_add_local_once(
+                                        Duration::from_secs(2),
+                                        move || {
+                                            let Some(this) = this_weak.upgrade() else {
+                                                return;
+                                            };
+                                            if let Some(connection) =
+                                                this.connection.borrow().clone()
+                                            {
+                                                Self::register_with_agent_manager_inner(
+                                                    &this,
+                                                    &connection,
+                                                    true,
+                                                );
+                                            }
+                                        },
+                                    );
+                                } else {
+                                    error!(
+                                        "IwdService: RegisterAgent retry also failed: {}",
+                                        e
+                                    );
+                                }
                             }
                         }
-                        if let Some(this) = this_weak.upgrade() {
-                            this.agent_registered_with_manager.set(true);
-                        }
-                        debug!("IwdService: agent registered with AgentManager");
                     },
                 );
+            },
+        );
+    }
+
+    /// Unregister our agent from IWD's AgentManager, then re-register (I3).
+    fn unregister_and_reregister(
+        this: &Rc<Self>,
+        proxy: &gio::DBusProxy,
+        connection: &gio::DBusConnection,
+    ) {
+        let agent_path = glib::variant::ObjectPath::try_from(AGENT_PATH)
+            .expect("AGENT_PATH constant must be a valid D-Bus object path");
+        let args = (agent_path,).to_variant();
+
+        let this_weak = Rc::downgrade(this);
+        let conn_clone = connection.clone();
+        proxy.call(
+            "UnregisterAgent",
+            Some(&args),
+            gio::DBusCallFlags::NONE,
+            5000,
+            None::<&gio::Cancellable>,
+            move |res| {
+                if let Err(e) = res {
+                    debug!(
+                        "IwdService: UnregisterAgent failed (may be expected): {}",
+                        e
+                    );
+                }
+                let Some(this) = this_weak.upgrade() else {
+                    return;
+                };
+                // Re-register after unregister (mark as retry to prevent loops)
+                Self::register_with_agent_manager_inner(&this, &conn_clone, true);
             },
         );
     }
@@ -1498,17 +1729,39 @@ impl IwdService {
                 }
 
                 if is_auth_failure {
-                    // Set failed_ssid before clearing auth state so UI can show error
-                    if let Some(ref auth_req) = this.snapshot.borrow().auth_request {
-                        this.set_failed_ssid(&auth_req.ssid, "Wrong password");
+                    // Set failed_ssid before clearing auth state so UI can show error.
+                    // Extract SSID first to avoid holding a Ref across the borrow_mut
+                    // inside set_failed_ssid.
+                    //
+                    // auth_request may already be None if submit_passphrase() was called
+                    // (it clears auth_request via clear_auth_state()). In that case,
+                    // fall back to connecting_network which is set by connect_to_network()
+                    // and persists until the connection attempt completes.
+                    let failed_ssid = this
+                        .snapshot
+                        .borrow()
+                        .auth_request
+                        .as_ref()
+                        .map(|a| a.ssid.clone())
+                        .or_else(|| {
+                            this.connecting_network
+                                .borrow()
+                                .as_ref()
+                                .map(|(_, ssid)| ssid.clone())
+                        });
+                    if let Some(ssid) = failed_ssid {
+                        this.set_failed_ssid(&ssid, super::AUTH_FAILURE_REASON);
                     }
                 }
 
-                // Clear pending auth
-                if let Some(pending) = this.pending_auth.borrow_mut().take() {
+                // Clear pending auth (cancel its timeout too)
+                if let Some(mut pending) = this.pending_auth.borrow_mut().take() {
+                    if let Some(source_id) = pending.timeout_source.take() {
+                        source_id.remove();
+                    }
                     pending
                         .invocation
-                        .return_dbus_error("net.connman.iwd.Agent.Error.Canceled", "Canceled");
+                        .return_dbus_error(AGENT_ERROR_CANCELED, "Canceled");
                 }
                 // Clear auth request from snapshot
                 this.clear_auth_state();
@@ -1522,10 +1775,29 @@ impl IwdService {
                 Self::handle_request_passphrase(this, params, invocation);
             }
             "RequestUserNameAndPassword" | "RequestUserPassword" => {
-                // Enterprise auth - not supported yet
+                // Enterprise auth - not supported yet.
+                // Extract SSID from the network path so the UI can show which
+                // network failed and why.
                 warn!("IwdService: enterprise auth not supported");
+                if let Some(network_path) = params.child_value(0).get::<String>() {
+                    let ssid = this
+                        .snapshot
+                        .borrow()
+                        .networks
+                        .iter()
+                        .find(|n| n.path.as_deref() == Some(network_path.as_str()))
+                        .map(|n| n.ssid.clone())
+                        .or_else(|| {
+                            this.connecting_network
+                                .borrow()
+                                .as_ref()
+                                .map(|(_, s)| s.clone())
+                        })
+                        .unwrap_or_else(|| "Unknown".to_string());
+                    this.set_failed_ssid(&ssid, "Enterprise WiFi not supported");
+                }
                 invocation.return_dbus_error(
-                    "net.connman.iwd.Agent.Error.Canceled",
+                    AGENT_ERROR_CANCELED,
                     "Enterprise authentication not supported",
                 );
             }
@@ -1541,8 +1813,9 @@ impl IwdService {
 
     /// Handle RequestPassphrase - IWD is asking for the network password.
     ///
-    /// No explicit timeout is needed. Auth is cancelled when the user cancels,
-    /// the panel closes, or IWD sends a Cancel callback.
+    /// Includes a race guard (C5): rejects the request if the network path
+    /// doesn't match what `connect_to_network()` initiated. Also starts a
+    /// timeout (C4) that auto-cancels the pending auth after `AUTH_TIMEOUT_SECS`.
     fn handle_request_passphrase(
         this: &Rc<Self>,
         params: Variant,
@@ -1558,7 +1831,25 @@ impl IwdService {
             }
         };
 
-        // Get SSID from cached network list to avoid blocking D-Bus call on main thread.
+        // C5: Race guard — verify incoming network path matches the one we initiated.
+        // This prevents a stale or rogue auth request from a different connection
+        // attempt from being shown to the user.
+        let connecting = this.connecting_network.borrow().clone();
+        if let Some((ref expected_path, _)) = connecting
+            && *expected_path != network_path
+        {
+            warn!(
+                "IwdService: RequestPassphrase for unexpected network {} (expected {}), rejecting",
+                network_path, expected_path
+            );
+            invocation.return_dbus_error(AGENT_ERROR_CANCELED, "Unexpected network");
+            return;
+        }
+
+        // Get SSID from cached network list. If the list is stale, fall back
+        // to the SSID we stored at connect-initiation time to avoid showing
+        // "Unknown" in the password dialog.
+        let fallback_ssid = connecting.map(|(_, ssid)| ssid);
         let ssid = this
             .snapshot
             .borrow()
@@ -1566,6 +1857,7 @@ impl IwdService {
             .iter()
             .find(|n| n.path.as_deref() == Some(network_path.as_str()))
             .map(|n| n.ssid.clone())
+            .or(fallback_ssid)
             .unwrap_or_else(|| "Unknown".to_string());
 
         debug!(
@@ -1573,16 +1865,73 @@ impl IwdService {
             ssid, network_path
         );
 
-        // Cancel any existing pending auth
-        if let Some(pending) = this.pending_auth.borrow_mut().take() {
-            pending.invocation.return_dbus_error(
-                "net.connman.iwd.Agent.Error.Canceled",
-                "Superseded by new auth request",
-            );
-        }
+        // Cancel any existing pending auth (including its timeout)
+        Self::cancel_pending_auth_timeout(this);
 
-        // Store the pending auth
-        *this.pending_auth.borrow_mut() = Some(PendingAuth { invocation });
+        // C4: Start a timeout that auto-cancels the auth after AUTH_TIMEOUT_SECS.
+        let this_weak = Rc::downgrade(this);
+        let timeout_source = glib::timeout_add_local_once(
+            Duration::from_secs(AUTH_TIMEOUT_SECS as u64),
+            move || {
+                let Some(this) = this_weak.upgrade() else {
+                    return;
+                };
+                warn!(
+                    "IwdService: auth request timed out after {}s",
+                    AUTH_TIMEOUT_SECS
+                );
+
+                // Take the pending auth and return an error to IWD
+                if let Some(mut pending) = this.pending_auth.borrow_mut().take() {
+                    // Clear the timeout source since we're handling it now
+                    pending.timeout_source = None;
+                    pending
+                        .invocation
+                        .return_dbus_error(AGENT_ERROR_CANCELED, "Authentication timed out");
+                }
+
+                // Get the SSID before clearing the race guard, for the error message
+                let ssid = this
+                    .connecting_network
+                    .borrow()
+                    .as_ref()
+                    .map(|(_, ssid)| ssid.clone());
+
+                // Clear the race guard on timeout
+                *this.connecting_network.borrow_mut() = None;
+
+                // Show timeout error to the user
+                if let Some(ssid) = ssid {
+                    this.set_failed_ssid(&ssid, "Authentication timed out");
+                }
+
+                // Clear auth state and notify UI
+                this.clear_auth_state();
+            },
+        );
+
+        // Store the pending auth with timeout
+        *this.pending_auth.borrow_mut() = Some(PendingAuth {
+            invocation,
+            timeout_source: Some(timeout_source),
+        });
+
+        // Check for a stashed password (from a wrong-password retry via
+        // connect_to_network). If present, auto-submit instead of showing
+        // the password dialog again.
+        // SAFETY: Take the value and drop the RefMut before calling submit_passphrase,
+        // which borrows other RefCells. This prevents holding the borrow across the call.
+        let stashed_password = this.pending_password.borrow_mut().take();
+        if let Some(password) = stashed_password {
+            debug!(
+                "IwdService: auto-submitting stashed password for '{}'",
+                ssid
+            );
+            // submit_passphrase takes pending_auth, cancels timeout, and
+            // clears auth_request — no UI flash.
+            this.submit_passphrase(&password);
+            return;
+        }
 
         // Update snapshot with auth request and notify UI
         let mut snapshot = this.snapshot.borrow_mut();
@@ -1595,15 +1944,41 @@ impl IwdService {
         this.callbacks.notify(&snapshot_clone);
     }
 
+    /// Cancel the timeout on an existing pending auth (if any) and return
+    /// the D-Bus error before replacing it.
+    fn cancel_pending_auth_timeout(this: &Rc<Self>) {
+        if let Some(mut pending) = this.pending_auth.borrow_mut().take() {
+            if let Some(source_id) = pending.timeout_source.take() {
+                source_id.remove();
+            }
+            pending
+                .invocation
+                .return_dbus_error(AGENT_ERROR_CANCELED, "Superseded by new auth request");
+        }
+    }
+
+    /// Stash a password for the next `RequestPassphrase` callback. When IWD
+    /// fires the agent callback, `handle_request_passphrase` will auto-submit
+    /// this password instead of showing the password dialog (avoiding the
+    /// double-prompt issue on wrong-password retry).
+    pub fn set_pending_password(&self, password: Option<&str>) {
+        *self.pending_password.borrow_mut() = password.map(|p| p.to_string());
+    }
+
     /// Submit a passphrase in response to a pending auth request.
     pub fn submit_passphrase(&self, passphrase: &str) {
-        let pending = match self.pending_auth.borrow_mut().take() {
+        let mut pending = match self.pending_auth.borrow_mut().take() {
             Some(p) => p,
             None => {
                 debug!("IwdService: submit_passphrase called but no pending auth");
                 return;
             }
         };
+
+        // Cancel the auth timeout
+        if let Some(source_id) = pending.timeout_source.take() {
+            source_id.remove();
+        }
 
         debug!("IwdService: submitting passphrase");
 
@@ -1618,7 +1993,7 @@ impl IwdService {
 
     /// Cancel a pending auth request.
     pub fn cancel_auth(&self) {
-        let pending = match self.pending_auth.borrow_mut().take() {
+        let mut pending = match self.pending_auth.borrow_mut().take() {
             Some(p) => p,
             None => {
                 // No pending auth - this is normal during cleanup
@@ -1626,46 +2001,71 @@ impl IwdService {
             }
         };
 
+        // Cancel the auth timeout
+        if let Some(source_id) = pending.timeout_source.take() {
+            source_id.remove();
+        }
+
         debug!("IwdService: cancelling auth");
 
         // Return error to IWD
         pending
             .invocation
-            .return_dbus_error("net.connman.iwd.Agent.Error.Canceled", "User canceled");
+            .return_dbus_error(AGENT_ERROR_CANCELED, "User canceled");
+
+        // Clear the race guard — user cancelled, so any future auth for a
+        // different network should be accepted.
+        *self.connecting_network.borrow_mut() = None;
+
+        // Clear any stashed password to avoid leaking it to a future connection.
+        *self.pending_password.borrow_mut() = None;
 
         // Clear auth request from snapshot
         self.clear_auth_state();
     }
 
     /// Clear the auth request from snapshot and notify.
+    ///
+    /// # Re-entrancy safety
+    /// The `borrow_mut` on `snapshot` is dropped before `callbacks.notify()`,
+    /// which may re-enter this service (e.g., UI callback reads snapshot).
+    /// No mutable borrow is held during the notification.
     fn clear_auth_state(&self) {
         let mut snapshot = self.snapshot.borrow_mut();
         if snapshot.auth_request.is_some() {
             snapshot.auth_request = None;
             let snapshot_clone = snapshot.clone();
-            drop(snapshot);
+            drop(snapshot); // Drop borrow before notify — callbacks may re-enter
             self.callbacks.notify(&snapshot_clone);
         }
     }
 
     /// Set the failed SSID with a reason and notify listeners.
+    ///
+    /// # Re-entrancy safety
+    /// Same pattern as `clear_auth_state` — mutable borrow is dropped before
+    /// `callbacks.notify()`.
     pub fn set_failed_ssid(&self, ssid: &str, reason: &str) {
         let mut snapshot = self.snapshot.borrow_mut();
         snapshot.failed_ssid = Some(ssid.to_string());
         snapshot.failed_reason = Some(reason.to_string());
         let snapshot_clone = snapshot.clone();
-        drop(snapshot);
+        drop(snapshot); // Drop borrow before notify — callbacks may re-enter
         self.callbacks.notify(&snapshot_clone);
     }
 
     /// Clear the failed state and notify listeners.
+    ///
+    /// # Re-entrancy safety
+    /// Same pattern as `clear_auth_state` — mutable borrow is dropped before
+    /// `callbacks.notify()`.
     pub fn clear_failed_state(&self) {
         let mut snapshot = self.snapshot.borrow_mut();
         if snapshot.failed_ssid.is_some() {
             snapshot.failed_ssid = None;
             snapshot.failed_reason = None;
             let snapshot_clone = snapshot.clone();
-            drop(snapshot);
+            drop(snapshot); // Drop borrow before notify — callbacks may re-enter
             self.callbacks.notify(&snapshot_clone);
         }
     }
@@ -1675,56 +2075,42 @@ impl Drop for IwdService {
     fn drop(&mut self) {
         debug!("IwdService: dropping, cleaning up resources");
 
-        // Cancel any pending authentication
-        if let Some(pending) = self.pending_auth.borrow_mut().take() {
-            pending.invocation.return_dbus_error(
-                "net.connman.iwd.Agent.Error.Canceled",
-                "Service shutting down",
-            );
+        // Cancel any pending authentication (including its timeout)
+        if let Some(mut pending) = self.pending_auth.borrow_mut().take() {
+            if let Some(source_id) = pending.timeout_source.take() {
+                source_id.remove();
+            }
+            pending
+                .invocation
+                .return_dbus_error(AGENT_ERROR_CANCELED, "Service shutting down");
         }
 
-        // Unregister from IWD's AgentManager before unregistering D-Bus object
-        if let Some(conn) = self.connection.borrow().as_ref() {
-            // Try to unregister agent with AgentManager synchronously
-            if let Ok(proxy) = gio::DBusProxy::for_bus_sync(
-                gio::BusType::System,
-                gio::DBusProxyFlags::DO_NOT_LOAD_PROPERTIES
-                    | gio::DBusProxyFlags::DO_NOT_CONNECT_SIGNALS,
-                None::<&gio::DBusInterfaceInfo>,
-                IWD_SERVICE,
-                IWD_ROOT_PATH,
-                AGENT_MANAGER_IFACE,
-                None::<&gio::Cancellable>,
-            ) && let Ok(agent_path) = glib::variant::ObjectPath::try_from(AGENT_PATH)
-            {
-                let args = (agent_path,).to_variant();
-                if let Err(e) = proxy.call_sync(
-                    "UnregisterAgent",
-                    Some(&args),
-                    gio::DBusCallFlags::NONE,
-                    200, // Very short timeout - we're shutting down, don't block
-                    None::<&gio::Cancellable>,
-                ) {
-                    debug!(
-                        "IwdService: failed to unregister agent from AgentManager: {}",
-                        e
-                    );
-                } else {
-                    debug!("IwdService: unregistered agent from AgentManager");
-                }
-            }
-
-            // Unregister the agent D-Bus object
-            if let Some(reg_id) = self.agent_registration_id.borrow_mut().take() {
-                match conn.unregister_object(reg_id) {
-                    Ok(()) => debug!("IwdService: unregistered agent object from D-Bus"),
-                    Err(e) => debug!("IwdService: failed to unregister agent object: {}", e),
-                }
+        // Unregister the local agent D-Bus object. We skip the remote
+        // UnregisterAgent call to IWD's AgentManager because closing the D-Bus
+        // connection on exit automatically unregisters the agent on IWD's side,
+        // and a sync D-Bus round-trip here could block shutdown if IWD is
+        // unresponsive.
+        if let Some(conn) = self.connection.borrow().as_ref()
+            && let Some(reg_id) = self.agent_registration_id.borrow_mut().take()
+        {
+            match conn.unregister_object(reg_id) {
+                Ok(()) => debug!("IwdService: unregistered agent object from D-Bus"),
+                Err(e) => debug!("IwdService: failed to unregister agent object: {}", e),
             }
         }
     }
 }
 
+/// Send an update from a background thread to the main GLib loop.
+///
+/// This is the IWD counterpart of [`network_manager::send_network_update`].
+/// Both use `glib::idle_add_once()` to wake the main loop immediately
+/// without polling. The update is applied to the global singleton on the
+/// main thread, which then notifies all registered callbacks.
+///
+/// # Thread safety
+/// Safe to call from any thread — `glib::idle_add_once` marshals the
+/// closure to the main loop.
 fn send_network_update(update: IwdUpdate) {
     glib::idle_add_once(move || {
         IwdService::apply_update(&IwdService::global(), update);

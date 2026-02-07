@@ -5,9 +5,18 @@ use tracing::{debug, warn};
 
 pub mod iwd;
 pub mod network_manager;
+use iwd::IWD_SERVICE;
 pub use iwd::{IwdService, IwdSnapshot};
 use network_manager::{NM_IFACE, NM_PATH, NM_SERVICE};
 pub use network_manager::{NetworkService, NetworkSnapshot};
+
+/// Failure reason for authentication errors (wrong password).
+/// Used as a semantic tag between the IWD backend (producer) and the UI (consumer)
+/// to distinguish auth failures from other connection errors.
+pub const AUTH_FAILURE_REASON: &str = "Wrong password";
+
+/// Generic failure reason for connection errors.
+pub const CONNECTION_FAILURE_REASON: &str = "Connection failed";
 
 /// Whether a Wi-Fi network requires authentication.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -339,6 +348,9 @@ impl WifiService {
             WifiBackend::NetworkManager(inner) => inner.connect_to_network(ssid, password),
             WifiBackend::Iwd(inner) => {
                 if let Some(p) = path {
+                    // Stash the password so handle_request_passphrase can
+                    // auto-submit it (avoids double-prompt on retry).
+                    inner.set_pending_password(password);
                     inner.connect_to_network(p);
                 } else {
                     warn!(
@@ -439,15 +451,15 @@ impl WifiService {
 /// Detect which Wi-Fi backend is available.
 ///
 /// Checks for NetworkManager first (the most common Linux network manager).
-/// If NetworkManager is not available, falls back to IWD.
+/// If NetworkManager is not available, probes for IWD on D-Bus before
+/// falling back. If neither service is running, IWD is still returned
+/// (it monitors for service appearance and will activate when IWD starts).
 ///
 /// Called once at startup when the [`WifiService`] singleton is created;
 /// the chosen backend is fixed for the lifetime of the process.
-///
-/// Note: If neither backend is available, IWD is still returned but will
-/// mark itself as unavailable after D-Bus initialization fails.
 fn detect_backend() -> WifiBackend {
-    let result = gio::DBusProxy::for_bus_sync(
+    // Check for NetworkManager
+    let nm_result = gio::DBusProxy::for_bus_sync(
         gio::BusType::System,
         gio::DBusProxyFlags::DO_NOT_AUTO_START | gio::DBusProxyFlags::DO_NOT_LOAD_PROPERTIES,
         None::<&gio::DBusInterfaceInfo>,
@@ -457,13 +469,33 @@ fn detect_backend() -> WifiBackend {
         None::<&gio::Cancellable>,
     );
 
-    if let Ok(proxy) = result
+    if let Ok(proxy) = nm_result
         && proxy.name_owner().is_some()
     {
         debug!("Wi-Fi backend: NetworkManager detected");
         return WifiBackend::NetworkManager(NetworkService::global());
     }
 
-    debug!("Wi-Fi backend: NetworkManager not available, falling back to IWD");
+    // Check for IWD
+    let iwd_result = gio::DBusProxy::for_bus_sync(
+        gio::BusType::System,
+        gio::DBusProxyFlags::DO_NOT_AUTO_START | gio::DBusProxyFlags::DO_NOT_LOAD_PROPERTIES,
+        None::<&gio::DBusInterfaceInfo>,
+        IWD_SERVICE,
+        "/",
+        "org.freedesktop.DBus.Peer",
+        None::<&gio::Cancellable>,
+    );
+
+    if let Ok(proxy) = iwd_result
+        && proxy.name_owner().is_some()
+    {
+        debug!("Wi-Fi backend: IWD detected");
+    } else {
+        warn!(
+            "Wi-Fi backend: neither NetworkManager nor IWD detected; using IWD (will activate when service appears)"
+        );
+    }
+
     WifiBackend::Iwd(IwdService::global())
 }

@@ -26,7 +26,10 @@ use super::ui_helpers::{
 use super::window::current_quick_settings_window;
 use crate::services::icons::IconsService;
 use crate::services::surfaces::SurfaceStyleManager;
-use crate::services::wifi::{WifiConnectionState, WifiNetwork, WifiService, WifiSnapshot};
+use crate::services::wifi::{
+    AUTH_FAILURE_REASON, CONNECTION_FAILURE_REASON, WifiConnectionState, WifiNetwork, WifiService,
+    WifiSnapshot,
+};
 use crate::styles::{button, color, icon, qs, row, state, surface};
 use crate::widgets::base::configure_popover;
 
@@ -742,7 +745,7 @@ pub fn populate_wifi_list(state: &WifiCardState, list_box: &ListBox, snapshot: &
             row_builder = row_builder.subtitle_widget(subtitle_widget.upcast());
         } else if is_failed {
             // Failed network: error-colored reason + muted extras
-            let reason = failed_reason.unwrap_or("Connection failed");
+            let reason = failed_reason.unwrap_or(CONNECTION_FAILURE_REASON);
             let extra_refs: Vec<&str> = extra_parts.iter().map(|s| s.as_str()).collect();
             let subtitle_widget = build_error_subtitle(reason, &extra_refs);
             row_builder = row_builder.subtitle_widget(subtitle_widget.upcast());
@@ -1046,9 +1049,26 @@ fn on_password_connect_clicked(state: &WifiCardState, window: WeakRef<Applicatio
     let snapshot = service.snapshot();
 
     // Check if this is an IWD auth request (agent callback pending)
-    if snapshot.auth_request_ssid().is_some() {
-        // IWD agent pattern: submit the password to the pending D-Bus invocation
-        service.submit_password(&password);
+    // Verify the auth request SSID matches our target to avoid submitting
+    // a password for the wrong network in case of a race.
+    if let Some(auth_ssid) = snapshot.auth_request_ssid() {
+        if auth_ssid == ssid {
+            // IWD agent pattern: submit the password to the pending D-Bus invocation
+            service.submit_password(&password);
+        } else {
+            // SSID mismatch — the pending auth is for a different network.
+            // Connect directly instead (this will trigger a new auth flow).
+            debug!(
+                "Auth request SSID '{}' doesn't match target '{}', connecting directly",
+                auth_ssid, ssid
+            );
+            let path = snapshot
+                .networks()
+                .iter()
+                .find(|n| n.ssid == ssid)
+                .and_then(|n| n.path.clone());
+            service.connect_to_network(&ssid, Some(&password), path.as_deref());
+        }
     } else {
         // No pending IWD auth request — connect with password directly.
         // NetworkManager doesn't need a path; IWD does, so look it up from
@@ -1175,7 +1195,7 @@ pub fn on_network_changed(
                     set_password_connecting_state(state, false, None);
                     if let Some(error_label) = state.password_error_label.borrow().as_ref() {
                         error_label.add_css_class(color::ERROR);
-                        error_label.set_label("Wrong password");
+                        error_label.set_label(CONNECTION_FAILURE_REASON);
                     }
                     // Repopulate the network list so the previously-connected network
                     // no longer shows "Connected" (the list is normally skipped when
@@ -1243,12 +1263,16 @@ pub fn on_network_changed(
                 );
                 show_password_dialog(state, &auth_request.ssid);
             } else {
-                // Window is closed - cancel the auth request
+                // Window is closed - don't cancel the auth request.
+                // IWD's connect-then-prompt flow means the agent callback
+                // can legitimately arrive after the panel closes. The 30s
+                // AUTH_TIMEOUT_SECS handles cleanup. When the panel reopens,
+                // on_network_changed will see the pending auth_request and
+                // show the password dialog at that point.
                 debug!(
-                    "IWD requesting passphrase for '{}', but window is closed - cancelling",
+                    "IWD requesting passphrase for '{}', but window is closed - deferring",
                     auth_request.ssid
                 );
-                WifiService::global().cancel_auth();
             }
         }
 
@@ -1260,7 +1284,7 @@ pub fn on_network_changed(
                     let reason = iwd_snap
                         .failed_reason
                         .as_deref()
-                        .unwrap_or("Connection failed");
+                        .unwrap_or(CONNECTION_FAILURE_REASON);
                     debug!(
                         "IWD connection failed for '{}': {}, showing error",
                         failed_ssid, reason
@@ -1306,8 +1330,8 @@ pub fn on_network_changed(
             let reason = iwd_snap
                 .failed_reason
                 .as_deref()
-                .unwrap_or("Connection failed");
-            let is_auth_failure = reason == "Wrong password";
+                .unwrap_or(CONNECTION_FAILURE_REASON);
+            let is_auth_failure = reason == AUTH_FAILURE_REASON;
 
             if is_auth_failure && window.is_mapped() {
                 debug!(
@@ -1434,6 +1458,7 @@ pub fn on_network_changed(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::wifi::iwd::StationState;
     use crate::services::wifi::{IwdSnapshot, NetworkSnapshot};
 
     #[test]
@@ -1755,7 +1780,7 @@ mod tests {
     #[test]
     fn test_iwd_subtitle_connected() {
         let mut snap = iwd_snapshot();
-        snap.state = Some("connected".to_string());
+        snap.state = Some(StationState::Connected);
         snap.ssid = Some("HomeWifi".to_string());
         let wrapped = WifiSnapshot::Iwd(snap);
         assert_eq!(get_network_subtitle_text(&wrapped), "HomeWifi");
@@ -1764,7 +1789,7 @@ mod tests {
     #[test]
     fn test_iwd_subtitle_connecting() {
         let mut snap = iwd_snapshot();
-        snap.state = Some("connecting".to_string());
+        snap.state = Some(StationState::Connecting);
         snap.ssid = Some("HomeWifi".to_string());
         let wrapped = WifiSnapshot::Iwd(snap);
         assert_eq!(
@@ -1799,7 +1824,7 @@ mod tests {
     #[test]
     fn test_iwd_subtitle_active_when_connected() {
         let mut snap = iwd_snapshot();
-        snap.state = Some("connected".to_string());
+        snap.state = Some(StationState::Connected);
         snap.ssid = Some("Network".to_string());
         let wrapped = WifiSnapshot::Iwd(snap);
         assert!(is_network_subtitle_active(&wrapped));
@@ -1808,7 +1833,7 @@ mod tests {
     #[test]
     fn test_iwd_subtitle_not_active_when_connecting() {
         let mut snap = iwd_snapshot();
-        snap.state = Some("connecting".to_string());
+        snap.state = Some(StationState::Connecting);
         snap.ssid = Some("Network".to_string());
         let wrapped = WifiSnapshot::Iwd(snap);
         assert!(!is_network_subtitle_active(&wrapped));
@@ -1824,7 +1849,7 @@ mod tests {
     #[test]
     fn test_iwd_subtitle_roaming() {
         let mut snap = iwd_snapshot();
-        snap.state = Some("roaming".to_string());
+        snap.state = Some(StationState::Roaming);
         snap.ssid = Some("RoamNet".to_string());
         let wrapped = WifiSnapshot::Iwd(snap);
         // Roaming is considered connected

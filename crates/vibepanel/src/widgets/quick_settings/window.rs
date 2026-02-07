@@ -1199,8 +1199,11 @@ impl QuickSettingsWindow {
         // Restore keyboard mode if it was released for VPN password dialogs
         vpn_card::restore_keyboard_if_released();
 
-        // Cancel any pending IWD auth request (safe to call if none pending)
-        WifiService::global().cancel_auth();
+        // NOTE: We intentionally do NOT cancel pending IWD auth here.
+        // IWD's connect-then-prompt flow means the agent callback may arrive
+        // after the panel closes. The 30s AUTH_TIMEOUT_SECS handles cleanup,
+        // and the Cancel button in the password dialog calls cancel_auth()
+        // explicitly when the user wants to abort.
 
         // Unsubscribe from WiFi service to clean up the dead callback
         if let Some(id) = self.wifi_callback_id.take() {

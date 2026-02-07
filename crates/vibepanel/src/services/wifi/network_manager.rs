@@ -1378,8 +1378,16 @@ impl NetworkService {
     }
 }
 
-/// Send an update to the main thread via glib::idle_add_once().
-/// This wakes the GLib main loop immediately (no polling).
+/// Send an update from a background thread to the main GLib loop.
+///
+/// This is the NetworkManager counterpart of [`iwd::send_network_update`].
+/// Both use `glib::idle_add_once()` to wake the main loop immediately
+/// without polling. The update is applied to the global singleton on the
+/// main thread, which then notifies all registered callbacks.
+///
+/// # Thread safety
+/// Safe to call from any thread — `glib::idle_add_once` marshals the
+/// closure to the main loop.
 fn send_network_update(update: NetworkUpdate) {
     glib::idle_add_once(move || {
         NetworkService::global().apply_update(update);
