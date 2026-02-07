@@ -76,6 +76,8 @@ enum IwdUpdate {
     /// Connection failed before agent was invoked (e.g., network disappeared).
     ConnectionFailed {
         ssid: String,
+        /// Human-readable reason for the failure.
+        reason: String,
     },
 }
 
@@ -109,6 +111,9 @@ pub struct IwdSnapshot {
     pub networks: Vec<WifiNetwork>,
     pub auth_request: Option<IwdAuthRequest>,
     pub failed_ssid: Option<String>,
+    /// Human-readable reason for the last connection failure (e.g., "Wrong password",
+    /// "Network not found", "Connection failed").
+    pub failed_reason: Option<String>,
     /// Whether initial scan has completed (for is_ready check).
     pub initial_scan_complete: bool,
 }
@@ -125,6 +130,7 @@ impl IwdSnapshot {
             networks: Vec::new(),
             auth_request: None,
             failed_ssid: None,
+            failed_reason: None,
             initial_scan_complete: false,
         }
     }
@@ -565,10 +571,11 @@ impl IwdService {
                 self.callbacks.notify(&snapshot_clone);
                 self.update_station_state();
             }
-            IwdUpdate::ConnectionFailed { ssid } => {
+            IwdUpdate::ConnectionFailed { ssid, reason } => {
                 // Connection failed before agent was invoked - set failed_ssid for UI feedback
                 let mut snapshot = self.snapshot.borrow_mut();
                 snapshot.failed_ssid = Some(ssid);
+                snapshot.failed_reason = Some(reason);
                 let snapshot_clone = snapshot.clone();
                 drop(snapshot);
                 self.callbacks.notify(&snapshot_clone);
@@ -848,6 +855,7 @@ impl IwdService {
             let mut snapshot = self.snapshot.borrow_mut();
             if snapshot.failed_ssid.is_some() {
                 snapshot.failed_ssid = None;
+                snapshot.failed_reason = None;
                 let snapshot_clone = snapshot.clone();
                 drop(snapshot);
                 self.callbacks.notify(&snapshot_clone);
@@ -872,7 +880,10 @@ impl IwdService {
                 Err(e) => {
                     warn!("Failed to create network proxy: {}", e);
                     if let Some(ssid) = ssid {
-                        send_network_update(IwdUpdate::ConnectionFailed { ssid });
+                        send_network_update(IwdUpdate::ConnectionFailed {
+                            ssid,
+                            reason: "Network not found".to_string(),
+                        });
                     }
                     return;
                 }
@@ -907,7 +918,13 @@ impl IwdService {
                 } else if !is_agent_error {
                     warn!("Connect failed: {} (error: {})", e, error_name_str);
                     if let Some(ssid) = ssid {
-                        send_network_update(IwdUpdate::ConnectionFailed { ssid });
+                        let reason = match error_name_str {
+                            "net.connman.iwd.NotFound" => "Network not found".to_string(),
+                            other => {
+                                format!("Connection failed ({})", other)
+                            }
+                        };
+                        send_network_update(IwdUpdate::ConnectionFailed { ssid, reason });
                     }
                 }
             }
@@ -1291,6 +1308,11 @@ impl IwdService {
     }
 
     /// Handle incoming agent method calls.
+    ///
+    /// Sender validation is not performed here because the system bus policy
+    /// already restricts which services can invoke methods on our registered
+    /// agent object path. Only IWD (running as a system service) can reach
+    /// this callback. See the same pattern in `bluetooth.rs`.
     fn handle_agent_method(
         this: &Rc<Self>,
         method: &str,
@@ -1330,7 +1352,7 @@ impl IwdService {
                 if is_auth_failure {
                     // Set failed_ssid before clearing auth state so UI can show error
                     if let Some(ref auth_req) = this.snapshot.borrow().auth_request {
-                        this.set_failed_ssid(&auth_req.ssid);
+                        this.set_failed_ssid(&auth_req.ssid, "Wrong password");
                     }
                 }
 
@@ -1419,6 +1441,7 @@ impl IwdService {
         snapshot.auth_request = Some(IwdAuthRequest { ssid });
         // Clear any previous failed_ssid when starting new auth
         snapshot.failed_ssid = None;
+        snapshot.failed_reason = None;
         let snapshot_clone = snapshot.clone();
         drop(snapshot);
         this.callbacks.notify(&snapshot_clone);
@@ -1477,10 +1500,11 @@ impl IwdService {
         }
     }
 
-    /// Set the failed SSID and notify listeners.
-    pub fn set_failed_ssid(&self, ssid: &str) {
+    /// Set the failed SSID with a reason and notify listeners.
+    pub fn set_failed_ssid(&self, ssid: &str, reason: &str) {
         let mut snapshot = self.snapshot.borrow_mut();
         snapshot.failed_ssid = Some(ssid.to_string());
+        snapshot.failed_reason = Some(reason.to_string());
         let snapshot_clone = snapshot.clone();
         drop(snapshot);
         self.callbacks.notify(&snapshot_clone);
@@ -1491,6 +1515,7 @@ impl IwdService {
         let mut snapshot = self.snapshot.borrow_mut();
         if snapshot.failed_ssid.is_some() {
             snapshot.failed_ssid = None;
+            snapshot.failed_reason = None;
             let snapshot_clone = snapshot.clone();
             drop(snapshot);
             self.callbacks.notify(&snapshot_clone);

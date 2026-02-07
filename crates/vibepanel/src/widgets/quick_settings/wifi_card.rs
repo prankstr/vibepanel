@@ -927,8 +927,12 @@ fn create_network_action_widget(net: &WifiNetwork) -> gtk4::Widget {
 }
 
 /// Show inline Wi-Fi password dialog for the given SSID.
-/// If `show_error` is true, displays "Wrong password" message.
-pub fn show_password_dialog_with_error(state: &WifiCardState, ssid: &str, show_error: bool) {
+/// If `error_message` is provided, displays it as an error message.
+pub fn show_password_dialog_with_error(
+    state: &WifiCardState,
+    ssid: &str,
+    error_message: Option<&str>,
+) {
     let ssid = ssid.trim();
     if ssid.is_empty() {
         return;
@@ -942,9 +946,9 @@ pub fn show_password_dialog_with_error(state: &WifiCardState, ssid: &str, show_e
 
     // Show or clear the error label (always visible for layout, text controls display)
     if let Some(error_label) = state.password_error_label.borrow().as_ref() {
-        if show_error {
+        if let Some(msg) = error_message {
             error_label.add_css_class(color::ERROR);
-            error_label.set_label("Wrong password");
+            error_label.set_label(msg);
         } else {
             error_label.remove_css_class(color::ERROR);
             error_label.set_label("");
@@ -963,7 +967,7 @@ pub fn show_password_dialog_with_error(state: &WifiCardState, ssid: &str, show_e
 
 /// Show inline Wi-Fi password dialog for the given SSID.
 pub fn show_password_dialog(state: &WifiCardState, ssid: &str) {
-    show_password_dialog_with_error(state, ssid, false);
+    show_password_dialog_with_error(state, ssid, None);
 }
 
 /// Called when the password entry is mapped; grabs focus if we have a target.
@@ -1174,7 +1178,7 @@ pub fn on_network_changed(
                     "Connection failed for '{}', showing password dialog with error",
                     failed_ssid
                 );
-                show_password_dialog_with_error(state, failed_ssid, true);
+                show_password_dialog_with_error(state, failed_ssid, Some("Wrong password"));
             } else {
                 debug!(
                     "Connection failed for '{}', but window is closed - clearing failed state",
@@ -1215,11 +1219,18 @@ pub fn on_network_changed(
             if let Some(ref failed_ssid) = iwd_snap.failed_ssid {
                 if failed_ssid == target_ssid {
                     // Connection failed for our target - show error and re-enable form
-                    debug!("IWD connection failed for '{}', showing error", failed_ssid);
+                    let reason = iwd_snap
+                        .failed_reason
+                        .as_deref()
+                        .unwrap_or("Connection failed");
+                    debug!(
+                        "IWD connection failed for '{}': {}, showing error",
+                        failed_ssid, reason
+                    );
                     set_password_connecting_state(state, false, None);
                     if let Some(error_label) = state.password_error_label.borrow().as_ref() {
                         error_label.add_css_class(color::ERROR);
-                        error_label.set_label("Wrong password");
+                        error_label.set_label(reason);
                     }
                     // Clear the failed state so we don't re-trigger
                     WifiService::global().clear_failed_state();
@@ -1234,12 +1245,16 @@ pub fn on_network_changed(
             }
         } else if let Some(ref failed_ssid) = iwd_snap.failed_ssid {
             // No dialog open but connection failed - show dialog with error if window is mapped
+            let reason = iwd_snap
+                .failed_reason
+                .as_deref()
+                .unwrap_or("Connection failed");
             if window.is_mapped() {
                 debug!(
-                    "IWD connection failed for '{}', showing password dialog with error",
-                    failed_ssid
+                    "IWD connection failed for '{}': {}, showing password dialog with error",
+                    failed_ssid, reason
                 );
-                show_password_dialog_with_error(state, failed_ssid, true);
+                show_password_dialog_with_error(state, failed_ssid, Some(reason));
             } else {
                 debug!(
                     "IWD connection failed for '{}', but window is closed - clearing failed state",
