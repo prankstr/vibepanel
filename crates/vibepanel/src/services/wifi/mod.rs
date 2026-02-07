@@ -208,19 +208,6 @@ impl WifiSnapshot {
         }
     }
 
-    /// Get the SSID of a network that failed to connect (e.g., wrong password).
-    ///
-    /// Used by UI to show error messages after a connection attempt fails.
-    /// Part of the unified API - currently UI code pattern-matches directly on
-    /// the snapshot variant instead.
-    #[allow(dead_code)]
-    pub fn failed_ssid(&self) -> Option<&str> {
-        match self {
-            Self::NetworkManager(inner) => inner.failed_ssid.as_deref(),
-            Self::Iwd(inner) => inner.failed_ssid.as_deref(),
-        }
-    }
-
     /// Check if there's a pending auth request (IWD only).
     /// Returns the SSID of the network requesting authentication.
     pub fn auth_request_ssid(&self) -> Option<&str> {

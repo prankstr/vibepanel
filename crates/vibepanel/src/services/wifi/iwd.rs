@@ -73,7 +73,8 @@ enum IwdUpdate {
     NetworksRefreshed {
         networks: Vec<WifiNetwork>,
     },
-    /// Connection failed before agent was invoked (e.g., network disappeared).
+    /// Connection failed (e.g., network disappeared, auth failure, DHCP timeout).
+    /// Ignored if a more specific failure (from agent Cancel) is already set.
     ConnectionFailed {
         ssid: String,
         /// Human-readable reason for the failure.
@@ -438,10 +439,10 @@ impl IwdService {
         }
 
         if let Some(path) = adapter_path {
-            this.apply_update(IwdUpdate::AdapterDiscovered { path });
+            Self::apply_update(this, IwdUpdate::AdapterDiscovered { path });
         }
         if let Some(path) = station_path {
-            this.apply_update(IwdUpdate::StationDiscovered { path });
+            Self::apply_update(this, IwdUpdate::StationDiscovered { path });
         }
 
         if this.adapter_path.borrow().is_none() && this.station_path.borrow().is_none() {
@@ -464,11 +465,11 @@ impl IwdService {
             match iface_name.as_deref() {
                 Some(IFACE_ADAPTER) if this.adapter_path.borrow().is_none() => {
                     debug!("IWD adapter added: {}", path);
-                    this.apply_update(IwdUpdate::AdapterDiscovered { path: path.clone() });
+                    Self::apply_update(this, IwdUpdate::AdapterDiscovered { path: path.clone() });
                 }
                 Some(IFACE_STATION) if this.station_path.borrow().is_none() => {
                     debug!("IWD station added: {}", path);
-                    this.apply_update(IwdUpdate::StationDiscovered { path: path.clone() });
+                    Self::apply_update(this, IwdUpdate::StationDiscovered { path: path.clone() });
                 }
                 _ => {}
             }
@@ -501,9 +502,16 @@ impl IwdService {
             }
         }
 
-        if lost_adapter || lost_station {
+        if lost_adapter {
+            // Adapter gone — full service loss.
             this.clear_proxies();
             this.set_unavailable();
+        } else if lost_station {
+            // Station removed but adapter still present — WiFi was powered off.
+            // Only clear station-related state; keep adapter proxy so we can
+            // re-enable WiFi without restarting the bar.
+            this.clear_station();
+            this.update_adapter_state();
         }
     }
 
@@ -522,63 +530,110 @@ impl IwdService {
             );
         }
 
-        // Clear agent registration (will re-register on service reappear)
-        *self.agent_registration_id.borrow_mut() = None;
+        // Unregister agent D-Bus object so re-registration succeeds on service reappear
+        if let (Some(conn), Some(reg_id)) = (
+            self.connection.borrow().clone(),
+            self.agent_registration_id.borrow_mut().take(),
+        ) {
+            let _ = conn.unregister_object(reg_id);
+        }
     }
 
-    fn apply_update(&self, update: IwdUpdate) {
+    /// Clear only station-related state when WiFi is powered off.
+    ///
+    /// Unlike `clear_proxies()`, this preserves the adapter proxy and path so
+    /// that `set_wifi_enabled(true)` can still reach the adapter.
+    fn clear_station(&self) {
+        *self.station_proxy.borrow_mut() = None;
+        *self.station_path.borrow_mut() = None;
+
+        // Cancel any pending auth (station is gone, auth can't succeed)
+        if let Some(pending) = self.pending_auth.borrow_mut().take() {
+            pending
+                .invocation
+                .return_dbus_error("net.connman.iwd.Agent.Error.Canceled", "WiFi powered off");
+        }
+
+        // Clear station-related snapshot fields without marking unavailable
+        let mut snapshot = self.snapshot.borrow_mut();
+        snapshot.state = None;
+        snapshot.ssid = None;
+        snapshot.networks.clear();
+        snapshot.scanning = false;
+        snapshot.auth_request = None;
+        snapshot.failed_ssid = None;
+        snapshot.failed_reason = None;
+        snapshot.initial_scan_complete = false;
+        let snapshot_clone = snapshot.clone();
+        drop(snapshot);
+        self.callbacks.notify(&snapshot_clone);
+    }
+
+    fn apply_update(this: &Rc<Self>, update: IwdUpdate) {
         match update {
             IwdUpdate::AdapterDiscovered { path } => {
-                *self.adapter_path.borrow_mut() = Some(path.clone());
-                let mut snapshot = self.snapshot.borrow_mut();
+                // Skip if we already have this adapter (avoids duplicate proxy setup
+                // from race between InterfacesAdded signal and GetManagedObjects)
+                if this.adapter_path.borrow().as_deref() == Some(&path) {
+                    return;
+                }
+                *this.adapter_path.borrow_mut() = Some(path.clone());
+                let mut snapshot = this.snapshot.borrow_mut();
                 let was_available = snapshot.available;
                 snapshot.available = true;
                 // Only notify if state changed to avoid redundant UI updates
                 if !was_available {
                     let snapshot_clone = snapshot.clone();
                     drop(snapshot);
-                    self.callbacks.notify(&snapshot_clone);
+                    this.callbacks.notify(&snapshot_clone);
                 } else {
                     drop(snapshot);
                 }
-                let this = IwdService::global();
-                Self::setup_adapter_proxy(&this, &path);
+                Self::setup_adapter_proxy(this, &path);
                 // Register the agent for password authentication
-                Self::register_agent(&this);
+                Self::register_agent(this);
             }
             IwdUpdate::StationDiscovered { path } => {
-                *self.station_path.borrow_mut() = Some(path.clone());
-                let mut snapshot = self.snapshot.borrow_mut();
+                // Skip if we already have this station (avoids duplicate proxy setup
+                // from race between InterfacesAdded signal and GetManagedObjects)
+                if this.station_path.borrow().as_deref() == Some(&path) {
+                    return;
+                }
+                *this.station_path.borrow_mut() = Some(path.clone());
+                let mut snapshot = this.snapshot.borrow_mut();
                 let was_available = snapshot.available;
                 snapshot.available = true;
                 // Only notify if state changed to avoid redundant UI updates
                 if !was_available {
                     let snapshot_clone = snapshot.clone();
                     drop(snapshot);
-                    self.callbacks.notify(&snapshot_clone);
+                    this.callbacks.notify(&snapshot_clone);
                 } else {
                     drop(snapshot);
                 }
-                let this = IwdService::global();
-                Self::setup_station_proxy(&this, &path);
+                Self::setup_station_proxy(this, &path);
             }
             IwdUpdate::NetworksRefreshed { networks } => {
-                let mut snapshot = self.snapshot.borrow_mut();
+                let mut snapshot = this.snapshot.borrow_mut();
                 snapshot.networks = networks;
                 snapshot.initial_scan_complete = true;
                 let snapshot_clone = snapshot.clone();
                 drop(snapshot);
-                self.callbacks.notify(&snapshot_clone);
-                self.update_station_state();
+                this.callbacks.notify(&snapshot_clone);
+                this.update_station_state();
             }
             IwdUpdate::ConnectionFailed { ssid, reason } => {
-                // Connection failed before agent was invoked - set failed_ssid for UI feedback
-                let mut snapshot = self.snapshot.borrow_mut();
+                let mut snapshot = this.snapshot.borrow_mut();
+                // Don't overwrite a more specific failure reason (e.g., "Wrong password"
+                // set by the agent Cancel callback) with a generic "Connection failed".
+                if snapshot.failed_ssid.is_some() {
+                    return;
+                }
                 snapshot.failed_ssid = Some(ssid);
                 snapshot.failed_reason = Some(reason);
                 let snapshot_clone = snapshot.clone();
                 drop(snapshot);
-                self.callbacks.notify(&snapshot_clone);
+                this.callbacks.notify(&snapshot_clone);
             }
         }
     }
@@ -907,7 +962,6 @@ impl IwdService {
                     "net.connman.iwd.Aborted"
                         | "net.connman.iwd.InProgress"
                         | "net.connman.iwd.NotAvailable"
-                        | "net.connman.iwd.Failed"
                 );
 
                 if is_transient_error {
@@ -1007,10 +1061,8 @@ impl IwdService {
             |res| {
                 if let Err(e) = res {
                     debug!("Scan failed: {}", e);
-                    // Clear scan_in_progress on failure
-                    glib::idle_add_once(|| {
-                        IwdService::global().scan_in_progress.set(false);
-                    });
+                    // Callback runs on main thread — safe to access global directly
+                    IwdService::global().scan_in_progress.set(false);
                 }
             },
         );
@@ -1579,7 +1631,7 @@ impl Drop for IwdService {
 
 fn send_network_update(update: IwdUpdate) {
     glib::idle_add_once(move || {
-        IwdService::global().apply_update(update);
+        IwdService::apply_update(&IwdService::global(), update);
     });
 }
 
