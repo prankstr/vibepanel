@@ -26,9 +26,7 @@ const AGENT_PATH: &str = "/org/vibepanel/iwd/agent";
 const AGENT_ERROR_CANCELED: &str = "net.connman.iwd.Agent.Error.Canceled";
 const DBUS_PEER_IFACE: &str = "org.freedesktop.DBus.Peer";
 
-/// Maximum number of SSID resolution attempts via network refresh before
-/// giving up. Prevents an infinite loop when the connected network's SSID
-/// is never found in the cached network list.
+/// Max SSID resolution retries before giving up.
 const MAX_SSID_RESOLVE_ATTEMPTS: u8 = 3;
 
 /// IWD station state (from `net.connman.iwd.Station` `State` property).
@@ -41,7 +39,6 @@ pub enum StationState {
 }
 
 impl StationState {
-    /// Parse the D-Bus string value into a `StationState`.
     fn from_dbus(s: &str) -> Self {
         match s {
             "connecting" => Self::Connecting,
@@ -52,9 +49,7 @@ impl StationState {
     }
 }
 
-/// Delay (ms) before refreshing the network list after an ObjectManager signal.
-/// Coalesces rapid add/remove bursts (e.g., after scan or forget) into a single
-/// D-Bus call.
+/// Delay (ms) to coalesce rapid ObjectManager signals into a single network refresh.
 const NETWORK_REFRESH_DEBOUNCE_MS: u64 = 100;
 
 /// IWD Agent interface introspection XML for D-Bus registration.
@@ -127,9 +122,7 @@ struct PendingAuth {
     timeout_source: Option<glib::SourceId>,
 }
 
-/// Timeout (seconds) for pending auth requests. If the user doesn't submit
-/// a password within this window, the request is automatically cancelled
-/// and the D-Bus invocation returns an error to IWD.
+/// Timeout (seconds) for pending auth requests. Auto-cancels if no password submitted.
 const AUTH_TIMEOUT_SECS: u32 = 30;
 
 /// Canonical snapshot of Wi-Fi state from IWD.
@@ -144,15 +137,13 @@ pub struct IwdSnapshot {
     pub networks: Vec<WifiNetwork>,
     pub auth_request: Option<IwdAuthRequest>,
     pub failed_ssid: Option<String>,
-    /// Human-readable reason for the last connection failure (e.g., "Wrong password",
-    /// "Network not found", "Connection failed").
+    /// Human-readable reason for the last connection failure.
     pub failed_reason: Option<String>,
     /// Whether initial scan has completed (for is_ready check).
     pub initial_scan_complete: bool,
 }
 
 impl IwdSnapshot {
-    /// Create an initial "unknown" snapshot.
     fn unknown() -> Self {
         Self {
             available: false,
@@ -168,7 +159,6 @@ impl IwdSnapshot {
         }
     }
 
-    /// Whether currently connected to a Wi-Fi network.
     pub fn connected(&self) -> bool {
         matches!(
             self.state,
@@ -176,7 +166,6 @@ impl IwdSnapshot {
         )
     }
 
-    /// Whether currently connecting to a Wi-Fi network.
     pub fn connecting(&self) -> bool {
         self.state == Some(StationState::Connecting)
     }
@@ -184,15 +173,10 @@ impl IwdSnapshot {
 
 /// Shared, process-wide IWD service for Wi-Fi state and control.
 ///
-/// This service manages Wi-Fi connectivity via the iNet Wireless Daemon (IWD).
-/// It implements the IWD Agent interface for authentication - when connecting
-/// to a secured network, IWD calls back to our agent requesting credentials,
-/// and the UI prompts the user for a password.
-///
 /// # Thread Safety
 /// All public methods are designed to be called from the GLib main loop.
-/// Synchronous D-Bus operations (connection, scanning) spawn background
-/// threads and use `glib::idle_add_once()` to deliver results to the main thread.
+/// Synchronous D-Bus operations spawn background threads and use
+/// `glib::idle_add_once()` to deliver results to the main thread.
 pub struct IwdService {
     snapshot: RefCell<IwdSnapshot>,
     callbacks: Callbacks<IwdSnapshot>,
@@ -202,37 +186,24 @@ pub struct IwdService {
     station_proxy: RefCell<Option<gio::DBusProxy>>,
     station_path: RefCell<Option<String>>,
     agent_registration_id: RefCell<Option<gio::RegistrationId>>,
-    /// Whether the agent has been successfully registered with IWD's AgentManager.
-    /// Tracked separately from `agent_registration_id` (D-Bus object registration)
-    /// because `RegisterAgent` can fail independently after the object is exported.
+    /// Whether the agent is registered with IWD's AgentManager (tracked separately from
+    /// D-Bus object registration because `RegisterAgent` can fail independently).
     agent_registered_with_manager: Cell<bool>,
     pending_auth: RefCell<Option<PendingAuth>>,
     scan_in_progress: Cell<bool>,
-    /// Whether a network list refresh is currently running in a background
-    /// thread. Prevents spawning redundant threads when multiple paths
-    /// trigger `refresh_networks_async` concurrently (e.g., state change +
-    /// scan complete + ObjectManager signal burst).
+    /// Guards against redundant concurrent network refresh threads.
     refresh_in_progress: Cell<bool>,
-    /// Whether a debounced network list refresh is pending (from IFACE_NETWORK
-    /// add/remove signals). Prevents stacking multiple refreshes when IWD
-    /// emits rapid ObjectManager signals (e.g., during forget).
+    /// Whether a debounced network refresh is pending (from IFACE_NETWORK signals).
     network_refresh_pending: Cell<bool>,
-    /// Counter for SSID resolution attempts when connected but SSID not found
-    /// in the cached network list. Capped at MAX_SSID_RESOLVE_ATTEMPTS to
-    /// prevent an infinite refresh_networks_async loop.
+    /// SSID resolution retry counter, capped at MAX_SSID_RESOLVE_ATTEMPTS.
     ssid_resolve_attempts: Cell<u8>,
     watcher_proxy: RefCell<Option<gio::DBusProxy>>,
     /// D-Bus signal subscriptions (kept alive for the service lifetime).
     _signal_subscriptions: RefCell<Vec<gio::SignalSubscription>>,
-    /// Network (path, SSID) currently being connected to (C5: race guard for password dialog).
-    /// Set in `connect_to_network()`, checked in `handle_request_passphrase()`.
-    /// Cleared on successful connection, disconnection, or auth completion.
+    /// Network (path, SSID) being connected to (C5 race guard for password dialog).
     connecting_network: RefCell<Option<(String, String)>>,
-    /// Stashed password for IWD retry flow. When a wrong-password retry triggers
-    /// a new `connect_to_network()` call with a password, IWD ignores it (IWD's
-    /// auth is agent-based). We stash the password here so that when IWD fires
-    /// `RequestPassphrase`, we can auto-submit it instead of showing the password
-    /// dialog again. Consumed (taken) on first use.
+    /// Stashed password for IWD retry flow. Auto-submitted on next RequestPassphrase
+    /// instead of re-prompting.
     pending_password: RefCell<Option<String>>,
 }
 
@@ -264,7 +235,6 @@ impl IwdService {
         service
     }
 
-    /// Get the global iwd service singleton.
     pub fn global() -> Rc<Self> {
         thread_local! {
             static INSTANCE: Rc<IwdService> = IwdService::new();
@@ -286,7 +256,6 @@ impl IwdService {
         id
     }
 
-    /// Unregister a previously registered callback.
     pub fn unsubscribe(&self, id: CallbackId) {
         self.callbacks.unregister(id);
     }
@@ -317,7 +286,6 @@ impl IwdService {
 
                 this.connection.replace(Some(connection.clone()));
 
-                // Subscribe to PropertiesChanged from IWD (any object path)
                 let this_weak2 = Rc::downgrade(&this);
                 let sub1 = connection.subscribe_to_signal(
                     Some(IWD_SERVICE),
@@ -330,7 +298,6 @@ impl IwdService {
                         let Some(this) = this_weak2.upgrade() else {
                             return;
                         };
-                        // Check which interface changed properties
                         let iface_name: Option<String> = signal.parameters.child_value(0).get();
                         match iface_name.as_deref() {
                             Some(IFACE_ADAPTER) => this.update_adapter_state(),
@@ -340,7 +307,6 @@ impl IwdService {
                     },
                 );
 
-                // Subscribe to InterfacesAdded from IWD ObjectManager
                 let this_weak3 = Rc::downgrade(&this);
                 let sub2 = connection.subscribe_to_signal(
                     Some(IWD_SERVICE),
@@ -357,7 +323,6 @@ impl IwdService {
                     },
                 );
 
-                // Subscribe to InterfacesRemoved from IWD ObjectManager
                 let this_weak4 = Rc::downgrade(&this);
                 let sub3 = connection.subscribe_to_signal(
                     Some(IWD_SERVICE),
@@ -374,7 +339,6 @@ impl IwdService {
                     },
                 );
 
-                // Store subscriptions to keep them alive
                 this._signal_subscriptions
                     .borrow_mut()
                     .extend([sub1, sub2, sub3]);
@@ -427,7 +391,6 @@ impl IwdService {
                         // Store the watcher proxy to keep it alive
                         this.watcher_proxy.replace(Some(proxy.clone()));
 
-                        // Check if service is currently available
                         if proxy.name_owner().is_some() {
                             Self::discover_from_managed_objects(&this);
                         } else {
@@ -520,7 +483,6 @@ impl IwdService {
         }
     }
 
-    /// Handle InterfacesAdded signal — detect new adapter/station objects.
     fn handle_interfaces_added(this: &Rc<Self>, params: &Variant) {
         // InterfacesAdded(OBJPATH, DICT<STRING,DICT<STRING,VARIANT>>)
         let path: Option<String> = params.child_value(0).get();
@@ -548,7 +510,6 @@ impl IwdService {
         }
     }
 
-    /// Handle InterfacesRemoved signal — detect adapter/station removal.
     fn handle_interfaces_removed(this: &Rc<Self>, params: &Variant) {
         // InterfacesRemoved(OBJPATH, ARRAY<STRING>)
         let path: Option<String> = params.child_value(0).get();
@@ -590,7 +551,6 @@ impl IwdService {
         }
     }
 
-    /// Clear all D-Bus proxies when service becomes unavailable.
     fn clear_proxies(&self) {
         *self.adapter_proxy.borrow_mut() = None;
         *self.station_proxy.borrow_mut() = None;
@@ -609,9 +569,7 @@ impl IwdService {
                 .return_dbus_error(AGENT_ERROR_CANCELED, "Service unavailable");
         }
 
-        // Reset operational flags so they don't stay stuck after service
-        // disappearance (clear_proxies is the full teardown path, so reset
-        // everything that clear_station resets plus adapter-level state).
+        // Reset all operational flags (superset of clear_station's resets).
         self.scan_in_progress.set(false);
         self.refresh_in_progress.set(false);
         self.network_refresh_pending.set(false);
@@ -637,9 +595,7 @@ impl IwdService {
         *self.connecting_network.borrow_mut() = None;
         *self.pending_password.borrow_mut() = None;
 
-        // Reset operational flags so they don't stay stuck after service
-        // disappearance mid-operation (e.g., suspend/resume killing IWD
-        // while a scan is in progress).
+        // Reset operational flags (e.g., scan/refresh stuck mid-operation).
         self.scan_in_progress.set(false);
         self.refresh_in_progress.set(false);
         self.network_refresh_pending.set(false);
@@ -1009,7 +965,6 @@ impl IwdService {
         }
     }
 
-    /// Enable or disable Wi-Fi hardware.
     pub fn set_wifi_enabled(&self, enabled: bool) {
         let Some(proxy) = self.adapter_proxy.borrow().clone() else {
             debug!("set_wifi_enabled called but adapter_proxy is None");
@@ -1017,11 +972,7 @@ impl IwdService {
         };
         debug!("set_wifi_enabled: setting Powered to {}", enabled);
         std::thread::spawn(move || {
-            // Set the Powered property via the standard D-Bus Properties interface.
-            // We use the fully-qualified method name "org.freedesktop.DBus.Properties.Set"
-            // which bypasses the proxy's own g-interface-name (IFACE_ADAPTER) and routes
-            // to the Properties interface on the same object path.
-            // D-Bus Properties.Set expects signature (ssv): interface, property, variant-boxed value.
+            // Set Powered via D-Bus Properties.Set (ssv signature). Double to_variant() boxes the bool as (v).
             let variant = Variant::tuple_from_iter([
                 IFACE_ADAPTER.to_variant(),
                 "Powered".to_variant(),
@@ -1162,7 +1113,6 @@ impl IwdService {
             }
         });
     }
-    /// Disconnect from the current Wi-Fi network.
     pub fn disconnect(&self) {
         let Some(proxy) = self.station_proxy.borrow().clone() else {
             return;
@@ -2102,11 +2052,6 @@ impl Drop for IwdService {
 }
 
 /// Send an update from a background thread to the main GLib loop.
-///
-/// This is the IWD counterpart of [`network_manager::send_network_update`].
-/// Both use `glib::idle_add_once()` to wake the main loop immediately
-/// without polling. The update is applied to the global singleton on the
-/// main thread, which then notifies all registered callbacks.
 ///
 /// # Thread safety
 /// Safe to call from any thread — `glib::idle_add_once` marshals the

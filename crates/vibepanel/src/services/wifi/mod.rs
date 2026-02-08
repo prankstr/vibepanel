@@ -80,10 +80,8 @@ pub enum WifiConnectionState {
 }
 
 impl WifiSnapshot {
-    /// Get the SSID of the active or connecting network.
-    ///
-    /// For NetworkManager: returns `connecting_ssid` if connecting, else `ssid`.
-    /// For IWD: returns `ssid` (which is set during both connecting and connected states).
+    /// SSID of the active/connecting network. NM returns connecting_ssid if connecting;
+    /// IWD returns ssid for both states.
     pub fn active_ssid(&self) -> Option<&str> {
         match self {
             Self::NetworkManager(inner) => {
@@ -93,10 +91,6 @@ impl WifiSnapshot {
         }
     }
 
-    /// Whether the Wi-Fi backend service is available.
-    ///
-    /// Returns `false` if the service (NetworkManager or IWD) is not running
-    /// or no Wi-Fi adapter was found.
     pub fn available(&self) -> bool {
         match self {
             Self::NetworkManager(inner) => inner.available,
@@ -104,10 +98,6 @@ impl WifiSnapshot {
         }
     }
 
-    /// Whether currently connected to a Wi-Fi network.
-    ///
-    /// For NetworkManager: checks `connected` field.
-    /// For IWD: uses `connected()` method (state is "connected" or "roaming").
     pub fn connected(&self) -> bool {
         match self {
             Self::NetworkManager(inner) => inner.connected,
@@ -256,36 +246,15 @@ impl WifiSnapshot {
 
 /// Unified Wi-Fi service that abstracts over NetworkManager and IWD backends.
 ///
-/// This service automatically detects which backend is available at startup
-/// (preferring NetworkManager) and provides a unified API for Wi-Fi operations.
+/// Automatically detects which backend is available at startup (preferring
+/// NetworkManager) and provides a unified API for Wi-Fi operations.
 ///
 /// # Backend differences
 ///
-/// While most operations are equivalent, there are key differences in authentication:
-///
 /// - **NetworkManager**: Password is provided upfront via `connect_to_network(ssid, password, _)`.
-///   The connection attempt happens synchronously with the password.
-///
 /// - **IWD**: Connection is initiated via `connect_to_network(_, _, path)`, and if the network
 ///   requires authentication, IWD calls back via the agent pattern. The UI then shows a password
 ///   dialog and calls `submit_password()` to complete the authentication.
-///
-/// # Usage
-///
-/// ```ignore
-/// let service = WifiService::global();
-///
-/// // Subscribe to state changes
-/// service.connect(|snapshot| {
-///     println!("Connected: {}", snapshot.connected());
-/// });
-///
-/// // Scan for networks
-/// service.scan();
-///
-/// // Connect to a network
-/// service.connect_to_network("MyNetwork", Some("password123"), network.path.as_deref());
-/// ```
 pub struct WifiService {
     backend: WifiBackend,
 }
@@ -322,7 +291,6 @@ impl WifiService {
         }
     }
 
-    /// Unregister a previously registered callback.
     pub fn unsubscribe(&self, id: CallbackId) {
         match &self.backend {
             WifiBackend::NetworkManager(inner) => inner.unsubscribe(id),
@@ -332,17 +300,9 @@ impl WifiService {
 
     /// Connect to a Wi-Fi network.
     ///
-    /// # Parameters
-    /// - `ssid`: Network name. Used by NetworkManager to identify the network.
-    /// - `password`: Optional password. Used by NetworkManager for secured networks.
-    ///   IWD uses the agent pattern instead (password requested via callback).
-    /// - `path`: D-Bus object path. Required by IWD to identify the network.
-    ///   Ignored by NetworkManager.
-    ///
-    /// # Backend behavior
-    /// - **NetworkManager**: Calls `nmcli device wifi connect <ssid> [password <pw>]`
-    /// - **IWD**: Calls `Network.Connect()` on the D-Bus path. If authentication is
-    ///   needed, IWD will invoke the agent's `RequestPassphrase` method.
+    /// - `ssid`: Network name (used by NM).
+    /// - `password`: Optional password (NM only; IWD uses agent callbacks).
+    /// - `path`: D-Bus object path (IWD only; ignored by NM).
     pub fn connect_to_network(&self, ssid: &str, password: Option<&str>, path: Option<&str>) {
         match &self.backend {
             WifiBackend::NetworkManager(inner) => inner.connect_to_network(ssid, password),
@@ -373,14 +333,8 @@ impl WifiService {
 
     /// Forget a saved Wi-Fi network.
     ///
-    /// # Parameters
-    /// - `ssid`: Network name. Used by NetworkManager to identify the saved connection.
-    /// - `path`: D-Bus path to the KnownNetwork object. Required by IWD.
-    ///   Ignored by NetworkManager.
-    ///
-    /// # Backend behavior
-    /// - **NetworkManager**: Calls `nmcli connection delete id <ssid>`
-    /// - **IWD**: Calls `KnownNetwork.Forget()` on the D-Bus path.
+    /// - `ssid`: Network name (used by NM to delete the connection).
+    /// - `path`: D-Bus KnownNetwork path (IWD only; ignored by NM).
     pub fn forget(&self, ssid: &str, path: Option<&str>) {
         match &self.backend {
             WifiBackend::NetworkManager(inner) => inner.forget_network(ssid),
@@ -448,15 +402,10 @@ impl WifiService {
     }
 }
 
-/// Detect which Wi-Fi backend is available.
+/// Detect which Wi-Fi backend is available (NM preferred, then IWD).
 ///
-/// Checks for NetworkManager first (the most common Linux network manager).
-/// If NetworkManager is not available, probes for IWD on D-Bus before
-/// falling back. If neither service is running, IWD is still returned
-/// (it monitors for service appearance and will activate when IWD starts).
-///
-/// Called once at startup when the [`WifiService`] singleton is created;
-/// the chosen backend is fixed for the lifetime of the process.
+/// If neither service is running, returns IWD (it monitors for service
+/// appearance). Called once at startup; the backend is fixed for the process lifetime.
 fn detect_backend() -> WifiBackend {
     // Check for NetworkManager
     let nm_result = gio::DBusProxy::for_bus_sync(

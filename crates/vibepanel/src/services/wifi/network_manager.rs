@@ -1,16 +1,6 @@
-//! NetworkService - Wi-Fi state via NetworkManager over D-Bus.
+//! NetworkService — Wi-Fi state via NetworkManager over D-Bus.
 //!
-//! - Asynchronously connects to NetworkManager via D-Bus
-//! - Discovers Wi-Fi device and monitors state changes
-//! - Provides network list with signal strength, security, and known status
-//! - Supports scan, connect, disconnect, and forget operations
-//!
-//! ## Architecture
-//!
-//! - Uses Gio's async D-Bus proxy for non-blocking operations
-//! - Background threads send updates to the main thread via `glib::idle_add_once()`
-//!   which wakes the main loop immediately (no polling required)
-//! - Notifies listeners on the GLib main loop with canonical snapshots
+//! Uses Gio's async D-Bus proxy; background threads deliver updates via `glib::idle_add_once()`.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
@@ -93,7 +83,6 @@ pub struct NetworkSnapshot {
 }
 
 impl NetworkSnapshot {
-    /// Create an initial "unknown" snapshot.
     fn unknown() -> Self {
         Self {
             available: false,
@@ -201,8 +190,7 @@ impl NetworkService {
             failed_ssid: RefCell::new(None),
         });
 
-        // Initialize D-Bus connection.
-        // Background threads send updates via glib::idle_add_once() - no polling needed.
+        // Initialize D-Bus — NM property signals deliver updates without polling.
         Self::init_dbus(&service);
 
         service
@@ -230,12 +218,10 @@ impl NetworkService {
         id
     }
 
-    /// Unregister a previously registered callback.
     pub fn unsubscribe(&self, id: CallbackId) {
         self.callbacks.unregister(id);
     }
 
-    /// Return the current network snapshot.
     pub fn snapshot(&self) -> NetworkSnapshot {
         self.snapshot.borrow().clone()
     }
@@ -294,10 +280,8 @@ impl NetworkService {
                     self.last_scan_value.set(Some(ls));
                 }
 
-                // Clear scan_in_progress if we got fresh results.
+                // Clear scan flag if we got newer results (or first results).
                 if self.scan_in_progress.get() {
-                    // Fresh results if: we have a timestamp and either didn't before,
-                    // or it's newer than what we had
                     let got_fresh_results = match (last_scan, prev_last_scan) {
                         (Some(new), Some(old)) => new > old,
                         (Some(_), None) => true,
@@ -308,10 +292,8 @@ impl NetworkService {
                     }
                 }
 
-                // Note: We do NOT clear connecting_ssid here based on net.active.
-                // NetworkManager may briefly show the network as active during the
-                // authentication phase, before authentication actually completes.
-                // We only clear connecting_ssid when ConnectionAttemptFinished arrives.
+                // Don't clear connecting_ssid here — NM may briefly show active during auth.
+                // Wait for ConnectionAttemptFinished.
 
                 let mut snapshot = self.snapshot.borrow_mut();
                 snapshot.networks = networks;
@@ -336,8 +318,7 @@ impl NetworkService {
                     *self.failed_ssid.borrow_mut() = None;
                 } else {
                     *self.failed_ssid.borrow_mut() = Some(ssid);
-                    // Invalidate the known SSIDs cache so we don't show "Saved"
-                    // for a network that failed to connect.
+                    // Invalidate known SSIDs cache so failed network doesn't show "Saved".
                     *self
                         .known_ssids_last_refresh
                         .lock()
@@ -1379,11 +1360,6 @@ impl NetworkService {
 }
 
 /// Send an update from a background thread to the main GLib loop.
-///
-/// This is the NetworkManager counterpart of [`iwd::send_network_update`].
-/// Both use `glib::idle_add_once()` to wake the main loop immediately
-/// without polling. The update is applied to the global singleton on the
-/// main thread, which then notifies all registered callbacks.
 ///
 /// # Thread safety
 /// Safe to call from any thread — `glib::idle_add_once` marshals the

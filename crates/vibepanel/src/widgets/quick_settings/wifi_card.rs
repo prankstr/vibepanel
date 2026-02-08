@@ -832,17 +832,13 @@ fn create_network_action_widget(net: &WifiNetwork) -> gtk4::Widget {
         action_label.connect_clicked(move |_| {
             let service = WifiService::global();
             if is_secured {
-                // Secured, unknown network: behavior depends on backend
+                // IWD: connect first, agent callback shows password dialog.
+                // NM: show password dialog first, then connect.
                 let snapshot = service.snapshot();
                 if matches!(snapshot, WifiSnapshot::Iwd(_)) {
-                    // IWD: call connect first, which triggers agent callback
-                    // The agent callback will show the password dialog
                     service.connect_to_network(&ssid_clone, None, path.as_deref());
-                } else {
-                    // NetworkManager: show password dialog first, then connect with password
-                    if let Some(qs) = current_quick_settings_window() {
-                        qs.show_wifi_password_dialog(&ssid_clone);
-                    }
+                } else if let Some(qs) = current_quick_settings_window() {
+                    qs.show_wifi_password_dialog(&ssid_clone);
                 }
             } else {
                 // Open network: connect directly without password
@@ -1231,12 +1227,8 @@ pub fn on_network_changed(
             }
             // If connecting_ssid matches target, keep showing animation (do nothing)
         } else if let Some(ref _failed_ssid) = nm_snap.failed_ssid {
-            // No dialog open but connection failed.
-            // Don't show password dialog — NM doesn't tell us the failure reason,
-            // so prompting for a password is misleading when the cause could be
-            // DHCP timeout, AP unreachable, driver error, etc.
-            // The inline error subtitle on the network row (handled by
-            // populate_wifi_list) is shown instead.
+            // NM doesn't provide failure reasons, so prompting for password is misleading.
+            // Show inline error instead.
             debug!(
                 "NM connection failed for '{}', showing inline error",
                 _failed_ssid
@@ -1263,12 +1255,8 @@ pub fn on_network_changed(
                 );
                 show_password_dialog(state, &auth_request.ssid);
             } else {
-                // Window is closed - don't cancel the auth request.
-                // IWD's connect-then-prompt flow means the agent callback
-                // can legitimately arrive after the panel closes. The 30s
-                // AUTH_TIMEOUT_SECS handles cleanup. When the panel reopens,
-                // on_network_changed will see the pending auth_request and
-                // show the password dialog at that point.
+                // Window closed — defer. AUTH_TIMEOUT_SECS handles cleanup;
+                // on_network_changed shows dialog on reopen.
                 debug!(
                     "IWD requesting passphrase for '{}', but window is closed - deferring",
                     auth_request.ssid
@@ -1322,11 +1310,7 @@ pub fn on_network_changed(
                 hide_password_dialog(state);
             }
         } else if let Some(ref failed_ssid) = iwd_snap.failed_ssid {
-            // No dialog open but connection failed.
-            // Only show password dialog for auth failures ("Wrong password").
-            // For other failures (e.g., DHCP timeout, driver error, AP unreachable),
-            // show the error inline on the network row instead of misleadingly
-            // prompting for a password.
+            // Only prompt for password on auth failures. Other failures show inline error.
             let reason = iwd_snap
                 .failed_reason
                 .as_deref()
@@ -1433,16 +1417,12 @@ pub fn on_network_changed(
         }
     }
 
-    // Update Wi-Fi subtitle (works with any backend)
     update_subtitle(state, snapshot);
 
-    // Update Ethernet row visibility (NM shows/hides, IWD always hidden)
     update_ethernet_row(state, snapshot);
 
-    // Update scan button UI (works for all backends)
     update_scan_ui(state, snapshot);
 
-    // Update network list for all backends - skip if password dialog is visible to avoid layout shifts
     let password_dialog_visible = state
         .password_box
         .borrow()
