@@ -15,7 +15,7 @@ use gtk4::glib::{self, Variant, VariantTy};
 use tracing::{debug, error, warn};
 
 use crate::services::callbacks::{CallbackId, Callbacks};
-use crate::services::wifi::{SecurityType, WifiNetwork};
+use crate::services::wifi::{SecurityType, WifiNetwork, objpath_to_string};
 
 // D-Bus Constants
 
@@ -422,7 +422,7 @@ impl NetworkService {
                             if signal_name == "DeviceAdded"
                                 && let Some(params) =
                                     values.get(3).and_then(|v| v.get::<Variant>().ok())
-                                && let Some(device_path) = params.child_value(0).get::<String>()
+                                && let Some(device_path) = objpath_to_string(&params.child_value(0))
                             {
                                 // Check if the new device is an ethernet adapter
                                 Self::check_device_type_for_ethernet(&device_path);
@@ -435,10 +435,14 @@ impl NetworkService {
                         proxy.connect_local("notify::g-name-owner", false, move |values| {
                             let this = this_weak.upgrade()?;
                             let proxy = values[0].get::<gio::DBusProxy>().ok();
-                            let has_owner = proxy.and_then(|p| p.name_owner()).is_some();
+                            let has_owner = proxy.as_ref().and_then(|p| p.name_owner()).is_some();
                             if has_owner {
-                                // Service reappeared - rediscover Wi-Fi device.
+                                // Service reappeared - restore proxy and rediscover Wi-Fi device.
+                                if let Some(p) = proxy {
+                                    this.nm_proxy.replace(Some(p));
+                                }
                                 this.set_available(true);
+                                this.update_nm_flags();
                                 Self::discover_wifi_device();
                             } else {
                                 // Service disappeared - mark unavailable.
@@ -563,7 +567,7 @@ impl NetworkService {
         let paths: Vec<String> = result
             .child_value(0)
             .iter()
-            .filter_map(|v| v.get::<String>())
+            .filter_map(|v| objpath_to_string(&v))
             .collect();
 
         Ok(paths)
@@ -883,7 +887,7 @@ impl NetworkService {
         // Get active access point path
         let ap_path = wifi
             .cached_property("ActiveAccessPoint")
-            .and_then(|v| v.get::<String>());
+            .and_then(|v| objpath_to_string(&v));
 
         let ap_path = match ap_path {
             Some(p) if !p.is_empty() && p != "/" => p,
@@ -960,7 +964,7 @@ impl NetworkService {
             // Get active AP path
             let active_path = wifi
                 .cached_property("ActiveAccessPoint")
-                .and_then(|v| v.get::<String>())
+                .and_then(|v| objpath_to_string(&v))
                 .filter(|p| !p.is_empty() && p != "/");
 
             // Get LastScan timestamp
@@ -1021,7 +1025,7 @@ impl NetworkService {
         let paths: Vec<String> = result
             .child_value(0)
             .iter()
-            .filter_map(|v| v.get::<String>())
+            .filter_map(|v| objpath_to_string(&v))
             .collect();
 
         Ok(paths)
@@ -1223,7 +1227,11 @@ impl NetworkService {
         self.callbacks.notify(&snapshot_clone);
 
         // RequestScan expects (a{sv}) - empty options dict
-        let empty_dict = Variant::parse(Some(VariantTy::new("a{sv}").unwrap()), "{}").unwrap();
+        let empty_dict = Variant::parse(
+            Some(VariantTy::new("a{sv}").expect("valid GVariant type string")),
+            "{}",
+        )
+        .expect("valid empty dict literal for a{sv}");
         let args = Variant::tuple_from_iter([empty_dict]);
 
         wifi.call(

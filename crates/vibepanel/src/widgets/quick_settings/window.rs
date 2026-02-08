@@ -69,6 +69,29 @@ fn set_current_qs_window(qs: &Rc<QuickSettingsWindow>) {
     });
 }
 
+/// GObject data key for the back-reference to [`QuickSettingsWindow`].
+const QS_WINDOW_DATA_KEY: &str = "vibepanel-qs-window";
+
+/// Store a [`Weak`] back-reference to [`QuickSettingsWindow`] on a window.
+///
+/// Pairs with [`get_qs_window_data`] to encapsulate the `unsafe` type-tag invariant.
+pub(super) fn set_qs_window_data(window: &ApplicationWindow, qs: &Rc<QuickSettingsWindow>) {
+    unsafe {
+        window.set_data(QS_WINDOW_DATA_KEY, Rc::downgrade(qs));
+    }
+}
+
+/// Retrieve the [`QuickSettingsWindow`] back-reference from an [`ApplicationWindow`].
+///
+/// Returns `Some` if the window has a valid, still-alive reference.
+pub(super) fn get_qs_window_data(window: &ApplicationWindow) -> Option<Rc<QuickSettingsWindow>> {
+    unsafe {
+        window
+            .data::<Weak<QuickSettingsWindow>>(QS_WINDOW_DATA_KEY)
+            .and_then(|ptr| ptr.as_ref().upgrade())
+    }
+}
+
 /// Clear the current QuickSettingsWindow reference.
 fn clear_current_qs_window() {
     CURRENT_QS_WINDOW.with(|cell| {
@@ -178,12 +201,7 @@ impl QuickSettingsWindow {
         SurfaceStyleManager::global().apply_pango_attrs_all(&outer);
 
         // Store a back-reference on the window so callbacks can access the QuickSettingsWindow.
-        // SAFETY: We own the Rc<QuickSettingsWindow> and store a Weak reference. The data lives
-        // as long as the window, and we only access it via upgrade() which handles dropped refs.
-        unsafe {
-            qs.window
-                .set_data("vibepanel-qs-window", Rc::downgrade(&qs));
-        }
+        set_qs_window_data(&qs.window, &qs);
 
         // ESC key closes the panel
         {
@@ -1171,21 +1189,22 @@ impl QuickSettingsWindow {
         self.window.set_visible(true);
         self.window.present();
 
-        // After the window is mapped and has its real size, update position and fade in
+        // After the window is mapped and has its real size, update position and fade in.
+        // Also re-check for pending IWD auth requests: subscribe_to_services() fires
+        // on_network_changed before the window is mapped, so the is_mapped() gate in
+        // wifi_card defers the password dialog. This re-check catches that case.
         let window_weak = self.window.downgrade();
         glib::idle_add_local(move || {
-            if let Some(window) = window_weak.upgrade() {
-                // SAFETY: We stored Weak<QuickSettingsWindow> at window creation with this key.
-                // upgrade() safely returns None if the QuickSettingsWindow was dropped.
-                unsafe {
-                    if let Some(weak_ptr) =
-                        window.data::<Weak<QuickSettingsWindow>>("vibepanel-qs-window")
-                        && let Some(qs) = weak_ptr.as_ref().upgrade()
-                    {
-                        qs.update_position();
-                        qs.window.set_opacity(1.0);
-                    }
-                }
+            if let Some(window) = window_weak.upgrade()
+                && let Some(qs) = get_qs_window_data(&window)
+            {
+                qs.update_position();
+                qs.window.set_opacity(1.0);
+
+                // Re-deliver current snapshot now that the window is mapped,
+                // so any deferred auth prompt is shown.
+                let snapshot = WifiService::global().snapshot();
+                wifi_card::on_network_changed(&qs.wifi, &snapshot, &qs.window);
             }
             ControlFlow::Break
         });

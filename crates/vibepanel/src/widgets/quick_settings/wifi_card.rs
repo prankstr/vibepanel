@@ -7,7 +7,7 @@
 //! - Password dialog handling
 
 use std::cell::{Cell, RefCell};
-use std::rc::{Rc, Weak};
+use std::rc::Rc;
 
 use gtk4::glib::{self, WeakRef};
 use gtk4::prelude::*;
@@ -835,6 +835,9 @@ fn create_network_action_widget(net: &WifiNetwork) -> gtk4::Widget {
                 // IWD: connect first, agent callback shows password dialog.
                 // NM: show password dialog first, then connect.
                 let snapshot = service.snapshot();
+                // Backend-specific: IWD uses connect-then-prompt (agent callback
+                // shows password dialog), NM uses prompt-then-connect. These flows
+                // are fundamentally different and cannot be unified.
                 if matches!(snapshot, WifiSnapshot::Iwd(_)) {
                     service.connect_to_network(&ssid_clone, None, path.as_deref());
                 } else if let Some(qs) = current_quick_settings_window() {
@@ -992,7 +995,7 @@ fn on_password_cancel_clicked(state: &WifiCardState) {
     // Cancel any pending IWD auth, abort active connection, and clear failed state
     let service = WifiService::global();
     service.cancel_auth();
-    if service.snapshot().connecting_ssid().is_some() {
+    if service.snapshot().connection_state() == WifiConnectionState::Connecting {
         service.disconnect();
     }
     service.clear_failed_state();
@@ -1113,30 +1116,23 @@ fn set_password_connecting_state(
             let step_cell = state.connect_anim_step.clone();
             let source_id = glib::timeout_add_local(std::time::Duration::from_millis(450), {
                 move || {
-                    if let Some(window) = window.upgrade() {
-                        // SAFETY: We store a Weak<QuickSettingsWindow> on the window at creation
-                        // time with key "vibepanel-qs-window". upgrade() returns None if dropped.
-                        unsafe {
-                            if let Some(weak_ptr) = window
-                                .data::<Weak<super::window::QuickSettingsWindow>>(
-                                    "vibepanel-qs-window",
-                                )
-                                && let Some(qs) = weak_ptr.as_ref().upgrade()
-                                && let Some(label) = qs.wifi.password_error_label.borrow().as_ref()
-                            {
-                                let step = step_cell.get().wrapping_add(1) % 4;
-                                step_cell.set(step);
-                                let dots = match step {
-                                    1 => ".",
-                                    2 => "..",
-                                    3 => "...",
-                                    _ => "",
-                                };
-                                label.set_label(&format!("Connecting{}", dots));
-                            }
-                        }
+                    if let Some(window) = window.upgrade()
+                        && let Some(qs) = super::window::get_qs_window_data(&window)
+                        && let Some(label) = qs.wifi.password_error_label.borrow().as_ref()
+                    {
+                        let step = step_cell.get().wrapping_add(1) % 4;
+                        step_cell.set(step);
+                        let dots = match step {
+                            1 => ".",
+                            2 => "..",
+                            3 => "...",
+                            _ => "",
+                        };
+                        label.set_label(&format!("Connecting{}", dots));
+                        glib::ControlFlow::Continue
+                    } else {
+                        glib::ControlFlow::Break
                     }
-                    glib::ControlFlow::Continue
                 }
             });
             *source_opt = Some(source_id);
@@ -1180,7 +1176,10 @@ pub fn on_network_changed(
     snapshot: &WifiSnapshot,
     window: &ApplicationWindow,
 ) {
-    // Handle password dialog state based on connection result (NetworkManager only)
+    // Backend-specific: NM provides the password upfront and tracks connection
+    // failure via failed_ssid. This block handles the NM password dialog lifecycle
+    // (error display, success dismiss, stale dialog cleanup). Cannot be unified with
+    // the IWD block below because NM has no agent-based auth flow.
     if let WifiSnapshot::NetworkManager(nm_snap) = snapshot {
         let current_target = state.password_target_ssid.borrow().clone();
         if let Some(ref target_ssid) = current_target {
@@ -1239,7 +1238,11 @@ pub fn on_network_changed(
         }
     }
 
-    // Handle IWD auth requests and failed state
+    // Backend-specific: IWD uses agent-based auth (the daemon calls back requesting
+    // the password mid-connection) and provides richer failure reasons. This block
+    // handles auth request display, failure categorization (auth vs generic), and
+    // retry prompts. Cannot be unified with the NM block above because the auth
+    // flows are architecturally different.
     if let WifiSnapshot::Iwd(iwd_snap) = snapshot {
         let current_target = state.password_target_ssid.borrow().clone();
 
@@ -1255,10 +1258,12 @@ pub fn on_network_changed(
                 );
                 show_password_dialog(state, &auth_request.ssid);
             } else {
-                // Window closed — defer. AUTH_TIMEOUT_SECS handles cleanup;
-                // on_network_changed shows dialog on reopen.
+                // Window not yet mapped — defer. show_panel()'s idle callback
+                // re-delivers the snapshot after mapping, which re-enters here
+                // with is_mapped() == true. AUTH_TIMEOUT_SECS is the backstop
+                // if the panel is never opened.
                 debug!(
-                    "IWD requesting passphrase for '{}', but window is closed - deferring",
+                    "IWD requesting passphrase for '{}', but window not mapped - deferring to post-map re-check",
                     auth_request.ssid
                 );
             }

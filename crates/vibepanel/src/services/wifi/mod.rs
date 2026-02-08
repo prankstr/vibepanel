@@ -1,5 +1,6 @@
 use crate::services::callbacks::CallbackId;
 use gtk4::gio::{self, prelude::*};
+use gtk4::glib;
 use std::rc::Rc;
 use tracing::{debug, warn};
 
@@ -87,7 +88,13 @@ impl WifiSnapshot {
             Self::NetworkManager(inner) => {
                 inner.connecting_ssid.as_deref().or(inner.ssid.as_deref())
             }
-            Self::Iwd(inner) => inner.ssid.as_deref(),
+            Self::Iwd(inner) => {
+                if inner.connected() || inner.connecting() {
+                    inner.ssid.as_deref()
+                } else {
+                    None
+                }
+            }
         }
     }
 
@@ -229,6 +236,34 @@ impl WifiSnapshot {
         match self {
             Self::NetworkManager(inner) => inner.failed_ssid.as_deref(),
             Self::Iwd(inner) => inner.failed_ssid.as_deref(),
+        }
+    }
+
+    /// Signal strength of the active (connected) network, or 0 if not connected.
+    ///
+    /// - NM: uses the top-level `strength` field on the snapshot.
+    /// - IWD: looks up the active network in the scan list.
+    pub fn active_strength(&self) -> i32 {
+        match self {
+            Self::NetworkManager(inner) => {
+                if inner.connected {
+                    inner.strength
+                } else {
+                    0
+                }
+            }
+            Self::Iwd(inner) => {
+                if inner.connected() {
+                    inner
+                        .networks
+                        .iter()
+                        .find(|n| n.active)
+                        .map(|n| n.strength)
+                        .unwrap_or(0)
+                } else {
+                    0
+                }
+            }
         }
     }
 
@@ -404,8 +439,10 @@ impl WifiService {
 
 /// Detect which Wi-Fi backend is available (NM preferred, then IWD).
 ///
-/// If neither service is running, returns IWD (it monitors for service
-/// appearance). Called once at startup; the backend is fixed for the process lifetime.
+/// Called once at startup; the backend is fixed for the process lifetime.
+/// If neither service is running, defaults to NetworkManager — its `init_dbus()`
+/// connects a `notify::g-name-owner` handler that fires the moment NM registers
+/// on D-Bus, restoring the pre-IWD self-healing behavior.
 fn detect_backend() -> WifiBackend {
     // Check for NetworkManager
     let nm_result = gio::DBusProxy::for_bus_sync(
@@ -440,11 +477,23 @@ fn detect_backend() -> WifiBackend {
         && proxy.name_owner().is_some()
     {
         debug!("Wi-Fi backend: IWD detected");
-    } else {
-        warn!(
-            "Wi-Fi backend: neither NetworkManager nor IWD detected; using IWD (will activate when service appears)"
-        );
+        return WifiBackend::Iwd(IwdService::global());
     }
 
-    WifiBackend::Iwd(IwdService::global())
+    // Neither detected — default to NetworkManager. Both backends monitor for
+    // service appearance via notify::g-name-owner in their init_dbus(), but NM
+    // is the overwhelmingly more common backend and NM startup races are the
+    // realistic scenario (NM can be session-activated, whereas IWD is a system
+    // service that starts early in boot).
+    warn!(
+        "Wi-Fi backend: neither NetworkManager nor IWD detected; \
+         defaulting to NetworkManager (will activate when service appears)"
+    );
+    WifiBackend::NetworkManager(NetworkService::global())
+}
+
+/// Extract a D-Bus object path (`type o`) from a [`glib::Variant`] as a `String`.
+pub(super) fn objpath_to_string(v: &glib::Variant) -> Option<String> {
+    v.get::<glib::variant::ObjectPath>()
+        .map(|p| p.as_str().to_string())
 }

@@ -308,45 +308,21 @@ impl QuickSettingsWidget {
                     widget.remove_css_class(state::ICON_ACTIVE);
                 }
 
-                // Tooltip - backend-specific details
-                let tooltip = match snapshot {
-                    WifiSnapshot::NetworkManager(nm_snap) => {
-                        if nm_snap.wired_connected {
-                            "Ethernet connected".to_string()
-                        } else if nm_snap.connected {
-                            let ssid = nm_snap.ssid.as_deref().unwrap_or("Connected");
-                            let strength = nm_snap.strength;
-                            if strength > 0 {
-                                format!("{}\nSignal: {}%", ssid, strength)
-                            } else {
-                                ssid.to_string()
-                            }
-                        } else if nm_snap.wifi_enabled == Some(false) {
-                            "Wi-Fi Off".to_string()
-                        } else {
-                            "Disconnected".to_string()
-                        }
+                // Tooltip
+                let tooltip = if snapshot.wired_connected() {
+                    "Ethernet connected".to_string()
+                } else if snapshot.connected() {
+                    let ssid = snapshot.active_ssid().unwrap_or("Connected");
+                    let strength = snapshot.active_strength();
+                    if strength > 0 {
+                        format!("{}\nSignal: {}%", ssid, strength)
+                    } else {
+                        ssid.to_string()
                     }
-                    WifiSnapshot::Iwd(iwd_snap) => {
-                        if iwd_snap.connected() {
-                            let ssid = iwd_snap.ssid.as_deref().unwrap_or("Connected");
-                            let strength = iwd_snap
-                                .networks
-                                .iter()
-                                .find(|n| n.active)
-                                .map(|n| n.strength)
-                                .unwrap_or(0);
-                            if strength > 0 {
-                                format!("{}\nSignal: {}%", ssid, strength)
-                            } else {
-                                ssid.to_string()
-                            }
-                        } else if iwd_snap.wifi_enabled == Some(false) {
-                            "Wi-Fi Off".to_string()
-                        } else {
-                            "Disconnected".to_string()
-                        }
-                    }
+                } else if snapshot.wifi_enabled() == Some(false) {
+                    "Wi-Fi Off".to_string()
+                } else {
+                    "Disconnected".to_string()
                 };
                 TooltipManager::global().set_styled_tooltip(&widget, &tooltip);
             });
