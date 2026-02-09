@@ -7,7 +7,7 @@
 
 use gtk4::gdk::BUTTON_PRIMARY;
 use gtk4::prelude::*;
-use gtk4::{Box as GtkBox, GestureClick};
+use gtk4::{Box as GtkBox, EventControllerScroll, EventControllerScrollFlags, GestureClick};
 use tracing::debug;
 
 use super::QuickSettingsWindowHandle;
@@ -123,6 +123,8 @@ impl WidgetConfig for QuickSettingsConfig {
 pub struct QuickSettingsWidget {
     base: BaseWidget,
 }
+
+const VOLUME_SCROLL_STEP: i32 = 5;
 
 impl QuickSettingsWidget {
     pub fn new(cfg: QuickSettingsConfig, qs_window: QuickSettingsWindowHandle) -> Self {
@@ -382,6 +384,27 @@ impl QuickSettingsWidget {
 
         // Ensure the root box is clickable.
         base.widget().add_css_class(state::CLICKABLE);
+
+        // Scroll wheel adjusts volume when hovering the widget.
+        if cards.audio {
+            let scroll = EventControllerScroll::new(EventControllerScrollFlags::VERTICAL);
+            scroll.set_propagation_phase(gtk4::PropagationPhase::Capture);
+            scroll.connect_scroll(move |_controller, _dx, dy| {
+                let snapshot = AudioService::global().current();
+                if !snapshot.available || !snapshot.control_available {
+                    return gtk4::glib::Propagation::Proceed;
+                }
+
+                if dy.abs() < f64::EPSILON {
+                    return gtk4::glib::Propagation::Proceed;
+                }
+
+                let direction = if dy < 0.0 { 1 } else { -1 };
+                AudioService::global().set_volume_relative(direction * VOLUME_SCROLL_STEP);
+                gtk4::glib::Propagation::Stop
+            });
+            base.widget().add_controller(scroll);
+        }
 
         // Gesture to toggle the Quick Settings window when clicked.
         let gesture = GestureClick::new();
