@@ -9,8 +9,9 @@ use gtk4::gdk::{self, Monitor};
 use gtk4::glib::{self, ControlFlow};
 use gtk4::prelude::*;
 use gtk4::{
-    Application, ApplicationWindow, Box as GtkBox, Button, Label, Orientation, PolicyType,
-    Revealer, RevealerTransitionType, ScrolledWindow,
+    Application, ApplicationWindow, Box as GtkBox, Button, EventControllerScroll,
+    EventControllerScrollFlags, Label, Orientation, PolicyType, Revealer, RevealerTransitionType,
+    ScrolledWindow,
 };
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use std::cell::{Cell, RefCell};
@@ -114,6 +115,7 @@ const QUICK_SETTINGS_DEFAULT_RIGHT_MARGIN: i32 = 8;
 const CARD_ROW_SPACING: i32 = 8;
 const CARD_ROW_GAP: i32 = 8;
 const AUDIO_SECTION_TOP_MARGIN: i32 = 12;
+const AUDIO_SCROLL_STEP: i32 = 5;
 
 /// Full Quick Settings window.
 ///
@@ -880,7 +882,25 @@ impl QuickSettingsWindow {
         audio_widgets.row.add_css_class(qs::AUDIO_OUTPUT);
 
         // Scroll wheel adjusts volume when hovering the audio row.
-        audio_card::attach_volume_scroll_controller(&audio_widgets.row, qs.audio_scroll_percentage);
+        {
+            let scroll = EventControllerScroll::new(EventControllerScrollFlags::VERTICAL);
+            scroll.set_propagation_phase(gtk4::PropagationPhase::Capture);
+            scroll.connect_scroll(move |_controller, _dx, dy| {
+                let snapshot = AudioService::global().current();
+                if !snapshot.available || !snapshot.control_available {
+                    return gtk4::glib::Propagation::Proceed;
+                }
+
+                if dy.abs() < f64::EPSILON {
+                    return gtk4::glib::Propagation::Proceed;
+                }
+
+                let direction = if dy < 0.0 { 1 } else { -1 };
+                AudioService::global().set_volume_relative(direction * AUDIO_SCROLL_STEP);
+                gtk4::glib::Propagation::Stop
+            });
+            audio_widgets.row.add_controller(scroll);
+        }
 
         // Get initial audio state
         let audio_service = AudioService::global();
