@@ -9,9 +9,8 @@ use gtk4::gdk::{self, Monitor};
 use gtk4::glib::{self, ControlFlow};
 use gtk4::prelude::*;
 use gtk4::{
-    Application, ApplicationWindow, Box as GtkBox, Button, EventControllerScroll,
-    EventControllerScrollFlags, Label, Orientation, PolicyType, Revealer, RevealerTransitionType,
-    ScrolledWindow,
+    Application, ApplicationWindow, Box as GtkBox, Button, Label, Orientation, PolicyType,
+    Revealer, RevealerTransitionType, ScrolledWindow,
 };
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use std::cell::{Cell, RefCell};
@@ -846,31 +845,12 @@ impl QuickSettingsWindow {
         let audio_widgets = build_audio_row();
         let audio_details = build_audio_details();
         let audio_hint_label = build_audio_hint_label();
-        let scroll_step = qs.audio_scroll_percentage;
 
         // Add row identifier for CSS targeting
         audio_widgets.row.add_css_class(qs::AUDIO_OUTPUT);
 
         // Scroll wheel adjusts volume when hovering the audio row.
-        {
-            let scroll = EventControllerScroll::new(EventControllerScrollFlags::VERTICAL);
-            scroll.set_propagation_phase(gtk4::PropagationPhase::Capture);
-            scroll.connect_scroll(move |_controller, _dx, dy| {
-                let snapshot = AudioService::global().current();
-                if !snapshot.available || !snapshot.control_available {
-                    return gtk4::glib::Propagation::Proceed;
-                }
-
-                if dy.abs() < f64::EPSILON {
-                    return gtk4::glib::Propagation::Proceed;
-                }
-
-                let direction = if dy < 0.0 { 1 } else { -1 };
-                AudioService::global().set_volume_relative(direction * scroll_step);
-                gtk4::glib::Propagation::Stop
-            });
-            audio_widgets.row.add_controller(scroll);
-        }
+        audio_card::attach_volume_scroll_controller(&audio_widgets.row, qs.audio_scroll_percentage);
 
         // Get initial audio state
         let audio_service = AudioService::global();

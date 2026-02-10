@@ -355,7 +355,6 @@ impl AudioService {
     }
 
     /// Adjust volume by a relative amount (e.g., +5 or -5 percentage points).
-    #[allow(dead_code)]
     pub fn set_volume_relative(&self, delta: i32) {
         let _ = self.command_tx.send(AudioCommand::SetVolumeRelative(delta));
     }

@@ -7,12 +7,13 @@
 //! - State change handling
 
 use std::cell::{Cell, RefCell};
+use std::rc::Rc;
 
 use gtk4::pango::EllipsizeMode;
 use gtk4::prelude::*;
 use gtk4::{
-    Align, Box as GtkBox, Button, Label, ListBox, ListBoxRow, Orientation, Overlay, Revealer,
-    RevealerTransitionType, Scale,
+    Align, Box as GtkBox, Button, EventControllerScroll, EventControllerScrollFlags, Label,
+    ListBox, ListBoxRow, Orientation, Overlay, Revealer, RevealerTransitionType, Scale,
 };
 
 use super::components::SliderRow;
@@ -370,4 +371,45 @@ pub fn on_audio_sink_row_activated(row: &ListBoxRow) {
     if let Some(sink) = available_sinks.get(index as usize) {
         audio.set_default_sink(&sink.name);
     }
+}
+
+/// Attach an `EventControllerScroll` that adjusts volume on vertical scroll.
+///
+/// Each full scroll tick changes volume by `step` percentage points.
+/// Fractional scroll events (e.g. from touchpads) are accumulated so that
+/// volume only changes once a full tick is reached. The accumulator resets
+/// on direction change so that reversing scroll direction feels responsive.
+pub fn attach_volume_scroll_controller(widget: &impl IsA<gtk4::Widget>, step: i32) {
+    let scroll = EventControllerScroll::new(EventControllerScrollFlags::VERTICAL);
+    scroll.set_propagation_phase(gtk4::PropagationPhase::Capture);
+
+    let accumulated = Rc::new(Cell::new(0.0f64));
+
+    scroll.connect_scroll(move |_controller, _dx, dy| {
+        let snapshot = AudioService::global().current();
+        if !snapshot.available || !snapshot.control_available {
+            return gtk4::glib::Propagation::Proceed;
+        }
+
+        let mut acc = accumulated.get();
+
+        // Reset accumulator on direction change to avoid a "dead zone"
+        // when reversing scroll direction.
+        if (acc > 0.0 && dy < 0.0) || (acc < 0.0 && dy > 0.0) {
+            acc = 0.0;
+        }
+
+        acc += dy;
+
+        while acc.abs() >= 1.0 {
+            let direction = if acc < 0.0 { 1 } else { -1 };
+            AudioService::global().set_volume_relative(direction * step);
+            acc -= acc.signum();
+        }
+
+        accumulated.set(acc);
+        gtk4::glib::Propagation::Stop
+    });
+
+    widget.add_controller(scroll);
 }
