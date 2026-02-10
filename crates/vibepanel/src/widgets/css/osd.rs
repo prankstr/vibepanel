@@ -27,8 +27,6 @@ pub fn css() -> &'static str {
 .osd-slider trough highlight {
     background-color: var(--color-accent-slider, var(--color-accent-primary));
     border-radius: var(--slider-radius-thick);
-    min-height: var(--slider-height-thick);
-    min-width: var(--slider-height-thick);
 }
 
 /* Hide the slider knob/thumb */
