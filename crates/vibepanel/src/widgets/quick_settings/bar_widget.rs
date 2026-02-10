@@ -37,6 +37,7 @@ use vibepanel_core::config::WidgetEntry;
 /// vpn = false
 /// idle_inhibitor = false
 /// vpn_close_on_connect = true  # close panel when VPN connects successfully
+/// audio_scroll_percentage = 5        # volume change per scroll tick (% points)
 /// ```
 #[derive(Debug, Clone)]
 pub struct QuickSettingsCardsConfig {
@@ -72,10 +73,12 @@ impl Default for QuickSettingsCardsConfig {
 }
 
 /// Configuration for the Quick Settings widget.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct QuickSettingsConfig {
     /// Which cards to show in the Quick Settings panel.
     pub cards: QuickSettingsCardsConfig,
+    /// Volume delta (percentage points) for scroll on QS widget/window.
+    pub audio_scroll_percentage: i32,
 }
 
 impl WidgetConfig for QuickSettingsConfig {
@@ -91,8 +94,19 @@ impl WidgetConfig for QuickSettingsConfig {
             "brightness",
             "power",
             "vpn_close_on_connect",
+            "audio_scroll_percentage",
+            "audio_scroll_step",
         ];
         warn_unknown_options("quick_settings", entry, known_options);
+
+        let audio_scroll_percentage = entry
+            .options
+            .get("audio_scroll_percentage")
+            .or_else(|| entry.options.get("audio_scroll_step"))
+            .and_then(|v| v.as_integer())
+            .map(|v| v as i32)
+            .unwrap_or(QuickSettingsConfig::default_audio_scroll_percentage())
+            .max(1);
 
         let get_bool = |key: &str| -> bool {
             entry
@@ -115,7 +129,23 @@ impl WidgetConfig for QuickSettingsConfig {
                 power: get_bool("power"),
                 vpn_close_on_connect: get_bool("vpn_close_on_connect"),
             },
+            audio_scroll_percentage,
         }
+    }
+}
+
+impl Default for QuickSettingsConfig {
+    fn default() -> Self {
+        Self {
+            cards: QuickSettingsCardsConfig::default(),
+            audio_scroll_percentage: Self::default_audio_scroll_percentage(),
+        }
+    }
+}
+
+impl QuickSettingsConfig {
+    fn default_audio_scroll_percentage() -> i32 {
+        5
     }
 }
 
@@ -124,11 +154,10 @@ pub struct QuickSettingsWidget {
     base: BaseWidget,
 }
 
-const VOLUME_SCROLL_STEP: i32 = 5;
-
 impl QuickSettingsWidget {
     pub fn new(cfg: QuickSettingsConfig, qs_window: QuickSettingsWindowHandle) -> Self {
         let cards = &cfg.cards;
+        let volume_scroll_step = cfg.audio_scroll_percentage;
         let base = BaseWidget::new(&[widget::QUICK_SETTINGS]);
 
         // Build icons only for enabled cards (order: Audio, Bluetooth, Wi-Fi, VPN)
@@ -400,7 +429,7 @@ impl QuickSettingsWidget {
                 }
 
                 let direction = if dy < 0.0 { 1 } else { -1 };
-                AudioService::global().set_volume_relative(direction * VOLUME_SCROLL_STEP);
+                AudioService::global().set_volume_relative(direction * volume_scroll_step);
                 gtk4::glib::Propagation::Stop
             });
             base.widget().add_controller(scroll);

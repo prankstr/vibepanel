@@ -37,7 +37,7 @@ use crate::widgets::layer_shell_popover::{
 use super::audio_card::{
     self, AudioCardState, build_audio_details, build_audio_hint_label, build_audio_row,
 };
-use super::bar_widget::QuickSettingsCardsConfig;
+use super::bar_widget::{QuickSettingsCardsConfig, QuickSettingsConfig};
 use super::bluetooth_card::{self, BluetoothCardState, bt_icon_name, build_bluetooth_details};
 use super::brightness_card::{self, BrightnessCardState, build_brightness_row};
 use super::components::ToggleCard;
@@ -114,7 +114,6 @@ const QUICK_SETTINGS_DEFAULT_RIGHT_MARGIN: i32 = 8;
 const CARD_ROW_SPACING: i32 = 8;
 const CARD_ROW_GAP: i32 = 8;
 const AUDIO_SECTION_TOP_MARGIN: i32 = 12;
-const AUDIO_SCROLL_STEP: i32 = 5;
 
 /// Full Quick Settings window.
 ///
@@ -125,6 +124,7 @@ pub struct QuickSettingsWindow {
     anchor_x: Cell<i32>,
     anchor_monitor: RefCell<Option<Monitor>>,
     cards_config: QuickSettingsCardsConfig,
+    audio_scroll_percentage: i32,
     scroll_container: ScrolledWindow,
     /// WiFi service callback ID, used to unsubscribe on close.
     wifi_callback_id: Cell<Option<CallbackId>>,
@@ -142,7 +142,7 @@ pub struct QuickSettingsWindow {
 
 impl QuickSettingsWindow {
     /// Create a new Quick Settings window bound to the given application.
-    pub fn new(app: &Application, cards_config: QuickSettingsCardsConfig) -> Rc<Self> {
+    pub fn new(app: &Application, config: QuickSettingsConfig) -> Rc<Self> {
         let window = ApplicationWindow::builder()
             .application(app)
             .title("vibepanel quick settings")
@@ -180,7 +180,8 @@ impl QuickSettingsWindow {
             click_catcher: RefCell::new(None),
             anchor_x: Cell::new(0),
             anchor_monitor: RefCell::new(None),
-            cards_config,
+            cards_config: config.cards,
+            audio_scroll_percentage: config.audio_scroll_percentage,
             scroll_container,
             wifi_callback_id: Cell::new(None),
             wifi: Rc::new(WifiCardState::new()),
@@ -845,6 +846,7 @@ impl QuickSettingsWindow {
         let audio_widgets = build_audio_row();
         let audio_details = build_audio_details();
         let audio_hint_label = build_audio_hint_label();
+        let scroll_step = qs.audio_scroll_percentage;
 
         // Add row identifier for CSS targeting
         audio_widgets.row.add_css_class(qs::AUDIO_OUTPUT);
@@ -864,7 +866,7 @@ impl QuickSettingsWindow {
                 }
 
                 let direction = if dy < 0.0 { 1 } else { -1 };
-                AudioService::global().set_volume_relative(direction * AUDIO_SCROLL_STEP);
+                AudioService::global().set_volume_relative(direction * scroll_step);
                 gtk4::glib::Propagation::Stop
             });
             audio_widgets.row.add_controller(scroll);
@@ -1299,7 +1301,7 @@ impl QuickSettingsWindow {
 #[derive(Clone)]
 pub struct QuickSettingsWindowHandle {
     app: Application,
-    cards_config: QuickSettingsCardsConfig,
+    config: QuickSettingsConfig,
     /// The current window instance. Shared across clones via Rc.
     window: Rc<RefCell<Option<Rc<QuickSettingsWindow>>>>,
     /// ID returned from PopoverTracker when QS is active.
@@ -1311,10 +1313,10 @@ pub struct QuickSettingsWindowHandle {
 }
 
 impl QuickSettingsWindowHandle {
-    pub fn new(app: Application, cards_config: QuickSettingsCardsConfig) -> Self {
+    pub fn new(app: Application, config: QuickSettingsConfig) -> Self {
         Self {
             app,
-            cards_config,
+            config,
             window: Rc::new(RefCell::new(None)),
             tracker_id: Rc::new(Cell::new(None)),
         }
@@ -1346,7 +1348,7 @@ impl QuickSettingsWindowHandle {
         // Window not visible - create a new one
         // (Layer-shell surfaces don't reliably re-show after being hidden,
         // so we always create fresh)
-        let qs = QuickSettingsWindow::new(&self.app, self.cards_config.clone());
+        let qs = QuickSettingsWindow::new(&self.app, self.config.clone());
         qs.set_anchor_position(x, monitor);
         qs.show_panel();
         *self.window.borrow_mut() = Some(qs);

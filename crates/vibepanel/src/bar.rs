@@ -114,18 +114,18 @@ pub fn create_bar_window(
 
     // Find quick_settings config from widget entries to configure the window.
     // Get options from [widgets.quick_settings] if defined.
-    let qs_cards_config = config
+    let qs_config = config
         .widgets
         .get_options("quick_settings")
         .map(|opts| {
             let entry = WidgetEntry::with_options("quick_settings", opts);
-            QuickSettingsConfig::from_entry(&entry).cards
+            QuickSettingsConfig::from_entry(&entry)
         })
         .unwrap_or_default();
 
     // Create handle for this bar's Quick Settings window.
     // The window itself is created lazily on first open and destroyed on close.
-    let qs_handle = crate::widgets::QuickSettingsWindowHandle::new(app.clone(), qs_cards_config);
+    let qs_handle = crate::widgets::QuickSettingsWindowHandle::new(app.clone(), qs_config.clone());
 
     // Create left section
     let left_section = create_section("left", config, state, &qs_handle, Some(output_id));
