@@ -7,8 +7,8 @@
 
 use gtk4::gdk::BUTTON_PRIMARY;
 use gtk4::prelude::*;
-use gtk4::{Box as GtkBox, EventControllerScroll, EventControllerScrollFlags, GestureClick};
-use tracing::debug;
+use gtk4::{Box as GtkBox, GestureClick};
+use tracing::{debug, warn};
 
 use super::QuickSettingsWindowHandle;
 use super::audio_card::volume_icon_name;
@@ -30,16 +30,9 @@ use vibepanel_core::config::WidgetEntry;
 
 /// Configuration for which cards are shown in Quick Settings.
 ///
-/// All cards default to `true` (shown). Users can disable specific
-/// cards they don't need in their config.toml:
-///
-/// ```toml
-/// [widgets.quick_settings]
-/// vpn = false
-/// idle_inhibitor = false
-/// vpn_close_on_connect = true  # close panel when VPN connects successfully
-/// audio_scroll_percentage = 5        # volume change per scroll tick (% points)
-/// ```
+/// These options are set in the `[widgets.quick_settings]` TOML section
+/// alongside widget-level settings — see [`QuickSettingsConfig`] for a
+/// complete example.
 #[derive(Debug, Clone)]
 pub struct QuickSettingsCardsConfig {
     /// Whether the unified Network card/icon is shown.
@@ -77,6 +70,17 @@ impl Default for QuickSettingsCardsConfig {
 }
 
 /// Configuration for the Quick Settings widget.
+///
+/// Includes card visibility toggles (see [`QuickSettingsCardsConfig`])
+/// and widget-level settings.
+///
+/// ```toml
+/// [widgets.quick_settings]
+/// vpn = false                          # hide the VPN card
+/// idle_inhibitor = false               # hide the idle inhibitor card
+/// vpn_close_on_connect = true          # close panel when VPN connects successfully
+/// audio_scroll_percentage = 5          # volume change per scroll tick (% points, 1..=25)
+/// ```
 #[derive(Debug, Clone)]
 pub struct QuickSettingsConfig {
     /// Which cards to show in the Quick Settings panel.
@@ -101,18 +105,26 @@ impl WidgetConfig for QuickSettingsConfig {
             "power",
             "vpn_close_on_connect",
             "audio_scroll_percentage",
-            "audio_scroll_step",
         ];
         warn_unknown_options("quick_settings", entry, known_options);
 
         let audio_scroll_percentage = entry
             .options
             .get("audio_scroll_percentage")
-            .or_else(|| entry.options.get("audio_scroll_step"))
             .and_then(|v| v.as_integer())
             .map(|v| v as i32)
-            .unwrap_or(QuickSettingsConfig::default_audio_scroll_percentage())
-            .max(1);
+            .unwrap_or(QuickSettingsConfig::DEFAULT_AUDIO_SCROLL_PERCENTAGE);
+
+        let audio_scroll_percentage = {
+            let clamped = audio_scroll_percentage.clamp(1, 25);
+            if clamped != audio_scroll_percentage {
+                warn!(
+                    "audio_scroll_percentage = {} is outside valid range 1..=25, clamping to {}",
+                    audio_scroll_percentage, clamped
+                );
+            }
+            clamped
+        };
 
         let get_bool = |key: &str| -> bool {
             entry
@@ -144,14 +156,8 @@ impl Default for QuickSettingsConfig {
     fn default() -> Self {
         Self {
             cards: QuickSettingsCardsConfig::default(),
-            audio_scroll_percentage: Self::default_audio_scroll_percentage(),
+            audio_scroll_percentage: Self::DEFAULT_AUDIO_SCROLL_PERCENTAGE,
         }
-    }
-}
-
-impl QuickSettingsConfig {
-    fn default_audio_scroll_percentage() -> i32 {
-        5
     }
 }
 
@@ -172,7 +178,6 @@ pub struct QuickSettingsWidget {
 impl QuickSettingsWidget {
     pub fn new(cfg: QuickSettingsConfig, qs_window: QuickSettingsWindowHandle) -> Self {
         let cards = &cfg.cards;
-        let volume_scroll_step = cfg.audio_scroll_percentage;
         let base = BaseWidget::new(&[widget::QUICK_SETTINGS]);
 
         let mut audio_callback_id = None;
@@ -184,6 +189,7 @@ impl QuickSettingsWidget {
         // Build icons only for enabled cards (order: Audio, Bluetooth, Wi-Fi, VPN)
         // Audio icon
         if cards.audio {
+            let volume_scroll_step = cfg.audio_scroll_percentage;
             let volume_scroll_step = cfg.audio_scroll_percentage;
             let audio_snapshot = AudioService::global().current();
             let audio_icon_name_initial =
@@ -218,14 +224,13 @@ impl QuickSettingsWidget {
                     let icon_name = volume_icon_name(snapshot.volume, snapshot.muted);
                     audio_icon_handle.set_icon(icon_name);
 
-                    let tooltip = if snapshot.muted {
-                        "Muted".to_string()
-                    } else {
-                        format!("Volume: {}%", snapshot.volume)
-                    };
-                    TooltipManager::global().set_styled_tooltip(&widget, &tooltip);
-                },
-            ));
+                let tooltip = if snapshot.muted {
+                    "Muted".to_string()
+                } else {
+                    format!("Volume: {}%", snapshot.volume)
+                };
+                TooltipManager::global().set_styled_tooltip(&widget, &tooltip);
+            });
 
             // Scroll wheel adjusts volume when hovering the audio icon.
             super::audio_card::attach_volume_scroll_controller(
@@ -523,27 +528,6 @@ impl QuickSettingsWidget {
 
         // Ensure the root box is clickable.
         base.widget().add_css_class(state::CLICKABLE);
-
-        // Scroll wheel adjusts volume when hovering the widget.
-        if cards.audio {
-            let scroll = EventControllerScroll::new(EventControllerScrollFlags::VERTICAL);
-            scroll.set_propagation_phase(gtk4::PropagationPhase::Capture);
-            scroll.connect_scroll(move |_controller, _dx, dy| {
-                let snapshot = AudioService::global().current();
-                if !snapshot.available || !snapshot.control_available {
-                    return gtk4::glib::Propagation::Proceed;
-                }
-
-                if dy.abs() < f64::EPSILON {
-                    return gtk4::glib::Propagation::Proceed;
-                }
-
-                let direction = if dy < 0.0 { 1 } else { -1 };
-                AudioService::global().set_volume_relative(direction * volume_scroll_step);
-                gtk4::glib::Propagation::Stop
-            });
-            base.widget().add_controller(scroll);
-        }
 
         // Gesture to toggle the Quick Settings window when clicked.
         let gesture = GestureClick::new();
