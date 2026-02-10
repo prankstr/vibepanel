@@ -30,9 +30,16 @@ use vibepanel_core::config::WidgetEntry;
 
 /// Configuration for which cards are shown in Quick Settings.
 ///
-/// These options are set in the `[widgets.quick_settings]` TOML section
-/// alongside widget-level settings — see [`QuickSettingsConfig`] for a
-/// complete example.
+/// All cards default to `true` (shown). Users can disable specific
+/// cards they don't need in their config.toml:
+///
+/// ```toml
+/// [widgets.quick_settings]
+/// vpn = false
+/// idle_inhibitor = false
+/// vpn_close_on_connect = true  # close panel when VPN connects successfully
+/// audio_scroll_percentage = 5        # volume change per scroll tick (% points)
+/// ```
 #[derive(Debug, Clone)]
 pub struct QuickSettingsCardsConfig {
     /// Whether the unified Network card/icon is shown.
@@ -70,21 +77,12 @@ impl Default for QuickSettingsCardsConfig {
 }
 
 /// Configuration for the Quick Settings widget.
-///
-/// Includes card visibility toggles (see [`QuickSettingsCardsConfig`])
-/// and widget-level settings.
-///
-/// ```toml
-/// [widgets.quick_settings]
-/// vpn = false                          # hide the VPN card
-/// idle_inhibitor = false               # hide the idle inhibitor card
-/// vpn_close_on_connect = true          # close panel when VPN connects successfully
-/// audio_scroll_percentage = 5          # volume change per scroll tick (% points, 1..=25)
-/// ```
 #[derive(Debug, Clone)]
 pub struct QuickSettingsConfig {
     /// Which cards to show in the Quick Settings panel.
     pub cards: QuickSettingsCardsConfig,
+    /// Volume delta (percentage points) for scroll on QS widget/window.
+    pub audio_scroll_percentage: i32,
     /// Volume delta (percentage points) for scroll on QS widget/window.
     pub audio_scroll_percentage: i32,
 }
@@ -103,26 +101,18 @@ impl WidgetConfig for QuickSettingsConfig {
             "power",
             "vpn_close_on_connect",
             "audio_scroll_percentage",
+            "audio_scroll_step",
         ];
         warn_unknown_options("quick_settings", entry, known_options);
 
         let audio_scroll_percentage = entry
             .options
             .get("audio_scroll_percentage")
+            .or_else(|| entry.options.get("audio_scroll_step"))
             .and_then(|v| v.as_integer())
             .map(|v| v as i32)
-            .unwrap_or(QuickSettingsConfig::DEFAULT_AUDIO_SCROLL_PERCENTAGE);
-
-        let audio_scroll_percentage = {
-            let clamped = audio_scroll_percentage.clamp(1, 25);
-            if clamped != audio_scroll_percentage {
-                warn!(
-                    "audio_scroll_percentage = {} is outside valid range 1..=25, clamping to {}",
-                    audio_scroll_percentage, clamped
-                );
-            }
-            clamped
-        };
+            .unwrap_or(QuickSettingsConfig::default_audio_scroll_percentage())
+            .max(1);
 
         let get_bool = |key: &str| -> bool {
             entry
@@ -154,8 +144,14 @@ impl Default for QuickSettingsConfig {
     fn default() -> Self {
         Self {
             cards: QuickSettingsCardsConfig::default(),
-            audio_scroll_percentage: Self::DEFAULT_AUDIO_SCROLL_PERCENTAGE,
+            audio_scroll_percentage: Self::default_audio_scroll_percentage(),
         }
+    }
+}
+
+impl QuickSettingsConfig {
+    fn default_audio_scroll_percentage() -> i32 {
+        5
     }
 }
 
@@ -173,11 +169,10 @@ pub struct QuickSettingsWidget {
     vpn_callback_id: Option<CallbackId>,
 }
 
-const VOLUME_SCROLL_STEP: i32 = 5;
-
 impl QuickSettingsWidget {
     pub fn new(cfg: QuickSettingsConfig, qs_window: QuickSettingsWindowHandle) -> Self {
         let cards = &cfg.cards;
+        let volume_scroll_step = cfg.audio_scroll_percentage;
         let base = BaseWidget::new(&[widget::QUICK_SETTINGS]);
 
         let mut audio_callback_id = None;
@@ -544,7 +539,7 @@ impl QuickSettingsWidget {
                 }
 
                 let direction = if dy < 0.0 { 1 } else { -1 };
-                AudioService::global().set_volume_relative(direction * VOLUME_SCROLL_STEP);
+                AudioService::global().set_volume_relative(direction * volume_scroll_step);
                 gtk4::glib::Propagation::Stop
             });
             base.widget().add_controller(scroll);

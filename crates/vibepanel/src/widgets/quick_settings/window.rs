@@ -115,7 +115,6 @@ const QUICK_SETTINGS_DEFAULT_RIGHT_MARGIN: i32 = 8;
 const CARD_ROW_SPACING: i32 = 8;
 const CARD_ROW_GAP: i32 = 8;
 const AUDIO_SECTION_TOP_MARGIN: i32 = 12;
-const AUDIO_SCROLL_STEP: i32 = 5;
 
 /// Full Quick Settings window.
 ///
@@ -877,6 +876,7 @@ impl QuickSettingsWindow {
         let audio_widgets = build_audio_row();
         let audio_details = build_audio_details();
         let audio_hint_label = build_audio_hint_label();
+        let scroll_step = qs.audio_scroll_percentage;
 
         // Add row identifier for CSS targeting
         audio_widgets.row.add_css_class(qs::AUDIO_OUTPUT);
@@ -896,7 +896,7 @@ impl QuickSettingsWindow {
                 }
 
                 let direction = if dy < 0.0 { 1 } else { -1 };
-                AudioService::global().set_volume_relative(direction * AUDIO_SCROLL_STEP);
+                AudioService::global().set_volume_relative(direction * scroll_step);
                 gtk4::glib::Propagation::Stop
             });
             audio_widgets.row.add_controller(scroll);
