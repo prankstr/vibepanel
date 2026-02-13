@@ -18,12 +18,14 @@
 //! the underlying theme implementation. The service supports live theme
 //! switching via `reconfigure()`.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
+use std::f64::consts::PI;
 use std::path::PathBuf;
 use std::rc::{Rc, Weak};
 
 use gtk4::gio::{AppInfo, DesktopAppInfo, prelude::*};
+use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4::{IconTheme, Image, Label};
 use pango::prelude::FontMapExt;
@@ -170,6 +172,15 @@ pub fn material_symbol_name(icon_name: &str) -> &str {
         "network-wireless-signal-weak-symbolic" => "wifi_1_bar",
         "network-wireless-signal-none-symbolic" => "wifi_1_bar",
         "network-wireless-offline-symbolic" => "wifi_off",
+
+        // Cellular signal icons
+        "network-cellular-signal-excellent-symbolic" => "signal_cellular_4_bar",
+        "network-cellular-signal-good-symbolic" => "signal_cellular_3_bar",
+        "network-cellular-signal-ok-symbolic" => "signal_cellular_2_bar",
+        "network-cellular-signal-weak-symbolic" => "signal_cellular_1_bar",
+        "network-cellular-signal-none-symbolic" => "signal_cellular_0_bar",
+        "network-cellular-offline-symbolic" => "signal_cellular_off",
+        "network-cellular-no-route-symbolic" => "signal_cellular_off",
 
         // Wired networking
         "network-wired" => "lan",
@@ -518,6 +529,37 @@ pub fn gtk_icon_candidates(logical: &str) -> &'static [&'static str] {
             "network-wireless-disabled-symbolic",
             "network-wireless-signal-none-symbolic",
             "network-wireless-symbolic",
+        ],
+        "network-cellular-signal-excellent-symbolic" => &[
+            "network-cellular-signal-excellent-symbolic",
+            "network-cellular-signal-good-symbolic",
+            "network-cellular-symbolic",
+            "network-wireless-signal-excellent-symbolic",
+        ],
+        "network-cellular-signal-good-symbolic" => &[
+            "network-cellular-signal-good-symbolic",
+            "network-cellular-signal-ok-symbolic",
+            "network-cellular-symbolic",
+            "network-wireless-signal-good-symbolic",
+        ],
+        "network-cellular-signal-ok-symbolic" => &[
+            "network-cellular-signal-ok-symbolic",
+            "network-cellular-signal-weak-symbolic",
+            "network-cellular-symbolic",
+            "network-wireless-signal-ok-symbolic",
+        ],
+        "network-cellular-signal-weak-symbolic" => &[
+            "network-cellular-signal-weak-symbolic",
+            "network-cellular-signal-none-symbolic",
+            "network-cellular-symbolic",
+            "network-wireless-signal-weak-symbolic",
+        ],
+        "network-cellular-signal-none-symbolic" => &[
+            "network-cellular-signal-none-symbolic",
+            "network-cellular-offline-symbolic",
+            "network-cellular-no-route-symbolic",
+            "network-cellular-symbolic",
+            "network-wireless-signal-none-symbolic",
         ],
         "network-offline-symbolic" => &[
             "network-offline-symbolic",
@@ -1047,6 +1089,164 @@ impl Clone for IconBackend {
     }
 }
 
+/// Cairo-drawn spinning arc widget for loading/connecting indicators.
+///
+/// Draws a 270° arc that rotates smoothly at ~30fps, inheriting its color
+/// from the CSS foreground of a specified widget. Used by both `IconHandle`
+/// (for inline icon spinners) and `ScanButton` (for scan-in-progress).
+///
+/// The spinner is created hidden and must be appended to a container.
+/// Call [`start`](CairoSpinner::start) / [`stop`](CairoSpinner::stop) to
+/// control the animation.
+pub struct CairoSpinner {
+    /// The DrawingArea that renders the arc.
+    area: gtk4::DrawingArea,
+    /// Current rotation angle (radians), shared with the draw function.
+    angle: Rc<Cell<f64>>,
+    /// Active timer source, if the animation is running.
+    source: RefCell<Option<glib::SourceId>>,
+}
+
+impl CairoSpinner {
+    /// Create a spinner that reads its foreground color from `color_source`.
+    ///
+    /// The `color_source` widget is used to resolve the CSS `color` property
+    /// (e.g., the parent container or the DrawingArea itself).
+    ///
+    /// The returned spinner is hidden and must be appended to a container by the caller.
+    pub fn new(color_source: &impl IsA<gtk4::Widget>) -> Self {
+        Self::build(Some(color_source.as_ref().downgrade()))
+    }
+
+    /// Create a spinner that reads its foreground color from its own CSS.
+    ///
+    /// Use this when the spinner's `DrawingArea` has CSS classes that set its
+    /// color directly (e.g., `.qs-scan-spinner { color: @accent_color; }`).
+    pub fn new_self_colored() -> Self {
+        Self::build(None)
+    }
+
+    /// Shared construction logic.
+    ///
+    /// When `external_source` is `Some`, the color is read from that widget.
+    /// When `None`, the color is read from the DrawingArea itself.
+    fn build(external_source: Option<glib::WeakRef<gtk4::Widget>>) -> Self {
+        let area = gtk4::DrawingArea::new();
+        area.set_halign(gtk4::Align::Center);
+        area.set_valign(gtk4::Align::Center);
+        area.set_visible(false);
+
+        let angle: Rc<Cell<f64>> = Rc::new(Cell::new(0.0));
+
+        let angle_ref = angle.clone();
+        area.set_draw_func(move |area, cr, width, height| {
+            let w = width as f64;
+            let h = height as f64;
+            let cx = w / 2.0;
+            let cy = h / 2.0;
+            let radius = (w.min(h) / 2.0) - 1.5;
+            if radius <= 0.0 {
+                return;
+            }
+            let line_width = (radius * 0.22).max(1.5);
+
+            // Read color from external source if provided, otherwise from self.
+            let color_widget: Option<gtk4::Widget> = match &external_source {
+                Some(weak) => weak.upgrade(),
+                None => Some(area.clone().upcast()),
+            };
+            let (r, g, b, a) = color_widget
+                .map(|w| {
+                    let c = w.color();
+                    (
+                        c.red() as f64,
+                        c.green() as f64,
+                        c.blue() as f64,
+                        c.alpha() as f64,
+                    )
+                })
+                .unwrap_or((1.0, 1.0, 1.0, 1.0));
+
+            let current = angle_ref.get();
+            let arc_len = 1.5 * PI; // 270°
+
+            cr.set_line_width(line_width);
+            cr.set_line_cap(gtk4::cairo::LineCap::Round);
+            cr.set_source_rgba(r, g, b, a);
+            cr.arc(cx, cy, radius, current, current + arc_len);
+            let _ = cr.stroke();
+        });
+
+        Self {
+            area,
+            angle,
+            source: RefCell::new(None),
+        }
+    }
+
+    /// The underlying `DrawingArea` widget.
+    pub fn widget(&self) -> &gtk4::DrawingArea {
+        &self.area
+    }
+
+    /// Set the spinner content size (width and height in pixels).
+    pub fn set_size(&self, size: i32) {
+        self.area.set_content_width(size);
+        self.area.set_content_height(size);
+    }
+
+    /// Start the spinning animation (~30fps).
+    ///
+    /// If already running this is a no-op.
+    pub fn start(&self) {
+        self.area.set_visible(true);
+        if self.source.borrow().is_some() {
+            return;
+        }
+        let angle = self.angle.clone();
+        let area_weak = self.area.downgrade();
+        let source = glib::timeout_add_local(std::time::Duration::from_millis(33), move || {
+            angle.set(angle.get() + 0.2);
+            if angle.get() > 2.0 * PI {
+                angle.set(angle.get() - 2.0 * PI);
+            }
+            if let Some(area) = area_weak.upgrade() {
+                area.queue_draw();
+                glib::ControlFlow::Continue
+            } else {
+                glib::ControlFlow::Break
+            }
+        });
+        *self.source.borrow_mut() = Some(source);
+    }
+
+    /// Stop the spinning animation and hide the widget.
+    pub fn stop(&self) {
+        if let Some(source_id) = self.source.borrow_mut().take() {
+            source_id.remove();
+        }
+        self.area.set_visible(false);
+    }
+
+    /// Stop the animation and release the timer, without changing visibility.
+    ///
+    /// Used when the spinner widget is being removed from its container
+    /// (e.g., during theme switch in `IconHandleInner`).
+    pub fn stop_animation_only(&self) {
+        if let Some(source_id) = self.source.borrow_mut().take() {
+            source_id.remove();
+        }
+    }
+}
+
+impl Drop for CairoSpinner {
+    fn drop(&mut self) {
+        if let Some(source_id) = self.source.borrow_mut().take() {
+            source_id.remove();
+        }
+    }
+}
+
 /// Internal state shared by IconHandle clones and tracked by IconsService.
 ///
 /// This allows the service to reapply icons when the theme changes at runtime.
@@ -1064,6 +1264,10 @@ struct IconHandleInner {
     css_classes: RefCell<Vec<String>>,
     /// CSS classes added dynamically via `add_css_class()`, also reapplied on rebuild.
     dynamic_classes: RefCell<HashSet<String>>,
+    /// Cairo-drawn spinner, lazily created and shared across all backends.
+    spinner: RefCell<Option<CairoSpinner>>,
+    /// Whether the icon is currently in a spinning/loading state.
+    spinning: Cell<bool>,
 }
 
 impl IconHandleInner {
@@ -1106,9 +1310,12 @@ impl IconHandleInner {
             return;
         }
 
-        // Remove the old child widget from the root container
-        if let Some(child) = self.root.first_child() {
+        // Remove all children from the root container (backend + possible spinner)
+        while let Some(child) = self.root.first_child() {
             self.root.remove(&child);
+        }
+        if let Some(spinner) = self.spinner.borrow_mut().take() {
+            spinner.stop_animation_only();
         }
 
         // Create new backend widget with stored CSS classes
@@ -1129,6 +1336,62 @@ impl IconHandleInner {
 
         // Reapply the current icon
         self.reapply();
+
+        // If spinning was active, re-apply for the new backend kind
+        if self.spinning.get() {
+            self.apply_spinning(true);
+        }
+    }
+
+    /// Lazily create the shared `CairoSpinner`, appending it to the root container.
+    fn ensure_spinner(&self) {
+        let mut opt = self.spinner.borrow_mut();
+        if opt.is_none() {
+            let spinner = CairoSpinner::new(&self.root);
+            self.root.append(spinner.widget());
+            *opt = Some(spinner);
+        }
+    }
+
+    /// Size the spinner based on the root container's current allocation.
+    ///
+    /// Called each time spinning starts so the size reflects the actual layout,
+    /// not a stale or zero-sized initial allocation.
+    fn size_spinner(&self) {
+        let rw = self.root.width();
+        let rh = self.root.height();
+        let raw = (rw.min(rh) as f64 * 0.75).round() as i32;
+        let size = raw.max(10);
+        if let Some(spinner) = self.spinner.borrow().as_ref() {
+            spinner.set_size(size);
+        }
+    }
+
+    /// Apply or remove the spinning visual state.
+    ///
+    /// For all backends, hides the backend widget and shows a Cairo-drawn
+    /// spinning arc. This avoids font glyph rotation issues with Material
+    /// Symbols and provides a consistent spinner across all icon backends.
+    fn apply_spinning(&self, active: bool) {
+        let backend = self.backend.borrow();
+        if active {
+            // Lazily create spinner and size it from root *before* hiding backend
+            self.ensure_spinner();
+            self.size_spinner();
+            backend.widget().set_visible(false);
+            drop(backend);
+
+            // Start animation
+            if let Some(spinner) = self.spinner.borrow().as_ref() {
+                spinner.start();
+            }
+        } else {
+            // Stop animation
+            if let Some(spinner) = self.spinner.borrow().as_ref() {
+                spinner.stop();
+            }
+            backend.widget().set_visible(true);
+        }
     }
 }
 
@@ -1169,6 +1432,7 @@ impl IconHandle {
     /// is recreated).
     pub fn add_css_class(&self, class: &str) {
         self.inner.backend.borrow().widget().add_css_class(class);
+        self.inner.root.add_css_class(class);
         self.inner
             .dynamic_classes
             .borrow_mut()
@@ -1181,6 +1445,7 @@ impl IconHandle {
     /// set, so it won't be reapplied on theme switches.
     pub fn remove_css_class(&self, class: &str) {
         self.inner.backend.borrow().widget().remove_css_class(class);
+        self.inner.root.remove_css_class(class);
         self.inner.dynamic_classes.borrow_mut().remove(class);
     }
 
@@ -1200,6 +1465,22 @@ impl IconHandle {
     /// ```
     pub fn set_icon(&self, name: &str) {
         self.inner.apply_icon(name);
+    }
+
+    /// Show a spinning/loading indicator in place of the icon.
+    ///
+    /// When `active` is true, the current icon is hidden and replaced with a
+    /// Cairo-drawn spinning arc that inherits the CSS foreground color from the
+    /// parent container.
+    ///
+    /// When `active` is false, the backend widget (which already reflects any
+    /// `set_icon()` calls made during spinning) is made visible again.
+    pub fn set_spinning(&self, active: bool) {
+        if self.inner.spinning.get() == active {
+            return;
+        }
+        self.inner.spinning.set(active);
+        self.inner.apply_spinning(active);
     }
 }
 
@@ -1435,6 +1716,8 @@ impl IconsService {
             logical_name: RefCell::new(String::new()),
             css_classes: RefCell::new(css_classes.iter().map(|s| s.to_string()).collect()),
             dynamic_classes: RefCell::new(HashSet::new()),
+            spinner: RefCell::new(None),
+            spinning: Cell::new(false),
         });
 
         // Register for live reload

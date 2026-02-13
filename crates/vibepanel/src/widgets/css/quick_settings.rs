@@ -72,13 +72,17 @@ window.quick-settings-window {
     color: var(--color-foreground-disabled);
 }
 
-/* Ethernet section in expanded details (above Wi-Fi controls) */
-.qs-ethernet-section {
-    /* Container for header + connection row */
+/* Mobile disabled state override */
+.qs-mobile-disabled-icon {
+    color: var(--color-foreground-disabled);
+}
+
+/* Shared styling for network sections (Ethernet, Mobile) in expanded details */
+.qs-network-section {
     padding-top: 6px;
 }
 
-.qs-ethernet-section .qs-ethernet-connection-row {
+.qs-network-section .qs-network-connection-row {
     /* Override .qs-row margin, keep horizontal margin for alignment */
     margin-top: 8px;
     margin-bottom: 0;
@@ -86,34 +90,34 @@ window.quick-settings-window {
     margin-right: 0;
 }
 
-/* Wi-Fi switch row in expanded details */
-.qs-wifi-switch-row {
+/* Network section header row in expanded details */
+.qs-network-section-row {
     padding: 0 8px;
     margin-top: 8px;
     margin-bottom: -4px;
 }
 
-.qs-wifi-switch-label {
+.qs-network-section-label {
     font-size: var(--font-size);
 }
 
-/* Wi-Fi switch styling - accent colored track when on */
-.qs-wifi-switch-row switch {
+/* Network section switch styling - accent colored track when on */
+.qs-network-section-row switch {
     /* Switch track: rounder than slider to contain it */
     border-radius: calc(var(--slider-radius-thick) * 2.5);
     margin-top: 2px;
 }
 
-.qs-wifi-switch-row switch:checked {
+.qs-network-section-row switch:checked {
     background-color: var(--color-accent-primary);
     background-image: none;
 }
 
-.qs-wifi-switch-row switch:checked:backdrop {
+.qs-network-section-row switch:checked:backdrop {
     background-color: var(--color-accent-primary);
 }
 
-.qs-wifi-switch-row switch slider {
+.qs-network-section-row switch slider {
     border-radius: calc(var(--slider-radius-thick) * 1.5);
     min-width: calc(var(--slider-height-thick) * 1.2);
     min-height: calc(var(--slider-height-thick) * 1.2);
@@ -126,34 +130,7 @@ window.quick-settings-window {
     margin-bottom: -4px;
 }
 
-/* Network empty state (no connections) */
-.qs-no-connections-state {
-    padding: 24px 16px;
-}
-
-.qs-no-connections-icon {
-    font-size: 32px;
-    color: var(--color-foreground-disabled);
-}
-
-.qs-no-connections-label {
-    font-size: var(--font-size-sm);
-}
-
-.qs-wifi-disabled-state {
-    padding: 16px;
-}
-
-.qs-wifi-disabled-state-icon {
-    font-size: 28px;
-    color: var(--color-foreground-disabled);
-}
-
-.qs-wifi-disabled-label {
-    font-size: var(--font-size-sm);
-}
-
-/* Generic disabled state placeholder (used by Bluetooth, etc.) */
+/* Generic disabled state placeholder (used by Bluetooth, Network, etc.) */
 .qs-disabled-state {
     padding: 16px;
 }
@@ -299,20 +276,6 @@ window.quick-settings-window {
 .qs-scan-spinner {
     min-width: 12px;
     min-height: 12px;
-    color: var(--color-foreground-primary);
-}
-
-/* Material icon spinner rotation animation */
-@keyframes spin {
-    from { transform: rotate(0deg); }
-    to { transform: rotate(360deg); }
-}
-
-.qs-scan-spinner.spinning {
-    animation: spin 1s linear infinite;
-}
-
-.qs-scan-spinner.spinning label {
     color: var(--color-accent-primary);
 }
 

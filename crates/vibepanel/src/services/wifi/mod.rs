@@ -85,9 +85,11 @@ impl WifiSnapshot {
     /// IWD returns ssid for both states.
     pub fn active_ssid(&self) -> Option<&str> {
         match self {
-            Self::NetworkManager(inner) => {
-                inner.connecting_ssid.as_deref().or(inner.ssid.as_deref())
-            }
+            Self::NetworkManager(inner) => inner
+                .wifi
+                .connecting_ssid
+                .as_deref()
+                .or(inner.wifi.ssid.as_deref()),
             Self::Iwd(inner) => {
                 if inner.connected() || inner.connecting() {
                     inner.ssid.as_deref()
@@ -107,14 +109,14 @@ impl WifiSnapshot {
 
     pub fn connected(&self) -> bool {
         match self {
-            Self::NetworkManager(inner) => inner.connected,
+            Self::NetworkManager(inner) => inner.wifi.connected,
             Self::Iwd(inner) => inner.connected(),
         }
     }
 
     pub fn connecting_ssid(&self) -> Option<&str> {
         match self {
-            Self::NetworkManager(inner) => inner.connecting_ssid.as_deref(),
+            Self::NetworkManager(inner) => inner.wifi.connecting_ssid.as_deref(),
             Self::Iwd(inner) => {
                 if inner.connecting() {
                     inner.ssid.as_deref()
@@ -128,9 +130,9 @@ impl WifiSnapshot {
     pub fn connection_state(&self) -> WifiConnectionState {
         match self {
             Self::NetworkManager(inner) => {
-                if inner.connecting_ssid.is_some() {
+                if inner.wifi.connecting_ssid.is_some() {
                     WifiConnectionState::Connecting
-                } else if inner.connected {
+                } else if inner.wifi.connected {
                     WifiConnectionState::Connected
                 } else {
                     WifiConnectionState::Disconnected
@@ -148,25 +150,39 @@ impl WifiSnapshot {
         }
     }
 
+    /// Whether the system has an Ethernet (wired) network device.
     pub fn has_ethernet_device(&self) -> bool {
         match self {
-            Self::NetworkManager(inner) => inner.has_ethernet_device,
+            Self::NetworkManager(inner) => inner.wired.has_device,
             Self::Iwd(_) => false,
         }
+    }
+
+    /// Whether the system has a modem (cellular) device.
+    pub fn has_modem_device(&self) -> bool {
+        match self {
+            Self::NetworkManager(inner) => inner.mobile.has_device,
+            Self::Iwd(_) => false,
+        }
+    }
+
+    /// Whether the system has any non-WiFi network device (Ethernet or cellular).
+    pub fn has_non_wifi_device(&self) -> bool {
+        self.has_ethernet_device() || self.has_modem_device()
     }
 
     /// Whether the system has wifi hardware.
     /// For iwd: implied by service availability (iwd requires wifi hardware).
     pub fn has_wifi_device(&self) -> bool {
         match self {
-            Self::NetworkManager(inner) => inner.has_wifi_device,
+            Self::NetworkManager(inner) => inner.wifi.has_device,
             Self::Iwd(inner) => inner.available, // adapter found = wifi device exists
         }
     }
 
     pub fn is_ready(&self) -> bool {
         match self {
-            Self::NetworkManager(inner) => inner.is_ready,
+            Self::NetworkManager(inner) => inner.wifi.is_ready,
             // IWD is ready once the initial network refresh has completed.
             // This mirrors NetworkManager's is_ready field for consistent UI behavior.
             Self::Iwd(inner) => inner.initial_scan_complete,
@@ -175,50 +191,130 @@ impl WifiSnapshot {
 
     pub fn networks(&self) -> &[WifiNetwork] {
         match self {
-            Self::NetworkManager(inner) => &inner.networks,
+            Self::NetworkManager(inner) => &inner.wifi.networks,
             Self::Iwd(inner) => &inner.networks,
         }
     }
 
     pub fn scanning(&self) -> bool {
         match self {
-            Self::NetworkManager(inner) => inner.scanning,
+            Self::NetworkManager(inner) => inner.wifi.scanning,
             Self::Iwd(inner) => inner.scanning,
         }
     }
 
     pub fn wifi_enabled(&self) -> Option<bool> {
         match self {
-            Self::NetworkManager(inner) => inner.wifi_enabled,
+            Self::NetworkManager(inner) => inner.wifi.enabled,
             Self::Iwd(inner) => inner.wifi_enabled,
         }
     }
 
     pub fn wired_connected(&self) -> bool {
         match self {
-            Self::NetworkManager(inner) => inner.wired_connected,
+            Self::NetworkManager(inner) => inner.wired.connected,
             Self::Iwd(_) => false,
+        }
+    }
+
+    /// Whether mobile data is the primary connection (set via NM's PrimaryConnectionType).
+    pub fn mobile_connected(&self) -> bool {
+        match self {
+            Self::NetworkManager(inner) => inner.mobile.is_primary,
+            Self::Iwd(_) => false,
+        }
+    }
+
+    /// Whether a GSM/CDMA connection is activated (set from ModemManager device info).
+    pub fn mobile_active(&self) -> bool {
+        match self {
+            Self::NetworkManager(inner) => inner.mobile.active,
+            Self::Iwd(_) => false,
+        }
+    }
+
+    /// Whether a GSM/CDMA connection is currently activating.
+    pub fn mobile_connecting(&self) -> bool {
+        match self {
+            Self::NetworkManager(inner) => inner.mobile.connecting,
+            Self::Iwd(_) => false,
+        }
+    }
+
+    /// Whether mobile networking is supported (modem + SIM + profile all present).
+    pub fn mobile_supported(&self) -> bool {
+        match self {
+            Self::NetworkManager(inner) => inner.mobile.supported,
+            Self::Iwd(_) => false,
+        }
+    }
+
+    /// Whether WWAN (mobile broadband) is enabled in NetworkManager, if known.
+    pub fn mobile_enabled(&self) -> Option<bool> {
+        match self {
+            Self::NetworkManager(inner) => inner.mobile.enabled,
+            Self::Iwd(_) => None,
         }
     }
 
     pub fn wired_iface(&self) -> Option<&str> {
         match self {
-            Self::NetworkManager(inner) => inner.wired_iface.as_deref(),
+            Self::NetworkManager(inner) => inner.wired.iface.as_deref(),
             Self::Iwd(_) => None,
         }
     }
 
     pub fn wired_name(&self) -> Option<&str> {
         match self {
-            Self::NetworkManager(inner) => inner.wired_name.as_deref(),
+            Self::NetworkManager(inner) => inner.wired.name.as_deref(),
             Self::Iwd(_) => None,
         }
     }
 
     pub fn wired_speed(&self) -> Option<u32> {
         match self {
-            Self::NetworkManager(inner) => inner.wired_speed,
+            Self::NetworkManager(inner) => inner.wired.speed,
             Self::Iwd(_) => None,
+        }
+    }
+
+    /// Connection profile name for the active mobile connection (e.g., "T-Mobile").
+    pub fn mobile_name(&self) -> Option<&str> {
+        match self {
+            Self::NetworkManager(inner) => inner.mobile.name.as_deref(),
+            Self::Iwd(_) => None,
+        }
+    }
+
+    /// Mobile carrier / operator name reported by the 3GPP modem.
+    pub fn mobile_operator(&self) -> Option<&str> {
+        match self {
+            Self::NetworkManager(inner) => inner.mobile.operator.as_deref(),
+            Self::Iwd(_) => None,
+        }
+    }
+
+    /// Radio access technology label (e.g., "LTE", "5G NR", "HSPA+").
+    pub fn mobile_access_technology(&self) -> Option<&str> {
+        match self {
+            Self::NetworkManager(inner) => inner.mobile.access_technology.as_deref(),
+            Self::Iwd(_) => None,
+        }
+    }
+
+    /// Signal quality percentage (0–100) from ModemManager.
+    pub fn mobile_signal_quality(&self) -> Option<u32> {
+        match self {
+            Self::NetworkManager(inner) => inner.mobile.signal_quality,
+            Self::Iwd(_) => None,
+        }
+    }
+
+    /// Whether the last mobile connection attempt failed.
+    pub fn mobile_failed(&self) -> bool {
+        match self {
+            Self::NetworkManager(inner) => inner.mobile.failed,
+            Self::Iwd(_) => false,
         }
     }
 
@@ -234,7 +330,7 @@ impl WifiSnapshot {
     /// Get the SSID of the network that failed to connect, if any.
     pub fn failed_ssid(&self) -> Option<&str> {
         match self {
-            Self::NetworkManager(inner) => inner.failed_ssid.as_deref(),
+            Self::NetworkManager(inner) => inner.wifi.failed_ssid.as_deref(),
             Self::Iwd(inner) => inner.failed_ssid.as_deref(),
         }
     }
@@ -246,8 +342,8 @@ impl WifiSnapshot {
     pub fn active_strength(&self) -> i32 {
         match self {
             Self::NetworkManager(inner) => {
-                if inner.connected {
-                    inner.strength
+                if inner.wifi.connected {
+                    inner.wifi.strength
                 } else {
                     0
                 }
@@ -400,6 +496,24 @@ impl WifiService {
         }
     }
 
+    pub fn set_mobile_enabled(&self, enabled: bool) {
+        if let WifiBackend::NetworkManager(inner) = &self.backend {
+            inner.set_mobile_enabled(enabled);
+        }
+    }
+
+    pub fn connect_mobile(&self) {
+        if let WifiBackend::NetworkManager(inner) = &self.backend {
+            inner.connect_mobile();
+        }
+    }
+
+    pub fn disconnect_mobile(&self) {
+        if let WifiBackend::NetworkManager(inner) = &self.backend {
+            inner.disconnect_mobile();
+        }
+    }
+
     pub fn snapshot(&self) -> WifiSnapshot {
         match &self.backend {
             WifiBackend::NetworkManager(inner) => WifiSnapshot::NetworkManager(inner.snapshot()),
@@ -433,6 +547,13 @@ impl WifiService {
         match &self.backend {
             WifiBackend::NetworkManager(inner) => inner.clear_failed_state(),
             WifiBackend::Iwd(inner) => inner.clear_failed_state(),
+        }
+    }
+
+    /// Clear the mobile failed connection state (called by UI after showing error).
+    pub fn clear_mobile_failed_state(&self) {
+        if let WifiBackend::NetworkManager(inner) = &self.backend {
+            inner.clear_mobile_failed_state();
         }
     }
 }

@@ -5,7 +5,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::services::icons::{IconHandle, IconsService};
+use crate::services::icons::{CairoSpinner, IconHandle, IconsService};
 use crate::styles::{button, color, qs, row, state};
 use gtk4::prelude::*;
 use gtk4::{
@@ -421,14 +421,6 @@ pub fn create_qs_list_box() -> ListBox {
     list_box
 }
 
-/// Spinner backend for ScanButton - either Material icon or GTK spinner.
-enum ScanSpinner {
-    /// Material Symbols icon with CSS animation
-    Material(IconHandle),
-    /// Native GTK spinner widget
-    Gtk(gtk4::Spinner),
-}
-
 /// Self-contained scan button widget with spinner state.
 ///
 /// This provides a consistent scan/refresh button used by Wi-Fi, Bluetooth,
@@ -437,20 +429,18 @@ enum ScanSpinner {
 /// - Spinner shown during active state (label hidden)
 /// - Automatic state management
 ///
-/// The spinner uses Material Symbols (`progress_activity`) when the Material
-/// icon theme is configured, providing consistent appearance across systems.
-/// When GTK icons are configured, it uses the native `gtk4::Spinner` to match
-/// the user's chosen theme.
+/// The spinner is a Cairo-drawn rotating arc that inherits the CSS foreground
+/// color, providing a consistent appearance across all icon themes.
 ///
 /// # CSS Classes Applied
 ///
 /// - `.qs-scan-button` on the button
 /// - `.qs-scan-label` and `.vp-primary` on the label
-/// - `.qs-scan-spinner` on the spinner (with `.spinning` when active for Material)
+/// - `.qs-scan-spinner` on the spinner drawing area
 pub struct ScanButton {
     button: Button,
     label: Label,
-    spinner: ScanSpinner,
+    spinner: CairoSpinner,
 }
 
 impl ScanButton {
@@ -472,8 +462,6 @@ impl ScanButton {
     where
         F: Fn() + 'static,
     {
-        let icons = IconsService::global();
-
         let button = Button::new();
         button.add_css_class(qs::SCAN_BUTTON);
         button.set_has_frame(false);
@@ -486,20 +474,12 @@ impl ScanButton {
         label.add_css_class(color::PRIMARY);
         content.append(&label);
 
-        // Use Material icon spinner for consistent appearance, GTK spinner for native theme
-        let spinner = if icons.uses_material() {
-            let icon = icons.create_icon("process-working-symbolic", &[qs::SCAN_SPINNER]);
-            icon.widget().set_visible(false);
-            content.append(&icon.widget());
-            ScanSpinner::Material(icon)
-        } else {
-            let gtk_spinner = gtk4::Spinner::new();
-            gtk_spinner.set_visible(false);
-            gtk_spinner.add_css_class(qs::SCAN_SPINNER);
-            content.append(&gtk_spinner);
-            ScanSpinner::Gtk(gtk_spinner)
-        };
+        // Shared Cairo spinner
+        let spinner = CairoSpinner::new_self_colored();
+        spinner.set_size(12);
+        spinner.widget().add_css_class(qs::SCAN_SPINNER);
 
+        content.append(spinner.widget());
         button.set_child(Some(&content));
         button.connect_clicked(move |_| on_click());
 
@@ -532,27 +512,9 @@ impl ScanButton {
     pub fn set_scanning(&self, active: bool) {
         if active {
             self.label.set_visible(false);
-            match &self.spinner {
-                ScanSpinner::Material(icon) => {
-                    icon.widget().set_visible(true);
-                    icon.widget().add_css_class(state::SPINNING);
-                }
-                ScanSpinner::Gtk(spinner) => {
-                    spinner.set_visible(true);
-                    spinner.start();
-                }
-            }
+            self.spinner.start();
         } else {
-            match &self.spinner {
-                ScanSpinner::Material(icon) => {
-                    icon.widget().remove_css_class(state::SPINNING);
-                    icon.widget().set_visible(false);
-                }
-                ScanSpinner::Gtk(spinner) => {
-                    spinner.stop();
-                    spinner.set_visible(false);
-                }
-            }
+            self.spinner.stop();
             self.label.set_visible(true);
         }
     }

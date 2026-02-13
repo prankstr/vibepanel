@@ -47,7 +47,8 @@ use super::ui_helpers::{AccordionManager, ExpandableCard};
 use super::updates_card::{self, UpdatesCardState, build_updates_card};
 use super::vpn_card::{self, VpnCardState, build_vpn_details, vpn_icon_name};
 use super::wifi_card::{
-    self, WifiCardState, build_network_subtitle, build_wifi_details, wifi_icon_name,
+    self, NetworkIconContext, WifiCardState, build_network_subtitle, build_wifi_details,
+    network_icon_name,
 };
 
 thread_local! {
@@ -231,7 +232,7 @@ impl QuickSettingsWindow {
     fn subscribe_to_services(qs: &Rc<Self>) {
         let cfg = &qs.cards_config;
 
-        if cfg.wifi {
+        if cfg.wifi || cfg.cellular {
             let qs_weak = Rc::downgrade(qs);
             let id = WifiService::global().connect(move |snapshot| {
                 if let Some(qs) = qs_weak.upgrade() {
@@ -351,7 +352,9 @@ impl QuickSettingsWindow {
         let mut toggle_cards: Vec<ToggleCardInfo> = Vec::new();
 
         // Build enabled cards
-        if cfg.wifi {
+        // Unified Network card: allow legacy `cellular = true` configs
+        // to still show this card even if `wifi = false`.
+        if cfg.wifi || cfg.cellular {
             let (card, revealer, expander_button) = Self::build_wifi_card(qs);
             toggle_cards.push(ToggleCardInfo {
                 card,
@@ -529,22 +532,16 @@ impl QuickSettingsWindow {
         let wifi_enabled = snapshot.wifi_enabled().unwrap_or(false);
         let wifi_connected = snapshot.connected();
         let wired_connected = snapshot.wired_connected();
-        let has_wifi_device = snapshot.has_wifi_device();
 
         // Build custom subtitle widget with connection status icons
         let subtitle_result = build_network_subtitle(&snapshot);
 
-        let icon_name = wifi_icon_name(
-            snapshot.available(),
-            wifi_connected,
-            wifi_enabled,
-            wired_connected,
-            has_wifi_device,
-        );
-        let icon_active = (wifi_enabled && wifi_connected) || wired_connected;
+        let icon_name = network_icon_name(&NetworkIconContext::from_snapshot(&snapshot));
+        let icon_active =
+            (wifi_enabled && wifi_connected) || wired_connected || snapshot.mobile_connected();
 
-        // Card title: "Network" if ethernet device exists, "Wi-Fi" otherwise
-        let card_title = if snapshot.has_ethernet_device() {
+        // Card title: "Network" if ethernet/modem device exists, "Wi-Fi" otherwise
+        let card_title = if snapshot.has_non_wifi_device() {
             "Network"
         } else {
             "Wi-Fi"
@@ -568,7 +565,7 @@ impl QuickSettingsWindow {
             wifi_card.toggle.set_sensitive(false);
         }
 
-        if !wifi_enabled && !wired_connected {
+        if !wifi_enabled && !wired_connected && !snapshot.mobile_connected() {
             wifi_card
                 .icon_handle
                 .widget()
@@ -580,7 +577,7 @@ impl QuickSettingsWindow {
             let wifi_state = Rc::clone(&qs.wifi);
             toggle.connect_toggled(move |toggle| {
                 // Skip if this is a programmatic update (prevents feedback loops)
-                if wifi_state.updating_toggle.get() {
+                if wifi_state.updating_wifi_toggle.get() {
                     return;
                 }
                 WifiService::global().set_wifi_enabled(toggle.is_active());
@@ -618,7 +615,7 @@ impl QuickSettingsWindow {
                 .wifi_switch
                 .connect_state_set(move |_, enabled| {
                     // Skip if this is a programmatic update (prevents feedback loops)
-                    if wifi_state.updating_toggle.get() {
+                    if wifi_state.updating_wifi_toggle.get() {
                         return glib::Propagation::Proceed;
                     }
                     WifiService::global().set_wifi_enabled(enabled);
