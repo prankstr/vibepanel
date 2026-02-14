@@ -252,11 +252,11 @@ impl QuickSettingsWindow {
 
         if cfg.vpn {
             let qs_weak = Rc::downgrade(qs);
-            let close_on_action = cfg.vpn_close_on_connect;
+            let close_on_connect = cfg.vpn_close_on_connect;
             VpnService::global().connect(move |snapshot| {
                 if let Some(qs) = qs_weak.upgrade() {
-                    let action_completed = vpn_card::on_vpn_changed(&qs.vpn, snapshot);
-                    if action_completed && close_on_action {
+                    let connect_completed = vpn_card::on_vpn_changed(&qs.vpn, snapshot);
+                    if connect_completed && close_on_connect {
                         qs.hide_panel();
                     }
                 }
@@ -768,11 +768,9 @@ impl QuickSettingsWindow {
                 let vpn = VpnService::global();
                 let snapshot = vpn.snapshot();
                 if let Some(primary) = snapshot.primary() {
-                    // Track connect attempt for close-on-success behavior
-                    if toggle.is_active() {
-                        vpn_card::add_pending_connect(&primary.uuid);
-                    }
-                    vpn.set_connection_state(&primary.uuid, toggle.is_active());
+                    let target_active = toggle.is_active();
+                    vpn_card::track_toggle_action(&primary.uuid, target_active);
+                    vpn.set_connection_state(&primary.uuid, target_active);
                 }
             });
         }

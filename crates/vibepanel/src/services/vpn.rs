@@ -559,6 +559,27 @@ impl VpnService {
 
                 *this.connection.borrow_mut() = Some(connection.clone());
 
+                // After resume from sleep, signal subscriptions on active connection
+                // paths may be stale. Refresh to re-subscribe to current paths.
+                let sub_sleep = connection.subscribe_to_signal(
+                    Some("org.freedesktop.login1"),
+                    Some("org.freedesktop.login1.Manager"),
+                    Some("PrepareForSleep"),
+                    Some("/org/freedesktop/login1"),
+                    None,
+                    gio::DBusSignalFlags::NONE,
+                    move |signal| {
+                        // PrepareForSleep(boolean): true = going to sleep, false = resuming
+                        if let Some(preparing) = signal.parameters.child_value(0).get::<bool>()
+                            && !preparing
+                        {
+                            debug!("VPN: System resumed from sleep, refreshing state");
+                            send_vpn_update(VpnUpdate::RequestRefresh);
+                        }
+                    },
+                );
+                this._signal_subscriptions.borrow_mut().push(sub_sleep);
+
                 // Create NetworkManager main proxy.
                 let this_weak2 = Rc::downgrade(&this);
                 let conn_for_nm = connection.clone();

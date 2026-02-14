@@ -105,7 +105,7 @@ impl VpnKeyboardState {
     }
 
     /// Check and resolve pending connections based on VPN snapshot.
-    /// Returns (any_action_completed, should_restore_keyboard).
+    /// Returns (connect_completed, should_restore_keyboard).
     fn check_pending(&mut self, snapshot: &VpnSnapshot) -> (bool, bool) {
         use crate::services::vpn::VpnState;
 
@@ -114,7 +114,7 @@ impl VpnKeyboardState {
             return (false, false);
         }
 
-        let mut any_action_completed = false;
+        let mut connect_completed = false;
         let mut should_restore = false;
 
         // Check pending connects
@@ -126,7 +126,7 @@ impl VpnKeyboardState {
                     match conn.state {
                         VpnState::Activated => {
                             resolved.push(uuid.clone());
-                            any_action_completed = true;
+                            connect_completed = true;
                             should_restore = true;
                         }
                         VpnState::Deactivated | VpnState::Unknown => {
@@ -158,7 +158,6 @@ impl VpnKeyboardState {
                     match conn.state {
                         VpnState::Deactivated | VpnState::Unknown => {
                             resolved.push(uuid.clone());
-                            any_action_completed = true;
                         }
                         VpnState::Activated | VpnState::Activating | VpnState::Deactivating => {
                             // Still active or in progress, keep waiting
@@ -167,7 +166,6 @@ impl VpnKeyboardState {
                 } else {
                     // Connection no longer in snapshot - disconnected
                     resolved.push(uuid.clone());
-                    any_action_completed = true;
                 }
             }
 
@@ -176,7 +174,7 @@ impl VpnKeyboardState {
             }
         }
 
-        (any_action_completed, should_restore)
+        (connect_completed, should_restore)
     }
 }
 
@@ -198,9 +196,19 @@ pub fn set_quick_settings_window(qs: Weak<QuickSettingsWindow>) {
     VPN_KEYBOARD_STATE.with(|state| state.borrow_mut().set_qs_window(qs));
 }
 
-/// Add a VPN UUID to the pending connects set (for toggle-initiated connections).
-pub fn add_pending_connect(uuid: &str) {
-    VPN_KEYBOARD_STATE.with(|state| state.borrow_mut().pending_connects.insert(uuid.to_string()));
+/// Track a user-initiated toggle action before requesting state change.
+///
+/// When connecting, this releases keyboard grab so external password dialogs
+/// can receive input. When disconnecting, this tracks pending disconnect.
+pub fn track_toggle_action(uuid: &str, target_active: bool) {
+    VPN_KEYBOARD_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        if target_active {
+            state.begin_connect(uuid);
+        } else {
+            state.begin_disconnect(uuid);
+        }
+    });
 }
 
 /// Restore keyboard mode if it was released for VPN password dialogs.
@@ -363,18 +371,9 @@ fn create_vpn_action_widget(_state: &Rc<VpnCardState>, conn: &VpnConnection) -> 
 
     action_label.connect_clicked(move |_| {
         let vpn = VpnService::global();
-
-        if is_active {
-            // Track pending disconnect for close-on-action
-            VPN_KEYBOARD_STATE.with(|state| state.borrow_mut().begin_disconnect(&uuid));
-        } else {
-            // When connecting, release keyboard grab to allow external password dialogs
-            // (nm-applet, keyring unlock, etc.) to receive input.
-            // The grab will be restored when the VPN state changes or the panel closes.
-            VPN_KEYBOARD_STATE.with(|state| state.borrow_mut().begin_connect(&uuid));
-        }
-
-        vpn.set_connection_state(&uuid, !is_active);
+        let target_active = !is_active;
+        track_toggle_action(&uuid, target_active);
+        vpn.set_connection_state(&uuid, target_active);
     });
 
     action_label.upcast()
@@ -382,14 +381,14 @@ fn create_vpn_action_widget(_state: &Rc<VpnCardState>, conn: &VpnConnection) -> 
 
 /// Handle VPN state changes from VpnService.
 ///
-/// Returns `true` if a pending action completed (connect or disconnect),
-/// so caller can close the panel if configured.
+/// Returns `true` if a pending connect completed,
+/// so caller can close the panel when configured to close on connect.
 pub fn on_vpn_changed(state: &Rc<VpnCardState>, snapshot: &VpnSnapshot) -> bool {
     let primary = snapshot.primary();
     let has_connections = !snapshot.connections.is_empty();
 
-    // Check if any pending action completed and restore keyboard if needed
-    let (pending_action_completed, should_restore) =
+    // Check if a pending connect completed and restore keyboard if needed
+    let (pending_connect_completed, should_restore) =
         VPN_KEYBOARD_STATE.with(|s| s.borrow_mut().check_pending(snapshot));
 
     if should_restore {
@@ -449,5 +448,5 @@ pub fn on_vpn_changed(state: &Rc<VpnCardState>, snapshot: &VpnSnapshot) -> bool 
         SurfaceStyleManager::global().apply_pango_attrs_all(list_box);
     }
 
-    pending_action_completed
+    pending_connect_completed
 }

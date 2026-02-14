@@ -15,7 +15,7 @@ VibePanel is something between a simple status bar and a full desktop shell:
   - **Notifications** – Integrated notification center
   - **OSD** – Built-in on-screen display for volume and brightness
   - **Quick settings** – Native panel for Wi‑Fi, Bluetooth, audio, power profiles and more
-- **Modern aesthetics** – Defaults to a floating “island” style with instant hot‑reloading for layouts and themes.
+- **Modern aesthetics** – Defaults to a floating "island" style with instant hot‑reloading for layouts and themes.
 - **Integrated CLI** – Small CLI for controlling volume, brightness, media controls and idle inhibition.
 - **Center anchoring** – Custom GTK4 layout keeps center widgets centered even when left/right sections grow.
 
@@ -23,7 +23,7 @@ VibePanel is something between a simple status bar and a full desktop shell:
 
 These examples use roughly ~10–35 lines of TOML to get completely different vibes, no CSS required.
 
-https://github.com/user-attachments/assets/28cc8b6e-a1ec-46a9-acee-15c13ee2bce5
+<https://github.com/user-attachments/assets/28cc8b6e-a1ec-46a9-acee-15c13ee2bce5>
 
 *A few example configurations*
 <table align="center">
@@ -36,28 +36,22 @@ https://github.com/user-attachments/assets/28cc8b6e-a1ec-46a9-acee-15c13ee2bce5
 
 ## Widgets
 
-- Workspaces - clickable indicators with tooltips
-- Window title - active window with app icon
-- Clock - configurable format with calendar popover
-- Battery - status with detailed popover and power profiles
-- Quick settings - audio, brightness, bluetooth, wifi, VPN, power profiles, idle inhibitor
-- System tray - XDG tray support
-- Notifications - notification center with Do Not Disturb
-- Updates - package update indicator (dnf and pacman/paru support right now)
-- CPU & Memory - system resource monitors
-- Media - MPRIS media player controls with album art
-
-## Status
-
-VibePanel is in early 0.x development but should be stable enough for daily use.
-Config options and defaults may change between minor releases, check the changelog when upgrading.
-
-If you find a bug or if you're missing a feature, please [open an issue](https://github.com/prankstr/vibepanel/issues)! It's far from perfect yet.
-
-### Compatibility
-
-- **Compositors:** Hyprland, Niri, MangoWC/DWL. Sway support may be added based on demand.
-- **Updates widget:** dnf and pacman/paru. More package managers planned.
+- **Workspaces** - clickable indicators with tooltips
+- **Window title** - active window with app icon
+- **Clock** - configurable format with calendar popover
+- **Battery** - status with detailed popover and power profiles
+- **System tray** - XDG tray support
+- **Notifications** - notification center with Do Not Disturb
+- **Updates** - package update indicator (dnf and pacman/paru support right now)
+- **CPU & Memory** - system resource monitors
+- **Media** - MPRIS media player controls with album art
+- **Quick settings**:
+  - **Audio** - Control volume and outputs
+  - **Brightness** - Adjust screen brightness
+  - **Bluetooth** - Manage and pair devices
+  - **Wi-Fi** - Connect to and manage networks
+  - **VPN** - Connect to NetworkManager-managed VPN connections
+  - **Idle Inhibitor** - Toggle idle inhibitor to prevent sleep
 
 ## Quickstart
 
@@ -121,6 +115,24 @@ accent = "#adabe0"
 
 Changes hot-reload instantly. See the [Configuration wiki](https://github.com/prankstr/vibepanel/wiki/Configuration) for all options.
 
+## Status
+
+VibePanel is in early 0.x development but should be stable enough for daily use.
+Config options and defaults may change between minor releases, check the changelog when upgrading.
+
+The idea and architecture behind the panel is something I first built in Python.
+For performance, portability and curiosity reasons I wanted to migrate to Rust. I started
+doing it myself but realized it would take far too long in a language I'm still learning.
+So this codebase is largely written by AI but a lot of effort has gone into making sure
+it's not slop and I use VibePanel daily on multiple computers.
+
+If you find a bug or if you're missing a feature, please [open an issue](https://github.com/prankstr/vibepanel/issues)!
+
+### Compatibility
+
+- **Compositors:** Hyprland, Niri, MangoWC/DWL. Sway support may be added based on demand.
+- **Updates widget:** dnf and pacman/paru. More package managers planned.
+
 ## Documentation
 
 Full documentation lives in the [wiki](https://github.com/prankstr/vibepanel/wiki):
@@ -130,10 +142,6 @@ Full documentation lives in the [wiki](https://github.com/prankstr/vibepanel/wik
 - [Widgets](https://github.com/prankstr/vibepanel/wiki/Widgets) - Widget reference and per-widget options
 - [Theming](https://github.com/prankstr/vibepanel/wiki/Theming) - Custom CSS styling
 - [CSS Variables](https://github.com/prankstr/vibepanel/wiki/CSS-Variables) - Full CSS variable reference
-
-## Vibe Code Disclaimer
-
-As the name suggests, this project is mainly vibe code, i.e responsible AI-assisted development not just blindly accepting outputs. I'm not a Rust developer, nor was I particularly familiar with GTK when I started but it's been a great learning experience. Without AI, VibePanel wouldn't exist but it allowed me to create a bar I actually enjoy using so I'm thankful. I've done my due diligence to ensure the codebase is solid, but you have been warned :)
 
 ## Contributing
 

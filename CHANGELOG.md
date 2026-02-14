@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0](https://github.com/prankstr/vibepanel/compare/v0.7.0...v0.8.0) (2026-02-10)
+
+
+### Features
+
+* **quick_settings:** support volume adjust with mouse scroll while hovering ([#44](https://github.com/prankstr/vibepanel/issues/44)) ([25fca05](https://github.com/prankstr/vibepanel/commit/25fca050106f0a599621e277dbf89bf0eb0d1911))
+* **tooltip:** update visible tooltip text live when content changes ([8e4b246](https://github.com/prankstr/vibepanel/commit/8e4b2460a63db3d7b95caa0dc33faa3cdf20ad55))
+* **wifi:** add iwd backend and wifi service abstraction ([#42](https://github.com/prankstr/vibepanel/issues/42)) ([e37db6c](https://github.com/prankstr/vibepanel/commit/e37db6c6b2abdc1990cb31a14d583309b9254cce))
+
+
+### Bug Fixes
+
+* **media:** media popover offset bug ([#37](https://github.com/prankstr/vibepanel/issues/37)) ([c656a7c](https://github.com/prankstr/vibepanel/commit/c656a7c757ecd5939d20719f6a228aca2d96b7f2))
+* **quick_settings:** correct icon and subtitle when network manager is unavailable ([26b933d](https://github.com/prankstr/vibepanel/commit/26b933da0b468a5f869a13a566a6427750666c6e))
+* **vpn:** refresh signal subscriptions after sleep resume ([884093a](https://github.com/prankstr/vibepanel/commit/884093aaed3002be1573f271141ce438fc31542f))
+* **widgets:** cancel and hide tooltips when clicking widgets ([#43](https://github.com/prankstr/vibepanel/issues/43)) ([c0dbff2](https://github.com/prankstr/vibepanel/commit/c0dbff2cb4e81b7d21e3656002d9e3f046770de5))
+
 ## [0.7.0](https://github.com/prankstr/vibepanel/compare/v0.6.4...v0.7.0) (2026-02-01)
 
 
