@@ -327,9 +327,7 @@ impl NmService {
         #[cfg(debug_assertions)]
         if debug_mobile_mock::is_enabled() {
             if enabled {
-                self.mobile.connecting_local.set(true);
                 self.notify_snapshot(|s| {
-                    s.mobile.connecting = true;
                     s.mobile.enabled = Some(true);
                 });
                 // disabled -> enabled (500ms) -> registered
