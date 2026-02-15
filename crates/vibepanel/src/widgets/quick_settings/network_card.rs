@@ -35,10 +35,6 @@ use crate::styles::{button, color, icon, qs, row, state, surface};
 use crate::widgets::base::configure_popover;
 
 /// Return a simple connected/disconnected Wi-Fi icon.
-///
-/// The main card widget uses this for a stable "connected" icon,
-/// while the per-network list rows use `wifi_strength_icon` for
-/// detailed signal levels.
 pub struct NetworkIconContext {
     pub available: bool,
     pub connected: bool,
@@ -51,7 +47,7 @@ pub struct NetworkIconContext {
 }
 
 impl NetworkIconContext {
-    /// Build a full icon context from a [`NetworkSnapshot`], including mobile state.
+    /// Build a full icon context from a [`NetworkSnapshot`].
     pub fn from_snapshot(snapshot: &NetworkSnapshot) -> Self {
         Self {
             available: snapshot.available(),
@@ -65,9 +61,9 @@ impl NetworkIconContext {
         }
     }
 
-    /// Build an icon context for the bar widget, which has a **separate** cellular
-    /// icon (managed by `QuickSettingsBarWidget`). Mobile fields are zeroed here so
-    /// `network_icon_name()` returns only the Wi-Fi/wired icon; the bar renders
+    /// Build an icon context for the bar widget (excludes mobile — bar has
+    /// a separate cellular icon). Mobile fields are zeroed so
+    /// `network_icon_name()` produces only Wi-Fi/wired icons; the bar renders
     /// cellular status independently via `cellular_signal_icon_name()`.
     pub fn for_bar(snapshot: &NetworkSnapshot) -> Self {
         Self {
@@ -111,10 +107,7 @@ pub fn network_icon_name(ctx: &NetworkIconContext) -> &'static str {
     }
 }
 
-/// Return a Wi-Fi icon name based on a raw signal strength percentage.
-///
-/// The list rows use this to express 1/2/3/4-bar states. The Material
-/// icon mapping compresses these into the available glyph set.
+/// Return a Wi-Fi icon name based on signal strength percentage.
 pub fn wifi_strength_icon(level: i32) -> &'static str {
     if level >= 70 {
         "network-wireless-signal-excellent-symbolic"
@@ -150,10 +143,6 @@ pub fn cellular_signal_icon_name(quality: u32) -> &'static str {
 }
 
 /// Returns the appropriate cellular icon name based on modem state.
-///
-/// - Disabled → offline icon
-/// - Active → signal strength icon based on quality
-/// - Otherwise → no-signal icon
 pub fn mobile_state_icon_name(enabled: bool, active: bool, signal_quality: u32) -> &'static str {
     if !enabled {
         "network-cellular-offline-symbolic"
@@ -166,19 +155,11 @@ pub fn mobile_state_icon_name(enabled: bool, active: bool, signal_quality: u32) 
 
 /// Result of building the network card subtitle widget.
 pub struct NetworkSubtitleResult {
-    /// The container widget holding the label.
     pub container: GtkBox,
-    /// Label for text (SSID or status).
     pub label: Label,
 }
 
 /// Build the subtitle widget for the network card.
-///
-/// Creates a label that shows connection status text like:
-/// - "Ethernet • SSID" (both connected)
-/// - "Ethernet" (wired only)
-/// - "SSID" (Wi-Fi only)
-/// - "Disconnected" / "Off"
 pub fn build_network_subtitle(snapshot: &NetworkSnapshot) -> NetworkSubtitleResult {
     use gtk4::pango::EllipsizeMode;
 
@@ -192,27 +173,13 @@ pub fn build_network_subtitle(snapshot: &NetworkSnapshot) -> NetworkSubtitleResu
     label.add_css_class(color::MUTED);
     container.append(&label);
 
-    // Set initial state
     update_network_subtitle(&label, snapshot);
 
     NetworkSubtitleResult { container, label }
 }
 
 /// Generate the subtitle text for the network card based on connection state.
-///
-/// Returns a string describing the current network status:
-/// - Service unavailable: "Unavailable"
-/// - Wired + connecting: "Ethernet · Connecting to {ssid}"
-/// - Wired + Wi-Fi connected: "Ethernet · {ssid}"
-/// - Wired only: "Ethernet"
-/// - Wi-Fi connecting: "Connecting to {ssid}"
-/// - Wi-Fi connected: "{ssid}"
-/// - Mobile connecting: "Connecting..."
-/// - Disconnected (has Wi-Fi): "Disconnected"
-/// - Wi-Fi disabled: "Off"
-/// - Ethernet-only system, disconnected: "Disconnected"
 pub fn get_network_subtitle_text(snapshot: &NetworkSnapshot) -> String {
-    // Service unavailable (e.g., NetworkManager not running)
     if !snapshot.available() {
         return "Unavailable".to_string();
     }
@@ -258,10 +225,7 @@ pub fn get_network_subtitle_text(snapshot: &NetworkSnapshot) -> String {
     }
 }
 
-/// Determine if the network subtitle should be styled as "active" (connected).
-///
-/// Returns true when any network is connected and not in a connecting state.
-/// Mobile connecting alone (without another active connection) is not "active".
+/// Whether the network subtitle should be styled as "active" (connected, not connecting).
 pub fn is_network_subtitle_active(snapshot: &NetworkSnapshot) -> bool {
     let state = snapshot.connection_state();
     let is_connecting = state == NetworkConnectionState::Connecting;
@@ -291,56 +255,28 @@ pub fn update_network_subtitle(label: &Label, snapshot: &NetworkSnapshot) {
 }
 
 /// Cached widget references for the Ethernet row in the expanded details.
-///
-/// Stored so `update_ethernet_row()` can update content (title, subtitle)
-/// when the wired connection changes (e.g., dock swap, speed renegotiation).
 pub struct EthernetRowWidgets {
-    /// Container for the entire Ethernet section (shown/hidden based on state).
     pub container: GtkBox,
-    /// Title label (connection name or interface name).
     pub title_label: Label,
-    /// Subtitle box containing "Connected" accent label + details.
     pub subtitle_box: GtkBox,
 }
 
-/// Cached widget references for the mobile/cellular row, populated once
-/// when `build_mobile_row()` runs. Wrapped in a `RefCell<Option<…>>` in
-/// [`MobileRowState`] to eliminate per-field `RefCell` overhead and make
-/// borrow boundaries explicit.
+/// Cached widget references for the mobile/cellular row.
+/// Grouped in a single `RefCell<Option<…>>` (in [`MobileRowState`]) to avoid per-field borrow overhead.
 pub struct MobileRowWidgets {
-    /// Mobile enabled switch in expanded details section.
     pub switch: Switch,
-    /// Mobile action button (Connect/Disconnect) in expanded details section.
     pub action_button: Button,
-    /// Cached label for simple mobile states (Off / Connecting… / Disconnected).
-    /// Visible when the mobile subtitle shows a single muted-color label.
     pub status_label: Label,
-    /// Cached accent label for "Connected" state.
-    /// Visible only when mobile is active and connected.
     pub accent_label: Label,
-    /// Cached muted label for connection details ("• LTE • 75%").
-    /// Visible only when mobile is connected and has extra info to show.
     pub details_label: Label,
-    /// Mobile row icon handle for active/inactive styling.
     pub icon_handle: IconHandle,
-    /// Mobile connection row (hidden when modem is disabled).
     pub connection_row: GtkBox,
-    /// Mobile row title label (operator name / "Mobile Connection").
     pub title_label: Label,
 }
 
-/// Cached widget references for the mobile/cellular row in the expanded details.
-///
-/// Grouped into a substruct to keep `NetworkCardState` manageable and make it
-/// clear which fields belong to the mobile subsystem.
-///
-/// The `row` field is set separately in `build_wifi_details()` (after
-/// `build_mobile_row()` returns the container), while all other widgets are
-/// populated together inside `build_mobile_row()` via `widgets`.
+/// State for the mobile/cellular row in the expanded details.
 pub struct MobileRowState {
-    /// Mobile row container (shown above Wi-Fi controls when mobile is supported).
     pub row: RefCell<Option<GtkBox>>,
-    /// All other mobile widgets, populated atomically by `build_mobile_row()`.
     pub widgets: RefCell<Option<MobileRowWidgets>>,
 }
 
@@ -353,61 +289,32 @@ impl MobileRowState {
     }
 }
 
-/// State for the Wi-Fi card in the Quick Settings panel.
-///
-/// Uses `ExpandableCardBase` for common expandable card fields and adds
-/// Wi-Fi specific state (scan button, password dialog, animation).
+/// State for the network card in the Quick Settings panel.
 pub struct NetworkCardState {
-    /// Common expandable card state (toggle, icon, subtitle, list_box, revealer, arrow).
     pub base: ExpandableCardBase,
-    /// Card title label (for updating between "Wi-Fi" and "Network").
     pub title_label: RefCell<Option<Label>>,
-    /// Text label in the subtitle (SSID or status).
     pub subtitle_label: RefCell<Option<Label>>,
-    /// The Wi-Fi scan button (self-contained with animation).
     pub scan_button: RefCell<Option<Rc<ScanButton>>>,
-    /// Inline password box.
     pub password_box: RefCell<Option<GtkBox>>,
-    /// Label in the password box.
     pub password_label: RefCell<Option<Label>>,
-    /// Error/status label in the password box (shows errors or "Connecting...").
     pub password_error_label: RefCell<Option<Label>>,
-    /// Password entry field.
     pub password_entry: RefCell<Option<Entry>>,
-    /// Cancel button in password box.
     pub password_cancel_button: RefCell<Option<Button>>,
-    /// Connect button in password box.
     pub password_connect_button: RefCell<Option<Button>>,
-    /// Target SSID for the inline password prompt.
     pub password_target_ssid: RefCell<Option<String>>,
-    /// Connect animation GLib source ID.
     pub connect_anim_source: RefCell<Option<glib::SourceId>>,
-    /// Connect animation step counter.
     pub connect_anim_step: Cell<u8>,
-    /// Guard for the Wi-Fi toggle button and Wi-Fi switch — prevents their `state_set`
-    /// signal handlers from dispatching service calls during programmatic updates.
+    /// Prevents `state_set` handlers from dispatching during programmatic updates.
     pub updating_wifi_toggle: Cell<bool>,
-    /// Guard for the mobile switch — same purpose as `updating_wifi_toggle` but
-    /// scoped to the mobile switch, so toggling one doesn't accidentally suppress
-    /// user interactions on the other.
+    /// Same purpose as `updating_wifi_toggle` but scoped to the mobile switch.
     pub updating_mobile_switch: Cell<bool>,
-    /// The Wi-Fi switch row container (label + switch + scan button).
     pub wifi_switch_row: RefCell<Option<GtkBox>>,
-    /// The Wi-Fi label in the expanded details section.
-    /// Only visible when ethernet device is present.
     pub wifi_label: RefCell<Option<Label>>,
-    /// The Wi-Fi switch in the expanded details section.
-    /// Only visible when ethernet device is present.
     pub wifi_switch: RefCell<Option<Switch>>,
-    /// Ethernet row widget state (shown above Wi-Fi controls when connected).
     pub ethernet: RefCell<Option<EthernetRowWidgets>>,
-    /// Mobile/cellular row widget state.
     pub mobile: MobileRowState,
-    /// GLib source ID for the Wi-Fi failed-state auto-clear timer.
-    /// Stored so we can cancel any pending timer before scheduling a new one,
-    /// preventing timer accumulation under rapid state transitions.
+    /// Prevents timer accumulation under rapid state transitions.
     pub wifi_failed_clear_source: RefCell<Option<glib::SourceId>>,
-    /// GLib source ID for the mobile failed-state auto-clear timer.
     /// Separate from Wi-Fi so simultaneous failures are cleared independently.
     pub mobile_failed_clear_source: RefCell<Option<glib::SourceId>>,
 }
@@ -486,10 +393,9 @@ pub fn build_wifi_details(
 ) -> NetworkDetailsResult {
     let container = GtkBox::new(Orientation::Vertical, 0);
 
-    // Get current network state for initial values
     let snapshot = NetworkService::global().snapshot();
 
-    // Ethernet row (above Wi-Fi controls, shown only when connected)
+    // Ethernet row (shown only when connected)
     let ethernet_widgets = build_ethernet_row(&snapshot);
     container.append(&ethernet_widgets.container);
 
@@ -649,10 +555,7 @@ pub fn build_wifi_details(
     }
 }
 
-/// Build a standalone Ethernet section widget (not in a ListBox).
-///
-/// Includes a header label and connection details row.
-/// Returns `EthernetRowWidgets` with references for dynamic updates.
+/// Build a standalone Ethernet section widget.
 fn build_ethernet_row(snapshot: &NetworkSnapshot) -> EthernetRowWidgets {
     let icons = IconsService::global();
 
@@ -741,18 +644,7 @@ fn build_ethernet_subtitle(snapshot: &NetworkSnapshot) -> GtkBox {
     build_accent_subtitle("Connected", &extra_refs)
 }
 
-/// Update the mobile subtitle container labels for the current state.
-///
-/// On first call, creates and caches three labels (status, accent, details)
-/// as children of the subtitle box. On subsequent calls, updates text and
-/// visibility in-place to avoid destroying and recreating GTK widgets.
-///
-/// States:
-/// - Off: muted "Off"
-/// - Connecting: muted "Connecting..."
-/// - Connected: accent "Connected" + optional muted " · LTE · 85%"
-/// - Failed: error "Connection failed"
-/// - Disconnected: muted "Disconnected"
+/// Update the mobile subtitle labels for the current state.
 fn set_mobile_subtitle(widgets: &MobileRowWidgets, snapshot: &NetworkSnapshot) {
     let mobile_enabled = snapshot.mobile_enabled().unwrap_or(false);
 
@@ -948,10 +840,7 @@ fn build_mobile_row(state: &Rc<NetworkCardState>, snapshot: &NetworkSnapshot) ->
     container
 }
 
-/// Update the Ethernet row visibility and content based on connection state.
-///
-/// Updates title (connection/interface name) and subtitle (speed) when the
-/// wired state changes, e.g. on dock swap or link speed renegotiation.
+/// Update the Ethernet row visibility and content.
 pub fn update_ethernet_row(state: &NetworkCardState, snapshot: &NetworkSnapshot) {
     let ethernet_ref = state.ethernet.borrow();
     let Some(w) = ethernet_ref.as_ref() else {
@@ -964,7 +853,7 @@ pub fn update_ethernet_row(state: &NetworkCardState, snapshot: &NetworkSnapshot)
         return;
     }
 
-    // Update title (connection name may change on cable/dock swap)
+    // Update title
     let new_title = snapshot
         .wired_name()
         .or(snapshot.wired_iface())
@@ -973,9 +862,8 @@ pub fn update_ethernet_row(state: &NetworkCardState, snapshot: &NetworkSnapshot)
         w.title_label.set_text(new_title);
     }
 
-    // Rebuild subtitle content (speed/interface may change)
+    // Rebuild subtitle
     let new_subtitle = build_ethernet_subtitle(snapshot);
-    // Replace children of the subtitle box
     while let Some(child) = w.subtitle_box.first_child() {
         w.subtitle_box.remove(&child);
     }
@@ -1456,10 +1344,6 @@ fn on_password_cancel_clicked(state: &NetworkCardState) {
 }
 
 /// Schedule a delayed clear of a failed-connection state after 5 seconds.
-///
-/// Cancels any previously scheduled clear timer before creating a new one,
-/// preventing timer accumulation when multiple snapshot notifications arrive
-/// while the failed state is still set.
 fn schedule_failed_clear<F: FnOnce() + 'static>(
     source: &RefCell<Option<glib::SourceId>>,
     clear_fn: F,

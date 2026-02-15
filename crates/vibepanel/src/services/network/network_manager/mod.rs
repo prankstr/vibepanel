@@ -27,45 +27,26 @@ mod wired;
 
 // D-Bus Constants
 
-/// NetworkManager service name.
 pub const NM_SERVICE: &str = "org.freedesktop.NetworkManager";
-/// NetworkManager main object path.
 pub const NM_PATH: &str = "/org/freedesktop/NetworkManager";
-/// NetworkManager main interface.
 pub const NM_IFACE: &str = "org.freedesktop.NetworkManager";
-/// Device interface for type detection.
 const IFACE_DEV: &str = "org.freedesktop.NetworkManager.Device";
-/// Wireless device interface.
 const IFACE_WIFI: &str = "org.freedesktop.NetworkManager.Device.Wireless";
-/// Wired/Ethernet device interface.
 const IFACE_WIRED: &str = "org.freedesktop.NetworkManager.Device.Wired";
-/// Access point interface.
 const IFACE_AP: &str = "org.freedesktop.NetworkManager.AccessPoint";
-/// Active connection interface (for connection name/Id).
 const IFACE_ACTIVE_CONN: &str = "org.freedesktop.NetworkManager.Connection.Active";
-/// NetworkManager settings path.
 const NM_SETTINGS_PATH: &str = "/org/freedesktop/NetworkManager/Settings";
-/// NetworkManager settings interface.
 const IFACE_SETTINGS: &str = "org.freedesktop.NetworkManager.Settings";
-/// NetworkManager settings connection interface.
 const IFACE_SETTINGS_CONN: &str = "org.freedesktop.NetworkManager.Settings.Connection";
 
-/// NetworkManager device type for Ethernet (NM_DEVICE_TYPE_ETHERNET = 1).
-const ETHERNET_DEVICE_TYPE: u32 = 1;
-/// NetworkManager device type for Wi-Fi (NM_DEVICE_TYPE_WIFI = 2).
-const WIFI_DEVICE_TYPE: u32 = 2;
-/// NetworkManager device type for modem/cellular (NM_DEVICE_TYPE_MODEM = 8).
-const MODEM_DEVICE_TYPE: u32 = 8;
+const ETHERNET_DEVICE_TYPE: u32 = 1; // NM_DEVICE_TYPE_ETHERNET
+const WIFI_DEVICE_TYPE: u32 = 2; // NM_DEVICE_TYPE_WIFI
+const MODEM_DEVICE_TYPE: u32 = 8; // NM_DEVICE_TYPE_MODEM
 
-/// ModemManager service name.
 const MM_SERVICE: &str = "org.freedesktop.ModemManager1";
-/// ModemManager manager path.
 const MM_PATH: &str = "/org/freedesktop/ModemManager1";
-/// Object manager interface.
 const OBJECT_MANAGER_IFACE: &str = "org.freedesktop.DBus.ObjectManager";
-/// Modem interface.
 const MM_MODEM_IFACE: &str = "org.freedesktop.ModemManager1.Modem";
-/// 3GPP modem interface.
 const MM_MODEM_3GPP_IFACE: &str = "org.freedesktop.ModemManager1.Modem.Modem3gpp";
 const PROPERTIES_IFACE: &str = "org.freedesktop.DBus.Properties";
 
@@ -113,32 +94,22 @@ const MM_ACCESS_TECH_LTE_NB_IOT: u32 = 1 << 20;
 // ── Data types ───────────────────────────────────────────────────────
 
 /// Wi-Fi networking state from NetworkManager.
-///
-/// Groups all Wi-Fi–related fields that were previously spread across
-/// `NmSnapshot` to improve readability and make subsystems easier
-/// to reason about in isolation.
 #[derive(Debug, Clone, Default)]
 pub struct WifiState {
-    /// Whether Wi-Fi hardware is enabled.
     pub enabled: Option<bool>,
-    /// Whether connected to a Wi-Fi network.
     pub connected: bool,
     /// Whether the system has a Wi-Fi device.
-    /// Used to determine whether to enable the Wi-Fi toggle.
     pub has_device: bool,
-    /// Current SSID if connected.
     pub ssid: Option<String>,
-    /// Current signal strength if connected (0-100).
+    /// Signal strength (0-100).
     pub strength: i32,
-    /// Whether a scan is in progress.
     pub scanning: bool,
-    /// Whether the service is ready (first scan complete).
+    /// Whether the first scan has completed.
     pub is_ready: bool,
-    /// List of visible networks.
     pub networks: Vec<WifiNetwork>,
     /// SSID currently being connected to (for loading state).
     pub connecting_ssid: Option<String>,
-    /// SSID that failed to connect (for re-showing password prompt).
+    /// SSID that failed to connect.
     pub failed_ssid: Option<String>,
 }
 
@@ -149,21 +120,16 @@ impl WifiState {
 }
 
 /// Wired (Ethernet) networking state from NetworkManager.
-///
-/// Groups all Ethernet-related fields for the same reasons as [`WifiState`]
-/// and [`MobileState`].
 #[derive(Debug, Clone, Default)]
 pub struct WiredState {
-    /// Whether a wired (Ethernet) connection is active as the primary link.
     pub connected: bool,
-    /// Whether the system has an Ethernet device (regardless of connection state).
-    /// Used to determine whether to show "Network" or "Wi-Fi" as the card title.
+    /// Whether the system has an Ethernet device (drives "Network" vs "Wi-Fi" card title).
     pub has_device: bool,
-    /// Wired interface name (e.g., "enp3s0") when connected via Ethernet.
+    /// Interface name (e.g., "enp3s0").
     pub iface: Option<String>,
-    /// Wired connection name from NetworkManager (e.g., "Wired connection 1").
+    /// Connection name (e.g., "Wired connection 1").
     pub name: Option<String>,
-    /// Wired link speed in Mb/s (e.g., 1000 for gigabit) when connected via Ethernet.
+    /// Link speed in Mb/s (e.g., 1000 for gigabit).
     pub speed: Option<u32>,
 }
 
@@ -174,36 +140,28 @@ impl WiredState {
 }
 
 /// Mobile/cellular networking state from NetworkManager and ModemManager.
-///
-/// Groups all modem-related fields for the same reasons as [`WifiState`]
-/// and [`WiredState`].
 #[derive(Debug, Clone, Default)]
 pub struct MobileState {
-    /// Whether a mobile/cellular connection is active as the primary link.
+    /// Whether mobile is the primary connection route.
     pub is_primary: bool,
-    /// Whether a mobile/cellular connection is active (regardless of primary route).
+    /// Whether a GSM/CDMA connection is activated (regardless of primary route).
     pub active: bool,
-    /// Whether a mobile/cellular connection is currently activating (connecting).
     pub connecting: bool,
-    /// Whether mobile is supported for display in UI:
-    /// modem exists + SIM present + at least one GSM/CDMA connection profile exists.
+    /// Modem exists + SIM present + at least one GSM/CDMA profile exists.
     pub supported: bool,
-    /// Whether WWAN/modem is enabled in NetworkManager.
+    /// Whether WWAN is enabled in NetworkManager.
     pub enabled: Option<bool>,
-    /// Whether the system has a modem/cellular device (regardless of connection state).
-    /// Used to determine whether to show "Network" or "Wi-Fi" as the card title.
+    /// Whether the system has a modem device (drives "Network" vs "Wi-Fi" card title).
     pub has_device: bool,
-    /// Mobile connection name from NetworkManager (e.g., carrier profile name).
+    /// Connection profile name.
     pub name: Option<String>,
-    /// Mobile operator name from ModemManager (e.g., "T-Mobile").
+    /// Operator name from ModemManager (e.g., "T-Mobile").
     pub operator: Option<String>,
-    /// Mobile access technology label (e.g., "LTE", "5G").
+    /// Access technology label (e.g., "LTE", "5G").
     pub access_technology: Option<String>,
-    /// Mobile signal quality (0-100).
+    /// Signal quality (0-100).
     pub signal_quality: Option<u32>,
-    /// Whether the last mobile connection attempt failed.
-    /// Set when nmcli exits with non-zero status, cleared on next successful
-    /// connection or when explicitly cleared by the UI.
+    /// Set on nmcli failure, auto-cleared after 5s by UI or on next successful connection.
     pub failed: bool,
 }
 
@@ -216,15 +174,10 @@ impl MobileState {
 /// Canonical snapshot of network state.
 #[derive(Debug, Clone)]
 pub struct NmSnapshot {
-    /// Whether the NetworkManager service is available.
     pub available: bool,
-    /// Wi-Fi networking state (connection, scanning, networks, etc.).
     pub wifi: WifiState,
-    /// Wired (Ethernet) networking state (connection, interface, speed).
     pub wired: WiredState,
-    /// Mobile/cellular networking state (modem, connection, signal, etc.).
     pub mobile: MobileState,
-    /// NetworkManager primary connection type (e.g., "802-11-wireless", "802-3-ethernet").
     pub(crate) primary_connection_type: Option<String>,
 }
 
@@ -243,72 +196,48 @@ impl NmSnapshot {
 /// Messages sent from background threads to the main thread.
 #[derive(Debug)]
 enum NmUpdate {
-    /// Wi-Fi device discovered - path and interface name.
     WifiDeviceFound {
         path: String,
         iface_name: Option<String>,
     },
-    /// Ethernet device exists on this system (detected during device discovery).
     EthernetDeviceExists,
-    /// Modem/cellular device exists on this system (detected during device discovery).
     ModemDeviceExists,
-    /// Device discovery failed - service is unavailable.
     DeviceDiscoveryFailed,
-    /// Active access point details.
-    ApDetails { ssid: Option<String>, strength: i32 },
-    /// Failed to get AP details - set disconnected.
+    ApDetails {
+        ssid: Option<String>,
+        strength: i32,
+    },
     ApDetailsFailed,
-    /// Network list refresh complete.
     NetworksRefreshed {
         networks: Vec<WifiNetwork>,
         last_scan: Option<i64>,
     },
-    /// Request a network list refresh (from main thread context).
     RefreshNetworks,
-    /// Connection attempt finished (success or failure).
     ConnectionAttemptFinished {
-        /// The SSID that was attempted.
         ssid: String,
-        /// Whether the connection succeeded.
         success: bool,
     },
-    /// Wired device info fetched.
     WiredDeviceInfo {
-        /// Interface name (e.g., "enp3s0").
         iface_name: Option<String>,
-        /// Connection name from NetworkManager (e.g., "Wired connection 1").
         conn_name: Option<String>,
-        /// Link speed in Mb/s (e.g., 1000 for gigabit).
+        /// Link speed in Mb/s.
         speed: Option<u32>,
     },
-    /// Mobile device info fetched.
     MobileDeviceInfo {
-        /// Connection name from NetworkManager (e.g., profile name).
         conn_name: Option<String>,
-        /// Operator name from ModemManager.
         operator_name: Option<String>,
-        /// Access technology label (e.g., LTE, 5G).
         access_technology: Option<String>,
-        /// Signal quality percentage (0-100).
         signal_quality: Option<u32>,
-        /// Whether a GSM/CDMA connection is currently active.
         active: bool,
-        /// Whether a GSM/CDMA connection is currently activating (connecting).
         connecting: bool,
-        /// Whether the system supports mobile usage in UI
-        /// (modem + SIM + GSM/CDMA profile).
         supported: bool,
-        /// Whether a modem device is currently present (for hot-unplug detection).
         has_modem: bool,
     },
-    /// Mobile connection attempt finished (nmcli returned).
-    /// Clears the local connecting intent flag so the next MobileDeviceInfo
-    /// uses the real D-Bus state.
+    /// Sent after nmcli returns. Clears the local connecting intent flag so the
+    /// next MobileDeviceInfo uses the real D-Bus state.
     MobileConnectionAttemptFinished {
-        /// Whether the connection attempt succeeded.
         success: bool,
     },
-    /// Override the mobile_enabled (WWAN) flag (used by debug mock).
     #[cfg(debug_assertions)]
     MobileEnabled(bool),
 }
@@ -316,17 +245,10 @@ enum NmUpdate {
 // ── NmService internal mobile state ──────────────────────────────────
 
 /// Internal mobile bookkeeping fields, grouped to keep [`NmService`] focused.
-///
-/// These are implementation details — the public mobile state lives in
-/// [`MobileState`] inside [`NmSnapshot`].
 pub(super) struct MobileInternal {
-    /// ModemManager signal subscriptions (kept alive for the service lifetime).
     pub(super) _signal_subscriptions: RefCell<Vec<gio::SignalSubscription>>,
-    /// Debounce guard for mobile refresh requests.
     pub(super) refresh_pending: Cell<bool>,
-    /// Whether a mobile connection attempt is in progress (for instant UI feedback).
-    /// Set synchronously in connect_mobile() / set_mobile_enabled(true), cleared when
-    /// MobileDeviceInfo arrives with the real state.
+    /// Set synchronously in connect/enable, cleared when real D-Bus state arrives.
     pub(super) connecting_local: Cell<bool>,
 }
 
@@ -342,26 +264,15 @@ impl MobileInternal {
 
 // ── NmService internal Wi-Fi state ──────────────────────────────────
 
-/// Internal Wi-Fi bookkeeping fields, grouped for symmetry with [`MobileInternal`].
-///
-/// These are implementation details — the public Wi-Fi state lives in
-/// [`WifiState`] inside [`NmSnapshot`].
+/// Internal Wi-Fi bookkeeping (not exposed in snapshots).
 pub(super) struct WifiInternal {
-    /// Wi-Fi device proxy.
     pub(super) proxy: RefCell<Option<gio::DBusProxy>>,
-    /// Wi-Fi interface name (e.g., "wlan0").
     pub(super) iface_name: RefCell<Option<String>>,
-    /// Whether a scan is in progress.
     pub(super) scan_in_progress: Cell<bool>,
-    /// Last scan timestamp from NetworkManager.
     pub(super) last_scan_value: Cell<Option<i64>>,
-    /// Cache of known SSIDs (saved connections).
     pub(super) known_ssids: Arc<Mutex<HashSet<String>>>,
-    /// When the known SSIDs cache was last refreshed.
     pub(super) known_ssids_last_refresh: Arc<Mutex<Option<Instant>>>,
-    /// SSID currently being connected to (cleared on success/failure).
     pub(super) connecting_ssid: RefCell<Option<String>>,
-    /// SSID that failed to connect (for re-showing password prompt).
     pub(super) failed_ssid: RefCell<Option<String>>,
 }
 
@@ -384,20 +295,14 @@ impl WifiInternal {
 
 /// Shared, process-wide network service for Wi-Fi, Ethernet, and mobile state and control.
 pub struct NmService {
-    /// NetworkManager main proxy.
     pub(super) nm_proxy: RefCell<Option<gio::DBusProxy>>,
-    /// Current snapshot of network state.
     snapshot: RefCell<NmSnapshot>,
-    /// Registered callbacks for state changes.
     callbacks: Callbacks<NmSnapshot>,
-    /// Internal Wi-Fi bookkeeping (proxy, scan state, known SSIDs, connecting/failed SSIDs).
     pub(super) wifi: WifiInternal,
-    /// Internal mobile bookkeeping (subscriptions, debounce, optimistic state).
     pub(super) mobile: MobileInternal,
 }
 
 impl NmService {
-    /// Create a new NmService.
     fn new() -> Rc<Self> {
         let service = Rc::new(Self {
             nm_proxy: RefCell::new(None),
@@ -463,9 +368,6 @@ impl NmService {
     }
 
     /// Mutate the snapshot and notify callbacks only if the closure returns `true`.
-    ///
-    /// The closure should apply its changes and return whether anything actually
-    /// changed. If it returns `false`, callbacks are not invoked.
     pub(super) fn notify_snapshot_if(&self, f: impl FnOnce(&mut NmSnapshot) -> bool) {
         let mut snapshot = self.snapshot.borrow_mut();
         if f(&mut snapshot) {
@@ -503,7 +405,6 @@ impl NmService {
                 }
             }
             NmUpdate::DeviceDiscoveryFailed => {
-                // Device discovery failed - mark service as unavailable
                 self.set_unavailable();
             }
             NmUpdate::ApDetails { ssid, strength } => {
@@ -512,7 +413,6 @@ impl NmService {
                     s.wifi.ssid = ssid;
                     s.wifi.strength = strength;
                 });
-                // Also trigger a network list refresh.
                 self.refresh_networks_async();
             }
             NmUpdate::ApDetailsFailed => {
@@ -557,11 +457,8 @@ impl NmService {
                 self.refresh_networks_async();
             }
             NmUpdate::ConnectionAttemptFinished { ssid, success } => {
-                // Clear connecting state.
                 *self.wifi.connecting_ssid.borrow_mut() = None;
 
-                // If connection failed, set failed_ssid so UI can re-show password prompt.
-                // If succeeded, clear any previous failed_ssid.
                 if success {
                     *self.wifi.failed_ssid.borrow_mut() = None;
                 } else {
@@ -614,22 +511,12 @@ impl NmService {
 
                 // Merge local "connecting" intent with D-Bus state.
                 //
-                // Race resolution strategy:
-                // `mobile.connecting_local` is set synchronously on the main thread
-                // in `connect_mobile()` / `set_mobile_enabled(true)` so the UI shows
-                // a "Connecting…" state immediately, before NM/MM D-Bus signals
-                // arrive (which may take hundreds of milliseconds).
-                //
-                // When a `MobileDeviceInfo` update arrives from D-Bus we reconcile:
-                //   • NM confirms `active` or `connecting` → local flag is redundant,
-                //     clear it and trust the real D-Bus state from here on.
-                //   • NM shows neither active nor connecting → the D-Bus signal
-                //     arrived before NM reflected the attempt; keep the local flag so
-                //     the UI continues showing "Connecting…" until the next update.
-                //
-                // The flag is also cleared unconditionally via the
-                // `MobileConnectionAttemptFinished` update sent after `nmcli` returns,
-                // which acts as a safety net if the state machine gets stuck.
+                // `connecting_local` is set synchronously so the UI shows
+                // "Connecting…" before D-Bus signals arrive. When NM confirms
+                // active/connecting, the local flag is redundant and cleared.
+                // If NM shows neither, keep the flag until the next update.
+                // `MobileConnectionAttemptFinished` clears it unconditionally
+                // as a safety net.
                 let (effective_connecting, clear_local) = mobile::resolve_mobile_connecting(
                     self.mobile.connecting_local.get(),
                     active,
@@ -662,9 +549,8 @@ impl NmService {
                 });
             }
             NmUpdate::MobileConnectionAttemptFinished { success } => {
-                // nmcli returned — clear the local connecting intent flag.
-                // The next MobileDeviceInfo (triggered right after this) will
-                // use the real D-Bus state.
+                // Clear local connecting intent; the next MobileDeviceInfo
+                // will use real D-Bus state.
                 self.mobile.connecting_local.set(false);
 
                 if !success {
@@ -673,8 +559,6 @@ impl NmService {
                         s.mobile.connecting = false;
                     });
                 } else {
-                    // Clear any stale failed state from a previous attempt
-                    // and stop showing the connecting spinner.
                     self.notify_snapshot_if(|s| {
                         let changed = s.mobile.failed || s.mobile.connecting;
                         s.mobile.failed = false;
@@ -700,7 +584,6 @@ impl NmService {
     fn init_dbus(this: &Rc<Self>) {
         let this_weak = Rc::downgrade(this);
 
-        // First, get the system bus
         gio::bus_get(
             gio::BusType::System,
             None::<&gio::Cancellable>,
@@ -718,13 +601,9 @@ impl NmService {
                     }
                 };
 
-                // Subscribe to ModemManager D-Bus signals for responsive modem
-                // state updates (signal quality, registration, operator, etc.).
-                //
-                // Unlike WiFi (which uses a per-device DBusProxy with g-properties-changed),
-                // mobile subscribes at the bus level with wildcard object paths because
-                // modems can appear/disappear at runtime (USB modems, SIM hot-swap) and
-                // ModemManager is a separate D-Bus service from NetworkManager.
+                // Subscribe to ModemManager D-Bus signals at the bus level
+                // (wildcard object paths) because modems can appear/disappear
+                // at runtime and MM is a separate service from NM.
                 let sub_props = connection.subscribe_to_signal(
                     Some(MM_SERVICE),
                     Some(PROPERTIES_IFACE),
@@ -835,7 +714,6 @@ impl NmService {
 
                         this.nm_proxy.replace(Some(proxy.clone()));
 
-                        // Track WirelessEnabled property changes
                         let this_weak = Rc::downgrade(&this);
                         proxy.connect_local("g-properties-changed", false, move |_| {
                             if let Some(this) = this_weak.upgrade() {
@@ -855,7 +733,6 @@ impl NmService {
                                     values.get(3).and_then(|v| v.get::<Variant>().ok())
                                 && let Some(device_path) = objpath_to_string(&params.child_value(0))
                             {
-                                // Check if the new device is a network adapter we care about
                                 Self::check_device_type_for_network_devices(&device_path);
                             }
                             None
@@ -886,7 +763,6 @@ impl NmService {
                         this.set_available(true);
                         this.update_nm_flags();
 
-                        // Discover Wi-Fi device in background thread
                         Self::discover_wifi_device();
                     },
                 );
@@ -907,8 +783,6 @@ impl NmService {
             return; // Already unavailable
         }
         self.notify_snapshot(|s| *s = NmSnapshot::unknown());
-
-        // Clear proxies.
         self.nm_proxy.replace(None);
         self.wifi.proxy.replace(None);
     }
@@ -916,10 +790,8 @@ impl NmService {
     // ── Shared Device Discovery ──────────────────────────────────────
 
     fn discover_wifi_device() {
-        // We need to do synchronous D-Bus calls to find the Wi-Fi device,
-        // so we spawn a thread to avoid blocking the main loop.
+        // Synchronous D-Bus calls — spawn a thread to avoid blocking the main loop.
         thread::spawn(move || {
-            // Get device paths from NetworkManager
             let device_paths = match Self::get_device_paths_sync() {
                 Ok(paths) => paths,
                 Err(e) => {
@@ -929,7 +801,6 @@ impl NmService {
                 }
             };
 
-            // Find Wi-Fi device and check for Ethernet/Modem devices
             let mut wifi_path: Option<String> = None;
             let mut iface_name: Option<String> = None;
             let mut has_ethernet = false;
@@ -959,7 +830,6 @@ impl NmService {
                 has_modem = true;
             }
 
-            // Notify if ethernet device exists (for adaptive card title)
             if has_ethernet {
                 send_nm_update(NmUpdate::EthernetDeviceExists);
             }
@@ -974,13 +844,11 @@ impl NmService {
 
             debug!("Found Wi-Fi device: {} (iface: {:?})", path, iface_name);
 
-            // Send update to main thread.
             send_nm_update(NmUpdate::WifiDeviceFound { path, iface_name });
         });
     }
 
     fn get_device_paths_sync() -> Result<Vec<String>, String> {
-        // Create a sync proxy to NetworkManager
         let proxy = system_dbus_proxy_sync(NM_SERVICE, NM_PATH, NM_IFACE)
             .map_err(|e| format!("Failed to create NM proxy: {}", e))?;
 
@@ -994,7 +862,7 @@ impl NmService {
             )
             .map_err(|e| format!("GetDevices failed: {}", e))?;
 
-        // Result is (ao,) - array of object paths in a tuple
+        // Result is (ao,) — array of object paths in a tuple
         let paths: Vec<String> = result
             .child_value(0)
             .iter()
@@ -1020,8 +888,7 @@ impl NmService {
         Ok((dtype, iface))
     }
 
-    /// Check if a newly added device is an ethernet adapter and notify if so.
-    /// Called when NetworkManager emits DeviceAdded signal.
+    /// Check if a newly added device is a network adapter we track.
     fn check_device_type_for_network_devices(device_path: &str) {
         let path = device_path.to_string();
         thread::spawn(move || match Self::get_device_type_sync(&path) {
@@ -1073,12 +940,11 @@ impl NmService {
             snapshot.wifi.enabled = wifi_enabled;
             changed = true;
 
-            // When WiFi is disabled, clear connection state and mark all networks as inactive
+            // When WiFi is disabled, clear connection state
             if wifi_enabled == Some(false) {
                 snapshot.wifi.connected = false;
                 snapshot.wifi.ssid = None;
                 snapshot.wifi.strength = 0;
-                // Mark all networks as not active (they can't be connected if WiFi is off)
                 for net in &mut snapshot.wifi.networks {
                     net.active = false;
                 }
@@ -1134,9 +1000,7 @@ impl NmService {
 
 /// Send an update from a background thread to the main GLib loop.
 ///
-/// # Thread safety
-/// Safe to call from any thread — `glib::idle_add_once` marshals the
-/// closure to the main loop.
+/// Thread-safe: marshals to the main loop via `glib::idle_add_once`.
 fn send_nm_update(update: NmUpdate) {
     glib::idle_add_once(move || {
         NmService::global().apply_update(update);

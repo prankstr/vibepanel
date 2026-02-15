@@ -22,10 +22,9 @@ use crate::services::network::objpath_to_string;
 #[cfg(debug_assertions)]
 use super::debug_mobile_mock;
 
-/// Modem information gathered from ModemManager (SIM, signal, technology, operator).
+/// Modem information gathered from ModemManager.
 #[derive(Default)]
 pub(super) struct MobileInfo {
-    /// Whether a modem object was found in ModemManager.
     pub has_modem: bool,
     pub has_sim: bool,
     pub signal_quality: Option<u32>,
@@ -38,8 +37,7 @@ pub(super) struct MobileInfo {
 pub(super) struct MobileNmStatus {
     pub active: bool,
     pub connecting: bool,
-    /// The name of the first GSM/CDMA connection profile, if one exists.
-    /// Use `.is_some()` to check whether a mobile profile is configured.
+    /// The first GSM/CDMA connection profile name, if one exists.
     pub profile_name: Option<String>,
     pub active_name: Option<String>,
 }
@@ -47,7 +45,6 @@ pub(super) struct MobileNmStatus {
 impl NmService {
     /// Discover mobile info in a background thread.
     pub(super) fn fetch_mobile_device_info() {
-        // In debug builds, return mock data if the debug mock is enabled.
         #[cfg(debug_assertions)]
         if debug_mobile_mock::is_enabled()
             && let Some(mock) = debug_mobile_mock::read_state()
@@ -85,7 +82,7 @@ impl NmService {
     /// Multiple calls within [`MOBILE_REFRESH_DEBOUNCE_MS`] are coalesced into one.
     pub(super) fn queue_mobile_refresh(&self) {
         if self.mobile.refresh_pending.get() {
-            return; // Already pending — coalesce.
+            return;
         }
         self.mobile.refresh_pending.set(true);
 
@@ -94,8 +91,7 @@ impl NmService {
         });
     }
 
-    /// Return mobile status from NetworkManager:
-    /// (mobile_active, has_mobile_profile, active_mobile_connection_name)
+    /// Return mobile status from NetworkManager.
     pub(super) fn get_mobile_nm_status_sync() -> Result<MobileNmStatus, String> {
         let nm_proxy = system_dbus_proxy_sync(NM_SERVICE, NM_PATH, NM_IFACE)
             .map_err(|e| format!("Failed to create NM proxy: {}", e))?;
@@ -163,9 +159,6 @@ impl NmService {
     }
 
     /// Extract a property from the "connection" section of a D-Bus settings variant.
-    ///
-    /// Used to read `"type"` (gsm/cdma/wifi/...) or `"id"` (profile name) from
-    /// the result of `GetSettings`.
     fn parse_connection_prop(settings: &Variant, key: &str) -> Option<String> {
         let root = settings.child_value(0);
         for i in 0..root.n_children() {
@@ -179,10 +172,6 @@ impl NmService {
     }
 
     /// Find the first GSM/CDMA connection profile name via NetworkManager's Settings interface.
-    ///
-    /// Returns `Ok(Some(name))` if a mobile profile exists, `Ok(None)` if none found.
-    /// This replaces both the old `has_mobile_profile_sync` (use `.is_some()`) and
-    /// `get_first_mobile_profile_name_sync`.
     pub(super) fn find_first_mobile_profile_sync() -> Result<Option<String>, String> {
         let settings_proxy = system_dbus_proxy_sync(NM_SERVICE, NM_SETTINGS_PATH, IFACE_SETTINGS)
             .map_err(|e| format!("Failed to create NM settings proxy: {}", e))?;
@@ -214,11 +203,7 @@ impl NmService {
 
     /// Read cellular signal/operator/technology from ModemManager.
     ///
-    /// Also reports `has_modem` — whether at least one modem object was found
-    /// in ModemManager, which replaces the separate `has_modem_device_sync()`
-    /// NM device enumeration that was previously used.
-    ///
-    /// Note: returns info for the **first** modem with a SIM inserted.
+    /// Returns info for the **first** modem with a SIM inserted.
     /// Multi-modem setups are not currently supported.
     fn get_mobile_info_from_mm_sync() -> Result<MobileInfo, String> {
         let proxy = system_dbus_proxy_sync(MM_SERVICE, MM_PATH, OBJECT_MANAGER_IFACE)
@@ -339,11 +324,9 @@ impl NmService {
 
     /// Enable or disable WWAN/modem via NetworkManager.
     pub fn set_mobile_enabled(&self, enabled: bool) {
-        // In debug builds, update mock state with realistic delays.
         #[cfg(debug_assertions)]
         if debug_mobile_mock::is_enabled() {
             if enabled {
-                // Set connecting state for instant UI feedback (same as production path).
                 self.mobile.connecting_local.set(true);
                 self.notify_snapshot(|s| {
                     s.mobile.connecting = true;
@@ -372,7 +355,6 @@ impl NmService {
         };
 
         if enabled {
-            // Set connecting state synchronously for instant UI feedback.
             // Enabling WWAN often triggers auto-connect of the mobile profile.
             self.mobile.connecting_local.set(true);
             self.notify_snapshot(|s| {
@@ -380,7 +362,6 @@ impl NmService {
                 s.mobile.enabled = Some(true);
             });
         } else {
-            // Disabling — clear connecting state immediately.
             self.mobile.connecting_local.set(false);
             self.notify_snapshot(|s| {
                 s.mobile.connecting = false;
@@ -406,19 +387,12 @@ impl NmService {
             if let Err(ref e) = dbus_result {
                 error!("Failed to set WwanEnabled: {}", e);
             }
-            // WwanEnabled property change will trigger NM PropertiesChanged signal,
-            // which fires update_nm_flags and MM signal subscriptions.
-            // Clear local connecting intent so the real state takes over.
-            //
-            // Reuses `MobileConnectionAttemptFinished` even though this is an
-            // enable/disable operation, not a connection attempt.  The handler
-            // only clears `connecting_local` and sets the `failed` flag on
-            // error — both of which are exactly what we need here.
-            //
-            // Sent for both enable and disable: on failure the handler restores
-            // the `failed` flag and clears `connecting_local`, preventing stale
-            // optimistic state (e.g. `enabled=Some(false)` when the D-Bus call
-            // to disable actually failed).
+            // The WwanEnabled property change triggers NM's PropertiesChanged
+            // signal, which fires update_nm_flags → fetch_mobile_device_info.
+            // Reuse MobileConnectionAttemptFinished (despite the name) to clear
+            // connecting_local and set the failed flag on error — the handler
+            // does exactly what we need for both enable/disable and connection
+            // attempts.
             send_nm_update(NmUpdate::MobileConnectionAttemptFinished {
                 success: dbus_result.is_ok(),
             });
@@ -429,15 +403,13 @@ impl NmService {
 
     /// Connect the first configured mobile profile (gsm/cdma) via NetworkManager.
     pub fn connect_mobile(&self) {
-        // Set connecting state synchronously for instant UI feedback (same pattern as
-        // connecting_ssid for Wi-Fi). Cleared when MobileDeviceInfo arrives with real state.
         self.mobile.connecting_local.set(true);
         self.notify_snapshot(|s| {
             s.mobile.connecting = true;
             s.mobile.failed = false;
         });
 
-        // In debug builds, simulate connect with realistic delays.
+        // In debug builds, simulate connect.
         #[cfg(debug_assertions)]
         if debug_mobile_mock::is_enabled() {
             // connecting (1.5s) -> connected
@@ -486,8 +458,7 @@ impl NmService {
                     false
                 }
             };
-            // nmcli returned — NM state is now settled. Clear local connecting intent
-            // first, then fetch real mobile state.
+            // nmcli returned — clear local connecting intent, then fetch real state.
             send_nm_update(NmUpdate::MobileConnectionAttemptFinished { success });
             Self::fetch_mobile_device_info();
             send_nm_update(NmUpdate::RefreshNetworks);
@@ -496,27 +467,17 @@ impl NmService {
 
     /// Disconnect active mobile connection via NetworkManager.
     ///
-    /// On success, deactivating a connection triggers NM's `PropertiesChanged`
-    /// signal on the primary-connection and active-connections properties,
-    /// which fires `update_nm_flags()`. That detects the mobile state change
-    /// (`mobile_changed`) and calls `fetch_mobile_device_info()` automatically,
-    /// so the UI converges to the correct state through the existing signal
-    /// cascade without an explicit fetch.
-    ///
-    /// On failure, we explicitly fetch mobile device info and send
-    /// `MobileConnectionAttemptFinished` to restore the correct state,
-    /// since no NM signals will fire when the disconnect didn't happen.
+    /// On success, NM's `PropertiesChanged` signal cascade handles UI convergence
+    /// automatically. On failure, we explicitly fetch state and report the error
+    /// since no NM signals will fire.
     pub fn disconnect_mobile(&self) {
-        // Optimistically clear connecting and active state so the UI updates
-        // instantly. The real D-Bus state will arrive shortly via the NM signal
-        // cascade (PrimaryConnectionType change → update_nm_flags → fetch).
         self.mobile.connecting_local.set(false);
         self.notify_snapshot(|s| {
             s.mobile.connecting = false;
             s.mobile.active = false;
         });
 
-        // In debug builds, simulate disconnect with realistic delay.
+        // In debug builds, simulate disconnect.
         #[cfg(debug_assertions)]
         if debug_mobile_mock::is_enabled() {
             // -> registered (after 800ms settling)
@@ -585,12 +546,8 @@ pub(super) fn is_mobile_connected(primary_type: Option<&str>) -> bool {
 /// Resolve the effective `connecting` state for mobile by merging the local
 /// optimistic flag with the real D-Bus state.
 ///
-/// Returns `(effective_connecting, clear_local_flag)`:
-/// - `effective_connecting`: the value to store in `MobileState.connecting`.
-/// - `clear_local_flag`: whether `mobile_connecting_local` should be cleared.
-///
-/// See the doc comment on the `MobileDeviceInfo` arm of `apply_update` for the
-/// full race-resolution strategy.
+/// Returns `(effective_connecting, clear_local_flag)`.
+/// See the `MobileDeviceInfo` arm of `apply_update` for the full strategy.
 pub(super) fn resolve_mobile_connecting(
     local_flag: bool,
     dbus_active: bool,

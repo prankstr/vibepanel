@@ -14,7 +14,6 @@ use gtk4::glib;
 impl NmService {
     /// Get wired device info (interface name and speed) synchronously.
     pub(super) fn get_wired_device_info_sync(path: &str) -> Result<(String, u32), String> {
-        // Get interface name from Device interface
         let dev_proxy = system_dbus_proxy_sync(NM_SERVICE, path, IFACE_DEV)
             .map_err(|e| format!("Failed to create device proxy: {}", e))?;
 
@@ -23,7 +22,6 @@ impl NmService {
             .and_then(|v| v.get::<String>())
             .ok_or_else(|| "No Interface property".to_string())?;
 
-        // Get speed from Wired interface
         let wired_proxy = system_dbus_proxy_sync(NM_SERVICE, path, IFACE_WIRED)
             .map_err(|e| format!("Failed to create wired proxy: {}", e))?;
 
@@ -36,22 +34,18 @@ impl NmService {
     }
 
     /// Get the primary connection name (Id) from NetworkManager.
-    /// Returns None if no primary connection or on error.
     pub(super) fn get_primary_connection_name_sync() -> Option<String> {
-        // Get NM proxy to read PrimaryConnection path
         let nm_proxy = system_dbus_proxy_sync(NM_SERVICE, NM_PATH, NM_IFACE).ok()?;
 
-        // Get PrimaryConnection object path
         let primary_conn_path = nm_proxy
             .cached_property("PrimaryConnection")
             .and_then(|v| v.get::<glib::variant::ObjectPath>())?;
 
         let path_str = primary_conn_path.as_str();
         if path_str == "/" {
-            return None; // No primary connection
+            return None;
         }
 
-        // Get the connection name (Id) from the ActiveConnection
         let conn_proxy = system_dbus_proxy_sync(NM_SERVICE, path_str, IFACE_ACTIVE_CONN).ok()?;
 
         conn_proxy
@@ -62,11 +56,9 @@ impl NmService {
     /// Discover wired device and fetch its info in a background thread.
     pub(super) fn fetch_wired_device_info() {
         thread::spawn(move || {
-            // In debug builds, return mock data if the debug file exists
             #[cfg(debug_assertions)]
             if std::path::Path::new("/tmp/vibepanel-debug-wired").exists() {
                 debug!("Using mock wired device info (debug mode)");
-                // Also send EthernetDeviceExists so card shows "Network" title
                 send_nm_update(NmUpdate::EthernetDeviceExists);
                 send_nm_update(NmUpdate::WiredDeviceInfo {
                     iface_name: Some("enp0s31f6".to_string()),
@@ -89,13 +81,11 @@ impl NmService {
                 }
             };
 
-            // Find first Ethernet device
             for path in device_paths {
                 match Self::get_device_type_sync(&path) {
                     Ok((dtype, _)) if dtype == ETHERNET_DEVICE_TYPE => {
                         match Self::get_wired_device_info_sync(&path) {
                             Ok((iface_name, speed)) => {
-                                // Also get the connection name from the primary connection
                                 let conn_name = Self::get_primary_connection_name_sync();
                                 debug!(
                                     "Found wired device: {} ({} Mb/s), connection: {:?}",
@@ -117,7 +107,6 @@ impl NmService {
                 }
             }
 
-            // No wired device found
             send_nm_update(NmUpdate::WiredDeviceInfo {
                 iface_name: None,
                 conn_name: None,
@@ -129,8 +118,7 @@ impl NmService {
 
 /// Check if a wired (Ethernet) connection is active.
 ///
-/// In debug builds, this can be overridden by creating `/tmp/vibepanel-debug-wired`
-/// for testing without physical hardware. Toggle at runtime with:
+/// In debug builds, overridable via `/tmp/vibepanel-debug-wired`:
 /// - Enable: `touch /tmp/vibepanel-debug-wired`
 /// - Disable: `rm /tmp/vibepanel-debug-wired`
 pub(super) fn is_wired_connected(primary_type: Option<&str>) -> bool {

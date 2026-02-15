@@ -12,8 +12,7 @@ use network_manager::{NM_IFACE, NM_PATH, NM_SERVICE};
 pub use network_manager::{NmService, NmSnapshot};
 
 /// Failure reason for authentication errors (wrong password).
-/// Used as a semantic tag between the IWD backend (producer) and the UI (consumer)
-/// to distinguish auth failures from other connection errors.
+/// Matched by the UI to distinguish auth failures from other connection errors.
 pub const AUTH_FAILURE_REASON: &str = "Wrong password";
 
 /// Generic failure reason for connection errors.
@@ -34,8 +33,7 @@ impl SecurityType {
 
 /// A Wi-Fi network visible in the scan results.
 ///
-/// Used by both NetworkManager and IWD backends. Some fields
-/// are backend-specific and will be `None` when using the other backend.
+/// Some fields are backend-specific and will be `None` for the other backend.
 #[derive(Debug, Clone)]
 pub struct WifiNetwork {
     pub ssid: String,
@@ -44,7 +42,7 @@ pub struct WifiNetwork {
     pub security: SecurityType,
     /// Whether this is the currently connected network.
     pub active: bool,
-    /// Whether there is a saved connection profile for this SSID.
+    /// Whether this SSID has a saved connection profile.
     pub known: bool,
     /// IWD-only: D-Bus path to the KnownNetwork object (for `forget_network()`).
     pub known_network_path: Option<String>,
@@ -59,30 +57,25 @@ enum NetworkBackend {
 
 /// Unified snapshot of Wi-Fi state from either backend.
 ///
-/// Use the accessor methods (e.g., `connected()`, `networks()`) to get
-/// unified values that work with both backends.
+/// Use the accessor methods for unified values across backends.
 pub enum NetworkSnapshot {
     NetworkManager(NmSnapshot),
     Iwd(IwdSnapshot),
 }
 
-/// Connection state for Wi-Fi.
-///
-/// This enum provides a unified view of the connection state across both
-/// NetworkManager and IWD backends.
+/// Connection state for Wi-Fi (unified across NM and IWD).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NetworkConnectionState {
-    /// Not connected to any network.
     Disconnected,
-    /// Currently connecting to a network.
     Connecting,
-    /// Connected to a network.
     Connected,
 }
 
 impl NetworkSnapshot {
-    /// SSID of the active/connecting network. NM returns connecting_ssid if connecting;
-    /// IWD returns ssid for both states.
+    /// SSID of the active/connecting network.
+    ///
+    /// NM has separate `connecting_ssid`/`ssid` fields; IWD uses a single `ssid`
+    /// guarded by connection state.
     pub fn active_ssid(&self) -> Option<&str> {
         match self {
             Self::NetworkManager(inner) => inner
@@ -172,19 +165,18 @@ impl NetworkSnapshot {
     }
 
     /// Whether the system has wifi hardware.
-    /// For iwd: implied by service availability (iwd requires wifi hardware).
+    /// For IWD, implied by service availability (IWD requires wifi hardware).
     pub fn has_wifi_device(&self) -> bool {
         match self {
             Self::NetworkManager(inner) => inner.wifi.has_device,
-            Self::Iwd(inner) => inner.available, // adapter found = wifi device exists
+            Self::Iwd(inner) => inner.available,
         }
     }
 
     pub fn is_ready(&self) -> bool {
         match self {
             Self::NetworkManager(inner) => inner.wifi.is_ready,
-            // IWD is ready once the initial network refresh has completed.
-            // This mirrors NetworkManager's is_ready field for consistent UI behavior.
+            // Mirrors NM's is_ready for consistent UI behavior.
             Self::Iwd(inner) => inner.initial_scan_complete,
         }
     }
@@ -335,10 +327,7 @@ impl NetworkSnapshot {
         }
     }
 
-    /// Signal strength of the active (connected) network, or 0 if not connected.
-    ///
-    /// - NM: uses the top-level `strength` field on the snapshot.
-    /// - IWD: looks up the active network in the scan list.
+    /// Signal strength of the active network, or 0 if not connected.
     pub fn active_strength(&self) -> i32 {
         match self {
             Self::NetworkManager(inner) => {
@@ -363,10 +352,7 @@ impl NetworkSnapshot {
         }
     }
 
-    /// Get the human-readable reason for the last connection failure.
-    ///
-    /// - IWD: specific reasons like "Wrong password", "Connection failed", etc.
-    /// - NetworkManager: always `None` (NM doesn't provide granular failure reasons).
+    /// Human-readable reason for the last connection failure (IWD only).
     pub fn failed_reason(&self) -> Option<&str> {
         match self {
             Self::NetworkManager(_) => None,
@@ -375,20 +361,15 @@ impl NetworkSnapshot {
     }
 }
 
-/// Unified network service that abstracts over NetworkManager and IWD backends.
+/// Unified network service abstracting over NetworkManager and IWD backends.
 ///
-/// Automatically detects which backend is available at startup (preferring
-/// NetworkManager) and provides a unified API for Wi-Fi, wired, and mobile
-/// network operations.
+/// Automatically detects which backend is available at startup (preferring NM).
+/// NM supports Wi-Fi, wired, and mobile; IWD supports Wi-Fi only.
 ///
-/// # Backend differences
-///
-/// - **NetworkManager**: Supports Wi-Fi, wired (Ethernet), and mobile (GSM/CDMA via
-///   ModemManager). Password is provided upfront via `connect_to_network(ssid, password, _)`.
-/// - **IWD**: Supports Wi-Fi only. Connection is initiated via
-///   `connect_to_network(_, _, path)`, and if the network requires authentication,
-///   IWD calls back via the agent pattern. The UI then shows a password dialog and
-///   calls `submit_password()` to complete the authentication.
+/// Auth flow differs by backend: NM takes the password upfront via
+/// `connect_to_network(ssid, password, _)`, while IWD initiates connection
+/// first and calls back via the agent pattern — the UI then shows a password
+/// dialog and calls `submit_password()` to complete authentication.
 pub struct NetworkService {
     backend: NetworkBackend,
 }
@@ -526,23 +507,18 @@ impl NetworkService {
         }
     }
 
-    /// Submit a password for a pending IWD auth request.
-    /// For NetworkManager, this is a no-op (NM uses connect_to_network with password).
+    /// Submit a password for a pending IWD auth request (no-op for NM).
     pub fn submit_password(&self, password: &str) {
         match &self.backend {
-            NetworkBackend::NetworkManager(_) => {
-                // NM doesn't use agent pattern - password is passed directly to connect_to_network
-            }
+            NetworkBackend::NetworkManager(_) => {}
             NetworkBackend::Iwd(inner) => inner.submit_passphrase(password),
         }
     }
 
-    /// Cancel a pending auth request.
+    /// Cancel a pending auth request (IWD only).
     pub fn cancel_auth(&self) {
         match &self.backend {
-            NetworkBackend::NetworkManager(_) => {
-                // NM doesn't have pending auth state in the same way
-            }
+            NetworkBackend::NetworkManager(_) => {}
             NetworkBackend::Iwd(inner) => inner.cancel_auth(),
         }
     }
@@ -565,12 +541,9 @@ impl NetworkService {
 
 /// Detect which Wi-Fi backend is available (NM preferred, then IWD).
 ///
-/// Called once at startup; the backend is fixed for the process lifetime.
-/// If neither service is running, defaults to NetworkManager — its `init_dbus()`
-/// connects a `notify::g-name-owner` handler that fires the moment NM registers
-/// on D-Bus, restoring the pre-IWD self-healing behavior.
+/// If neither is running, defaults to NM — its `init_dbus()` handler fires
+/// when the service registers on D-Bus.
 fn detect_backend() -> NetworkBackend {
-    // Check for NetworkManager
     let nm_result = gio::DBusProxy::for_bus_sync(
         gio::BusType::System,
         gio::DBusProxyFlags::DO_NOT_AUTO_START | gio::DBusProxyFlags::DO_NOT_LOAD_PROPERTIES,
@@ -588,7 +561,6 @@ fn detect_backend() -> NetworkBackend {
         return NetworkBackend::NetworkManager(NmService::global());
     }
 
-    // Check for IWD
     let iwd_result = gio::DBusProxy::for_bus_sync(
         gio::BusType::System,
         gio::DBusProxyFlags::DO_NOT_AUTO_START | gio::DBusProxyFlags::DO_NOT_LOAD_PROPERTIES,
@@ -606,11 +578,8 @@ fn detect_backend() -> NetworkBackend {
         return NetworkBackend::Iwd(IwdService::global());
     }
 
-    // Neither detected — default to NetworkManager. Both backends monitor for
-    // service appearance via notify::g-name-owner in their init_dbus(), but NM
-    // is the overwhelmingly more common backend and NM startup races are the
-    // realistic scenario (NM can be session-activated, whereas IWD is a system
-    // service that starts early in boot).
+    // Neither detected — default to NM. NM can be session-activated (late start
+    // is common), whereas IWD starts early in boot and is unlikely to be missing.
     warn!(
         "Wi-Fi backend: neither NetworkManager nor IWD detected; \
          defaulting to NetworkManager (will activate when service appears)"
