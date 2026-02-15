@@ -303,7 +303,9 @@ impl QuickSettingsWidget {
         }
 
         // Unified Network icon (Wi-Fi + Ethernet).
-        if cards.wifi || cards.cellular {
+        // Only shown when `wifi` is enabled in config. The cellular icon is
+        // independent and controlled by `cards.cellular` below.
+        if cards.wifi {
             let wifi_snapshot = NetworkService::global().snapshot();
             let wifi_enabled = wifi_snapshot.wifi_enabled().unwrap_or(false);
             let wifi_connected = wifi_snapshot.connected();

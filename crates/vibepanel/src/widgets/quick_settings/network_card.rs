@@ -290,10 +290,23 @@ pub fn update_network_subtitle(label: &Label, snapshot: &NetworkSnapshot) {
     }
 }
 
-/// Concrete widget references for the mobile/cellular row, populated once
-/// when `build_mobile_row()` runs.  Stored behind a single
-/// `RefCell<Option<…>>` in [`MobileRowState`] to eliminate per-field
-/// `RefCell` overhead and make borrow boundaries explicit.
+/// Cached widget references for the Ethernet row in the expanded details.
+///
+/// Stored so `update_ethernet_row()` can update content (title, subtitle)
+/// when the wired connection changes (e.g., dock swap, speed renegotiation).
+pub struct EthernetRowWidgets {
+    /// Container for the entire Ethernet section (shown/hidden based on state).
+    pub container: GtkBox,
+    /// Title label (connection name or interface name).
+    pub title_label: Label,
+    /// Subtitle box containing "Connected" accent label + details.
+    pub subtitle_box: GtkBox,
+}
+
+/// Cached widget references for the mobile/cellular row, populated once
+/// when `build_mobile_row()` runs. Wrapped in a `RefCell<Option<…>>` in
+/// [`MobileRowState`] to eliminate per-field `RefCell` overhead and make
+/// borrow boundaries explicit.
 pub struct MobileRowWidgets {
     /// Mobile enabled switch in expanded details section.
     pub switch: Switch,
@@ -386,14 +399,17 @@ pub struct NetworkCardState {
     /// The Wi-Fi switch in the expanded details section.
     /// Only visible when ethernet device is present.
     pub wifi_switch: RefCell<Option<Switch>>,
-    /// Ethernet row container (shown above Wi-Fi controls when connected).
-    pub ethernet_row: RefCell<Option<GtkBox>>,
+    /// Ethernet row widget state (shown above Wi-Fi controls when connected).
+    pub ethernet: RefCell<Option<EthernetRowWidgets>>,
     /// Mobile/cellular row widget state.
     pub mobile: MobileRowState,
-    /// GLib source ID for the failed-state auto-clear timer.
+    /// GLib source ID for the Wi-Fi failed-state auto-clear timer.
     /// Stored so we can cancel any pending timer before scheduling a new one,
     /// preventing timer accumulation under rapid state transitions.
-    pub failed_clear_source: RefCell<Option<glib::SourceId>>,
+    pub wifi_failed_clear_source: RefCell<Option<glib::SourceId>>,
+    /// GLib source ID for the mobile failed-state auto-clear timer.
+    /// Separate from Wi-Fi so simultaneous failures are cleared independently.
+    pub mobile_failed_clear_source: RefCell<Option<glib::SourceId>>,
 }
 
 impl NetworkCardState {
@@ -417,9 +433,10 @@ impl NetworkCardState {
             wifi_switch_row: RefCell::new(None),
             wifi_label: RefCell::new(None),
             wifi_switch: RefCell::new(None),
-            ethernet_row: RefCell::new(None),
+            ethernet: RefCell::new(None),
             mobile: MobileRowState::new(),
-            failed_clear_source: RefCell::new(None),
+            wifi_failed_clear_source: RefCell::new(None),
+            mobile_failed_clear_source: RefCell::new(None),
         }
     }
 }
@@ -443,8 +460,11 @@ impl Drop for NetworkCardState {
             source_id.remove();
             debug!("NetworkCardState: connect animation timer cancelled on drop");
         }
-        // Cancel any pending failed-state clear timer
-        if let Some(source_id) = self.failed_clear_source.borrow_mut().take() {
+        // Cancel any pending failed-state clear timers
+        if let Some(source_id) = self.wifi_failed_clear_source.borrow_mut().take() {
+            source_id.remove();
+        }
+        if let Some(source_id) = self.mobile_failed_clear_source.borrow_mut().take() {
             source_id.remove();
         }
     }
@@ -470,11 +490,11 @@ pub fn build_wifi_details(
     let snapshot = NetworkService::global().snapshot();
 
     // Ethernet row (above Wi-Fi controls, shown only when connected)
-    let ethernet_row = build_ethernet_row(&snapshot);
-    container.append(&ethernet_row);
+    let ethernet_widgets = build_ethernet_row(&snapshot);
+    container.append(&ethernet_widgets.container);
 
     // Store ethernet row reference for dynamic updates
-    *state.ethernet_row.borrow_mut() = Some(ethernet_row);
+    *state.ethernet.borrow_mut() = Some(ethernet_widgets);
 
     // Mobile row (above Wi-Fi controls, shown when mobile is supported)
     let mobile_row = build_mobile_row(state, &snapshot);
@@ -630,9 +650,10 @@ pub fn build_wifi_details(
 }
 
 /// Build a standalone Ethernet section widget (not in a ListBox).
+///
 /// Includes a header label and connection details row.
-/// Returns a GtkBox that can be shown/hidden based on connection state.
-fn build_ethernet_row(snapshot: &NetworkSnapshot) -> GtkBox {
+/// Returns `EthernetRowWidgets` with references for dynamic updates.
+fn build_ethernet_row(snapshot: &NetworkSnapshot) -> EthernetRowWidgets {
     let icons = IconsService::global();
 
     // Main container for the entire Ethernet section
@@ -663,32 +684,13 @@ fn build_ethernet_row(snapshot: &NetworkSnapshot) -> GtkBox {
         .or(snapshot.wired_iface())
         .unwrap_or("Wired Connection");
 
-    // Build subtitle extra parts: interface name, speed
-    let mut extra_parts: Vec<String> = Vec::new();
-    if let Some(ref iface) = snapshot.wired_iface() {
-        extra_parts.push(iface.to_string());
-    }
-    if let Some(speed) = snapshot.wired_speed() {
-        if speed >= 1000 {
-            let gbps = speed as f64 / 1000.0;
-            if gbps.fract() == 0.0 {
-                extra_parts.push(format!("{} Gbps", speed / 1000));
-            } else {
-                extra_parts.push(format!("{:.1} Gbps", gbps));
-            }
-        } else {
-            extra_parts.push(format!("{} Mbps", speed));
-        }
-    }
-
-    // Build connected subtitle widget with accent "Connected" and muted extra parts
-    let extra_refs: Vec<&str> = extra_parts.iter().map(|s| s.as_str()).collect();
-    let subtitle_widget = build_accent_subtitle("Connected", &extra_refs);
+    // Build subtitle with connection details
+    let subtitle_box = build_ethernet_subtitle(snapshot);
 
     // Connection details row with connection name as title
     let row_result = ListRow::builder()
         .title(title)
-        .subtitle_widget(subtitle_widget.upcast())
+        .subtitle_widget(subtitle_box.clone().upcast())
         .leading_widget(icon_handle.widget())
         .css_class(qs::NETWORK_ROW)
         .build();
@@ -709,7 +711,34 @@ fn build_ethernet_row(snapshot: &NetworkSnapshot) -> GtkBox {
     // Initially visible only if wired is connected
     container.set_visible(snapshot.wired_connected());
 
-    container
+    EthernetRowWidgets {
+        container,
+        title_label: row_result.title,
+        subtitle_box,
+    }
+}
+
+/// Build the Ethernet subtitle widget (accent "Connected" + muted details).
+fn build_ethernet_subtitle(snapshot: &NetworkSnapshot) -> GtkBox {
+    let mut extra_parts: Vec<String> = Vec::new();
+    if let Some(ref iface) = snapshot.wired_iface() {
+        extra_parts.push(iface.to_string());
+    }
+    if let Some(speed) = snapshot.wired_speed() {
+        if speed >= 1000 {
+            let gbps = speed as f64 / 1000.0;
+            if gbps.fract() == 0.0 {
+                extra_parts.push(format!("{} Gbps", speed / 1000));
+            } else {
+                extra_parts.push(format!("{:.1} Gbps", gbps));
+            }
+        } else {
+            extra_parts.push(format!("{} Mbps", speed));
+        }
+    }
+
+    let extra_refs: Vec<&str> = extra_parts.iter().map(|s| s.as_str()).collect();
+    build_accent_subtitle("Connected", &extra_refs)
 }
 
 /// Update the mobile subtitle container labels for the current state.
@@ -733,6 +762,8 @@ fn set_mobile_subtitle(widgets: &MobileRowWidgets, snapshot: &NetworkSnapshot) {
 
     if !mobile_enabled {
         status_label.set_text("Off");
+        status_label.remove_css_class(color::ERROR);
+        status_label.add_css_class(color::MUTED);
         status_label.set_visible(true);
         accent_label.set_visible(false);
         details_label.set_visible(false);
@@ -917,13 +948,40 @@ fn build_mobile_row(state: &Rc<NetworkCardState>, snapshot: &NetworkSnapshot) ->
     container
 }
 
-/// Update the Ethernet row visibility based on connection state.
+/// Update the Ethernet row visibility and content based on connection state.
 ///
-/// The subtitle (link speed) is intentionally static — set once at row creation
-/// and not updated on link renegotiation, which is rare for wired connections.
+/// Updates title (connection/interface name) and subtitle (speed) when the
+/// wired state changes, e.g. on dock swap or link speed renegotiation.
 pub fn update_ethernet_row(state: &NetworkCardState, snapshot: &NetworkSnapshot) {
-    if let Some(ethernet_row) = state.ethernet_row.borrow().as_ref() {
-        ethernet_row.set_visible(snapshot.wired_connected());
+    let ethernet_ref = state.ethernet.borrow();
+    let Some(w) = ethernet_ref.as_ref() else {
+        return;
+    };
+
+    w.container.set_visible(snapshot.wired_connected());
+
+    if !snapshot.wired_connected() {
+        return;
+    }
+
+    // Update title (connection name may change on cable/dock swap)
+    let new_title = snapshot
+        .wired_name()
+        .or(snapshot.wired_iface())
+        .unwrap_or("Wired Connection");
+    if w.title_label.text().as_str() != new_title {
+        w.title_label.set_text(new_title);
+    }
+
+    // Rebuild subtitle content (speed/interface may change)
+    let new_subtitle = build_ethernet_subtitle(snapshot);
+    // Replace children of the subtitle box
+    while let Some(child) = w.subtitle_box.first_child() {
+        w.subtitle_box.remove(&child);
+    }
+    while let Some(child) = new_subtitle.first_child() {
+        new_subtitle.remove(&child);
+        w.subtitle_box.append(&child);
     }
 }
 
@@ -1402,8 +1460,11 @@ fn on_password_cancel_clicked(state: &NetworkCardState) {
 /// Cancels any previously scheduled clear timer before creating a new one,
 /// preventing timer accumulation when multiple snapshot notifications arrive
 /// while the failed state is still set.
-fn schedule_failed_clear<F: FnOnce() + 'static>(state: &NetworkCardState, clear_fn: F) {
-    let mut source = state.failed_clear_source.borrow_mut();
+fn schedule_failed_clear<F: FnOnce() + 'static>(
+    source: &RefCell<Option<glib::SourceId>>,
+    clear_fn: F,
+) {
+    let mut source = source.borrow_mut();
     if let Some(prev) = source.take() {
         prev.remove();
     }
@@ -1644,7 +1705,9 @@ pub fn on_network_changed(
                 "NM connection failed for '{}', showing inline error",
                 failed_ssid
             );
-            schedule_failed_clear(state, || NetworkService::global().clear_failed_state());
+            schedule_failed_clear(&state.wifi_failed_clear_source, || {
+                NetworkService::global().clear_failed_state();
+            });
         }
     }
 
@@ -1751,7 +1814,9 @@ pub fn on_network_changed(
                     "IWD connection failed for '{}': {}, showing inline error",
                     failed_ssid, reason
                 );
-                schedule_failed_clear(state, || NetworkService::global().clear_failed_state());
+                schedule_failed_clear(&state.wifi_failed_clear_source, || {
+                    NetworkService::global().clear_failed_state();
+                });
             }
         }
     }
@@ -1766,13 +1831,13 @@ pub fn on_network_changed(
         if toggle.is_active() != enabled {
             toggle.set_active(enabled);
         }
-        // Card toggle is only sensitive on WiFi-only devices (no ethernet port) and when service is available
-        // When ethernet is present, users must use the switch in expanded view
+        // Card toggle is only sensitive on WiFi-only devices (no ethernet port, no usable modem)
+        // When ethernet or a supported modem (SIM + profile) is present, users must use the switch in expanded view
         toggle.set_sensitive(
             snapshot.available()
                 && snapshot.has_wifi_device()
                 && !snapshot.has_ethernet_device()
-                && !snapshot.has_modem_device(),
+                && !snapshot.mobile_supported(),
         );
     }
 
@@ -1835,7 +1900,7 @@ pub fn on_network_changed(
 
     // Auto-clear mobile connection failure after 5 seconds (matches Wi-Fi pattern).
     if snapshot.mobile_failed() {
-        schedule_failed_clear(state, || {
+        schedule_failed_clear(&state.mobile_failed_clear_source, || {
             NetworkService::global().clear_mobile_failed_state();
         });
     }

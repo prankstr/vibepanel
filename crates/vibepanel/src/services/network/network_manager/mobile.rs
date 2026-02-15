@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use gtk4::gio::{self, prelude::*};
 use gtk4::glib::{self, Variant};
-use tracing::{error, warn};
+use tracing::{debug, error, warn};
 
 use super::{
     IFACE_ACTIVE_CONN, IFACE_SETTINGS, IFACE_SETTINGS_CONN, MM_ACCESS_TECH_EDGE,
@@ -63,11 +63,9 @@ impl NmService {
 
             let has_profile = nm_status.profile_name.is_some();
             let supported = mm_info.has_modem && mm_info.has_sim && has_profile;
-            let conn_name = nm_status.active_name.or(if supported {
-                nm_status.profile_name
-            } else {
-                None
-            });
+            let conn_name = nm_status
+                .active_name
+                .or(nm_status.profile_name.filter(|_| supported));
 
             send_nm_update(NmUpdate::MobileDeviceInfo {
                 conn_name,
@@ -330,6 +328,9 @@ impl NmService {
         }
 
         if v.n_children() > 0 {
+            debug!(
+                "SignalQuality: primary (u32, bool) parse failed, falling back to child_value(0)"
+            );
             return v.child_value(0).get::<u32>().unwrap_or(0);
         }
 
@@ -413,11 +414,14 @@ impl NmService {
             // enable/disable operation, not a connection attempt.  The handler
             // only clears `connecting_local` and sets the `failed` flag on
             // error — both of which are exactly what we need here.
-            if enabled {
-                send_nm_update(NmUpdate::MobileConnectionAttemptFinished {
-                    success: dbus_result.is_ok(),
-                });
-            }
+            //
+            // Sent for both enable and disable: on failure the handler restores
+            // the `failed` flag and clears `connecting_local`, preventing stale
+            // optimistic state (e.g. `enabled=Some(false)` when the D-Bus call
+            // to disable actually failed).
+            send_nm_update(NmUpdate::MobileConnectionAttemptFinished {
+                success: dbus_result.is_ok(),
+            });
             Self::fetch_mobile_device_info();
             send_nm_update(NmUpdate::RefreshNetworks);
         });
@@ -443,7 +447,12 @@ impl NmService {
 
         thread::spawn(move || {
             let conn_name = match Self::get_mobile_nm_status_sync() {
-                Ok(status) => status.active_name.or(status.profile_name),
+                Ok(status) => status
+                    .active_name
+                    .or(status.profile_name)
+                    // NM status returned OK but had no profile names — fall back
+                    // to scanning for the first available mobile profile.
+                    .or_else(|| Self::find_first_mobile_profile_sync().ok().flatten()),
                 _ => Self::find_first_mobile_profile_sync().ok().flatten(),
             };
 
@@ -487,14 +496,16 @@ impl NmService {
 
     /// Disconnect active mobile connection via NetworkManager.
     ///
-    /// Unlike `connect_mobile()`, this does **not** explicitly call
-    /// `fetch_mobile_device_info()` after `nmcli connection down`. It doesn't
-    /// need to: deactivating a connection triggers NM's `PropertiesChanged`
+    /// On success, deactivating a connection triggers NM's `PropertiesChanged`
     /// signal on the primary-connection and active-connections properties,
     /// which fires `update_nm_flags()`. That detects the mobile state change
     /// (`mobile_changed`) and calls `fetch_mobile_device_info()` automatically,
     /// so the UI converges to the correct state through the existing signal
     /// cascade without an explicit fetch.
+    ///
+    /// On failure, we explicitly fetch mobile device info and send
+    /// `MobileConnectionAttemptFinished` to restore the correct state,
+    /// since no NM signals will fire when the disconnect didn't happen.
     pub fn disconnect_mobile(&self) {
         // Optimistically clear connecting and active state so the UI updates
         // instantly. The real D-Bus state will arrive shortly via the NM signal
@@ -522,6 +533,7 @@ impl NmService {
                 }
             });
 
+            let mut success = true;
             if let Some(name) = active_name {
                 match Command::new("nmcli")
                     .args(["connection", "down", "id", &name])
@@ -534,14 +546,23 @@ impl NmService {
                             name,
                             stderr.trim()
                         );
+                        success = false;
                     }
                     Err(e) => {
                         error!("Failed to run nmcli: {}", e);
+                        success = false;
                     }
                     _ => {}
                 }
             }
 
+            if !success {
+                // Disconnect failed — no NM signals will fire, so the
+                // optimistic `active=false` would remain stale. Explicitly
+                // fetch the real state and clear local connecting intent.
+                send_nm_update(NmUpdate::MobileConnectionAttemptFinished { success: false });
+                Self::fetch_mobile_device_info();
+            }
             send_nm_update(NmUpdate::RefreshNetworks);
         });
     }

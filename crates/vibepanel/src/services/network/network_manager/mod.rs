@@ -720,6 +720,11 @@ impl NmService {
 
                 // Subscribe to ModemManager D-Bus signals for responsive modem
                 // state updates (signal quality, registration, operator, etc.).
+                //
+                // Unlike WiFi (which uses a per-device DBusProxy with g-properties-changed),
+                // mobile subscribes at the bus level with wildcard object paths because
+                // modems can appear/disappear at runtime (USB modems, SIM hot-swap) and
+                // ModemManager is a separate D-Bus service from NetworkManager.
                 let sub_props = connection.subscribe_to_signal(
                     Some(MM_SERVICE),
                     Some(PROPERTIES_IFACE),
