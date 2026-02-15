@@ -23,10 +23,10 @@ use crate::services::brightness::BrightnessService;
 use crate::services::callbacks::CallbackId;
 use crate::services::config_manager::ConfigManager;
 use crate::services::idle_inhibitor::IdleInhibitorService;
+use crate::services::network::NetworkService;
 use crate::services::surfaces::SurfaceStyleManager;
 use crate::services::updates::UpdatesService;
 use crate::services::vpn::VpnService;
-use crate::services::wifi::WifiService;
 use crate::styles::{qs, state, surface};
 use crate::widgets::layer_shell_popover::{
     Dismissible, calculate_bar_exclusive_zone, calculate_popover_right_margin,
@@ -42,14 +42,14 @@ use super::brightness_card::{self, BrightnessCardState, build_brightness_row};
 use super::components::ToggleCard;
 use super::idle_inhibitor_card::{self, IdleInhibitorCardState};
 use super::mic_card::{self, MicCardState, build_mic_details, build_mic_hint_label, build_mic_row};
+use super::network_card::{
+    self, NetworkCardState, NetworkIconContext, build_network_subtitle, build_wifi_details,
+    network_icon_name,
+};
 use super::power_card::{self, PowerCardBuildResult};
 use super::ui_helpers::{AccordionManager, ExpandableCard};
 use super::updates_card::{self, UpdatesCardState, build_updates_card};
 use super::vpn_card::{self, VpnCardState, build_vpn_details, vpn_icon_name};
-use super::wifi_card::{
-    self, NetworkIconContext, WifiCardState, build_network_subtitle, build_wifi_details,
-    network_icon_name,
-};
 
 thread_local! {
     static CURRENT_QS_WINDOW: RefCell<Option<Weak<QuickSettingsWindow>>> = const { RefCell::new(None) };
@@ -126,11 +126,11 @@ pub struct QuickSettingsWindow {
     cards_config: QuickSettingsCardsConfig,
     audio_scroll_percentage: i32,
     scroll_container: ScrolledWindow,
-    /// WiFi service callback ID, used to unsubscribe on close.
-    wifi_callback_id: Cell<Option<CallbackId>>,
+    /// Network service callback ID, used to unsubscribe on close.
+    network_callback_id: Cell<Option<CallbackId>>,
 
     // Card states
-    pub wifi: Rc<WifiCardState>,
+    pub network: Rc<NetworkCardState>,
     pub bluetooth: Rc<BluetoothCardState>,
     pub vpn: Rc<VpnCardState>,
     pub idle_inhibitor: Rc<IdleInhibitorCardState>,
@@ -183,8 +183,8 @@ impl QuickSettingsWindow {
             cards_config: config.cards,
             audio_scroll_percentage: config.audio_scroll_percentage,
             scroll_container,
-            wifi_callback_id: Cell::new(None),
-            wifi: Rc::new(WifiCardState::new()),
+            network_callback_id: Cell::new(None),
+            network: Rc::new(NetworkCardState::new()),
             bluetooth: Rc::new(BluetoothCardState::new()),
             vpn: Rc::new(VpnCardState::new()),
             idle_inhibitor: Rc::new(IdleInhibitorCardState::new()),
@@ -234,12 +234,12 @@ impl QuickSettingsWindow {
 
         if cfg.wifi || cfg.cellular {
             let qs_weak = Rc::downgrade(qs);
-            let id = WifiService::global().connect(move |snapshot| {
+            let id = NetworkService::global().connect(move |snapshot| {
                 if let Some(qs) = qs_weak.upgrade() {
-                    wifi_card::on_network_changed(&qs.wifi, snapshot, &qs.window);
+                    network_card::on_network_changed(&qs.network, snapshot, &qs.window);
                 }
             });
-            qs.wifi_callback_id.set(Some(id));
+            qs.network_callback_id.set(Some(id));
         }
 
         if cfg.bluetooth {
@@ -355,12 +355,12 @@ impl QuickSettingsWindow {
         // Unified Network card: allow legacy `cellular = true` configs
         // to still show this card even if `wifi = false`.
         if cfg.wifi || cfg.cellular {
-            let (card, revealer, expander_button) = Self::build_wifi_card(qs);
+            let (card, revealer, expander_button) = Self::build_network_card(qs);
             toggle_cards.push(ToggleCardInfo {
                 card,
                 revealer: Some(revealer),
                 expander_button,
-                expandable: Some(Rc::clone(&qs.wifi) as Rc<dyn ExpandableCard>),
+                expandable: Some(Rc::clone(&qs.network) as Rc<dyn ExpandableCard>),
                 on_toggle: None,
             });
         }
@@ -521,13 +521,13 @@ impl QuickSettingsWindow {
         outer
     }
 
-    /// Build the Wi-Fi card and its revealer.
+    /// Build the network card and its revealer.
     ///
     /// Returns `(card, revealer, expander_button)` - caller is responsible for
     /// accordion registration via `AccordionManager::setup_expander`.
-    fn build_wifi_card(qs: &Rc<Self>) -> (GtkBox, Revealer, Option<Button>) {
-        let wifi_service = WifiService::global();
-        let snapshot = wifi_service.snapshot();
+    fn build_network_card(qs: &Rc<Self>) -> (GtkBox, Revealer, Option<Button>) {
+        let network_service = NetworkService::global();
+        let snapshot = network_service.snapshot();
 
         let wifi_enabled = snapshot.wifi_enabled().unwrap_or(false);
         let wifi_connected = snapshot.connected();
@@ -574,43 +574,43 @@ impl QuickSettingsWindow {
 
         {
             let toggle = wifi_card.toggle.clone();
-            let wifi_state = Rc::clone(&qs.wifi);
+            let wifi_state = Rc::clone(&qs.network);
             toggle.connect_toggled(move |toggle| {
                 // Skip if this is a programmatic update (prevents feedback loops)
                 if wifi_state.updating_wifi_toggle.get() {
                     return;
                 }
-                WifiService::global().set_wifi_enabled(toggle.is_active());
+                NetworkService::global().set_wifi_enabled(toggle.is_active());
             });
         }
 
         // Store references (use base fields)
-        *qs.wifi.base.toggle.borrow_mut() = Some(wifi_card.toggle.clone());
-        *qs.wifi.base.card_icon.borrow_mut() = Some(wifi_card.icon_handle.clone());
-        *qs.wifi.base.arrow.borrow_mut() = wifi_card.expander_icon.clone();
+        *qs.network.base.toggle.borrow_mut() = Some(wifi_card.toggle.clone());
+        *qs.network.base.card_icon.borrow_mut() = Some(wifi_card.icon_handle.clone());
+        *qs.network.base.arrow.borrow_mut() = wifi_card.expander_icon.clone();
 
         // Store title label for dynamic updates
-        *qs.wifi.title_label.borrow_mut() = Some(wifi_card.title.clone());
+        *qs.network.title_label.borrow_mut() = Some(wifi_card.title.clone());
 
         // Store subtitle label reference
-        *qs.wifi.subtitle_label.borrow_mut() = Some(subtitle_result.label);
+        *qs.network.subtitle_label.borrow_mut() = Some(subtitle_result.label);
 
         // Build revealer
         let wifi_revealer = Revealer::new();
         wifi_revealer.set_reveal_child(false);
         wifi_revealer.set_transition_type(RevealerTransitionType::SlideDown);
+        let wifi_state = Rc::clone(&qs.network);
 
-        let wifi_state = Rc::clone(&qs.wifi);
         let wifi_details = build_wifi_details(&wifi_state, qs.window.downgrade());
         wifi_revealer.set_child(Some(&wifi_details.container));
 
-        *qs.wifi.base.list_box.borrow_mut() = Some(wifi_details.list_box);
-        *qs.wifi.base.revealer.borrow_mut() = Some(wifi_revealer.clone());
-        *qs.wifi.scan_button.borrow_mut() = Some(wifi_details.scan_button);
+        *qs.network.base.list_box.borrow_mut() = Some(wifi_details.list_box);
+        *qs.network.base.revealer.borrow_mut() = Some(wifi_revealer.clone());
+        *qs.network.scan_button.borrow_mut() = Some(wifi_details.scan_button);
 
         // Connect Wi-Fi switch to toggle Wi-Fi enabled state
         {
-            let wifi_state = Rc::clone(&qs.wifi);
+            let wifi_state = Rc::clone(&qs.network);
             wifi_details
                 .wifi_switch
                 .connect_state_set(move |_, enabled| {
@@ -618,7 +618,7 @@ impl QuickSettingsWindow {
                     if wifi_state.updating_wifi_toggle.get() {
                         return glib::Propagation::Proceed;
                     }
-                    WifiService::global().set_wifi_enabled(enabled);
+                    NetworkService::global().set_wifi_enabled(enabled);
                     glib::Propagation::Proceed
                 });
         }
@@ -1068,7 +1068,7 @@ impl QuickSettingsWindow {
 
     /// Show inline Wi-Fi password dialog for the given SSID.
     pub fn show_wifi_password_dialog(&self, ssid: &str) {
-        wifi_card::show_password_dialog(&self.wifi, ssid);
+        network_card::show_password_dialog(&self.network, ssid);
     }
 
     // Position and visibility management
@@ -1203,8 +1203,8 @@ impl QuickSettingsWindow {
 
                 // Re-deliver current snapshot now that the window is mapped,
                 // so any deferred auth prompt is shown.
-                let snapshot = WifiService::global().snapshot();
-                wifi_card::on_network_changed(&qs.wifi, &snapshot, &qs.window);
+                let snapshot = NetworkService::global().snapshot();
+                network_card::on_network_changed(&qs.network, &snapshot, &qs.window);
             }
             ControlFlow::Break
         });
@@ -1222,8 +1222,8 @@ impl QuickSettingsWindow {
         // AUTH_TIMEOUT_SECS handles cleanup.
 
         // Unsubscribe from WiFi service to clean up the dead callback
-        if let Some(id) = self.wifi_callback_id.take() {
-            WifiService::global().unsubscribe(id);
+        if let Some(id) = self.network_callback_id.take() {
+            NetworkService::global().unsubscribe(id);
         }
 
         // Clear focus from any focused widget (e.g., password Entry) before closing.

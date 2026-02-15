@@ -45,8 +45,8 @@ use tracing::debug;
 use super::{
     DEBUG_MOBILE_MOCK_FILE, MM_ACCESS_TECH_EDGE, MM_ACCESS_TECH_GPRS, MM_ACCESS_TECH_GSM,
     MM_ACCESS_TECH_HSDPA, MM_ACCESS_TECH_HSPA_PLUS, MM_ACCESS_TECH_HSUPA, MM_ACCESS_TECH_LTE,
-    MM_ACCESS_TECH_LTE_CAT_M, MM_ACCESS_TECH_NR5G, MM_ACCESS_TECH_UMTS, NetworkUpdate,
-    access_technology_label, send_network_update,
+    MM_ACCESS_TECH_LTE_CAT_M, MM_ACCESS_TECH_NR5G, MM_ACCESS_TECH_UMTS, NmUpdate,
+    access_technology_label, send_nm_update,
 };
 
 /// Parsed state from the debug mock file.
@@ -180,7 +180,7 @@ pub fn send_mock_updates(mock: &MockMobileState) {
     debug!("Using mock mobile state: {:?}", mock.state);
 
     // Always report modem device presence.
-    send_network_update(NetworkUpdate::ModemDeviceExists);
+    send_nm_update(NmUpdate::ModemDeviceExists);
 
     let (operator, tech, signal) = if mock.state.is_registered() {
         (
@@ -192,7 +192,7 @@ pub fn send_mock_updates(mock: &MockMobileState) {
         (None, None, None)
     };
 
-    send_network_update(NetworkUpdate::MobileDeviceInfo {
+    send_nm_update(NmUpdate::MobileDeviceInfo {
         conn_name: if mock.state.is_registered() {
             Some("Mock Mobile".to_string())
         } else {
@@ -207,7 +207,7 @@ pub fn send_mock_updates(mock: &MockMobileState) {
         has_modem: true,
     });
 
-    send_network_update(NetworkUpdate::MobileEnabled(mock.state.is_enabled()));
+    send_nm_update(NmUpdate::MobileEnabled(mock.state.is_enabled()));
 }
 
 thread_local! {

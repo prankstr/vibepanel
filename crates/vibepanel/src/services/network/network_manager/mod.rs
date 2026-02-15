@@ -1,4 +1,4 @@
-//! NetworkService — Network state via NetworkManager over D-Bus.
+//! NmService — Network state via NetworkManager over D-Bus.
 //!
 //! Uses Gio's async D-Bus proxy; background threads deliver updates via `glib::idle_add_once()`.
 
@@ -15,7 +15,7 @@ use gtk4::glib::{self, Variant, VariantTy};
 use tracing::{debug, error, warn};
 
 use crate::services::callbacks::{CallbackId, Callbacks};
-use crate::services::wifi::{SecurityType, WifiNetwork, objpath_to_string};
+use crate::services::network::{SecurityType, WifiNetwork, objpath_to_string};
 
 // D-Bus Constants
 
@@ -125,7 +125,7 @@ struct MobileNmStatus {
 /// Wi-Fi networking state from NetworkManager.
 ///
 /// Groups all Wi-Fi–related fields that were previously spread across
-/// `NetworkSnapshot` to improve readability and make subsystems easier
+/// `NmSnapshot` to improve readability and make subsystems easier
 /// to reason about in isolation.
 #[derive(Debug, Clone, Default)]
 pub struct WifiState {
@@ -225,7 +225,7 @@ impl MobileState {
 
 /// Canonical snapshot of network state.
 #[derive(Debug, Clone)]
-pub struct NetworkSnapshot {
+pub struct NmSnapshot {
     /// Whether the NetworkManager service is available.
     pub available: bool,
     /// Wi-Fi networking state (connection, scanning, networks, etc.).
@@ -238,7 +238,7 @@ pub struct NetworkSnapshot {
     pub(crate) primary_connection_type: Option<String>,
 }
 
-impl NetworkSnapshot {
+impl NmSnapshot {
     fn unknown() -> Self {
         Self {
             available: false,
@@ -252,7 +252,7 @@ impl NetworkSnapshot {
 
 /// Messages sent from background threads to the main thread.
 #[derive(Debug)]
-enum NetworkUpdate {
+enum NmUpdate {
     /// Wi-Fi device discovered - path and interface name.
     WifiDeviceFound {
         path: String,
@@ -324,7 +324,7 @@ enum NetworkUpdate {
 }
 
 /// Shared, process-wide network service for Wi-Fi state and control.
-pub struct NetworkService {
+pub struct NmService {
     /// NetworkManager main proxy.
     nm_proxy: RefCell<Option<gio::DBusProxy>>,
     /// Wi-Fi device proxy.
@@ -332,9 +332,9 @@ pub struct NetworkService {
     /// Wi-Fi interface name (e.g., "wlan0").
     iface_name: RefCell<Option<String>>,
     /// Current snapshot of network state.
-    snapshot: RefCell<NetworkSnapshot>,
+    snapshot: RefCell<NmSnapshot>,
     /// Registered callbacks for state changes.
-    callbacks: Callbacks<NetworkSnapshot>,
+    callbacks: Callbacks<NmSnapshot>,
     /// Whether a scan is in progress.
     scan_in_progress: Cell<bool>,
     /// Last scan timestamp from NetworkManager.
@@ -357,14 +357,14 @@ pub struct NetworkService {
     mobile_connecting_local: Cell<bool>,
 }
 
-impl NetworkService {
-    /// Create a new NetworkService.
+impl NmService {
+    /// Create a new NmService.
     fn new() -> Rc<Self> {
         let service = Rc::new(Self {
             nm_proxy: RefCell::new(None),
             wifi_proxy: RefCell::new(None),
             iface_name: RefCell::new(None),
-            snapshot: RefCell::new(NetworkSnapshot::unknown()),
+            snapshot: RefCell::new(NmSnapshot::unknown()),
             callbacks: Callbacks::new(),
             scan_in_progress: Cell::new(false),
             last_scan_value: Cell::new(None),
@@ -393,10 +393,10 @@ impl NetworkService {
         service
     }
 
-    /// Get the global NetworkService singleton.
+    /// Get the global NmService singleton.
     pub fn global() -> Rc<Self> {
         thread_local! {
-            static INSTANCE: Rc<NetworkService> = NetworkService::new();
+            static INSTANCE: Rc<NmService> = NmService::new();
         }
 
         INSTANCE.with(|s| s.clone())
@@ -405,7 +405,7 @@ impl NetworkService {
     /// Register a callback to be invoked whenever the network state changes.
     pub fn connect<F>(&self, callback: F) -> CallbackId
     where
-        F: Fn(&NetworkSnapshot) + 'static,
+        F: Fn(&NmSnapshot) + 'static,
     {
         let id = self.callbacks.register(callback);
 
@@ -419,12 +419,12 @@ impl NetworkService {
         self.callbacks.unregister(id);
     }
 
-    pub fn snapshot(&self) -> NetworkSnapshot {
+    pub fn snapshot(&self) -> NmSnapshot {
         self.snapshot.borrow().clone()
     }
 
     /// Mutate the snapshot and unconditionally notify all callbacks.
-    fn notify_snapshot(&self, f: impl FnOnce(&mut NetworkSnapshot)) {
+    fn notify_snapshot(&self, f: impl FnOnce(&mut NmSnapshot)) {
         let mut snapshot = self.snapshot.borrow_mut();
         f(&mut snapshot);
         let clone = snapshot.clone();
@@ -436,7 +436,7 @@ impl NetworkService {
     ///
     /// The closure should apply its changes and return whether anything actually
     /// changed. If it returns `false`, callbacks are not invoked.
-    fn notify_snapshot_if(&self, f: impl FnOnce(&mut NetworkSnapshot) -> bool) {
+    fn notify_snapshot_if(&self, f: impl FnOnce(&mut NmSnapshot) -> bool) {
         let mut snapshot = self.snapshot.borrow_mut();
         if f(&mut snapshot) {
             let clone = snapshot.clone();
@@ -447,9 +447,9 @@ impl NetworkService {
 
     // Update Handling
 
-    fn apply_update(&self, update: NetworkUpdate) {
+    fn apply_update(&self, update: NmUpdate) {
         match update {
-            NetworkUpdate::WifiDeviceFound { path, iface_name } => {
+            NmUpdate::WifiDeviceFound { path, iface_name } => {
                 *self.iface_name.borrow_mut() = iface_name;
                 self.notify_snapshot_if(|s| {
                     let changed = !s.wifi.has_device;
@@ -458,25 +458,25 @@ impl NetworkService {
                 });
                 Self::create_wifi_proxy_from_self(self, &path);
             }
-            NetworkUpdate::EthernetDeviceExists => {
+            NmUpdate::EthernetDeviceExists => {
                 self.notify_snapshot_if(|s| {
                     let changed = !s.wired.has_device;
                     s.wired.has_device = true;
                     changed
                 });
             }
-            NetworkUpdate::ModemDeviceExists => {
+            NmUpdate::ModemDeviceExists => {
                 let is_new = !self.snapshot.borrow().mobile.has_device;
                 if is_new {
                     self.notify_snapshot(|s| s.mobile.has_device = true);
                     Self::fetch_mobile_device_info();
                 }
             }
-            NetworkUpdate::DeviceDiscoveryFailed => {
+            NmUpdate::DeviceDiscoveryFailed => {
                 // Device discovery failed - mark service as unavailable
                 self.set_unavailable();
             }
-            NetworkUpdate::ApDetails { ssid, strength } => {
+            NmUpdate::ApDetails { ssid, strength } => {
                 self.notify_snapshot(|s| {
                     s.wifi.connected = true;
                     s.wifi.ssid = ssid;
@@ -485,10 +485,10 @@ impl NetworkService {
                 // Also trigger a network list refresh.
                 self.refresh_networks_async();
             }
-            NetworkUpdate::ApDetailsFailed => {
+            NmUpdate::ApDetailsFailed => {
                 self.set_disconnected();
             }
-            NetworkUpdate::NetworksRefreshed {
+            NmUpdate::NetworksRefreshed {
                 networks,
                 last_scan,
             } => {
@@ -523,10 +523,10 @@ impl NetworkService {
                     s.wifi.failed_ssid = failed_ssid;
                 });
             }
-            NetworkUpdate::RefreshNetworks => {
+            NmUpdate::RefreshNetworks => {
                 self.refresh_networks_async();
             }
-            NetworkUpdate::ConnectionAttemptFinished { ssid, success } => {
+            NmUpdate::ConnectionAttemptFinished { ssid, success } => {
                 // Clear connecting state.
                 *self.connecting_ssid.borrow_mut() = None;
 
@@ -551,7 +551,7 @@ impl NetworkService {
 
                 self.refresh_networks_async();
             }
-            NetworkUpdate::WiredDeviceInfo {
+            NmUpdate::WiredDeviceInfo {
                 iface_name,
                 conn_name,
                 speed,
@@ -568,7 +568,7 @@ impl NetworkService {
                     changed
                 });
             }
-            NetworkUpdate::MobileDeviceInfo {
+            NmUpdate::MobileDeviceInfo {
                 conn_name,
                 operator_name,
                 access_technology,
@@ -630,7 +630,7 @@ impl NetworkService {
                     changed
                 });
             }
-            NetworkUpdate::MobileConnectionAttemptFinished { success } => {
+            NmUpdate::MobileConnectionAttemptFinished { success } => {
                 // nmcli returned — clear the local connecting intent flag.
                 // The next MobileDeviceInfo (triggered right after this) will
                 // use the real D-Bus state.
@@ -653,7 +653,7 @@ impl NetworkService {
                 }
             }
             #[cfg(debug_assertions)]
-            NetworkUpdate::MobileEnabled(enabled) => {
+            NmUpdate::MobileEnabled(enabled) => {
                 self.notify_snapshot_if(|s| {
                     let new_val = Some(enabled);
                     let changed = s.mobile.enabled != new_val;
@@ -870,7 +870,7 @@ impl NetworkService {
         if !self.snapshot.borrow().available {
             return; // Already unavailable
         }
-        self.notify_snapshot(|s| *s = NetworkSnapshot::unknown());
+        self.notify_snapshot(|s| *s = NmSnapshot::unknown());
 
         // Clear proxies.
         self.nm_proxy.replace(None);
@@ -886,7 +886,7 @@ impl NetworkService {
                 Ok(paths) => paths,
                 Err(e) => {
                     warn!("Failed to get device paths: {}", e);
-                    send_network_update(NetworkUpdate::DeviceDiscoveryFailed);
+                    send_nm_update(NmUpdate::DeviceDiscoveryFailed);
                     return;
                 }
             };
@@ -923,10 +923,10 @@ impl NetworkService {
 
             // Notify if ethernet device exists (for adaptive card title)
             if has_ethernet {
-                send_network_update(NetworkUpdate::EthernetDeviceExists);
+                send_nm_update(NmUpdate::EthernetDeviceExists);
             }
             if has_modem {
-                send_network_update(NetworkUpdate::ModemDeviceExists);
+                send_nm_update(NmUpdate::ModemDeviceExists);
             }
 
             let Some(path) = wifi_path else {
@@ -937,7 +937,7 @@ impl NetworkService {
             debug!("Found Wi-Fi device: {} (iface: {:?})", path, iface_name);
 
             // Send update to main thread.
-            send_network_update(NetworkUpdate::WifiDeviceFound { path, iface_name });
+            send_nm_update(NmUpdate::WifiDeviceFound { path, iface_name });
         });
     }
 
@@ -989,11 +989,11 @@ impl NetworkService {
         thread::spawn(move || match Self::get_device_type_sync(&path) {
             Ok((dtype, _)) if dtype == ETHERNET_DEVICE_TYPE => {
                 debug!("New ethernet device detected: {}", path);
-                send_network_update(NetworkUpdate::EthernetDeviceExists);
+                send_nm_update(NmUpdate::EthernetDeviceExists);
             }
             Ok((dtype, _)) if dtype == MODEM_DEVICE_TYPE => {
                 debug!("New modem device detected: {}", path);
-                send_network_update(NetworkUpdate::ModemDeviceExists);
+                send_nm_update(NmUpdate::ModemDeviceExists);
             }
             _ => {}
         });
@@ -1054,8 +1054,8 @@ impl NetworkService {
             if std::path::Path::new("/tmp/vibepanel-debug-wired").exists() {
                 debug!("Using mock wired device info (debug mode)");
                 // Also send EthernetDeviceExists so card shows "Network" title
-                send_network_update(NetworkUpdate::EthernetDeviceExists);
-                send_network_update(NetworkUpdate::WiredDeviceInfo {
+                send_nm_update(NmUpdate::EthernetDeviceExists);
+                send_nm_update(NmUpdate::WiredDeviceInfo {
                     iface_name: Some("enp0s31f6".to_string()),
                     conn_name: Some("Wired connection 1".to_string()),
                     speed: Some(1000),
@@ -1067,7 +1067,7 @@ impl NetworkService {
                 Ok(paths) => paths,
                 Err(e) => {
                     warn!("Failed to get device paths for wired lookup: {}", e);
-                    send_network_update(NetworkUpdate::WiredDeviceInfo {
+                    send_nm_update(NmUpdate::WiredDeviceInfo {
                         iface_name: None,
                         conn_name: None,
                         speed: None,
@@ -1088,7 +1088,7 @@ impl NetworkService {
                                     "Found wired device: {} ({} Mb/s), connection: {:?}",
                                     iface_name, speed, conn_name
                                 );
-                                send_network_update(NetworkUpdate::WiredDeviceInfo {
+                                send_nm_update(NmUpdate::WiredDeviceInfo {
                                     iface_name: Some(iface_name),
                                     conn_name,
                                     speed: if speed > 0 { Some(speed) } else { None },
@@ -1105,7 +1105,7 @@ impl NetworkService {
             }
 
             // No wired device found
-            send_network_update(NetworkUpdate::WiredDeviceInfo {
+            send_nm_update(NmUpdate::WiredDeviceInfo {
                 iface_name: None,
                 conn_name: None,
                 speed: None,
@@ -1148,7 +1148,7 @@ impl NetworkService {
                 None
             });
 
-            send_network_update(NetworkUpdate::MobileDeviceInfo {
+            send_nm_update(NmUpdate::MobileDeviceInfo {
                 conn_name,
                 operator_name: mm_info.operator_name,
                 access_technology: mm_info.access_technology,
@@ -1414,7 +1414,7 @@ impl NetworkService {
     /// Create wifi proxy - called from apply_update on main thread.
     fn create_wifi_proxy_from_self(&self, path: &str) {
         // Get a strong Rc to self for the callback.
-        let this = NetworkService::global();
+        let this = NmService::global();
         Self::create_wifi_proxy(&this, path);
     }
 
@@ -1583,11 +1583,11 @@ impl NetworkService {
         // Fetch AP details in background.
         thread::spawn(move || match Self::get_ap_details_sync(&ap_path) {
             Ok((ssid, strength)) => {
-                send_network_update(NetworkUpdate::ApDetails { ssid, strength });
+                send_nm_update(NmUpdate::ApDetails { ssid, strength });
             }
             Err(e) => {
                 debug!("Failed to get AP details: {}", e);
-                send_network_update(NetworkUpdate::ApDetailsFailed);
+                send_nm_update(NmUpdate::ApDetailsFailed);
             }
         });
     }
@@ -1677,7 +1677,7 @@ impl NetworkService {
             let sorted = Self::sort_networks(deduped);
 
             // Send update to main thread.
-            send_network_update(NetworkUpdate::NetworksRefreshed {
+            send_nm_update(NmUpdate::NetworksRefreshed {
                 networks: sorted,
                 last_scan,
             });
@@ -1945,12 +1945,12 @@ impl NetworkService {
             // which fires update_nm_flags and MM signal subscriptions.
             // Clear local connecting intent so the real state takes over.
             if enabled {
-                send_network_update(NetworkUpdate::MobileConnectionAttemptFinished {
+                send_nm_update(NmUpdate::MobileConnectionAttemptFinished {
                     success: dbus_result.is_ok(),
                 });
             }
             Self::fetch_mobile_device_info();
-            send_network_update(NetworkUpdate::RefreshNetworks);
+            send_nm_update(NmUpdate::RefreshNetworks);
         });
     }
 
@@ -1981,9 +1981,7 @@ impl NetworkService {
             let Some(conn_name) = conn_name else {
                 warn!("No GSM/CDMA profile found to connect");
                 // No profile — clear connecting intent and refresh.
-                send_network_update(NetworkUpdate::MobileConnectionAttemptFinished {
-                    success: false,
-                });
+                send_nm_update(NmUpdate::MobileConnectionAttemptFinished { success: false });
                 Self::fetch_mobile_device_info();
                 return;
             };
@@ -2012,9 +2010,9 @@ impl NetworkService {
             };
             // nmcli returned — NM state is now settled. Clear local connecting intent
             // first, then fetch real mobile state.
-            send_network_update(NetworkUpdate::MobileConnectionAttemptFinished { success });
+            send_nm_update(NmUpdate::MobileConnectionAttemptFinished { success });
             Self::fetch_mobile_device_info();
-            send_network_update(NetworkUpdate::RefreshNetworks);
+            send_nm_update(NmUpdate::RefreshNetworks);
         });
     }
 
@@ -2075,7 +2073,7 @@ impl NetworkService {
                 }
             }
 
-            send_network_update(NetworkUpdate::RefreshNetworks);
+            send_nm_update(NmUpdate::RefreshNetworks);
         });
     }
 
@@ -2110,7 +2108,7 @@ impl NetworkService {
             None::<&gio::Cancellable>,
             move |_res| {
                 // Callback runs on main GLib loop - request refresh.
-                send_network_update(NetworkUpdate::RefreshNetworks);
+                send_nm_update(NmUpdate::RefreshNetworks);
             },
         );
     }
@@ -2188,7 +2186,7 @@ impl NetworkService {
             };
 
             // Signal that connection attempt finished (success or failure).
-            send_network_update(NetworkUpdate::ConnectionAttemptFinished { ssid, success });
+            send_nm_update(NmUpdate::ConnectionAttemptFinished { ssid, success });
         });
     }
 
@@ -2208,7 +2206,7 @@ impl NetworkService {
             }
 
             // Request refresh.
-            send_network_update(NetworkUpdate::RefreshNetworks);
+            send_nm_update(NmUpdate::RefreshNetworks);
         });
     }
 
@@ -2235,7 +2233,7 @@ impl NetworkService {
                 .unwrap_or_else(|e| e.into_inner()) = None;
 
             // Request refresh.
-            send_network_update(NetworkUpdate::RefreshNetworks);
+            send_nm_update(NmUpdate::RefreshNetworks);
         });
     }
 }
@@ -2245,9 +2243,9 @@ impl NetworkService {
 /// # Thread safety
 /// Safe to call from any thread — `glib::idle_add_once` marshals the
 /// closure to the main loop.
-fn send_network_update(update: NetworkUpdate) {
+fn send_nm_update(update: NmUpdate) {
     glib::idle_add_once(move || {
-        NetworkService::global().apply_update(update);
+        NmService::global().apply_update(update);
     });
 }
 

@@ -5,7 +5,7 @@
 //! - `window` - The main Quick Settings window (layer shell surface)
 //! - `ui_helpers` - Shared UI builders (cards, rows, etc.)
 //! - `components` - Reusable component builders (SliderRowBuilder, etc.)
-//! - `wifi_card` - Wi-Fi panel logic and icon helpers
+//! - `network_card` - Network panel logic and icon helpers (Wi-Fi, Ethernet, Mobile)
 //! - `bluetooth_card` - Bluetooth panel logic and icon helpers
 //! - `vpn_card` - VPN panel logic and icon helpers
 //! - `audio_card` - Audio panel logic (volume, sinks)
@@ -22,11 +22,11 @@ pub mod brightness_card;
 pub mod components;
 pub mod idle_inhibitor_card;
 pub mod mic_card;
+pub mod network_card;
 pub mod power_card;
 pub mod ui_helpers;
 pub mod updates_card;
 pub mod vpn_card;
-pub mod wifi_card;
 pub mod window;
 
 pub use bar_widget::{QuickSettingsConfig, QuickSettingsWidget};

@@ -13,14 +13,14 @@ use tracing::{debug, warn};
 use super::QuickSettingsWindowHandle;
 use super::audio_card::volume_icon_name;
 use super::bluetooth_card::bt_icon_name;
+use super::network_card::{NetworkIconContext, mobile_state_icon_name, network_icon_name};
 use super::vpn_card::vpn_icon_name;
-use super::wifi_card::{NetworkIconContext, mobile_state_icon_name, network_icon_name};
 use crate::services::audio::{AudioService, AudioSnapshot};
 use crate::services::bluetooth::{BluetoothService, BluetoothSnapshot};
 use crate::services::config_manager::ConfigManager;
+use crate::services::network::{NetworkService, NetworkSnapshot};
 use crate::services::tooltip::TooltipManager;
 use crate::services::vpn::{VpnService, VpnSnapshot};
-use crate::services::wifi::{WifiService, WifiSnapshot};
 use crate::styles::{icon, qs, state, widget};
 use crate::widgets::BaseWidget;
 use crate::widgets::WidgetConfig;
@@ -304,7 +304,7 @@ impl QuickSettingsWidget {
 
         // Unified Network icon (Wi-Fi + Ethernet).
         if cards.wifi || cards.cellular {
-            let wifi_snapshot = WifiService::global().snapshot();
+            let wifi_snapshot = NetworkService::global().snapshot();
             let wifi_enabled = wifi_snapshot.wifi_enabled().unwrap_or(false);
             let wifi_connected = wifi_snapshot.connected();
             let wired_connected = wifi_snapshot.wired_connected();
@@ -322,9 +322,9 @@ impl QuickSettingsWidget {
                 wifi_icon.widget().add_css_class(state::ICON_ACTIVE);
             }
 
-            // Subscribe to WifiService updates
+            // Subscribe to NetworkService updates
             let wifi_icon_handle = wifi_icon.clone();
-            WifiService::global().connect(move |snapshot: &WifiSnapshot| {
+            NetworkService::global().connect(move |snapshot: &NetworkSnapshot| {
                 let widget = wifi_icon_handle.widget();
 
                 if !snapshot.available() {
@@ -380,7 +380,7 @@ impl QuickSettingsWidget {
 
         // Mobile icon (separate from Network icon)
         if cards.cellular {
-            let snapshot = WifiService::global().snapshot();
+            let snapshot = NetworkService::global().snapshot();
             let quality = snapshot.mobile_signal_quality().unwrap_or(0);
             let mobile_enabled = snapshot.mobile_enabled().unwrap_or(false);
             let initial_icon =
@@ -397,7 +397,7 @@ impl QuickSettingsWidget {
             }
 
             let mobile_icon_handle = mobile_icon.clone();
-            WifiService::global().connect(move |snapshot: &WifiSnapshot| {
+            NetworkService::global().connect(move |snapshot: &NetworkSnapshot| {
                 let widget = mobile_icon_handle.widget();
                 widget.set_visible(snapshot.mobile_supported());
 
