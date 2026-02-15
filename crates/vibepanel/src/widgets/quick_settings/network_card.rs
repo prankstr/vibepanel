@@ -1,9 +1,10 @@
-//! Wi-Fi card for Quick Settings panel.
+//! Network card for Quick Settings panel.
 //!
 //! This module contains:
-//! - Wi-Fi icon helpers (merged from qs_wifi_helpers.rs)
-//! - Wi-Fi details panel building
-//! - Network list population
+//! - Network icon helpers (Wi-Fi, cellular, wired)
+//! - Wi-Fi details panel and network list population
+//! - Ethernet status display
+//! - Mobile/cellular row with ModemManager integration
 //! - Password dialog handling
 
 use std::cell::{Cell, RefCell};
@@ -82,6 +83,8 @@ impl NetworkIconContext {
     }
 }
 
+/// Pick the card icon based on connection state.
+/// Precedence: unavailable → wired → mobile-primary → no-wifi fallback → wifi.
 pub fn network_icon_name(ctx: &NetworkIconContext) -> &'static str {
     // Service unavailable - show offline icon regardless of device type
     if !ctx.available {
@@ -296,18 +299,15 @@ pub struct MobileRowWidgets {
     pub switch: Switch,
     /// Mobile action button (Connect/Disconnect) in expanded details section.
     pub action_button: Button,
-    /// Mobile subtitle container (HBox) in expanded details section.
-    /// Children are cached labels updated in-place instead of being rebuilt.
-    pub subtitle_box: GtkBox,
     /// Cached label for simple mobile states (Off / Connecting… / Disconnected).
     /// Visible when the mobile subtitle shows a single muted-color label.
-    pub status_label: Option<Label>,
+    pub status_label: Label,
     /// Cached accent label for "Connected" state.
     /// Visible only when mobile is active and connected.
-    pub accent_label: Option<Label>,
+    pub accent_label: Label,
     /// Cached muted label for connection details ("• LTE • 75%").
     /// Visible only when mobile is connected and has extra info to show.
-    pub details_label: Option<Label>,
+    pub details_label: Label,
     /// Mobile row icon handle for active/inactive styling.
     pub icon_handle: IconHandle,
     /// Mobile connection row (hidden when modem is disabled).
@@ -690,7 +690,7 @@ fn build_ethernet_row(snapshot: &NetworkSnapshot) -> GtkBox {
         .title(title)
         .subtitle_widget(subtitle_widget.upcast())
         .leading_widget(icon_handle.widget())
-        .css_class(qs::WIFI_ROW)
+        .css_class(qs::NETWORK_ROW)
         .build();
 
     // Connection row container with background styling
@@ -724,44 +724,12 @@ fn build_ethernet_row(snapshot: &NetworkSnapshot) -> GtkBox {
 /// - Connected: accent "Connected" + optional muted " · LTE · 85%"
 /// - Failed: error "Connection failed"
 /// - Disconnected: muted "Disconnected"
-fn set_mobile_subtitle(widgets: &mut MobileRowWidgets, snapshot: &NetworkSnapshot) {
+fn set_mobile_subtitle(widgets: &MobileRowWidgets, snapshot: &NetworkSnapshot) {
     let mobile_enabled = snapshot.mobile_enabled().unwrap_or(false);
-    let subtitle_box = &widgets.subtitle_box;
 
-    // Lazily create and cache labels on first call.
-    if widgets.status_label.is_none() {
-        let status = Label::new(None);
-        status.add_css_class(color::MUTED);
-        status.add_css_class(row::QS_SUBTITLE);
-        subtitle_box.append(&status);
-        widgets.status_label = Some(status);
-
-        let accent = Label::new(None);
-        accent.add_css_class(color::ACCENT);
-        accent.add_css_class(row::QS_SUBTITLE);
-        subtitle_box.append(&accent);
-        widgets.accent_label = Some(accent);
-
-        let details = Label::new(None);
-        details.add_css_class(color::MUTED);
-        details.add_css_class(row::QS_SUBTITLE);
-        details.set_ellipsize(gtk4::pango::EllipsizeMode::End);
-        subtitle_box.append(&details);
-        widgets.details_label = Some(details);
-    }
-
-    let status_label = widgets
-        .status_label
-        .as_ref()
-        .expect("labels populated above");
-    let accent_label = widgets
-        .accent_label
-        .as_ref()
-        .expect("labels populated above");
-    let details_label = widgets
-        .details_label
-        .as_ref()
-        .expect("labels populated above");
+    let status_label = &widgets.status_label;
+    let accent_label = &widgets.accent_label;
+    let details_label = &widgets.details_label;
 
     if !mobile_enabled {
         status_label.set_text("Off");
@@ -880,6 +848,22 @@ fn build_mobile_row(state: &Rc<NetworkCardState>, snapshot: &NetworkSnapshot) ->
 
     let subtitle_box = GtkBox::new(Orientation::Horizontal, 0);
 
+    let status_label = Label::new(None);
+    status_label.add_css_class(color::MUTED);
+    status_label.add_css_class(row::QS_SUBTITLE);
+    subtitle_box.append(&status_label);
+
+    let accent_label = Label::new(None);
+    accent_label.add_css_class(color::ACCENT);
+    accent_label.add_css_class(row::QS_SUBTITLE);
+    subtitle_box.append(&accent_label);
+
+    let details_label = Label::new(None);
+    details_label.add_css_class(color::MUTED);
+    details_label.add_css_class(row::QS_SUBTITLE);
+    details_label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+    subtitle_box.append(&details_label);
+
     let action_button = create_row_action_label(if mobile_active {
         "Disconnect"
     } else {
@@ -901,7 +885,7 @@ fn build_mobile_row(state: &Rc<NetworkCardState>, snapshot: &NetworkSnapshot) ->
         .subtitle_widget(subtitle_box.clone().upcast())
         .leading_widget(icon_handle.widget())
         .trailing_widget(action_button.clone().upcast())
-        .css_class(qs::WIFI_ROW)
+        .css_class(qs::NETWORK_ROW)
         .build();
 
     let connection_row = GtkBox::new(Orientation::Vertical, 0);
@@ -917,31 +901,29 @@ fn build_mobile_row(state: &Rc<NetworkCardState>, snapshot: &NetworkSnapshot) ->
     container.append(&connection_row);
     container.set_visible(snapshot.mobile_supported());
 
-    let mut widgets = MobileRowWidgets {
+    let widgets = MobileRowWidgets {
         switch: mobile_switch,
         action_button,
-        subtitle_box,
-        status_label: None,
-        accent_label: None,
-        details_label: None,
+        status_label,
+        accent_label,
+        details_label,
         icon_handle,
         connection_row,
         title_label: row_result.title,
     };
-    set_mobile_subtitle(&mut widgets, snapshot);
+    set_mobile_subtitle(&widgets, snapshot);
     *state.mobile.widgets.borrow_mut() = Some(widgets);
 
     container
 }
 
-/// Update the Ethernet row visibility and content based on connection state.
+/// Update the Ethernet row visibility based on connection state.
+///
+/// The subtitle (link speed) is intentionally static — set once at row creation
+/// and not updated on link renegotiation, which is rare for wired connections.
 pub fn update_ethernet_row(state: &NetworkCardState, snapshot: &NetworkSnapshot) {
     if let Some(ethernet_row) = state.ethernet_row.borrow().as_ref() {
         ethernet_row.set_visible(snapshot.wired_connected());
-
-        // If connected and row is visible, we might want to update the subtitle
-        // For now, the subtitle is static after creation. If we need dynamic updates,
-        // we'd need to store subtitle label reference and update it here.
     }
 }
 
@@ -1150,7 +1132,7 @@ pub fn populate_wifi_list(
             .title(&net.ssid)
             .leading_widget(leading_icon)
             .trailing_widget(right_widget)
-            .css_class(qs::WIFI_ROW);
+            .css_class(qs::NETWORK_ROW);
 
         if net.active && !is_connecting {
             // Active network: accent "Connected" + muted extras
@@ -1655,12 +1637,12 @@ pub fn on_network_changed(
                 hide_password_dialog(state);
             }
             // If connecting_ssid matches target, keep showing animation (do nothing)
-        } else if let Some(ref _failed_ssid) = nm_snap.wifi.failed_ssid {
+        } else if let Some(ref failed_ssid) = nm_snap.wifi.failed_ssid {
             // NM doesn't provide failure reasons, so prompting for password is misleading.
             // Show inline error instead.
             debug!(
                 "NM connection failed for '{}', showing inline error",
-                _failed_ssid
+                failed_ssid
             );
             schedule_failed_clear(state, || NetworkService::global().clear_failed_state());
         }

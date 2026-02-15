@@ -46,7 +46,7 @@ use super::{
     DEBUG_MOBILE_MOCK_FILE, MM_ACCESS_TECH_EDGE, MM_ACCESS_TECH_GPRS, MM_ACCESS_TECH_GSM,
     MM_ACCESS_TECH_HSDPA, MM_ACCESS_TECH_HSPA_PLUS, MM_ACCESS_TECH_HSUPA, MM_ACCESS_TECH_LTE,
     MM_ACCESS_TECH_LTE_CAT_M, MM_ACCESS_TECH_NR5G, MM_ACCESS_TECH_UMTS, NmUpdate,
-    access_technology_label, send_nm_update,
+    mobile::access_technology_label, send_nm_update,
 };
 
 /// Parsed state from the debug mock file.

@@ -345,9 +345,9 @@ pub mod qs {
     /// Updates error row (`.qs-updates-error`).
     pub const UPDATES_ERROR: &str = "qs-updates-error";
 
-    // Wi-Fi card
-    /// Wi-Fi network row (`.qs-wifi-row`).
-    pub const WIFI_ROW: &str = "qs-wifi-row";
+    // Network card
+    /// Network row shared by Wi-Fi, Ethernet, and Mobile sections (`.qs-network-row`).
+    pub const NETWORK_ROW: &str = "qs-network-row";
 
     /// Wi-Fi base signal icon (dimmed, full bars) (`.qs-wifi-base`).
     pub const WIFI_BASE: &str = "qs-wifi-base";
