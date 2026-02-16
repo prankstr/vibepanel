@@ -132,6 +132,21 @@ impl NetworkSnapshot {
         }
     }
 
+    /// Whether Wi-Fi is in any connecting/scanning state that warrants a spinner.
+    ///
+    /// Covers three cases:
+    ///   1. User-initiated connection (`connecting_ssid` is set)
+    ///   2. NM device is in a connecting state (PREPARE through SECONDARIES)
+    ///   3. Wi-Fi enabled, not connected, not wired, initial scan in progress
+    pub fn wifi_connecting(&self) -> bool {
+        self.connecting_ssid().is_some()
+            || self.wifi_device_connecting()
+            || (self.wifi_enabled().unwrap_or(false)
+                && !self.connected()
+                && !self.wired_connected()
+                && (self.scanning() || !self.is_ready()))
+    }
+
     pub fn connection_state(&self) -> NetworkConnectionState {
         match self {
             Self::NetworkManager(inner) => {
@@ -302,7 +317,7 @@ impl NetworkSnapshot {
 
     /// Best available display name for the mobile connection.
     ///
-    /// Prefers the operator name (e.g., "T-Mobile"), falls back to the NM
+    /// Prefers the operator name, falls back to the NM
     /// connection profile name (e.g., "MyCarrier"), and finally to "Mobile".
     pub fn mobile_display_name(&self) -> &str {
         self.mobile_operator()

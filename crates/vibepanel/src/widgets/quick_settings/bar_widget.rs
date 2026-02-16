@@ -308,12 +308,7 @@ impl QuickSettingsWidget {
             if !wifi_enabled && !wired_connected {
                 wifi_icon.widget().add_css_class(qs::WIFI_DISABLED_ICON);
             }
-            let wifi_connecting = snapshot.connecting_ssid().is_some()
-                || snapshot.wifi_device_connecting()
-                || (wifi_enabled
-                    && !snapshot.connected()
-                    && !wired_connected
-                    && (snapshot.scanning() || !snapshot.is_ready()));
+            let wifi_connecting = snapshot.wifi_connecting();
             if wifi_connecting {
                 wifi_icon.set_spinning(true);
             }
@@ -345,12 +340,7 @@ impl QuickSettingsWidget {
                 let ctx = NetworkIconContext::for_bar(snapshot);
                 wifi_icon_handle.set_icon(network_icon_name(&ctx));
 
-                let wifi_connecting = snapshot.connecting_ssid().is_some()
-                    || snapshot.wifi_device_connecting()
-                    || (enabled
-                        && !connected
-                        && !wired_connected
-                        && (snapshot.scanning() || !snapshot.is_ready()));
+                let wifi_connecting = snapshot.wifi_connecting();
                 wifi_icon_handle.set_spinning(wifi_connecting);
 
                 if !enabled && !wired_connected {
@@ -391,7 +381,7 @@ impl QuickSettingsWidget {
         }
 
         // Mobile icon — separate from the Wi-Fi/Ethernet icon.
-        // Visible whenever a modem is present, regardless of icon theme.
+        // Visible when a modem with SIM and profile is available (mobile_supported).
         if cards.network {
             let snapshot = NetworkService::global().snapshot();
             let quality = snapshot.mobile_signal_quality().unwrap_or(0);

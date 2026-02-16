@@ -167,11 +167,7 @@ pub fn is_material_unified(snapshot: &NetworkSnapshot) -> bool {
 /// appropriate unified icon: combined (cell_wifi), cellular-only, or
 /// wifi/wired. Falls back to the standard [`network_icon_name`] when
 /// Material unified mode is inactive.
-///
-/// `for_bar` controls the icon context: the bar widget zeros out mobile
-/// fields so the base icon only reflects wifi/wired (the bar has a separate
-/// cellular icon slot).
-pub fn resolve_material_network_icon(snapshot: &NetworkSnapshot, for_bar: bool) -> &'static str {
+pub fn resolve_material_network_icon(snapshot: &NetworkSnapshot) -> &'static str {
     let material_unified = snapshot.mobile_supported() && IconsService::global().uses_material();
     let wifi_or_wired = snapshot.connected() || snapshot.wired_connected();
 
@@ -181,11 +177,7 @@ pub fn resolve_material_network_icon(snapshot: &NetworkSnapshot, for_bar: bool) 
         let quality = snapshot.mobile_signal_quality().unwrap_or(0);
         cellular_signal_icon_name(quality)
     } else {
-        let ctx = if for_bar {
-            NetworkIconContext::for_bar(snapshot)
-        } else {
-            NetworkIconContext::from_snapshot(snapshot)
-        };
+        let ctx = NetworkIconContext::from_snapshot(snapshot);
         let icon_name = network_icon_name(&ctx);
         // In Material mode, use the regular wifi shape for disabled state —
         // the WIFI_DISABLED_ICON CSS class dims the color instead.
@@ -858,7 +850,7 @@ fn build_mobile_row(state: &Rc<NetworkCardState>, snapshot: &NetworkSnapshot) ->
     } else {
         "Connect"
     });
-    action_button.set_sensitive(mobile_enabled);
+    action_button.set_sensitive(!snapshot.mobile_connecting() && mobile_enabled);
     action_button.connect_clicked(move |_| {
         let service = NetworkService::global();
         let snap = service.snapshot();
@@ -1838,22 +1830,12 @@ pub fn on_network_changed(
             icon_handle.remove_css_class(state::SERVICE_UNAVAILABLE);
 
             let material_unified = is_material_unified(snapshot);
-            icon_handle.set_icon(resolve_material_network_icon(snapshot, false));
+            icon_handle.set_icon(resolve_material_network_icon(snapshot));
 
             // Spinner: show when wifi or cellular is connecting, but only
             // when the expanded details aren't visible (they have their own
             // per-row spinners, so showing both would be redundant).
-            //
-            // WiFi connecting covers three cases:
-            //   1. User-initiated connection (connecting_ssid is set)
-            //   2. WiFi just enabled, scanning for networks to auto-connect
-            //   3. WiFi enabled, initial scan not yet complete
-            let wifi_connecting = snapshot.connecting_ssid().is_some()
-                || snapshot.wifi_device_connecting()
-                || (enabled
-                    && !snapshot.connected()
-                    && !snapshot.wired_connected()
-                    && (snapshot.scanning() || !snapshot.is_ready()));
+            let wifi_connecting = snapshot.wifi_connecting();
             let is_connecting = wifi_connecting || snapshot.mobile_connecting();
             let expanded = state
                 .base

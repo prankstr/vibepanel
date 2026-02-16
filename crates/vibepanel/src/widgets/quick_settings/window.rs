@@ -534,7 +534,7 @@ impl QuickSettingsWindow {
         // Build custom subtitle widget with connection status icons
         let subtitle_result = build_network_subtitle(&snapshot);
 
-        let icon_name = resolve_material_network_icon(&snapshot, false);
+        let icon_name = resolve_material_network_icon(&snapshot);
         let icon_active =
             (wifi_enabled && wifi_connected) || wired_connected || snapshot.mobile_active();
 
@@ -576,12 +576,7 @@ impl QuickSettingsWindow {
         }
 
         // Show spinner when wifi or cellular is connecting/scanning
-        let wifi_connecting = snapshot.connecting_ssid().is_some()
-            || snapshot.wifi_device_connecting()
-            || (wifi_enabled
-                && !wifi_connected
-                && !wired_connected
-                && (snapshot.scanning() || !snapshot.is_ready()));
+        let wifi_connecting = snapshot.wifi_connecting();
         let is_connecting = wifi_connecting || snapshot.mobile_connecting();
         if is_connecting {
             network_card.icon_handle.set_spinning(true);

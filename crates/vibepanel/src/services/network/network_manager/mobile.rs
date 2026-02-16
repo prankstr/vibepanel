@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use gtk4::gio::{self, prelude::*};
 use gtk4::glib::{self, Variant};
-use tracing::{debug, error, warn};
+use tracing::{error, warn};
 
 use super::{
     IFACE_ACTIVE_CONN, IFACE_SETTINGS, IFACE_SETTINGS_CONN, MM_ACCESS_TECH_EDGE,
@@ -317,7 +317,7 @@ impl NmService {
         }
 
         if v.n_children() > 0 {
-            debug!(
+            warn!(
                 "SignalQuality: primary (u32, bool) parse failed, falling back to child_value(0)"
             );
             return v.child_value(0).get::<u32>().unwrap_or(0);
@@ -391,11 +391,7 @@ impl NmService {
             }
             // The WwanEnabled property change triggers NM's PropertiesChanged
             // signal, which fires update_nm_flags → fetch_mobile_device_info.
-            // Reuse MobileConnectionAttemptFinished (despite the name) to clear
-            // connecting_local and set the failed flag on error — the handler
-            // does exactly what we need for both enable/disable and connection
-            // attempts.
-            send_nm_update(NmUpdate::MobileConnectionAttemptFinished {
+            send_nm_update(NmUpdate::MobileToggleFinished {
                 success: dbus_result.is_ok(),
             });
             Self::fetch_mobile_device_info();

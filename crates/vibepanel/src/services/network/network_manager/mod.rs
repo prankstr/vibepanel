@@ -235,9 +235,15 @@ enum NmUpdate {
         supported: bool,
         has_modem: bool,
     },
-    /// Sent after nmcli returns. Clears the local connecting intent flag so the
-    /// next MobileDeviceInfo uses the real D-Bus state.
+    /// Sent after nmcli connect/disconnect returns. Clears the local connecting
+    /// intent flag so the next MobileDeviceInfo uses the real D-Bus state.
     MobileConnectionAttemptFinished {
+        success: bool,
+    },
+    /// Sent after toggling WwanEnabled via D-Bus. Semantically the same as
+    /// `MobileConnectionAttemptFinished` but makes the call site's intent
+    /// explicit.
+    MobileToggleFinished {
         success: bool,
     },
     #[cfg(debug_assertions)]
@@ -528,8 +534,8 @@ impl NmService {
                 // "Connecting…" before D-Bus signals arrive. When NM confirms
                 // active/connecting, the local flag is redundant and cleared.
                 // If NM shows neither, keep the flag until the next update.
-                // `MobileConnectionAttemptFinished` clears it unconditionally
-                // as a safety net.
+                // `MobileConnectionAttemptFinished` / `MobileToggleFinished`
+                // clears it unconditionally as a safety net.
                 let (effective_connecting, clear_local) = mobile::resolve_mobile_connecting(
                     self.mobile.connecting_local.get(),
                     active,
@@ -561,7 +567,8 @@ impl NmService {
                     changed
                 });
             }
-            NmUpdate::MobileConnectionAttemptFinished { success } => {
+            NmUpdate::MobileConnectionAttemptFinished { success }
+            | NmUpdate::MobileToggleFinished { success } => {
                 // Clear local connecting intent; the next MobileDeviceInfo
                 // will use real D-Bus state.
                 self.mobile.connecting_local.set(false);
