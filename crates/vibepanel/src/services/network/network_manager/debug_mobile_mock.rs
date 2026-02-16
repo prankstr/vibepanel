@@ -21,7 +21,7 @@
 //! ```text
 //! connected
 //! signal=85
-//! operator=T-Mobile
+//! operator=MyCarrier
 //! tech=5g
 //! ```
 //!

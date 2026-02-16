@@ -284,7 +284,7 @@ impl NetworkSnapshot {
         }
     }
 
-    /// Connection profile name for the active mobile connection (e.g., "T-Mobile").
+    /// Connection profile name for the active mobile connection (e.g., "MyCarrier").
     pub fn mobile_name(&self) -> Option<&str> {
         match self {
             Self::NetworkManager(inner) => inner.mobile.name.as_deref(),

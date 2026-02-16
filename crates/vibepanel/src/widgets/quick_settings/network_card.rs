@@ -2469,9 +2469,9 @@ mod tests {
         let mut snapshot = test_snapshot();
         snapshot.mobile.is_primary = true;
         snapshot.mobile.active = true;
-        snapshot.mobile.operator = Some("T-Mobile".to_string());
+        snapshot.mobile.operator = Some("MyCarrier".to_string());
         let wrapped = NetworkSnapshot::NetworkManager(snapshot);
-        assert_eq!(get_network_subtitle_text(&wrapped), "T-Mobile");
+        assert_eq!(get_network_subtitle_text(&wrapped), "MyCarrier");
     }
 
     #[test]
@@ -2563,11 +2563,11 @@ mod tests {
         let mut snapshot = test_snapshot();
         snapshot.wired.connected = true;
         snapshot.mobile.active = true;
-        snapshot.mobile.operator = Some("T-Mobile".to_string());
+        snapshot.mobile.operator = Some("MyCarrier".to_string());
         let wrapped = NetworkSnapshot::NetworkManager(snapshot);
         assert_eq!(
             get_network_subtitle_text(&wrapped),
-            "Ethernet \u{2022} T-Mobile"
+            "Ethernet \u{2022} MyCarrier"
         );
     }
 
@@ -2577,11 +2577,11 @@ mod tests {
         snapshot.wired.connected = true;
         snapshot.wifi.ssid = Some("HomeWifi".to_string());
         snapshot.mobile.active = true;
-        snapshot.mobile.operator = Some("T-Mobile".to_string());
+        snapshot.mobile.operator = Some("MyCarrier".to_string());
         let wrapped = NetworkSnapshot::NetworkManager(snapshot);
         assert_eq!(
             get_network_subtitle_text(&wrapped),
-            "Ethernet \u{2022} HomeWifi \u{2022} T-Mobile"
+            "Ethernet \u{2022} HomeWifi \u{2022} MyCarrier"
         );
     }
 
