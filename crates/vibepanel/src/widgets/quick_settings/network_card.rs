@@ -153,6 +153,50 @@ pub fn mobile_state_icon_name(enabled: bool, active: bool, signal_quality: u32) 
     }
 }
 
+/// Check if Material unified icon mode is active for this snapshot.
+///
+/// Returns `true` when Material icons are enabled and the device has a modem,
+/// meaning the network icon should use unified cellular/wifi glyphs.
+pub fn is_material_unified(snapshot: &NetworkSnapshot) -> bool {
+    snapshot.mobile_supported() && IconsService::global().uses_material()
+}
+
+/// Resolve the network icon for Material unified mode.
+///
+/// When Material icons are active and a modem is present, this picks the
+/// appropriate unified icon: combined (cell_wifi), cellular-only, or
+/// wifi/wired. Falls back to the standard [`network_icon_name`] when
+/// Material unified mode is inactive.
+///
+/// `for_bar` controls the icon context: the bar widget zeros out mobile
+/// fields so the base icon only reflects wifi/wired (the bar has a separate
+/// cellular icon slot).
+pub fn resolve_material_network_icon(snapshot: &NetworkSnapshot, for_bar: bool) -> &'static str {
+    let material_unified = snapshot.mobile_supported() && IconsService::global().uses_material();
+    let wifi_or_wired = snapshot.connected() || snapshot.wired_connected();
+
+    if material_unified && snapshot.mobile_active() && wifi_or_wired {
+        "network-wifi-cellular-symbolic"
+    } else if material_unified && snapshot.mobile_active() {
+        let quality = snapshot.mobile_signal_quality().unwrap_or(0);
+        cellular_signal_icon_name(quality)
+    } else {
+        let ctx = if for_bar {
+            NetworkIconContext::for_bar(snapshot)
+        } else {
+            NetworkIconContext::from_snapshot(snapshot)
+        };
+        let icon_name = network_icon_name(&ctx);
+        // In Material mode, use the regular wifi shape for disabled state —
+        // the WIFI_DISABLED_ICON CSS class dims the color instead.
+        if material_unified && icon_name == "network-wireless-offline-symbolic" {
+            "network-wireless-signal-excellent-symbolic"
+        } else {
+            icon_name
+        }
+    }
+}
+
 /// Result of building the network card subtitle widget.
 pub struct NetworkSubtitleResult {
     pub container: GtkBox,
@@ -1804,26 +1848,8 @@ pub fn on_network_changed(
         } else {
             icon_handle.remove_css_class(state::SERVICE_UNAVAILABLE);
 
-            // When Material is active and device has a modem, pick the unified
-            // icon (cell_wifi / cellular-only / wifi) instead of the default
-            // which relies on mobile_is_primary.
-            let material_unified =
-                snapshot.mobile_supported() && IconsService::global().uses_material();
-            let wifi_or_wired = snapshot.connected() || snapshot.wired_connected();
-
-            if material_unified && snapshot.mobile_active() && wifi_or_wired {
-                icon_handle.set_icon("network-wifi-cellular-symbolic");
-            } else if material_unified && snapshot.mobile_active() {
-                let quality = snapshot.mobile_signal_quality().unwrap_or(0);
-                icon_handle.set_icon(cellular_signal_icon_name(quality));
-            } else {
-                let icon_name = network_icon_name(&NetworkIconContext::from_snapshot(snapshot));
-                if material_unified && icon_name == "network-wireless-offline-symbolic" {
-                    icon_handle.set_icon("network-wireless-signal-excellent-symbolic");
-                } else {
-                    icon_handle.set_icon(icon_name);
-                }
-            }
+            let material_unified = is_material_unified(snapshot);
+            icon_handle.set_icon(resolve_material_network_icon(snapshot, false));
 
             // Spinner: show when wifi or cellular is connecting, but only
             // when the expanded details aren't visible (they have their own
