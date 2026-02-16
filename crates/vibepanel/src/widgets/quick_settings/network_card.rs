@@ -1104,8 +1104,7 @@ pub fn populate_wifi_list(
                 | "network-wireless-signal-good-symbolic"
         );
 
-        // Use accent color for active network icons
-        let icon_color = if net.active {
+        let icon_color = if net.active || is_connecting {
             color::ACCENT
         } else {
             color::PRIMARY
