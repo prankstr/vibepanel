@@ -1,8 +1,8 @@
 //! Mobile/cellular networking via ModemManager and NetworkManager D-Bus.
 
-use std::process::Command;
+use std::process::{Command, Output};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gtk4::gio::{self, prelude::*};
 use gtk4::glib::{self, Variant};
@@ -80,6 +80,9 @@ impl NmService {
     /// Queue a debounced mobile info refresh.
     ///
     /// Multiple calls within [`MOBILE_REFRESH_DEBOUNCE_MS`] are coalesced into one.
+    /// The pending flag is cleared at the timeout callback (before spawning the
+    /// fetch thread) so that new signals arriving during the fetch are not lost.
+    /// This matches the IWD debounce pattern in [`IwdService::schedule_network_refresh`].
     pub(super) fn queue_mobile_refresh(&self) {
         if self.mobile.refresh_pending.get() {
             return;
@@ -87,6 +90,7 @@ impl NmService {
         self.mobile.refresh_pending.set(true);
 
         glib::timeout_add_local_once(Duration::from_millis(MOBILE_REFRESH_DEBOUNCE_MS), || {
+            Self::global().mobile.refresh_pending.set(false);
             Self::fetch_mobile_device_info();
         });
     }
@@ -434,10 +438,12 @@ impl NmService {
                 return;
             };
 
-            let success = match Command::new("nmcli")
-                .args(["connection", "up", "id", &conn_name])
-                .output()
-            {
+            let success = match nmcli_output_with_timeout(Command::new("nmcli").args([
+                "connection",
+                "up",
+                "id",
+                &conn_name,
+            ])) {
                 Ok(output) => {
                     if output.status.success() {
                         true
@@ -452,7 +458,7 @@ impl NmService {
                     }
                 }
                 Err(e) => {
-                    error!("Failed to run nmcli: {}", e);
+                    error!("{}", e);
                     false
                 }
             };
@@ -494,10 +500,12 @@ impl NmService {
 
             let mut success = true;
             if let Some(name) = active_name {
-                match Command::new("nmcli")
-                    .args(["connection", "down", "id", &name])
-                    .output()
-                {
+                match nmcli_output_with_timeout(Command::new("nmcli").args([
+                    "connection",
+                    "down",
+                    "id",
+                    &name,
+                ])) {
                     Ok(output) if !output.status.success() => {
                         let stderr = String::from_utf8_lossy(&output.stderr);
                         warn!(
@@ -508,7 +516,7 @@ impl NmService {
                         success = false;
                     }
                     Err(e) => {
-                        error!("Failed to run nmcli: {}", e);
+                        error!("{}", e);
                         success = false;
                     }
                     _ => {}
@@ -533,6 +541,60 @@ impl NmService {
             s.mobile.failed = false;
             changed
         });
+    }
+}
+
+/// Timeout for `nmcli` subprocess calls. Cellular modems and their firmware
+/// can be slow, so we allow a generous 60 seconds before giving up.
+const NMCLI_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Run an `nmcli` command with a timeout, returning its output or an error.
+///
+/// Uses `spawn()` + `try_wait()` polling so the thread isn't blocked
+/// indefinitely if the modem or NetworkManager hangs. The child process
+/// is killed if the timeout expires.
+fn nmcli_output_with_timeout(cmd: &mut Command) -> Result<Output, String> {
+    let mut child = cmd
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to spawn nmcli: {e}"))?;
+
+    let start = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                // Process exited — collect output.
+                let stdout = child.stdout.take().map_or_else(Vec::new, |mut s| {
+                    let mut buf = Vec::new();
+                    std::io::Read::read_to_end(&mut s, &mut buf).ok();
+                    buf
+                });
+                let stderr = child.stderr.take().map_or_else(Vec::new, |mut s| {
+                    let mut buf = Vec::new();
+                    std::io::Read::read_to_end(&mut s, &mut buf).ok();
+                    buf
+                });
+                return Ok(Output {
+                    status,
+                    stdout,
+                    stderr,
+                });
+            }
+            Ok(None) => {
+                // Still running — check timeout.
+                if start.elapsed() >= NMCLI_TIMEOUT {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!(
+                        "nmcli timed out after {}s",
+                        NMCLI_TIMEOUT.as_secs()
+                    ));
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
+            Err(e) => return Err(format!("Failed to wait on nmcli: {e}")),
+        }
     }
 }
 

@@ -157,7 +157,7 @@ pub struct MobileState {
     pub has_device: bool,
     /// Connection profile name.
     pub name: Option<String>,
-    /// Operator name from ModemManager (e.g., "T-Mobile").
+    /// Operator name from ModemManager (e.g., "MyCarrier").
     pub operator: Option<String>,
     /// Access technology label (e.g., "LTE", "5G").
     pub access_technology: Option<String>,
@@ -521,9 +521,6 @@ impl NmService {
                 supported,
                 has_modem,
             } => {
-                // Clear debounce guard so future MM signals can trigger another refresh.
-                self.mobile.refresh_pending.set(false);
-
                 // Merge local "connecting" intent with D-Bus state.
                 //
                 // `connecting_local` is set synchronously so the UI shows
