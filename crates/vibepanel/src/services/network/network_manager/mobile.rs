@@ -396,7 +396,6 @@ impl NmService {
                 success: dbus_result.is_ok(),
             });
             Self::fetch_mobile_device_info();
-            send_nm_update(NmUpdate::RefreshNetworks);
         });
     }
 
@@ -462,7 +461,6 @@ impl NmService {
             // nmcli returned — clear local connecting intent, then fetch real state.
             send_nm_update(NmUpdate::MobileConnectionAttemptFinished { success });
             Self::fetch_mobile_device_info();
-            send_nm_update(NmUpdate::RefreshNetworks);
         });
     }
 
@@ -528,7 +526,6 @@ impl NmService {
                 Self::fetch_mobile_device_info();
             }
             // On success, NM property-change signals handle state convergence.
-            send_nm_update(NmUpdate::RefreshNetworks);
         });
     }
 
