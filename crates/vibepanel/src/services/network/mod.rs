@@ -300,6 +300,16 @@ impl NetworkSnapshot {
         }
     }
 
+    /// Best available display name for the mobile connection.
+    ///
+    /// Prefers the operator name (e.g., "T-Mobile"), falls back to the NM
+    /// connection profile name (e.g., "MyCarrier"), and finally to "Mobile".
+    pub fn mobile_display_name(&self) -> &str {
+        self.mobile_operator()
+            .or_else(|| self.mobile_name())
+            .unwrap_or("Mobile")
+    }
+
     /// Radio access technology label (e.g., "LTE", "5G NR", "HSPA+").
     pub fn mobile_access_technology(&self) -> Option<&str> {
         match self {

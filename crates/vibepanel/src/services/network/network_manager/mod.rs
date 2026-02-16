@@ -248,7 +248,8 @@ enum NmUpdate {
 
 /// Internal mobile bookkeeping fields, grouped to keep [`NmService`] focused.
 pub(super) struct MobileInternal {
-    pub(super) _signal_subscriptions: RefCell<Vec<gio::SignalSubscription>>,
+    /// D-Bus signal subscriptions kept alive for the lifetime of the service.
+    pub(super) signal_subscriptions: RefCell<Vec<gio::SignalSubscription>>,
     pub(super) refresh_pending: Cell<bool>,
     /// Set synchronously in connect/enable, cleared when real D-Bus state arrives.
     pub(super) connecting_local: Cell<bool>,
@@ -257,7 +258,7 @@ pub(super) struct MobileInternal {
 impl MobileInternal {
     fn new() -> Self {
         Self {
-            _signal_subscriptions: RefCell::new(Vec::new()),
+            signal_subscriptions: RefCell::new(Vec::new()),
             refresh_pending: Cell::new(false),
             connecting_local: Cell::new(false),
         }
@@ -693,7 +694,7 @@ impl NmService {
                     },
                 );
 
-                this.mobile._signal_subscriptions.borrow_mut().extend([
+                this.mobile.signal_subscriptions.borrow_mut().extend([
                     sub_props,
                     sub_added,
                     sub_removed,

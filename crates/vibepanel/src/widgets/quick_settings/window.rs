@@ -545,7 +545,7 @@ impl QuickSettingsWindow {
             "Wi-Fi"
         };
 
-        let wifi_card = ToggleCard::builder()
+        let network_card = ToggleCard::builder()
             .icon(icon_name)
             .label(card_title)
             .subtitle_widget(subtitle_result.container.upcast())
@@ -556,11 +556,11 @@ impl QuickSettingsWindow {
             .build();
 
         // Add card identifier for CSS targeting
-        wifi_card.card.add_css_class(qs::WIFI);
+        network_card.card.add_css_class(qs::WIFI);
 
         // Disable toggle if no Wi-Fi device (toggle controls Wi-Fi, not ethernet)
         if !snapshot.has_wifi_device() {
-            wifi_card.toggle.set_sensitive(false);
+            network_card.toggle.set_sensitive(false);
         }
 
         if !wifi_enabled && !wired_connected && !snapshot.mobile_active() {
@@ -568,7 +568,7 @@ impl QuickSettingsWindow {
             let showing_wifi_icon = !is_material_unified(&snapshot)
                 || (!snapshot.mobile_active() && !snapshot.mobile_connecting());
             if showing_wifi_icon {
-                wifi_card
+                network_card
                     .icon_handle
                     .widget()
                     .add_css_class(qs::WIFI_DISABLED_ICON);
@@ -584,15 +584,15 @@ impl QuickSettingsWindow {
                 && (snapshot.scanning() || !snapshot.is_ready()));
         let is_connecting = wifi_connecting || snapshot.mobile_connecting();
         if is_connecting {
-            wifi_card.icon_handle.set_spinning(true);
+            network_card.icon_handle.set_spinning(true);
         }
 
         {
-            let toggle = wifi_card.toggle.clone();
-            let wifi_state = Rc::clone(&qs.network);
+            let toggle = network_card.toggle.clone();
+            let network_state = Rc::clone(&qs.network);
             toggle.connect_toggled(move |toggle| {
                 // Skip if this is a programmatic update (prevents feedback loops)
-                if wifi_state.updating_wifi_toggle.get() {
+                if network_state.updating_wifi_toggle.get() {
                     return;
                 }
                 NetworkService::global().set_wifi_enabled(toggle.is_active());
@@ -600,37 +600,37 @@ impl QuickSettingsWindow {
         }
 
         // Store references (use base fields)
-        *qs.network.base.toggle.borrow_mut() = Some(wifi_card.toggle.clone());
-        *qs.network.base.card_icon.borrow_mut() = Some(wifi_card.icon_handle.clone());
-        *qs.network.base.arrow.borrow_mut() = wifi_card.expander_icon.clone();
+        *qs.network.base.toggle.borrow_mut() = Some(network_card.toggle.clone());
+        *qs.network.base.card_icon.borrow_mut() = Some(network_card.icon_handle.clone());
+        *qs.network.base.arrow.borrow_mut() = network_card.expander_icon.clone();
 
         // Store title label for dynamic updates
-        *qs.network.title_label.borrow_mut() = Some(wifi_card.title.clone());
+        *qs.network.title_label.borrow_mut() = Some(network_card.title.clone());
 
         // Store subtitle label reference
         *qs.network.subtitle_label.borrow_mut() = Some(subtitle_result.label);
 
         // Build revealer
-        let wifi_revealer = Revealer::new();
-        wifi_revealer.set_reveal_child(false);
-        wifi_revealer.set_transition_type(RevealerTransitionType::SlideDown);
-        let wifi_state = Rc::clone(&qs.network);
+        let network_revealer = Revealer::new();
+        network_revealer.set_reveal_child(false);
+        network_revealer.set_transition_type(RevealerTransitionType::SlideDown);
+        let network_state = Rc::clone(&qs.network);
 
-        let wifi_details = build_wifi_details(&wifi_state, qs.window.downgrade());
-        wifi_revealer.set_child(Some(&wifi_details.container));
+        let network_details = build_wifi_details(&network_state, qs.window.downgrade());
+        network_revealer.set_child(Some(&network_details.container));
 
-        *qs.network.base.list_box.borrow_mut() = Some(wifi_details.list_box);
-        *qs.network.base.revealer.borrow_mut() = Some(wifi_revealer.clone());
-        *qs.network.scan_button.borrow_mut() = Some(wifi_details.scan_button);
+        *qs.network.base.list_box.borrow_mut() = Some(network_details.list_box);
+        *qs.network.base.revealer.borrow_mut() = Some(network_revealer.clone());
+        *qs.network.scan_button.borrow_mut() = Some(network_details.scan_button);
 
         // Connect Wi-Fi switch to toggle Wi-Fi enabled state
         {
-            let wifi_state = Rc::clone(&qs.network);
-            wifi_details
+            let network_state = Rc::clone(&qs.network);
+            network_details
                 .wifi_switch
                 .connect_state_set(move |_, enabled| {
                     // Skip if this is a programmatic update (prevents feedback loops)
-                    if wifi_state.updating_wifi_toggle.get() {
+                    if network_state.updating_wifi_toggle.get() {
                         return glib::Propagation::Proceed;
                     }
                     NetworkService::global().set_wifi_enabled(enabled);
@@ -638,7 +638,11 @@ impl QuickSettingsWindow {
                 });
         }
 
-        (wifi_card.card, wifi_revealer, wifi_card.expander_button)
+        (
+            network_card.card,
+            network_revealer,
+            network_card.expander_button,
+        )
     }
 
     /// Build the Bluetooth card and its revealer.
@@ -1207,7 +1211,7 @@ impl QuickSettingsWindow {
         // After the window is mapped and has its real size, update position and fade in.
         // Also re-check for pending IWD auth requests: subscribe_to_services() fires
         // on_network_changed before the window is mapped, so the is_mapped() gate in
-        // wifi_card defers the password dialog. This re-check catches that case.
+        // network_card defers the password dialog. This re-check catches that case.
         let window_weak = self.window.downgrade();
         glib::idle_add_local(move || {
             if let Some(window) = window_weak.upgrade()

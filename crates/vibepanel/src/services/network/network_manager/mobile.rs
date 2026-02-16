@@ -530,6 +530,7 @@ impl NmService {
                 send_nm_update(NmUpdate::MobileConnectionAttemptFinished { success: false });
                 Self::fetch_mobile_device_info();
             }
+            // On success, NM property-change signals handle state convergence.
             send_nm_update(NmUpdate::RefreshNetworks);
         });
     }

@@ -232,10 +232,7 @@ pub fn get_network_subtitle_text(snapshot: &NetworkSnapshot) -> String {
     let is_connecting = snapshot.connection_state() == NetworkConnectionState::Connecting;
     let mobile_active = snapshot.mobile_active();
     let mobile_connecting = snapshot.mobile_connecting();
-    let carrier = snapshot
-        .mobile_operator()
-        .or(snapshot.mobile_name())
-        .unwrap_or("Mobile");
+    let carrier = snapshot.mobile_display_name();
 
     // Wired connected — may also have wifi and/or cellular
     if snapshot.wired_connected() {
@@ -820,7 +817,6 @@ fn build_mobile_row(state: &Rc<NetworkCardState>, snapshot: &NetworkSnapshot) ->
     container.append(&header_row);
 
     let signal = snapshot.mobile_signal_quality().unwrap_or(0);
-    let mobile_enabled = snapshot.mobile_enabled().unwrap_or(false);
     let mobile_active = snapshot.mobile_active();
     let icon_handle = icons.create_icon(
         mobile_state_icon_name(mobile_enabled, mobile_active, signal),
@@ -837,10 +833,7 @@ fn build_mobile_row(state: &Rc<NetworkCardState>, snapshot: &NetworkSnapshot) ->
         ],
     );
 
-    let title = snapshot
-        .mobile_operator()
-        .or(snapshot.mobile_name())
-        .unwrap_or("Mobile Connection");
+    let title = snapshot.mobile_display_name();
 
     let subtitle_box = GtkBox::new(Orientation::Horizontal, 0);
 
@@ -961,10 +954,7 @@ pub fn update_mobile_row(state: &NetworkCardState, snapshot: &NetworkSnapshot) {
     };
 
     // Update the row title (operator name may change, e.g., roaming).
-    let new_title = snapshot
-        .mobile_operator()
-        .or(snapshot.mobile_name())
-        .unwrap_or("Mobile Connection");
+    let new_title = snapshot.mobile_display_name();
     if w.title_label.text().as_str() != new_title {
         w.title_label.set_text(new_title);
     }

@@ -442,11 +442,7 @@ impl QuickSettingsWidget {
                     widget.remove_css_class(qs::MOBILE_DISABLED_ICON);
                 }
 
-                let carrier = snapshot
-                    .mobile_operator()
-                    .or(snapshot.mobile_name())
-                    .unwrap_or("Mobile")
-                    .to_string();
+                let carrier = snapshot.mobile_display_name().to_string();
                 let tooltip = if !mobile_enabled {
                     format!("{}\nOff", carrier)
                 } else if snapshot.mobile_connecting() {
