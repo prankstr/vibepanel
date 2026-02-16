@@ -34,7 +34,7 @@ use crate::services::surfaces::SurfaceStyleManager;
 use crate::styles::{button, color, icon, qs, row, state, surface};
 use crate::widgets::base::configure_popover;
 
-/// Return a simple connected/disconnected Wi-Fi icon.
+/// Snapshot of network state used to resolve bar and card icons.
 pub struct NetworkIconContext {
     pub available: bool,
     pub connected: bool,
@@ -168,7 +168,7 @@ pub fn is_material_unified(snapshot: &NetworkSnapshot) -> bool {
 /// wifi/wired. Falls back to the standard [`network_icon_name`] when
 /// Material unified mode is inactive.
 pub fn resolve_material_network_icon(snapshot: &NetworkSnapshot) -> &'static str {
-    let material_unified = snapshot.mobile_supported() && IconsService::global().uses_material();
+    let material_unified = is_material_unified(snapshot);
     let wifi_or_wired = snapshot.connected() || snapshot.wired_connected();
 
     if material_unified && snapshot.mobile_active() && wifi_or_wired {
@@ -314,6 +314,8 @@ pub struct EthernetRowWidgets {
     pub container: GtkBox,
     pub title_label: Label,
     pub subtitle_box: GtkBox,
+    /// Cached key for the subtitle content to skip redundant rebuilds.
+    pub subtitle_key: RefCell<String>,
 }
 
 /// Cached widget references for the mobile/cellular row.
@@ -679,6 +681,7 @@ fn build_ethernet_row(snapshot: &NetworkSnapshot) -> EthernetRowWidgets {
     EthernetRowWidgets {
         container,
         title_label: row_result.title,
+        subtitle_key: RefCell::new(ethernet_subtitle_key(snapshot)),
         subtitle_box,
     }
 }
@@ -704,6 +707,14 @@ fn build_ethernet_subtitle(snapshot: &NetworkSnapshot) -> GtkBox {
 
     let extra_refs: Vec<&str> = extra_parts.iter().map(|s| s.as_str()).collect();
     build_accent_subtitle("Connected", &extra_refs)
+}
+
+/// Build a comparable key from the ethernet subtitle inputs (interface name + speed).
+/// Used to skip redundant subtitle rebuilds when the data hasn't changed.
+fn ethernet_subtitle_key(snapshot: &NetworkSnapshot) -> String {
+    let iface = snapshot.wired_iface().unwrap_or("");
+    let speed = snapshot.wired_speed().unwrap_or(0);
+    format!("{iface}:{speed}")
 }
 
 /// Update the mobile subtitle labels for the current state.
@@ -790,6 +801,13 @@ fn build_mobile_row(state: &Rc<NetworkCardState>, snapshot: &NetworkSnapshot) ->
     mobile_switch.set_sensitive(snapshot.available() && snapshot.has_modem_device());
     {
         let state_weak = Rc::downgrade(state);
+        // `state_set` fires for both user and programmatic changes. When
+        // `updating_mobile_switch` is set, the switch is being synced to
+        // match D-Bus state — return `Proceed` to accept the visual change
+        // but skip the `set_mobile_enabled` call to avoid a feedback loop.
+        // We return `Proceed` (not `Stop`) in both branches because GTK4
+        // `state_set` expects `Proceed` to let the switch actually transition;
+        // `Stop` would reject the state change entirely.
         mobile_switch.connect_state_set(move |_, is_active| {
             if let Some(state) = state_weak.upgrade()
                 && state.updating_mobile_switch.get()
@@ -920,14 +938,20 @@ pub fn update_ethernet_row(state: &NetworkCardState, snapshot: &NetworkSnapshot)
         w.title_label.set_text(new_title);
     }
 
-    // Rebuild subtitle
-    let new_subtitle = build_ethernet_subtitle(snapshot);
-    while let Some(child) = w.subtitle_box.first_child() {
-        w.subtitle_box.remove(&child);
-    }
-    while let Some(child) = new_subtitle.first_child() {
-        new_subtitle.remove(&child);
-        w.subtitle_box.append(&child);
+    // Rebuild subtitle only when the underlying data changes.
+    // The subtitle is "Connected • <iface> • <speed>" — derive a key from the inputs
+    // and compare against the cached value to avoid unnecessary re-renders.
+    let new_key = ethernet_subtitle_key(snapshot);
+    if *w.subtitle_key.borrow() != new_key {
+        *w.subtitle_key.borrow_mut() = new_key;
+        let new_subtitle = build_ethernet_subtitle(snapshot);
+        while let Some(child) = w.subtitle_box.first_child() {
+            w.subtitle_box.remove(&child);
+        }
+        while let Some(child) = new_subtitle.first_child() {
+            new_subtitle.remove(&child);
+            w.subtitle_box.append(&child);
+        }
     }
 }
 

@@ -574,6 +574,12 @@ impl NmService {
                 self.mobile.connecting_local.set(false);
 
                 if !success {
+                    // Re-read the actual WwanEnabled property from NM so
+                    // the optimistic `mobile.enabled` set in
+                    // `set_mobile_enabled()` is reverted to the real value
+                    // (the D-Bus Set call failed, so no PropertiesChanged
+                    // signal will fire to correct it automatically).
+                    self.update_nm_flags();
                     self.notify_snapshot(|s| {
                         s.mobile.failed = true;
                         s.mobile.connecting = false;
@@ -771,7 +777,7 @@ impl NmService {
                                 }
                                 this.set_available(true);
                                 this.update_nm_flags();
-                                Self::discover_wifi_device();
+                                Self::discover_network_devices();
                             } else {
                                 // Service disappeared - mark unavailable.
                                 this.set_unavailable();
@@ -783,7 +789,7 @@ impl NmService {
                         this.set_available(true);
                         this.update_nm_flags();
 
-                        Self::discover_wifi_device();
+                        Self::discover_network_devices();
                     },
                 );
             },
@@ -810,7 +816,7 @@ impl NmService {
 
     // ── Shared Device Discovery ──────────────────────────────────────
 
-    fn discover_wifi_device() {
+    fn discover_network_devices() {
         // Synchronous D-Bus calls — spawn a thread to avoid blocking the main loop.
         thread::spawn(move || {
             let device_paths = match Self::get_device_paths_sync() {

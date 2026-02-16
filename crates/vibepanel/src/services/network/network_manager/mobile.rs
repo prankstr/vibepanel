@@ -568,6 +568,12 @@ fn nmcli_output_with_timeout(cmd: &mut Command) -> Result<Output, String> {
             // Timeout expired and sender didn't signal — kill the child.
             // SAFETY: Sending SIGKILL to a process. If the process already
             // exited and was reaped, kill() returns ESRCH which is harmless.
+            // Theoretical PID reuse: if the child exits and its PID is recycled
+            // before the timeout fires, we'd kill an unrelated process. In
+            // practice this can't happen here because wait_with_output() below
+            // is the only call that reaps the child — if it completes before
+            // the timeout, tx.send(()) cancels the watchdog. If it hasn't
+            // completed, the child is still alive and owns the PID.
             unsafe {
                 libc::kill(pid, libc::SIGKILL);
             }
@@ -801,7 +807,7 @@ mod tests {
             .spawn()
             .unwrap();
 
-        let pid = child.id() as i32;
+        let pid = child.id() as libc::pid_t;
         let short_timeout = Duration::from_millis(200);
         let (tx, rx) = std::sync::mpsc::channel::<()>();
 
