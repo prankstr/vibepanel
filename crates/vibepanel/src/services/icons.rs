@@ -1361,20 +1361,6 @@ impl IconHandleInner {
         }
     }
 
-    /// Size the spinner based on the root container's current allocation.
-    ///
-    /// Called each time spinning starts so the size reflects the actual layout,
-    /// not a stale or zero-sized initial allocation.
-    fn size_spinner(&self) {
-        let rw = self.root.width();
-        let rh = self.root.height();
-        let raw = (rw.min(rh) as f64 * 0.75).round() as i32;
-        let size = raw.max(10);
-        if let Some(spinner) = self.spinner.borrow().as_ref() {
-            spinner.set_size(size);
-        }
-    }
-
     /// Apply or remove the spinning visual state.
     ///
     /// For all backends, hides the backend widget and shows a Cairo-drawn
@@ -1383,21 +1369,33 @@ impl IconHandleInner {
     fn apply_spinning(&self, active: bool) {
         let backend = self.backend.borrow();
         if active {
-            // Lazily create spinner and size it from root *before* hiding backend
             self.ensure_spinner();
-            self.size_spinner();
+
+            let mut rw = self.root.width();
+            let mut rh = self.root.height();
+
+            if rw == 0 || rh == 0 {
+                let (_, nat_w, _, _) = backend.widget().measure(gtk4::Orientation::Horizontal, -1);
+                let (_, nat_h, _, _) = backend.widget().measure(gtk4::Orientation::Vertical, -1);
+                rw = nat_w;
+                rh = nat_h;
+            }
+
+            self.root.set_size_request(rw, rh);
             backend.widget().set_visible(false);
             drop(backend);
 
-            // Start animation
+            let raw = (rw.min(rh) as f64 * 0.75).round() as i32;
+            let size = raw.max(10);
             if let Some(spinner) = self.spinner.borrow().as_ref() {
+                spinner.set_size(size);
                 spinner.start();
             }
         } else {
-            // Stop animation
             if let Some(spinner) = self.spinner.borrow().as_ref() {
                 spinner.stop();
             }
+            self.root.set_size_request(-1, -1);
             backend.widget().set_visible(true);
         }
     }
