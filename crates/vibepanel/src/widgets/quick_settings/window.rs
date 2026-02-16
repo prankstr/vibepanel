@@ -233,7 +233,7 @@ impl QuickSettingsWindow {
     fn subscribe_to_services(qs: &Rc<Self>) {
         let cfg = &qs.cards_config;
 
-        if cfg.wifi || cfg.cellular {
+        if cfg.network {
             let qs_weak = Rc::downgrade(qs);
             let id = NetworkService::global().connect(move |snapshot| {
                 if let Some(qs) = qs_weak.upgrade() {
@@ -353,9 +353,7 @@ impl QuickSettingsWindow {
         let mut toggle_cards: Vec<ToggleCardInfo> = Vec::new();
 
         // Build enabled cards
-        // Unified Network card: allow legacy `cellular = true` configs
-        // to still show this card even if `wifi = false`.
-        if cfg.wifi || cfg.cellular {
+        if cfg.network {
             let (card, revealer, expander_button) = Self::build_network_card(qs);
             toggle_cards.push(ToggleCardInfo {
                 card,

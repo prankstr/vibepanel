@@ -37,16 +37,10 @@ use vibepanel_core::config::WidgetEntry;
 /// complete example.
 #[derive(Debug, Clone)]
 pub struct QuickSettingsCardsConfig {
-    pub wifi: bool,
-    /// Backward-compatible alias for the unified Network card.
-    /// If either `wifi` or `cellular` is enabled, the Network card/icon is shown.
-    ///
-    /// Named `cellular` (not `mobile`) for the user-facing config because it
-    /// controls the bar's cellular **icon** — a distinct visual element next to
-    /// the Wi-Fi icon. The service layer uses `mobile_*` naming throughout
-    /// (matching NetworkManager/ModemManager terminology), but the bar config
-    /// uses the colloquial "cellular" to match the icon's purpose.
-    pub cellular: bool,
+    /// Whether the unified Network card/icon is shown.
+    /// Controls both the bar icons (Wi-Fi + cellular) and the QS Network card.
+    /// Cellular UI within the card is driven by runtime modem detection.
+    pub network: bool,
     pub bluetooth: bool,
     pub vpn: bool,
     pub idle_inhibitor: bool,
@@ -63,8 +57,7 @@ pub struct QuickSettingsCardsConfig {
 impl Default for QuickSettingsCardsConfig {
     fn default() -> Self {
         Self {
-            wifi: true,
-            cellular: true,
+            network: true,
             bluetooth: true,
             vpn: true,
             idle_inhibitor: true,
@@ -101,8 +94,7 @@ pub struct QuickSettingsConfig {
 impl WidgetConfig for QuickSettingsConfig {
     fn from_entry(entry: &WidgetEntry) -> Self {
         let known_options = &[
-            "wifi",
-            "cellular",
+            "network",
             "bluetooth",
             "vpn",
             "idle_inhibitor",
@@ -144,8 +136,7 @@ impl WidgetConfig for QuickSettingsConfig {
 
         Self {
             cards: QuickSettingsCardsConfig {
-                wifi: get_bool("wifi"),
-                cellular: get_bool("cellular"),
+                network: get_bool("network"),
                 bluetooth: get_bool("bluetooth"),
                 vpn: get_bool("vpn"),
                 idle_inhibitor: get_bool("idle_inhibitor"),
@@ -305,28 +296,27 @@ impl QuickSettingsWidget {
             });
         }
 
-        // Unified Network icon (Wi-Fi + Ethernet).
-        // Only shown when `wifi` is enabled in config. The cellular icon is
-        // independent and controlled by `cards.cellular` below.
+        // Unified Network icon (Wi-Fi + Ethernet + Cellular).
         //
-        // When using Material icons and `cellular` is also enabled, this
-        // single icon handles all network states: `cell_wifi` when both
-        // Wi-Fi/wired and cellular are connected, a cellular signal icon when
-        // only cellular is active, or the normal Wi-Fi/wired icon otherwise.
-        // The separate cellular icon hides itself entirely in this mode.
+        // When using Material icons and a modem is detected, this single icon
+        // handles all network states: `cell_wifi` when both Wi-Fi/wired and
+        // cellular are connected, a cellular signal icon when only cellular is
+        // active, or the normal Wi-Fi/wired icon otherwise. The separate
+        // cellular icon hides itself entirely in this mode.
         //
         // In Material mode, disabled Wi-Fi uses the same `wifi` glyph shape
         // with a dimmed CSS color instead of the distinct `wifi_off` glyph,
         // matching how bluetooth handles its disabled state.
-        if cards.wifi {
+        if cards.network {
             let wifi_snapshot = NetworkService::global().snapshot();
             let wifi_enabled = wifi_snapshot.wifi_enabled().unwrap_or(false);
             let wifi_connected = wifi_snapshot.connected();
             let wired_connected = wifi_snapshot.wired_connected();
 
-            // When Material is active and cellular card is enabled, this icon
+            // When Material is active and a modem is present, this icon
             // handles all network states (wifi, cellular, combined).
-            let material_unified = cards.cellular && IconsService::global().uses_material();
+            let material_unified =
+                wifi_snapshot.mobile_supported() && IconsService::global().uses_material();
 
             let wifi_or_wired = wifi_connected || wired_connected;
             let network_icon_name_initial =
@@ -369,7 +359,6 @@ impl QuickSettingsWidget {
 
             // Subscribe to NetworkService updates
             let wifi_icon_handle = wifi_icon.clone();
-            let cellular_card_enabled = cards.cellular;
             NetworkService::global().connect(move |snapshot: &NetworkSnapshot| {
                 let widget = wifi_icon_handle.widget();
 
@@ -386,7 +375,7 @@ impl QuickSettingsWidget {
                 widget.remove_css_class(state::SERVICE_UNAVAILABLE);
 
                 let material_unified =
-                    cellular_card_enabled && IconsService::global().uses_material();
+                    snapshot.mobile_supported() && IconsService::global().uses_material();
                 let enabled = snapshot.wifi_enabled().unwrap_or(false);
                 let connected = snapshot.connected();
                 let wired_connected = snapshot.wired_connected();
@@ -494,12 +483,12 @@ impl QuickSettingsWidget {
             });
         }
 
-        // Mobile icon (separate from Network icon).
-        // When using Material icons and the wifi card is enabled, this icon
-        // is always hidden — the wifi icon slot handles all network states
-        // (wifi, cellular, combined) as a single unified icon.
+        // Mobile icon (separate from the unified Network icon).
+        // When using Material icons, this icon is always hidden — the network
+        // icon slot handles all network states (wifi, cellular, combined) as
+        // a single unified icon.
         // For GTK icon themes, this remains a separate visible icon.
-        if cards.cellular {
+        if cards.network {
             let snapshot = NetworkService::global().snapshot();
             let quality = snapshot.mobile_signal_quality().unwrap_or(0);
             let mobile_enabled = snapshot.mobile_enabled().unwrap_or(false);
@@ -507,9 +496,9 @@ impl QuickSettingsWidget {
                 mobile_state_icon_name(mobile_enabled, snapshot.mobile_active(), quality);
             let mobile_icon = base.add_icon(initial_icon, &[icon::ICON, icon::TEXT]);
 
-            // When Material is active and wifi card is enabled, the wifi icon
-            // handles all network states — hide this icon entirely.
-            let material_unified = cards.wifi && IconsService::global().uses_material();
+            // When Material is active, the network icon handles all network
+            // states — hide this icon entirely.
+            let material_unified = IconsService::global().uses_material();
             mobile_icon
                 .widget()
                 .set_visible(snapshot.mobile_supported() && !material_unified);
@@ -525,12 +514,11 @@ impl QuickSettingsWidget {
             }
 
             let mobile_icon_handle = mobile_icon.clone();
-            let wifi_card_enabled = cards.wifi;
             NetworkService::global().connect(move |snapshot: &NetworkSnapshot| {
                 let widget = mobile_icon_handle.widget();
 
                 // In Material unified mode, always hidden
-                let material_unified = wifi_card_enabled && IconsService::global().uses_material();
+                let material_unified = IconsService::global().uses_material();
                 widget.set_visible(snapshot.mobile_supported() && !material_unified);
 
                 let quality = snapshot.mobile_signal_quality().unwrap_or(0);
