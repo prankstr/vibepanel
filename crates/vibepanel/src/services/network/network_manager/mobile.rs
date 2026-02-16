@@ -1,8 +1,9 @@
 //! Mobile/cellular networking via ModemManager and NetworkManager D-Bus.
 
+use std::os::unix::process::ExitStatusExt;
 use std::process::{Command, Output};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use gtk4::gio::{self, prelude::*};
 use gtk4::glib::{self, Variant};
@@ -545,54 +546,52 @@ impl NmService {
 /// can be slow, so we allow a generous 60 seconds before giving up.
 const NMCLI_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Run an `nmcli` command with a timeout, returning its output or an error.
+/// Run an `nmcli` command with a timeout guard for slow modem firmware.
 ///
-/// Uses `spawn()` + `try_wait()` polling so the thread isn't blocked
-/// indefinitely if the modem or NetworkManager hangs. The child process
-/// is killed if the timeout expires.
+/// The calling thread blocks on `wait_with_output()` (kernel `waitpid`),
+/// while a watchdog thread uses `recv_timeout()` on a channel. If the main
+/// thread finishes first it signals the channel, causing the watchdog to
+/// exit immediately. If the timeout expires before the signal arrives, the
+/// watchdog sends SIGKILL to the child process.
+///
+/// Timeout detection checks `output.status.signal() == Some(SIGKILL)` rather
+/// than a flag, so it reflects what actually happened to the process.
 fn nmcli_output_with_timeout(cmd: &mut Command) -> Result<Output, String> {
-    let mut child = cmd
+    let child = cmd
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
         .map_err(|e| format!("Failed to spawn nmcli: {e}"))?;
 
-    let start = Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                // Process exited — collect output.
-                let stdout = child.stdout.take().map_or_else(Vec::new, |mut s| {
-                    let mut buf = Vec::new();
-                    std::io::Read::read_to_end(&mut s, &mut buf).ok();
-                    buf
-                });
-                let stderr = child.stderr.take().map_or_else(Vec::new, |mut s| {
-                    let mut buf = Vec::new();
-                    std::io::Read::read_to_end(&mut s, &mut buf).ok();
-                    buf
-                });
-                return Ok(Output {
-                    status,
-                    stdout,
-                    stderr,
-                });
+    let pid = child.id() as i32;
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
+
+    thread::spawn(move || {
+        if rx.recv_timeout(NMCLI_TIMEOUT).is_err() {
+            // Timeout expired and sender didn't signal — kill the child.
+            // SAFETY: Sending SIGKILL to a process. If the process already
+            // exited and was reaped, kill() returns ESRCH which is harmless.
+            unsafe {
+                libc::kill(pid, libc::SIGKILL);
             }
-            Ok(None) => {
-                // Still running — check timeout.
-                if start.elapsed() >= NMCLI_TIMEOUT {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(format!(
-                        "nmcli timed out after {}s",
-                        NMCLI_TIMEOUT.as_secs()
-                    ));
-                }
-                thread::sleep(Duration::from_millis(100));
-            }
-            Err(e) => return Err(format!("Failed to wait on nmcli: {e}")),
         }
+    });
+
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("Failed to wait on nmcli: {e}"))?;
+
+    // Signal the watchdog to exit early. If it already fired, that's fine.
+    let _ = tx.send(());
+
+    if !output.status.success() && output.status.signal() == Some(libc::SIGKILL) {
+        return Err(format!(
+            "nmcli timed out after {}s",
+            NMCLI_TIMEOUT.as_secs()
+        ));
     }
+
+    Ok(output)
 }
 
 /// Check if a mobile/cellular connection is active.
@@ -773,5 +772,89 @@ mod tests {
         let (effective, clear) = resolve_mobile_connecting(true, true, true);
         assert!(effective, "should use D-Bus connecting (true)");
         assert!(clear, "should clear local flag");
+    }
+
+    // --- nmcli_output_with_timeout tests ---
+
+    /// Helper: build a `Command` that runs for the given duration then exits.
+    fn sleep_cmd(secs: f32) -> Command {
+        let mut cmd = Command::new("sleep");
+        cmd.arg(format!("{secs}"));
+        cmd
+    }
+
+    #[test]
+    fn nmcli_timeout_happy_path() {
+        // A fast command should succeed and return its stdout.
+        let mut cmd = Command::new("echo");
+        cmd.arg("hello");
+        let output = nmcli_output_with_timeout(&mut cmd).expect("should succeed");
+        assert!(output.status.success());
+        assert_eq!(output.stdout.trim_ascii(), b"hello");
+    }
+
+    #[test]
+    fn nmcli_timeout_kills_slow_process() {
+        // Override NMCLI_TIMEOUT by testing the internals directly:
+        // spawn a long sleep, but use a short timeout via a custom wrapper.
+        let child = Command::new("sleep")
+            .arg("60")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+
+        let pid = child.id() as i32;
+        let short_timeout = Duration::from_millis(200);
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+
+        std::thread::spawn(move || {
+            if rx.recv_timeout(short_timeout).is_err() {
+                unsafe {
+                    libc::kill(pid, libc::SIGKILL);
+                }
+            }
+        });
+
+        let start = std::time::Instant::now();
+        let output = child.wait_with_output().unwrap();
+        let _ = tx.send(());
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "should have been killed quickly, took {elapsed:?}"
+        );
+        assert!(!output.status.success());
+        assert_eq!(output.status.signal(), Some(libc::SIGKILL));
+    }
+
+    #[test]
+    fn nmcli_timeout_watchdog_exits_early_on_fast_command() {
+        // Verify the watchdog thread doesn't linger: a fast command should
+        // complete well before NMCLI_TIMEOUT, and the function should return
+        // promptly without waiting for the watchdog to sleep.
+        let start = std::time::Instant::now();
+        let mut cmd = sleep_cmd(0.0);
+        let result = nmcli_output_with_timeout(&mut cmd);
+        let elapsed = start.elapsed();
+
+        assert!(result.is_ok());
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "should return immediately, took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn nmcli_timeout_nonzero_exit_not_treated_as_timeout() {
+        // A command that exits quickly with non-zero status should return Ok,
+        // not be misidentified as a timeout.
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "exit 1"]);
+        let output =
+            nmcli_output_with_timeout(&mut cmd).expect("should return Ok for non-timeout failure");
+        assert!(!output.status.success());
+        assert_ne!(output.status.signal(), Some(libc::SIGKILL));
     }
 }

@@ -100,6 +100,7 @@ impl NetworkSnapshot {
         }
     }
 
+    /// Whether Wi-Fi is connected (does not include wired or mobile).
     pub fn connected(&self) -> bool {
         match self {
             Self::NetworkManager(inner) => inner.wifi.connected,
@@ -239,7 +240,7 @@ impl NetworkSnapshot {
     }
 
     /// Whether mobile data is the primary connection (set via NM's PrimaryConnectionType).
-    pub fn mobile_connected(&self) -> bool {
+    pub fn mobile_is_primary(&self) -> bool {
         match self {
             Self::NetworkManager(inner) => inner.mobile.is_primary,
             Self::Iwd(_) => false,

@@ -55,7 +55,7 @@ impl NetworkIconContext {
             wifi_enabled: snapshot.wifi_enabled().unwrap_or(false),
             wired_connected: snapshot.wired_connected(),
             has_wifi_device: snapshot.has_wifi_device(),
-            mobile_is_primary: snapshot.mobile_connected(),
+            mobile_is_primary: snapshot.mobile_is_primary(),
             has_modem_device: snapshot.has_modem_device(),
             mobile_signal_quality: snapshot.mobile_signal_quality(),
         }
