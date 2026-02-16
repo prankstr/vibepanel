@@ -339,6 +339,12 @@ pub struct NetworkCardState {
     pub wifi_failed_clear_source: RefCell<Option<glib::SourceId>>,
     /// Separate from Wi-Fi so simultaneous failures are cleared independently.
     pub mobile_failed_clear_source: RefCell<Option<glib::SourceId>>,
+    /// Keeps the connecting WiFi row's `IconHandle` alive so the spinner
+    /// timer isn't killed when the handle goes out of scope in `populate_wifi_list`.
+    /// Without this, the `Rc<IconHandleInner>` drops at end of the loop body,
+    /// which drops the `CairoSpinner`, which cancels the animation timer — leaving
+    /// the spinner DrawingArea visible but frozen.
+    pub wifi_connecting_icon: RefCell<Option<IconHandle>>,
 }
 
 impl NetworkCardState {
@@ -366,6 +372,7 @@ impl NetworkCardState {
             mobile: MobileRowState::new(),
             wifi_failed_clear_source: RefCell::new(None),
             mobile_failed_clear_source: RefCell::new(None),
+            wifi_connecting_icon: RefCell::new(None),
         }
     }
 }
@@ -978,6 +985,9 @@ pub fn populate_wifi_list(
 
     clear_list_box(list_box);
 
+    // Drop any previously-stored connecting icon handle (its row was just removed).
+    *state.wifi_connecting_icon.borrow_mut() = None;
+
     // Check if Wi-Fi is disabled (or no Wi-Fi device exists)
     let wifi_enabled = snapshot.wifi_enabled().unwrap_or(false);
     let has_wifi = snapshot.has_wifi_device();
@@ -1057,7 +1067,16 @@ pub fn populate_wifi_list(
             color::PRIMARY
         };
 
-        let leading_icon: gtk4::Widget = if icons.uses_material() && needs_overlay {
+        let leading_icon: gtk4::Widget = if is_connecting {
+            // Connecting: show a spinner in place of the signal icon.
+            // Store the handle in state so the Rc<IconHandleInner> stays alive —
+            // if it drops, the CairoSpinner timer is cancelled and the spinner freezes.
+            let icon_handle =
+                icons.create_icon(strength_icon_name, &[icon::TEXT, row::QS_ICON, icon_color]);
+            icon_handle.set_spinning(true);
+            *state.wifi_connecting_icon.borrow_mut() = Some(icon_handle.clone());
+            icon_handle.widget()
+        } else if icons.uses_material() && needs_overlay {
             // Create base icon (full signal, dimmed)
             let base_handle = icons.create_icon(
                 "network-wireless-signal-excellent-symbolic",
@@ -1121,10 +1140,11 @@ pub fn populate_wifi_list(
 
         let row_result = row_builder.build();
 
-        // Disable row activation if this network is currently connecting
+        // Disable row activation if this network is currently connecting.
+        // Only set activatable to false — setting sensitive to false would
+        // dim the row and prevent the spinner DrawingArea from redrawing.
         if is_connecting {
             row_result.row.set_activatable(false);
-            row_result.row.set_sensitive(false);
         }
 
         // Connect row activation to the primary network action
@@ -1805,20 +1825,28 @@ pub fn on_network_changed(
                 }
             }
 
-            // Spinner: when Material unified and cellular is connecting,
-            // but only when the expanded details aren't showing their own
-            // mobile row spinner (avoids duplicate spinners).
-            if material_unified {
-                let expanded = state
-                    .base
-                    .revealer
-                    .borrow()
-                    .as_ref()
-                    .is_some_and(|r| r.reveals_child());
-                icon_handle.set_spinning(!expanded && snapshot.mobile_connecting());
-            } else {
-                icon_handle.set_spinning(false);
-            }
+            // Spinner: show when wifi or cellular is connecting, but only
+            // when the expanded details aren't visible (they have their own
+            // per-row spinners, so showing both would be redundant).
+            //
+            // WiFi connecting covers three cases:
+            //   1. User-initiated connection (connecting_ssid is set)
+            //   2. WiFi just enabled, scanning for networks to auto-connect
+            //   3. WiFi enabled, initial scan not yet complete
+            let wifi_connecting = snapshot.connecting_ssid().is_some()
+                || snapshot.wifi_device_connecting()
+                || (enabled
+                    && !snapshot.connected()
+                    && !snapshot.wired_connected()
+                    && (snapshot.scanning() || !snapshot.is_ready()));
+            let is_connecting = wifi_connecting || snapshot.mobile_connecting();
+            let expanded = state
+                .base
+                .revealer
+                .borrow()
+                .as_ref()
+                .is_some_and(|r| r.reveals_child());
+            icon_handle.set_spinning(is_connecting && !expanded);
 
             let icon_active = (enabled && snapshot.connected())
                 || snapshot.wired_connected()
@@ -2083,6 +2111,7 @@ mod tests {
                 networks: Vec::new(),
                 connecting_ssid: None,
                 failed_ssid: None,
+                device_state: None,
             },
             wired: WiredState {
                 connected: false,

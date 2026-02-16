@@ -352,8 +352,16 @@ impl QuickSettingsWidget {
             {
                 wifi_icon.widget().add_css_class(state::ICON_ACTIVE);
             }
-            // Show spinner if this icon is responsible for cellular and it's connecting
-            if material_unified && wifi_snapshot.mobile_connecting() {
+            // Show spinner if wifi or cellular is connecting
+            let wifi_connecting = wifi_snapshot.connecting_ssid().is_some()
+                || wifi_snapshot.wifi_device_connecting()
+                || (wifi_enabled
+                    && !wifi_connected
+                    && !wired_connected
+                    && (wifi_snapshot.scanning() || !wifi_snapshot.is_ready()));
+            let is_connecting =
+                wifi_connecting || (material_unified && wifi_snapshot.mobile_connecting());
+            if is_connecting {
                 wifi_icon.set_spinning(true);
             }
 
@@ -397,10 +405,16 @@ impl QuickSettingsWidget {
                     }
                 }
 
-                // Spinner: when this icon owns cellular display and modem is connecting
-                if material_unified {
-                    wifi_icon_handle.set_spinning(snapshot.mobile_connecting());
-                }
+                // Spinner: wifi connecting/scanning, or cellular connecting
+                let wifi_connecting = snapshot.connecting_ssid().is_some()
+                    || snapshot.wifi_device_connecting()
+                    || (enabled
+                        && !connected
+                        && !wired_connected
+                        && (snapshot.scanning() || !snapshot.is_ready()));
+                let is_connecting =
+                    wifi_connecting || (material_unified && snapshot.mobile_connecting());
+                wifi_icon_handle.set_spinning(is_connecting);
 
                 // Disabled styling: only when showing a wifi icon, not when
                 // displaying a cellular or combined icon.
@@ -474,8 +488,14 @@ impl QuickSettingsWidget {
                     } else {
                         ssid.to_string()
                     }
+                } else if let Some(ssid) = snapshot.connecting_ssid() {
+                    format!("Connecting to {}", ssid)
+                } else if snapshot.wifi_device_connecting() {
+                    "Connecting...".to_string()
                 } else if snapshot.wifi_enabled() == Some(false) {
                     "Wi-Fi Off".to_string()
+                } else if snapshot.scanning() || !snapshot.is_ready() {
+                    "Wi-Fi: Scanning...".to_string()
                 } else {
                     "Disconnected".to_string()
                 };

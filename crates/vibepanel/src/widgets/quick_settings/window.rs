@@ -595,9 +595,15 @@ impl QuickSettingsWindow {
             }
         }
 
-        // Show spinner when cellular is connecting (Material unified mode only —
-        // in GTK mode the separate mobile row in the expanded details handles this)
-        if material_unified && snapshot.mobile_connecting() {
+        // Show spinner when wifi or cellular is connecting/scanning
+        let wifi_connecting = snapshot.connecting_ssid().is_some()
+            || snapshot.wifi_device_connecting()
+            || (wifi_enabled
+                && !wifi_connected
+                && !wired_connected
+                && (snapshot.scanning() || !snapshot.is_ready()));
+        let is_connecting = wifi_connecting || snapshot.mobile_connecting();
+        if is_connecting {
             wifi_card.icon_handle.set_spinning(true);
         }
 

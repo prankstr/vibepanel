@@ -120,10 +120,24 @@ impl NetworkSnapshot {
         }
     }
 
+    /// Whether the NM WiFi device is in a connecting state (PREPARE through SECONDARIES).
+    ///
+    /// This fires earlier than `connecting_ssid()` because NM sets the Device
+    /// `State` property before `ActiveAccessPoint`, giving us an early signal
+    /// to show the spinner (matching nm-applet's behavior).
+    pub fn wifi_device_connecting(&self) -> bool {
+        match self {
+            Self::NetworkManager(inner) => matches!(inner.wifi.device_state, Some(40..=90)),
+            Self::Iwd(_) => false, // IWD has its own state machine
+        }
+    }
+
     pub fn connection_state(&self) -> NetworkConnectionState {
         match self {
             Self::NetworkManager(inner) => {
-                if inner.wifi.connecting_ssid.is_some() {
+                if inner.wifi.connecting_ssid.is_some()
+                    || matches!(inner.wifi.device_state, Some(40..=90))
+                {
                     NetworkConnectionState::Connecting
                 } else if inner.wifi.connected {
                     NetworkConnectionState::Connected

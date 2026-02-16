@@ -111,6 +111,8 @@ pub struct WifiState {
     pub connecting_ssid: Option<String>,
     /// SSID that failed to connect.
     pub failed_ssid: Option<String>,
+    /// NM Device `State` property (e.g., 40=PREPARE … 90=SECONDARIES → connecting).
+    pub device_state: Option<u32>,
 }
 
 impl WifiState {
@@ -267,6 +269,9 @@ impl MobileInternal {
 /// Internal Wi-Fi bookkeeping (not exposed in snapshots).
 pub(super) struct WifiInternal {
     pub(super) proxy: RefCell<Option<gio::DBusProxy>>,
+    /// Proxy for the base `org.freedesktop.NetworkManager.Device` interface,
+    /// used to monitor the `State` property for connecting states (40-90).
+    pub(super) device_proxy: RefCell<Option<gio::DBusProxy>>,
     pub(super) iface_name: RefCell<Option<String>>,
     pub(super) scan_in_progress: Cell<bool>,
     pub(super) last_scan_value: Cell<Option<i64>>,
@@ -280,6 +285,7 @@ impl WifiInternal {
     fn new() -> Self {
         Self {
             proxy: RefCell::new(None),
+            device_proxy: RefCell::new(None),
             iface_name: RefCell::new(None),
             scan_in_progress: Cell::new(false),
             last_scan_value: Cell::new(None),
@@ -794,6 +800,7 @@ impl NmService {
         self.notify_snapshot(|s| *s = NmSnapshot::unknown());
         self.nm_proxy.replace(None);
         self.wifi.proxy.replace(None);
+        self.wifi.device_proxy.replace(None);
     }
 
     // ── Shared Device Discovery ──────────────────────────────────────
@@ -945,15 +952,24 @@ impl NmService {
 
         let mut snapshot = self.snapshot.borrow_mut();
         let mut changed = false;
+        let mut wifi_reenabled = false;
         if snapshot.wifi.enabled != wifi_enabled {
+            // Detect WiFi being re-enabled so we can trigger a network refresh.
+            wifi_reenabled = snapshot.wifi.enabled == Some(false) && wifi_enabled == Some(true);
+
             snapshot.wifi.enabled = wifi_enabled;
             changed = true;
 
-            // When WiFi is disabled, clear connection state
+            // When WiFi is disabled, clear connection state and reset scan
+            // readiness so the spinner shows during the next re-enable cycle
+            // (matching IWD's clear_station() behavior).
             if wifi_enabled == Some(false) {
                 snapshot.wifi.connected = false;
                 snapshot.wifi.ssid = None;
                 snapshot.wifi.strength = 0;
+                snapshot.wifi.is_ready = false;
+                snapshot.wifi.scanning = false;
+                snapshot.wifi.device_state = None;
                 for net in &mut snapshot.wifi.networks {
                     net.active = false;
                 }
@@ -1000,6 +1016,13 @@ impl NmService {
             }
             if mobile_changed {
                 Self::fetch_mobile_device_info();
+            }
+            // When WiFi is re-enabled, trigger a network refresh so
+            // is_ready eventually becomes true (ending the spinner).
+            // Without this, if NM doesn't auto-connect, is_ready stays
+            // false because nothing triggers refresh_networks_async.
+            if wifi_reenabled {
+                self.refresh_networks_async();
             }
         } else {
             drop(snapshot);

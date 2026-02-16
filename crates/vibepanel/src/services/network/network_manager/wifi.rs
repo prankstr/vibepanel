@@ -12,7 +12,7 @@ use gtk4::glib::{Variant, VariantTy};
 use tracing::{debug, error, warn};
 
 use super::{
-    IFACE_AP, IFACE_WIFI, NM_IFACE, NM_SERVICE, NmService, NmUpdate, send_nm_update,
+    IFACE_AP, IFACE_DEV, IFACE_WIFI, NM_IFACE, NM_SERVICE, NmService, NmUpdate, send_nm_update,
     system_dbus_proxy_sync,
 };
 use crate::services::network::{SecurityType, WifiNetwork, objpath_to_string};
@@ -36,6 +36,7 @@ impl NmService {
 
         let connection = nm_proxy.connection();
 
+        // Create the Device.Wireless proxy (for ActiveAccessPoint, scanning, etc.)
         gio::DBusProxy::new(
             &connection,
             gio::DBusProxyFlags::NONE,
@@ -43,6 +44,47 @@ impl NmService {
             Some(NM_SERVICE),
             &path,
             IFACE_WIFI,
+            None::<&gio::Cancellable>,
+            {
+                let this_weak = this_weak.clone();
+                move |res| {
+                    let Some(this) = this_weak.upgrade() else {
+                        return;
+                    };
+
+                    let proxy = match res {
+                        Ok(p) => p,
+                        Err(e) => {
+                            error!("Failed to create Wi-Fi proxy: {}", e);
+                            return;
+                        }
+                    };
+
+                    this.wifi.proxy.replace(Some(proxy.clone()));
+
+                    // Subscribe to property changes
+                    let this_weak = Rc::downgrade(&this);
+                    proxy.connect_local("g-properties-changed", false, move |_| {
+                        if let Some(this) = this_weak.upgrade() {
+                            this.update_state();
+                        }
+                        None
+                    });
+
+                    // Initial state update
+                    this.update_state();
+                }
+            },
+        );
+
+        // Create the base Device proxy (for State property — connecting states 40-90).
+        gio::DBusProxy::new(
+            &connection,
+            gio::DBusProxyFlags::NONE,
+            None::<&gio::DBusInterfaceInfo>,
+            Some(NM_SERVICE),
+            &path,
+            IFACE_DEV,
             None::<&gio::Cancellable>,
             move |res| {
                 let Some(this) = this_weak.upgrade() else {
@@ -52,24 +94,35 @@ impl NmService {
                 let proxy = match res {
                     Ok(p) => p,
                     Err(e) => {
-                        error!("Failed to create Wi-Fi proxy: {}", e);
+                        error!("Failed to create Wi-Fi Device proxy: {}", e);
                         return;
                     }
                 };
 
-                this.wifi.proxy.replace(Some(proxy.clone()));
+                this.wifi.device_proxy.replace(Some(proxy.clone()));
 
-                // Subscribe to property changes
+                // Read initial state and notify.
+                if let Some(state) = proxy.cached_property("State").and_then(|v| v.get::<u32>()) {
+                    this.notify_snapshot(|s| s.wifi.device_state = Some(state));
+                }
+
+                // Subscribe to property changes for State updates.
                 let this_weak = Rc::downgrade(&this);
                 proxy.connect_local("g-properties-changed", false, move |_| {
-                    if let Some(this) = this_weak.upgrade() {
-                        this.update_state();
+                    if let Some(this) = this_weak.upgrade()
+                        && let Some(proxy) = this.wifi.device_proxy.borrow().as_ref()
+                        && let Some(state) =
+                            proxy.cached_property("State").and_then(|v| v.get::<u32>())
+                    {
+                        this.notify_snapshot_if(|s| {
+                            let new_val = Some(state);
+                            let changed = s.wifi.device_state != new_val;
+                            s.wifi.device_state = new_val;
+                            changed
+                        });
                     }
                     None
                 });
-
-                // Initial state update
-                this.update_state();
             },
         );
     }
