@@ -13,11 +13,14 @@ use tracing::{debug, warn};
 use super::QuickSettingsWindowHandle;
 use super::audio_card::volume_icon_name;
 use super::bluetooth_card::bt_icon_name;
-use super::network_card::{NetworkIconContext, mobile_state_icon_name, network_icon_name};
+use super::network_card::{
+    NetworkIconContext, cellular_signal_icon_name, mobile_state_icon_name, network_icon_name,
+};
 use super::vpn_card::vpn_icon_name;
 use crate::services::audio::{AudioService, AudioSnapshot};
 use crate::services::bluetooth::{BluetoothService, BluetoothSnapshot};
 use crate::services::config_manager::ConfigManager;
+use crate::services::icons::IconsService;
 use crate::services::network::{NetworkService, NetworkSnapshot};
 use crate::services::tooltip::TooltipManager;
 use crate::services::vpn::{VpnService, VpnSnapshot};
@@ -305,27 +308,68 @@ impl QuickSettingsWidget {
         // Unified Network icon (Wi-Fi + Ethernet).
         // Only shown when `wifi` is enabled in config. The cellular icon is
         // independent and controlled by `cards.cellular` below.
+        //
+        // When using Material icons and `cellular` is also enabled, this
+        // single icon handles all network states: `cell_wifi` when both
+        // Wi-Fi/wired and cellular are connected, a cellular signal icon when
+        // only cellular is active, or the normal Wi-Fi/wired icon otherwise.
+        // The separate cellular icon hides itself entirely in this mode.
+        //
+        // In Material mode, disabled Wi-Fi uses the same `wifi` glyph shape
+        // with a dimmed CSS color instead of the distinct `wifi_off` glyph,
+        // matching how bluetooth handles its disabled state.
         if cards.wifi {
             let wifi_snapshot = NetworkService::global().snapshot();
             let wifi_enabled = wifi_snapshot.wifi_enabled().unwrap_or(false);
             let wifi_connected = wifi_snapshot.connected();
             let wired_connected = wifi_snapshot.wired_connected();
-            // The bar's network icon intentionally ignores mobile connectivity
-            // state — a separate cellular icon handles mobile display, so the
-            // network icon only reflects Wi-Fi / wired status.
+
+            // When Material is active and cellular card is enabled, this icon
+            // handles all network states (wifi, cellular, combined).
+            let material_unified = cards.cellular && IconsService::global().uses_material();
+
+            let wifi_or_wired = wifi_connected || wired_connected;
             let network_icon_name_initial =
-                network_icon_name(&NetworkIconContext::for_bar(&wifi_snapshot));
+                if material_unified && wifi_snapshot.mobile_active() && wifi_or_wired {
+                    // Both connected — combined glyph
+                    "network-wifi-cellular-symbolic"
+                } else if material_unified && wifi_snapshot.mobile_active() {
+                    // Only cellular active — show cellular signal icon directly
+                    let quality = wifi_snapshot.mobile_signal_quality().unwrap_or(0);
+                    cellular_signal_icon_name(quality)
+                } else {
+                    let icon_name = network_icon_name(&NetworkIconContext::for_bar(&wifi_snapshot));
+                    // In Material mode, use the regular wifi shape for disabled
+                    // state — the WIFI_DISABLED_ICON CSS class dims the color.
+                    if material_unified && icon_name == "network-wireless-offline-symbolic" {
+                        "network-wireless-signal-excellent-symbolic"
+                    } else {
+                        icon_name
+                    }
+                };
             let wifi_icon = base.add_icon(network_icon_name_initial, &[icon::ICON, icon::TEXT]);
 
-            if !wifi_enabled && !wired_connected {
+            // CSS classes: only apply wifi-disabled when actually showing a
+            // wifi icon (not when showing cellular or combined).
+            let showing_wifi_icon = !material_unified
+                || (!wifi_snapshot.mobile_active() && !wifi_snapshot.mobile_connecting());
+            if showing_wifi_icon && !wifi_enabled && !wired_connected {
                 wifi_icon.widget().add_css_class(qs::WIFI_DISABLED_ICON);
             }
-            if (wifi_enabled && wifi_connected) || wired_connected {
+            if (wifi_enabled && wifi_connected)
+                || wired_connected
+                || (material_unified && wifi_snapshot.mobile_active())
+            {
                 wifi_icon.widget().add_css_class(state::ICON_ACTIVE);
+            }
+            // Show spinner if this icon is responsible for cellular and it's connecting
+            if material_unified && wifi_snapshot.mobile_connecting() {
+                wifi_icon.set_spinning(true);
             }
 
             // Subscribe to NetworkService updates
             let wifi_icon_handle = wifi_icon.clone();
+            let cellular_card_enabled = cards.cellular;
             NetworkService::global().connect(move |snapshot: &NetworkSnapshot| {
                 let widget = wifi_icon_handle.widget();
 
@@ -333,6 +377,7 @@ impl QuickSettingsWidget {
                     widget.add_css_class(state::SERVICE_UNAVAILABLE);
                     widget.remove_css_class(qs::WIFI_DISABLED_ICON);
                     widget.remove_css_class(state::ICON_ACTIVE);
+                    wifi_icon_handle.set_spinning(false);
                     wifi_icon_handle.set_icon("network-wireless-offline-symbolic");
                     TooltipManager::global()
                         .set_styled_tooltip(&widget, "Wi-Fi: Service unavailable");
@@ -340,28 +385,97 @@ impl QuickSettingsWidget {
                 }
                 widget.remove_css_class(state::SERVICE_UNAVAILABLE);
 
+                let material_unified =
+                    cellular_card_enabled && IconsService::global().uses_material();
                 let enabled = snapshot.wifi_enabled().unwrap_or(false);
                 let connected = snapshot.connected();
                 let wired_connected = snapshot.wired_connected();
+                let wifi_or_wired = connected || wired_connected;
 
-                // See comment above — bar network icon deliberately ignores mobile state.
-                let icon_name = network_icon_name(&NetworkIconContext::for_bar(snapshot));
-                wifi_icon_handle.set_icon(icon_name);
+                // Pick icon: combined → cellular-only → wifi/wired
+                if material_unified && snapshot.mobile_active() && wifi_or_wired {
+                    wifi_icon_handle.set_icon("network-wifi-cellular-symbolic");
+                } else if material_unified && snapshot.mobile_active() {
+                    // Only cellular active — show cellular signal icon directly
+                    let quality = snapshot.mobile_signal_quality().unwrap_or(0);
+                    wifi_icon_handle.set_icon(cellular_signal_icon_name(quality));
+                } else {
+                    let icon_name = network_icon_name(&NetworkIconContext::for_bar(snapshot));
+                    if material_unified && icon_name == "network-wireless-offline-symbolic" {
+                        wifi_icon_handle.set_icon("network-wireless-signal-excellent-symbolic");
+                    } else {
+                        wifi_icon_handle.set_icon(icon_name);
+                    }
+                }
 
-                if !enabled && !wired_connected {
+                // Spinner: when this icon owns cellular display and modem is connecting
+                if material_unified {
+                    wifi_icon_handle.set_spinning(snapshot.mobile_connecting());
+                }
+
+                // Disabled styling: only when showing a wifi icon, not when
+                // displaying a cellular or combined icon.
+                let showing_wifi_icon = !material_unified
+                    || (!snapshot.mobile_active() && !snapshot.mobile_connecting());
+                if showing_wifi_icon && !enabled && !wired_connected {
                     widget.add_css_class(qs::WIFI_DISABLED_ICON);
                 } else {
                     widget.remove_css_class(qs::WIFI_DISABLED_ICON);
                 }
 
-                if (enabled && connected) || wired_connected {
+                // Active: any displayed connection is active
+                if (enabled && connected)
+                    || wired_connected
+                    || (material_unified && snapshot.mobile_active())
+                {
                     widget.add_css_class(state::ICON_ACTIVE);
                 } else {
                     widget.remove_css_class(state::ICON_ACTIVE);
                 }
 
-                // Tooltip
-                let tooltip = if snapshot.wired_connected() {
+                // Tooltip — include cellular info when showing combined state
+                let show_combined = material_unified && snapshot.mobile_active() && wifi_or_wired;
+                let tooltip = if show_combined {
+                    let wifi_part = if snapshot.wired_connected() {
+                        "Ethernet".to_string()
+                    } else {
+                        let ssid = snapshot.active_ssid().unwrap_or("Wi-Fi");
+                        let strength = snapshot.active_strength();
+                        if strength > 0 {
+                            format!("{} ({}%)", ssid, strength)
+                        } else {
+                            ssid.to_string()
+                        }
+                    };
+                    let carrier = snapshot
+                        .mobile_operator()
+                        .or(snapshot.mobile_name())
+                        .unwrap_or("Mobile");
+                    let quality = snapshot.mobile_signal_quality().unwrap_or(0);
+                    if let Some(tech) = snapshot.mobile_access_technology() {
+                        format!("{}\n{} {}% {}", wifi_part, carrier, quality, tech)
+                    } else {
+                        format!("{}\n{} {}%", wifi_part, carrier, quality)
+                    }
+                } else if material_unified && snapshot.mobile_active() {
+                    // Cellular-only (no wifi/wired) — show cellular tooltip
+                    let carrier = snapshot
+                        .mobile_operator()
+                        .or(snapshot.mobile_name())
+                        .unwrap_or("Mobile");
+                    let quality = snapshot.mobile_signal_quality().unwrap_or(0);
+                    if let Some(tech) = snapshot.mobile_access_technology() {
+                        format!("{}\nSignal: {}%\n{}", carrier, quality, tech)
+                    } else {
+                        format!("{}\nSignal: {}%", carrier, quality)
+                    }
+                } else if material_unified && snapshot.mobile_connecting() {
+                    let carrier = snapshot
+                        .mobile_operator()
+                        .or(snapshot.mobile_name())
+                        .unwrap_or("Mobile");
+                    format!("{}\nConnecting...", carrier)
+                } else if snapshot.wired_connected() {
                     "Ethernet connected".to_string()
                 } else if snapshot.connected() {
                     let ssid = snapshot.active_ssid().unwrap_or("Connected");
@@ -380,7 +494,11 @@ impl QuickSettingsWidget {
             });
         }
 
-        // Mobile icon (separate from Network icon)
+        // Mobile icon (separate from Network icon).
+        // When using Material icons and the wifi card is enabled, this icon
+        // is always hidden — the wifi icon slot handles all network states
+        // (wifi, cellular, combined) as a single unified icon.
+        // For GTK icon themes, this remains a separate visible icon.
         if cards.cellular {
             let snapshot = NetworkService::global().snapshot();
             let quality = snapshot.mobile_signal_quality().unwrap_or(0);
@@ -388,26 +506,41 @@ impl QuickSettingsWidget {
             let initial_icon =
                 mobile_state_icon_name(mobile_enabled, snapshot.mobile_active(), quality);
             let mobile_icon = base.add_icon(initial_icon, &[icon::ICON, icon::TEXT]);
+
+            // When Material is active and wifi card is enabled, the wifi icon
+            // handles all network states — hide this icon entirely.
+            let material_unified = cards.wifi && IconsService::global().uses_material();
             mobile_icon
                 .widget()
-                .set_visible(snapshot.mobile_supported());
+                .set_visible(snapshot.mobile_supported() && !material_unified);
+
             if snapshot.mobile_active() {
                 mobile_icon.widget().add_css_class(state::ICON_ACTIVE);
             }
             if !mobile_enabled {
                 mobile_icon.widget().add_css_class(qs::MOBILE_DISABLED_ICON);
             }
+            if snapshot.mobile_connecting() {
+                mobile_icon.set_spinning(true);
+            }
 
             let mobile_icon_handle = mobile_icon.clone();
+            let wifi_card_enabled = cards.wifi;
             NetworkService::global().connect(move |snapshot: &NetworkSnapshot| {
                 let widget = mobile_icon_handle.widget();
-                widget.set_visible(snapshot.mobile_supported());
+
+                // In Material unified mode, always hidden
+                let material_unified = wifi_card_enabled && IconsService::global().uses_material();
+                widget.set_visible(snapshot.mobile_supported() && !material_unified);
 
                 let quality = snapshot.mobile_signal_quality().unwrap_or(0);
                 let mobile_enabled = snapshot.mobile_enabled().unwrap_or(false);
                 let icon_name =
                     mobile_state_icon_name(mobile_enabled, snapshot.mobile_active(), quality);
                 mobile_icon_handle.set_icon(icon_name);
+
+                // Show spinner while cellular is connecting
+                mobile_icon_handle.set_spinning(snapshot.mobile_connecting());
 
                 if snapshot.mobile_active() {
                     widget.add_css_class(state::ICON_ACTIVE);

@@ -182,6 +182,9 @@ pub fn material_symbol_name(icon_name: &str) -> &str {
         "network-cellular-offline-symbolic" => "signal_cellular_off",
         "network-cellular-no-route-symbolic" => "signal_cellular_off",
 
+        // Combined Wi-Fi + Cellular (bar icon when both are connected)
+        "network-wifi-cellular-symbolic" => "cell_wifi",
+
         // Wired networking
         "network-wired" => "lan",
         "network-wired-symbolic" => "lan",
@@ -560,6 +563,11 @@ pub fn gtk_icon_candidates(logical: &str) -> &'static [&'static str] {
             "network-cellular-no-route-symbolic",
             "network-cellular-symbolic",
             "network-wireless-signal-none-symbolic",
+        ],
+        // Combined Wi-Fi + Cellular — only used with Material; GTK falls back to wifi icon
+        "network-wifi-cellular-symbolic" => &[
+            "network-wireless-signal-excellent-symbolic",
+            "network-wireless-connected-symbolic",
         ],
         "network-offline-symbolic" => &[
             "network-offline-symbolic",

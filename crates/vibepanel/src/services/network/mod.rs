@@ -413,6 +413,19 @@ impl NetworkService {
         }
     }
 
+    /// Re-emit the current snapshot to all callbacks without any state change.
+    ///
+    /// This triggers all network callbacks to re-evaluate their rendering logic.
+    /// Used when external factors (e.g., icon theme switching between Material
+    /// and GTK) require widgets to update their icon selection even though the
+    /// underlying network state hasn't changed.
+    pub fn re_notify(&self) {
+        match &self.backend {
+            NetworkBackend::NetworkManager(inner) => inner.re_notify(),
+            NetworkBackend::Iwd(inner) => inner.re_notify(),
+        }
+    }
+
     /// Connect to a Wi-Fi network.
     ///
     /// - `ssid`: Network name (used by NM).

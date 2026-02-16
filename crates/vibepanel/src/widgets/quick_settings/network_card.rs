@@ -186,42 +186,64 @@ pub fn get_network_subtitle_text(snapshot: &NetworkSnapshot) -> String {
 
     let wifi_enabled = snapshot.wifi_enabled().unwrap_or(false);
     let is_connecting = snapshot.connection_state() == NetworkConnectionState::Connecting;
+    let mobile_active = snapshot.mobile_active();
     let mobile_connecting = snapshot.mobile_connecting();
+    let carrier = snapshot
+        .mobile_operator()
+        .or(snapshot.mobile_name())
+        .unwrap_or("Mobile");
 
-    match (
-        snapshot.wired_connected(),
-        snapshot.mobile_connected(),
-        is_connecting,
-        &snapshot.active_ssid(),
-    ) {
-        // Wired connected cases
-        (true, _, true, Some(ssid)) => format!("Ethernet \u{2022} Connecting to {}", ssid),
-        (true, _, true, None) => "Ethernet \u{2022} Connecting...".to_string(),
-        (true, _, false, Some(ssid)) => format!("Ethernet \u{2022} {}", ssid),
-        (true, _, false, None) => "Ethernet".to_string(),
+    // Wired connected — may also have wifi and/or cellular
+    if snapshot.wired_connected() {
+        let mut parts = vec!["Ethernet".to_string()];
+        if is_connecting {
+            if let Some(ssid) = snapshot.active_ssid() {
+                parts.push(format!("Connecting to {}", ssid));
+            }
+        } else if let Some(ssid) = snapshot.active_ssid() {
+            parts.push(ssid.to_string());
+        }
+        if mobile_active {
+            parts.push(carrier.to_string());
+        }
+        return parts.join(" \u{2022} ");
+    }
 
-        // Mobile connected (primary route) cases
-        (false, true, true, Some(ssid)) => format!("Mobile \u{2022} Connecting to {}", ssid),
-        (false, true, true, None) => "Mobile \u{2022} Connecting...".to_string(),
-        (false, true, false, Some(ssid)) => format!("Mobile \u{2022} {}", ssid),
-        (false, true, false, None) => snapshot
-            .mobile_operator()
-            .or(snapshot.mobile_name())
-            .unwrap_or("Mobile")
-            .to_string(),
+    // Mobile active (has activated connection) — may also have wifi
+    if mobile_active {
+        if is_connecting {
+            if let Some(ssid) = snapshot.active_ssid() {
+                return format!("{} \u{2022} Connecting to {}", carrier, ssid);
+            }
+        } else if let Some(ssid) = snapshot.active_ssid() {
+            return format!("{} \u{2022} {}", ssid, carrier);
+        }
+        return carrier.to_string();
+    }
 
-        // Wi-Fi connecting/connected cases
-        (false, false, true, Some(ssid)) => format!("Connecting to {}", ssid),
-        (false, false, true, None) => "Connecting...".to_string(),
-        (false, false, false, Some(ssid)) => ssid.to_string(),
+    // Wi-Fi only (no wired, no cellular active)
+    if is_connecting {
+        return if let Some(ssid) = snapshot.active_ssid() {
+            format!("Connecting to {}", ssid)
+        } else {
+            "Connecting...".to_string()
+        };
+    }
 
-        // Mobile connecting (not yet primary) — show connecting status
-        (false, false, false, None) if mobile_connecting => "Connecting...".to_string(),
+    if let Some(ssid) = snapshot.active_ssid() {
+        return ssid.to_string();
+    }
 
-        // Fallback disconnected/off states
-        (false, false, false, None) if !snapshot.has_wifi_device() => "Disconnected".to_string(),
-        (false, false, false, None) if wifi_enabled => "Disconnected".to_string(),
-        (false, false, false, None) => "Off".to_string(),
+    // Mobile connecting (not yet active)
+    if mobile_connecting {
+        return format!("{} \u{2022} Connecting...", carrier);
+    }
+
+    // Fallback disconnected/off states
+    if !snapshot.has_wifi_device() || wifi_enabled {
+        "Disconnected".to_string()
+    } else {
+        "Off".to_string()
     }
 }
 
@@ -230,7 +252,7 @@ pub fn is_network_subtitle_active(snapshot: &NetworkSnapshot) -> bool {
     let state = snapshot.connection_state();
     let is_connecting = state == NetworkConnectionState::Connecting;
     let any_connected = snapshot.wired_connected()
-        || snapshot.mobile_connected()
+        || snapshot.mobile_active()
         || state == NetworkConnectionState::Connected;
 
     // If only mobile is connecting (no other connection active), not active.
@@ -1752,24 +1774,62 @@ pub fn on_network_changed(
 
     // Update Wi-Fi card icon and its active state class
     if let Some(icon_handle) = state.base.card_icon.borrow().as_ref() {
-        let icon_name = network_icon_name(&NetworkIconContext::from_snapshot(snapshot));
-        icon_handle.set_icon(icon_name);
-
         // Service unavailable - use warning styling
         if !snapshot.available() {
+            icon_handle.set_icon("network-wireless-offline-symbolic");
+            icon_handle.set_spinning(false);
             icon_handle.add_css_class(state::SERVICE_UNAVAILABLE);
             icon_handle.remove_css_class(qs::WIFI_DISABLED_ICON);
             icon_handle.remove_css_class(state::ICON_ACTIVE);
         } else {
             icon_handle.remove_css_class(state::SERVICE_UNAVAILABLE);
 
+            // When Material is active and device has a modem, pick the unified
+            // icon (cell_wifi / cellular-only / wifi) instead of the default
+            // which relies on mobile_is_primary.
+            let material_unified =
+                snapshot.mobile_supported() && IconsService::global().uses_material();
+            let wifi_or_wired = snapshot.connected() || snapshot.wired_connected();
+
+            if material_unified && snapshot.mobile_active() && wifi_or_wired {
+                icon_handle.set_icon("network-wifi-cellular-symbolic");
+            } else if material_unified && snapshot.mobile_active() {
+                let quality = snapshot.mobile_signal_quality().unwrap_or(0);
+                icon_handle.set_icon(cellular_signal_icon_name(quality));
+            } else {
+                let icon_name = network_icon_name(&NetworkIconContext::from_snapshot(snapshot));
+                if material_unified && icon_name == "network-wireless-offline-symbolic" {
+                    icon_handle.set_icon("network-wireless-signal-excellent-symbolic");
+                } else {
+                    icon_handle.set_icon(icon_name);
+                }
+            }
+
+            // Spinner: when Material unified and cellular is connecting,
+            // but only when the expanded details aren't showing their own
+            // mobile row spinner (avoids duplicate spinners).
+            if material_unified {
+                let expanded = state
+                    .base
+                    .revealer
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|r| r.reveals_child());
+                icon_handle.set_spinning(!expanded && snapshot.mobile_connecting());
+            } else {
+                icon_handle.set_spinning(false);
+            }
+
             let icon_active = (enabled && snapshot.connected())
                 || snapshot.wired_connected()
-                || snapshot.mobile_connected();
+                || snapshot.mobile_active();
             set_icon_active(icon_handle, icon_active);
 
-            // Additional disabled styling for Wi-Fi
-            if !enabled && !snapshot.wired_connected() && !snapshot.mobile_connected() {
+            // Disabled styling: only when actually showing a wifi icon, not
+            // when displaying a cellular or combined icon.
+            let showing_wifi_icon =
+                !material_unified || (!snapshot.mobile_active() && !snapshot.mobile_connecting());
+            if showing_wifi_icon && !enabled && !snapshot.wired_connected() {
                 icon_handle.add_css_class(qs::WIFI_DISABLED_ICON);
             } else {
                 icon_handle.remove_css_class(qs::WIFI_DISABLED_ICON);
@@ -2384,7 +2444,10 @@ mod tests {
         let mut snapshot = test_snapshot();
         snapshot.mobile.connecting = true;
         let wrapped = NetworkSnapshot::NetworkManager(snapshot);
-        assert_eq!(get_network_subtitle_text(&wrapped), "Connecting...");
+        assert_eq!(
+            get_network_subtitle_text(&wrapped),
+            "Mobile \u{2022} Connecting..."
+        );
     }
 
     #[test]
@@ -2409,7 +2472,7 @@ mod tests {
         let wrapped = NetworkSnapshot::NetworkManager(snapshot);
         assert_eq!(
             get_network_subtitle_text(&wrapped),
-            "Mobile \u{2022} HomeWifi"
+            "HomeWifi \u{2022} Mobile"
         );
     }
 
@@ -2428,6 +2491,64 @@ mod tests {
         snapshot.mobile.connecting = true;
         let wrapped = NetworkSnapshot::NetworkManager(snapshot);
         assert!(!is_network_subtitle_active(&wrapped));
+    }
+
+    // ---- Mobile subtitle: active (not just primary) ----
+
+    #[test]
+    fn test_subtitle_mobile_active_not_primary_with_operator() {
+        let mut snapshot = test_snapshot();
+        snapshot.mobile.active = true;
+        snapshot.mobile.operator = Some("Vodafone".to_string());
+        let wrapped = NetworkSnapshot::NetworkManager(snapshot);
+        assert_eq!(get_network_subtitle_text(&wrapped), "Vodafone");
+    }
+
+    #[test]
+    fn test_subtitle_wired_and_mobile_active() {
+        let mut snapshot = test_snapshot();
+        snapshot.wired.connected = true;
+        snapshot.mobile.active = true;
+        snapshot.mobile.operator = Some("T-Mobile".to_string());
+        let wrapped = NetworkSnapshot::NetworkManager(snapshot);
+        assert_eq!(
+            get_network_subtitle_text(&wrapped),
+            "Ethernet \u{2022} T-Mobile"
+        );
+    }
+
+    #[test]
+    fn test_subtitle_wired_wifi_and_mobile_active() {
+        let mut snapshot = test_snapshot();
+        snapshot.wired.connected = true;
+        snapshot.wifi.ssid = Some("HomeWifi".to_string());
+        snapshot.mobile.active = true;
+        snapshot.mobile.operator = Some("T-Mobile".to_string());
+        let wrapped = NetworkSnapshot::NetworkManager(snapshot);
+        assert_eq!(
+            get_network_subtitle_text(&wrapped),
+            "Ethernet \u{2022} HomeWifi \u{2022} T-Mobile"
+        );
+    }
+
+    #[test]
+    fn test_subtitle_mobile_connecting_with_operator() {
+        let mut snapshot = test_snapshot();
+        snapshot.mobile.connecting = true;
+        snapshot.mobile.operator = Some("AT&T".to_string());
+        let wrapped = NetworkSnapshot::NetworkManager(snapshot);
+        assert_eq!(
+            get_network_subtitle_text(&wrapped),
+            "AT&T \u{2022} Connecting..."
+        );
+    }
+
+    #[test]
+    fn test_subtitle_active_mobile_active_not_primary() {
+        let mut snapshot = test_snapshot();
+        snapshot.mobile.active = true;
+        let wrapped = NetworkSnapshot::NetworkManager(snapshot);
+        assert!(is_network_subtitle_active(&wrapped));
     }
 
     // ---- network_icon_name with mobile ----

@@ -295,6 +295,15 @@ impl IwdService {
         self.snapshot.borrow().clone()
     }
 
+    /// Re-emit the current snapshot to all callbacks without any state change.
+    ///
+    /// Used when external factors (e.g., icon theme switch) require callbacks
+    /// to re-evaluate their rendering logic with unchanged network state.
+    pub fn re_notify(&self) {
+        let snapshot = self.snapshot.borrow().clone();
+        self.callbacks.notify(&snapshot);
+    }
+
     fn init_dbus(this: &Rc<Self>) {
         let this_weak = Rc::downgrade(this);
 
