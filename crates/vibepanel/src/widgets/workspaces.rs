@@ -127,23 +127,12 @@ mod ws_container_imp {
 
             let gap = self.gap.get();
 
-            // Active-aware two-group split: the active indicator is the last
-            // child in the left group. For the common single-active case, this
-            // places the growing and shrinking indicators on opposite sides of
-            // the group boundary during adjacent workspace switches.
-            //
-            // With multiple active indicators (multi-tag view), `position()`
-            // finds the first active child; the layout is still correct but
-            // the cross-boundary property isn't guaranteed for all pairs.
-            //
-            // Left group: [0..=active_index], laid out left-to-right
-            // Right group: [active_index+1..n], laid out right-to-left
-            //
-            // The gap between groups absorbs ±1px rounding drift from integer
-            // rounding of CSS-animated min-width values mid-transition.
-            // During multi-active → fewer-active transitions, children may
-            // transiently exceed target_width while CSS transitions settle;
-            // Overflow::Hidden (set in constructed()) clips this safely.
+            // Two-group split around the active indicator:
+            //   Left group: [0..=active_idx]  — laid out left-to-right
+            //   Right group: [active_idx+1..n] — laid out right-to-left
+            // The gap between groups absorbs ±1px rounding drift from
+            // CSS-animated min-width values. Overflow::Hidden clips any
+            // transient overshoot during multi-active transitions.
             let active_css = crate::styles::widget::ACTIVE;
             let active_idx = children.iter().position(|c| c.has_css_class(active_css));
 
@@ -276,9 +265,7 @@ impl WorkspaceContainer {
         }
     }
 
-    /// Snapshot the current left-group size so size_allocate uses it
-    /// instead of recomputing from the active CSS class. Returns the
-    /// frozen value.
+    /// Freeze the current left-group size for use during removal animations.
     fn freeze_left_count(&self) -> usize {
         let children = self.imp().children.borrow();
         let n = children.len();
@@ -434,11 +421,9 @@ impl WorkspacesWidget {
         let widget_height = sizes.widget_height;
         let content_gap = sizes.widget_content_gap;
 
-        // When animations are enabled, use a WorkspaceContainer that reports
-        // constant width and absorbs rounding drift during CSS transitions.
-        // This also drives enter/exit animations for workspace additions and
-        // removals. Without animations, indicators go directly in the content
-        // GtkBox.
+        // When animated, use a WorkspaceContainer that reports constant
+        // width and drives enter/exit animations. Otherwise, indicators
+        // go directly in the content GtkBox.
         let ws_container: Option<WorkspaceContainer> = if animate {
             let container = WorkspaceContainer::new();
             container.set_gap(content_gap as i32);
@@ -448,7 +433,6 @@ impl WorkspacesWidget {
             None
         };
 
-        // For non-minimal modes, indicators go directly in the content box.
         let content_box = base.content().clone();
 
         // State shared with the callback (callback owns these via Rc).
@@ -616,10 +600,6 @@ fn create_indicators(
 }
 
 /// Compute the steady-state target width for the workspace container.
-///
-/// This is the total width when all indicators are at their final sizes
-/// (no animation in progress). The container reports this constant width
-/// to prevent neighboring widgets from shifting during CSS transitions.
 fn compute_target_width(
     widget_height: u32,
     active_count: i32,
@@ -761,9 +741,7 @@ fn update_indicators(
                 // The container width animation smoothly closes the gap.
 
                 // Freeze the two-group split BEFORE removing children so
-                // surviving indicators stay in their original groups during
-                // the animation. This prevents e.g. ws2 jumping from the
-                // left group to the right group when active changes from
+                // e.g. ws2 doesn't jump groups when active changes from
                 // ws3 to ws1.
                 let frozen = wsc.freeze_left_count();
 
@@ -785,9 +763,6 @@ fn update_indicators(
                     drop(ids);
                     ids_cell.borrow_mut().retain(|id| new_ids_set.contains(id));
 
-                    // Adjust frozen split: removed left-group indicators
-                    // reduce the left count so surviving members keep their
-                    // original group membership.
                     if left_removed > 0 {
                         wsc.imp().frozen_left_count.set(Some(frozen - left_removed));
                     }
