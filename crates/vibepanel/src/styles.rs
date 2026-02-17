@@ -435,6 +435,9 @@ pub mod widget {
     /// Workspace indicator no-animate (`.workspace-no-animate`).
     pub const WORKSPACE_NO_ANIMATE: &str = "workspace-no-animate";
 
+    /// Workspace indicator collapsed for enter animation (`.workspace-indicator-collapsed`).
+    pub const WORKSPACE_INDICATOR_COLLAPSED: &str = "workspace-indicator-collapsed";
+
     /// Workspace separator (`.workspace-separator`).
     pub const WORKSPACE_SEPARATOR: &str = "workspace-separator";
 

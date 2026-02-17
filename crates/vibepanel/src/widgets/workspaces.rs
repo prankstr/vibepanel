@@ -46,6 +46,18 @@ mod ws_container_imp {
         pub(super) children: RefCell<Vec<Widget>>,
         pub(super) target_width: Cell<i32>,
         pub(super) gap: Cell<i32>,
+        /// Current animated width (f64 for smooth interpolation).
+        pub(super) current_width: Cell<f64>,
+        /// Width at the start of the current animation.
+        pub(super) anim_start_width: Cell<f64>,
+        /// Frame time (microseconds) at the start of the current animation.
+        pub(super) anim_start_time: Cell<Option<i64>>,
+        /// Whether an animation is currently running.
+        pub(super) animating: Cell<bool>,
+        /// When set, size_allocate uses this left-group size instead of
+        /// computing from the active CSS class. Used during removal
+        /// animations to keep surviving indicators in their original groups.
+        pub(super) frozen_left_count: Cell<Option<usize>>,
     }
 
     #[glib::object_subclass]
@@ -83,7 +95,7 @@ mod ws_container_imp {
                 return (0, 0, -1, -1);
             }
             if orientation == gtk4::Orientation::Horizontal {
-                let w = self.target_width.get();
+                let w = self.current_width.get().round() as i32;
                 (w, w, -1, -1)
             } else {
                 let mut max_min = 0i32;
@@ -135,7 +147,13 @@ mod ws_container_imp {
             let active_css = crate::styles::widget::ACTIVE;
             let active_idx = children.iter().position(|c| c.has_css_class(active_css));
 
-            let left_count = compute_left_count(n, active_idx);
+            let left_count = if let Some(frozen) = self.frozen_left_count.get() {
+                // During removal animations, use the frozen split to keep
+                // surviving indicators in their original groups.
+                frozen.min(n)
+            } else {
+                compute_left_count(n, active_idx)
+            };
 
             // Left group: laid out left-to-right from x=0
             let mut x = 0i32;
@@ -174,9 +192,62 @@ impl WorkspaceContainer {
 
     fn set_target_width(&self, width: i32) {
         let imp = self.imp();
-        if imp.target_width.get() != width {
-            imp.target_width.set(width);
+        if imp.target_width.get() == width {
+            return;
+        }
+        imp.target_width.set(width);
+
+        let current = imp.current_width.get();
+        if current == 0.0 {
+            // First call (no previous width) — snap immediately, no animation.
+            imp.current_width.set(width as f64);
             self.queue_resize();
+            return;
+        }
+
+        // Start (or restart) animation from current interpolated position.
+        imp.anim_start_width.set(current);
+        // anim_start_time will be set on the first tick (we don't have a
+        // frame clock reference here outside of a tick callback).
+        imp.anim_start_time.set(None);
+
+        if !imp.animating.get() {
+            imp.animating.set(true);
+            let widget = self.clone();
+            self.add_tick_callback(move |_w, frame_clock| {
+                let imp = widget.imp();
+                let now = frame_clock.frame_time(); // microseconds
+
+                // Lazily record the start time on the first tick.
+                let start_time = match imp.anim_start_time.get() {
+                    Some(t) => t,
+                    None => {
+                        imp.anim_start_time.set(Some(now));
+                        now
+                    }
+                };
+
+                let elapsed = now - start_time;
+                let target = imp.target_width.get() as f64;
+
+                if elapsed >= INDICATOR_ANIM_DURATION_US {
+                    // Animation complete.
+                    imp.current_width.set(target);
+                    imp.animating.set(false);
+                    imp.frozen_left_count.set(None);
+                    widget.queue_resize();
+                    return glib::ControlFlow::Break;
+                }
+
+                // Ease-out quadratic interpolation (decelerating).
+                let t = elapsed as f64 / INDICATOR_ANIM_DURATION_US as f64;
+                let eased = 1.0 - (1.0 - t).powi(2);
+                let start = imp.anim_start_width.get();
+                let interpolated = start + (target - start) * eased;
+                imp.current_width.set(interpolated);
+                widget.queue_resize();
+                glib::ControlFlow::Continue
+            });
         }
     }
 
@@ -190,9 +261,36 @@ impl WorkspaceContainer {
     }
 
     fn clear_children(&self) {
+        self.imp().frozen_left_count.set(None);
         for child in self.imp().children.borrow_mut().drain(..) {
             child.unparent();
         }
+    }
+
+    /// Remove a specific child widget by reference. Order-preserving.
+    fn remove_child(&self, child: &Widget) {
+        let mut children = self.imp().children.borrow_mut();
+        if let Some(pos) = children.iter().position(|c| c == child) {
+            children.remove(pos);
+            child.unparent();
+        }
+    }
+
+    /// Snapshot the current left-group size so size_allocate uses it
+    /// instead of recomputing from the active CSS class. Returns the
+    /// frozen value.
+    fn freeze_left_count(&self) -> usize {
+        let children = self.imp().children.borrow();
+        let n = children.len();
+        let left_count = if n < 2 {
+            n
+        } else {
+            let active_css = crate::styles::widget::ACTIVE;
+            let active_idx = children.iter().position(|c| c.has_css_class(active_css));
+            compute_left_count(n, active_idx)
+        };
+        self.imp().frozen_left_count.set(Some(left_count));
+        left_count
     }
 }
 
@@ -336,11 +434,12 @@ impl WorkspacesWidget {
         let widget_height = sizes.widget_height;
         let content_gap = sizes.widget_content_gap;
 
-        // For LabelType::None with animations, use a WorkspaceContainer that
-        // reports constant width and absorbs rounding drift during CSS
-        // transitions. Without animations (or for Icons/Numbers mode),
-        // indicators go directly in the content GtkBox.
-        let ws_container: Option<WorkspaceContainer> = if label_type == LabelType::None && animate {
+        // When animations are enabled, use a WorkspaceContainer that reports
+        // constant width and absorbs rounding drift during CSS transitions.
+        // This also drives enter/exit animations for workspace additions and
+        // removals. Without animations, indicators go directly in the content
+        // GtkBox.
+        let ws_container: Option<WorkspaceContainer> = if animate {
             let container = WorkspaceContainer::new();
             container.set_gap(content_gap as i32);
             base.content().append(&container);
@@ -406,6 +505,10 @@ const ICON_OCCUPIED: &str = "●";
 const ICON_EMPTY: &str = "○";
 const ICON_ACTIVE: &str = "◆";
 
+/// Duration of the enter/exit animation for workspace indicators (in microseconds).
+/// Matches the CSS transition duration on `.workspace-indicator`.
+const INDICATOR_ANIM_DURATION_US: i64 = 200_000;
+
 /// Clear all workspace indicator widgets from the container.
 fn clear_indicators(
     container: &GtkBox,
@@ -422,6 +525,56 @@ fn clear_indicators(
     }
     labels.borrow_mut().clear();
     ids.borrow_mut().clear();
+}
+
+/// Create a single workspace indicator widget.
+fn create_single_indicator(label_type: LabelType, animate: bool, workspace: &Workspace) -> Widget {
+    let workspace_id = workspace.id;
+    let gesture = GestureClick::new();
+    gesture.set_button(BUTTON_PRIMARY);
+    gesture.connect_released(move |gesture, _n_press, _x, _y| {
+        if gesture.current_button() != BUTTON_PRIMARY {
+            return;
+        }
+        debug!("Switching to workspace {}", workspace_id);
+        WorkspaceService::global().switch_workspace(workspace_id);
+    });
+
+    if label_type == LabelType::None {
+        // Minimal mode: use GtkBox to avoid font-metric intrinsic sizing.
+        // CSS min-width/min-height controls the exact circle/pill dimensions.
+        let dot = GtkBox::new(gtk4::Orientation::Horizontal, 0);
+        dot.add_css_class(widget::WORKSPACE_INDICATOR);
+        dot.add_css_class(widget::WORKSPACE_INDICATOR_MINIMAL);
+        dot.add_css_class(state::CLICKABLE);
+        if !animate {
+            dot.add_css_class(widget::WORKSPACE_NO_ANIMATE);
+        }
+        dot.set_valign(Align::Center);
+        dot.add_controller(gesture);
+        dot.upcast()
+    } else {
+        // Icons or Numbers mode: use Label directly.
+        let label_text = match label_type {
+            LabelType::Icons => ICON_EMPTY,
+            LabelType::Numbers => &workspace.name,
+            LabelType::None => unreachable!(),
+        };
+        let label = Label::new(Some(label_text));
+        label.add_css_class(widget::WORKSPACE_INDICATOR);
+        label.add_css_class(state::CLICKABLE);
+        if !animate {
+            label.add_css_class(widget::WORKSPACE_NO_ANIMATE);
+        }
+        label.set_valign(Align::Center);
+        // Optical centering: glyphs ●/○/◆ appear left-heavy at 0.5;
+        // 0.55 nudges them to look visually centered in the pill.
+        label.set_xalign(0.55);
+        label.set_ellipsize(EllipsizeMode::End);
+        label.set_single_line_mode(true);
+        label.add_controller(gesture);
+        label.upcast()
+    }
 }
 
 /// Create workspace indicator widgets for the given workspaces.
@@ -442,53 +595,7 @@ fn create_indicators(
     let mut ids = ids_cell.borrow_mut();
 
     for (i, workspace) in workspaces.iter().enumerate() {
-        // Add click handler to switch workspace
-        let workspace_id = workspace.id;
-        let gesture = GestureClick::new();
-        gesture.set_button(BUTTON_PRIMARY);
-        gesture.connect_released(move |gesture, _n_press, _x, _y| {
-            if gesture.current_button() != BUTTON_PRIMARY {
-                return;
-            }
-            debug!("Switching to workspace {}", workspace_id);
-            WorkspaceService::global().switch_workspace(workspace_id);
-        });
-
-        let indicator: Widget = if label_type == LabelType::None {
-            // Minimal mode: use GtkBox to avoid font-metric intrinsic sizing.
-            // CSS min-width/min-height controls the exact circle/pill dimensions.
-            let dot = GtkBox::new(gtk4::Orientation::Horizontal, 0);
-            dot.add_css_class(widget::WORKSPACE_INDICATOR);
-            dot.add_css_class(widget::WORKSPACE_INDICATOR_MINIMAL);
-            dot.add_css_class(state::CLICKABLE);
-            if !animate {
-                dot.add_css_class(widget::WORKSPACE_NO_ANIMATE);
-            }
-            dot.set_valign(Align::Center);
-            dot.add_controller(gesture);
-            dot.upcast()
-        } else {
-            // Icons or Numbers mode: use Label directly.
-            let label_text = match label_type {
-                LabelType::Icons => ICON_EMPTY,
-                LabelType::Numbers => &workspace.name,
-                LabelType::None => unreachable!(),
-            };
-            let label = Label::new(Some(label_text));
-            label.add_css_class(widget::WORKSPACE_INDICATOR);
-            label.add_css_class(state::CLICKABLE);
-            if !animate {
-                label.add_css_class(widget::WORKSPACE_NO_ANIMATE);
-            }
-            label.set_valign(Align::Center);
-            // Optical centering: glyphs ●/○/◆ appear left-heavy at 0.5;
-            // 0.55 nudges them to look visually centered in the pill.
-            label.set_xalign(0.55);
-            label.set_ellipsize(EllipsizeMode::End);
-            label.set_single_line_mode(true);
-            label.add_controller(gesture);
-            label.upcast()
-        };
+        let indicator = create_single_indicator(label_type, animate, workspace);
 
         labels.insert(workspace.id, indicator.clone());
         if let Some(wsc) = ws_container {
@@ -535,7 +642,7 @@ fn compute_target_width(
 ///
 /// When `output_id` is provided:
 /// - Uses per-output workspace data if available.
-/// - For Niri: shows only workspaces belonging to this output.
+/// - For Niri: only shows workspaces belonging to this output.
 /// - For MangoWC: shows all workspaces with per-output window counts.
 #[allow(clippy::too_many_arguments)]
 fn update_indicators(
@@ -630,10 +737,109 @@ fn update_indicators(
         return;
     }
 
-    // For minimal mode, fix the container width to the steady-state size
-    // (active pills + inactive circles + gaps). This prevents neighboring
-    // widgets from shifting during circle↔pill CSS transitions.
-    // Supports multiple active indicators (multi-tag view in DWL/mangoWC).
+    // The new set of workspace IDs that should be visible (in order).
+    let new_ids: Vec<i32> = display_workspaces.iter().map(|ws| ws.id).collect();
+
+    // Determine if the set of visible workspaces changed.
+    let ids_changed = new_ids != *ids_cell.borrow();
+
+    if ids_changed {
+        // Three mutually exclusive paths handle the update:
+        //   A. Removal-only (minimal mode): surgical removal + frozen layout + width animation
+        //   B. Additions (minimal mode): full recreate + collapsed CSS class for grow-in
+        //   C. Non-minimal mode: full recreate, no animations
+        // After any path, the shared tail updates container target width and indicator CSS.
+        // Snapshot old IDs before modifying so we can diff.
+        let old_ids: HashSet<i32> = ids_cell.borrow().iter().copied().collect();
+        let new_ids_set: HashSet<i32> = new_ids.iter().copied().collect();
+        let has_additions = new_ids_set.iter().any(|id| !old_ids.contains(id));
+
+        if let Some(wsc) = ws_container {
+            if !has_additions && !old_ids.is_empty() {
+                // Removal-only: surgically remove departed indicators so
+                // surviving widgets keep their GTK identity and position.
+                // The container width animation smoothly closes the gap.
+
+                // Freeze the two-group split BEFORE removing children so
+                // surviving indicators stay in their original groups during
+                // the animation. This prevents e.g. ws2 jumping from the
+                // left group to the right group when active changes from
+                // ws3 to ws1.
+                let frozen = wsc.freeze_left_count();
+
+                {
+                    let mut labels = labels_cell.borrow_mut();
+                    let ids = ids_cell.borrow();
+                    let mut left_removed = 0usize;
+                    for (i, &id) in ids.iter().enumerate() {
+                        if new_ids_set.contains(&id) {
+                            continue;
+                        }
+                        if i < frozen {
+                            left_removed += 1;
+                        }
+                        if let Some(indicator) = labels.remove(&id) {
+                            wsc.remove_child(&indicator);
+                        }
+                    }
+                    drop(ids);
+                    ids_cell.borrow_mut().retain(|id| new_ids_set.contains(id));
+
+                    // Adjust frozen split: removed left-group indicators
+                    // reduce the left count so surviving members keep their
+                    // original group membership.
+                    if left_removed > 0 {
+                        wsc.imp().frozen_left_count.set(Some(frozen - left_removed));
+                    }
+                }
+            } else {
+                // Additions (possibly with removals) — full recreate.
+                // New indicators get the grow-in animation.
+                create_indicators(
+                    container,
+                    Some(wsc),
+                    labels_cell,
+                    ids_cell,
+                    label_type,
+                    animate,
+                    separator,
+                    &display_workspaces,
+                );
+                if !old_ids.is_empty() {
+                    let labels = labels_cell.borrow();
+                    for &id in &new_ids {
+                        if old_ids.contains(&id) {
+                            continue;
+                        }
+                        if let Some(indicator) = labels.get(&id) {
+                            indicator.add_css_class(widget::WORKSPACE_NO_ANIMATE);
+                            indicator.add_css_class(widget::WORKSPACE_INDICATOR_COLLAPSED);
+                            let ind = indicator.clone();
+                            glib::idle_add_local_once(move || {
+                                ind.remove_css_class(widget::WORKSPACE_NO_ANIMATE);
+                                ind.remove_css_class(widget::WORKSPACE_INDICATOR_COLLAPSED);
+                            });
+                        }
+                    }
+                }
+            }
+        } else {
+            // Non-minimal mode — full recreate, no animations.
+            create_indicators(
+                container,
+                None,
+                labels_cell,
+                ids_cell,
+                label_type,
+                animate,
+                separator,
+                &display_workspaces,
+            );
+        }
+    }
+
+    // Update the container's target width for minimal/animated mode.
+    // This prevents neighboring widgets from shifting during transitions.
     if let Some(wsc) = ws_container {
         let active_count = display_workspaces.iter().filter(|ws| ws.active).count() as i32;
         let inactive_count = display_workspaces.len() as i32 - active_count;
@@ -646,22 +852,7 @@ fn update_indicators(
         wsc.set_target_width(total);
     }
 
-    // Check if we need to recreate indicators
-    let new_ids: Vec<i32> = display_workspaces.iter().map(|ws| ws.id).collect();
-    if new_ids != *ids_cell.borrow() {
-        create_indicators(
-            container,
-            ws_container,
-            labels_cell,
-            ids_cell,
-            label_type,
-            animate,
-            separator,
-            &display_workspaces,
-        );
-    }
-
-    // Update indicator styling
+    // Update indicator styling (for all indicators, including just-created ones).
     let labels = labels_cell.borrow();
     for workspace in &display_workspaces {
         let Some(indicator) = labels.get(&workspace.id) else {

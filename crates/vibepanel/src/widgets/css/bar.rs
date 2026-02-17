@@ -128,6 +128,12 @@ sectioned-bar.bar {{
 .workspace-indicator.workspace-no-animate {{
     transition: none;
 }}
+
+/* Collapsed state for enter animations — forces zero width so CSS transition grows it in */
+.workspace-indicator.workspace-indicator-collapsed {{
+    min-width: 0;
+}}
+
 "#
     )
 }
