@@ -13,7 +13,7 @@ use std::time::SystemTime;
 use gtk4::glib;
 use tracing::{debug, error, warn};
 
-use crate::services::updates::{PackageManager, UpdatesService, UpdatesSnapshot};
+use crate::services::updates::{PackageManager, UpdatesService, UpdatesSnapshot, has_flatpak};
 
 /// Get the appropriate icon name based on snapshot state.
 pub fn icon_for_state(snapshot: &UpdatesSnapshot) -> &'static str {
@@ -275,7 +275,9 @@ pub fn spawn_upgrade_terminal(
 fn build_upgrade_command(package_manager: PackageManager) -> String {
     let primary = package_manager.upgrade_command();
 
-    if package_manager != PackageManager::Flatpak && which_exists("flatpak") {
+    if package_manager != PackageManager::Flatpak && has_flatpak() {
+        // Use `;` rather than `&&` so flatpak updates still run even if the
+        // primary package manager fails
         format!(
             "{}; echo ''; echo 'Running Flatpak updates...'; flatpak update",
             primary
@@ -421,6 +423,8 @@ mod tests {
 
     #[test]
     fn test_build_upgrade_command_non_flatpak_contains_primary() {
+        // NOTE: The exact output depends on whether /usr/bin/flatpak exists on
+        // the test machine. We only verify the primary command prefix.
         let cmd = build_upgrade_command(PackageManager::Paru);
         assert!(cmd.starts_with("paru -Syu"));
     }

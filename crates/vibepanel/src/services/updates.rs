@@ -12,7 +12,7 @@
 //! - Universal: flatpak
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::process::Command;
 use std::rc::Rc;
@@ -314,7 +314,7 @@ fn detect_package_manager() -> Option<PackageManager> {
     }
 
     // Check for flatpak (cross-distro sandboxed apps)
-    if Path::new("/usr/bin/flatpak").exists() {
+    if has_flatpak() {
         return Some(PackageManager::Flatpak);
     }
 
@@ -322,7 +322,7 @@ fn detect_package_manager() -> Option<PackageManager> {
 }
 
 /// Whether Flatpak is available on the system.
-fn has_flatpak() -> bool {
+pub(crate) fn has_flatpak() -> bool {
     Path::new("/usr/bin/flatpak").exists()
 }
 
@@ -330,12 +330,22 @@ fn has_flatpak() -> bool {
 ///
 /// This runs in a background thread and should not touch any GTK state.
 fn run_update_check(pm: PackageManager) -> CheckResult {
-    match pm {
+    let mut result = match pm {
         PackageManager::Dnf => check_dnf_updates(),
         PackageManager::Pacman => check_pacman_updates(),
         PackageManager::Paru => check_paru_updates(),
         PackageManager::Flatpak => check_flatpak_updates(),
+    };
+
+    // Append flatpak updates when a different primary manager is detected
+    if pm != PackageManager::Flatpak
+        && has_flatpak()
+        && let Err(e) = append_flatpak_updates(&mut result.updates_by_repo)
+    {
+        debug!("Flatpak update check failed (ignored): {}", e);
     }
+
+    result
 }
 
 /// Check for updates using DNF (Fedora).
@@ -354,13 +364,7 @@ fn check_dnf_updates() -> CheckResult {
             // dnf upgrade --assumeno returns exit code 1 when it aborts
             // due to user declining, which is expected behavior
             let stdout = String::from_utf8_lossy(&output.stdout);
-            let mut updates_by_repo = parse_dnf_upgrade_output(&stdout);
-
-            if has_flatpak()
-                && let Err(e) = append_flatpak_updates(&mut updates_by_repo)
-            {
-                debug!("Flatpak update check failed (ignored): {}", e);
-            }
+            let updates_by_repo = parse_dnf_upgrade_output(&stdout);
 
             CheckResult {
                 updates_by_repo,
@@ -469,12 +473,6 @@ fn check_pacman_updates() -> CheckResult {
         by_repo.insert("official".to_string(), updates);
     }
 
-    if has_flatpak()
-        && let Err(e) = append_flatpak_updates(&mut by_repo)
-    {
-        debug!("Flatpak update check failed (ignored): {}", e);
-    }
-
     CheckResult {
         updates_by_repo: by_repo,
         error: None,
@@ -548,12 +546,6 @@ fn check_paru_updates() -> CheckResult {
         }
     }
 
-    if has_flatpak()
-        && let Err(e) = append_flatpak_updates(&mut by_repo)
-    {
-        debug!("Flatpak update check failed (ignored): {}", e);
-    }
-
     CheckResult {
         updates_by_repo: by_repo,
         error: None,
@@ -581,6 +573,15 @@ fn append_flatpak_updates(by_repo: &mut HashMap<String, Vec<UpdateInfo>>) -> Res
         .args(["remote-ls", "--updates", "--columns=application"])
         .output()
         .map_err(|e| format!("Failed to run flatpak: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "flatpak remote-ls failed (exit {}): {}",
+            output.status.code().unwrap_or(-1),
+            stderr.trim()
+        ));
+    }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let updates = parse_flatpak_updates_output(&stdout);
@@ -628,11 +629,15 @@ fn parse_checkupdates_output(output: &str) -> Vec<UpdateInfo> {
 /// Parse `flatpak remote-ls --updates --columns=application` output.
 ///
 /// Format: one Flatpak application/runtime ID per line.
+/// Duplicates are removed because the same ID can appear for both system and
+/// user installations.
 fn parse_flatpak_updates_output(output: &str) -> Vec<UpdateInfo> {
+    let mut seen = HashSet::new();
     output
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
+        .filter(|name| seen.insert(*name))
         .map(|name| UpdateInfo {
             name: name.to_string(),
         })
@@ -729,6 +734,16 @@ org.freedesktop.Platform
         assert_eq!(result.len(), 3);
         assert_eq!(result[0].name, "org.mozilla.firefox");
         assert_eq!(result[2].name, "org.freedesktop.Platform");
+    }
+
+    #[test]
+    fn test_parse_flatpak_updates_output_dedup() {
+        // Same ID can appear for both system and user installations
+        let output = "org.mozilla.firefox\norg.gnome.Calculator\norg.mozilla.firefox\n";
+        let result = parse_flatpak_updates_output(output);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].name, "org.mozilla.firefox");
+        assert_eq!(result[1].name, "org.gnome.Calculator");
     }
 
     #[test]
