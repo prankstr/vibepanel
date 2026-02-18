@@ -87,8 +87,6 @@ pub struct QuickSettingsConfig {
     pub cards: QuickSettingsCardsConfig,
     /// Volume delta (percentage points) for scroll on QS widget/window.
     pub audio_scroll_percentage: i32,
-    /// Volume delta (percentage points) for scroll on QS widget/window.
-    pub audio_scroll_percentage: i32,
 }
 
 impl WidgetConfig for QuickSettingsConfig {
@@ -190,7 +188,6 @@ impl QuickSettingsWidget {
         // Audio icon
         if cards.audio {
             let volume_scroll_step = cfg.audio_scroll_percentage;
-            let volume_scroll_step = cfg.audio_scroll_percentage;
             let audio_snapshot = AudioService::global().current();
             let audio_icon_name_initial =
                 volume_icon_name(audio_snapshot.volume, audio_snapshot.muted);
@@ -224,13 +221,14 @@ impl QuickSettingsWidget {
                     let icon_name = volume_icon_name(snapshot.volume, snapshot.muted);
                     audio_icon_handle.set_icon(icon_name);
 
-                let tooltip = if snapshot.muted {
-                    "Muted".to_string()
-                } else {
-                    format!("Volume: {}%", snapshot.volume)
-                };
-                TooltipManager::global().set_styled_tooltip(&widget, &tooltip);
-            });
+                    let tooltip = if snapshot.muted {
+                        "Muted".to_string()
+                    } else {
+                        format!("Volume: {}%", snapshot.volume)
+                    };
+                    TooltipManager::global().set_styled_tooltip(&widget, &tooltip);
+                },
+            ));
 
             // Scroll wheel adjusts volume when hovering the audio icon.
             super::audio_card::attach_volume_scroll_controller(
