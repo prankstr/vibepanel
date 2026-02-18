@@ -325,13 +325,18 @@ fn render_title(
 /// - Normalizing both the friendly app name and title segments
 /// - Tokenizing on common separators ("_-. ")
 /// - Treating segments as duplicates when token sets overlap
+///
+/// Original delimiters between segments are preserved so the title
+/// is not visually modified beyond removing matched segments.
 fn clean_title(title: &str, friendly_app: &str) -> String {
     if title.is_empty() {
         return String::new();
     }
 
-    // Common title delimiters: hyphen, en-dash, em-dash, pipe, bullet, middle dot
-    const DELIMITERS: &[char] = &['-', '\u{2013}', '\u{2014}', '|', '\u{2022}', '\u{00b7}'];
+    // Common title delimiters: en-dash, em-dash, pipe, bullet, middle dot
+    // Note: bare hyphen '-' is NOT a delimiter — it appears inside words
+    // like "my-project". Spaced hyphens " - " are pre-normalized to em-dash.
+    const DELIMITERS: &[char] = &['\u{2013}', '\u{2014}', '|', '\u{2022}', '\u{00b7}'];
 
     // Normalize: trim, lowercase, strip leading @: and spaces
     fn normalize(value: &str) -> String {
@@ -374,11 +379,43 @@ fn clean_title(title: &str, friendly_app: &str) -> String {
         segment_tokens.is_subset(friendly_tokens) || friendly_tokens.is_subset(&segment_tokens)
     }
 
-    let mut segments: Vec<String> = Vec::new();
+    // Pre-normalize " - " (spaced hyphen) to " — " so it is recognized
+    // as a delimiter while bare hyphens inside words are left alone.
+    let title = title.replace(" - ", " \u{2014} ");
+
+    // Parse into alternating (segment_text, following_delimiter) pairs,
+    // preserving the original delimiter strings between segments.
+    let mut parts: Vec<(&str, Option<&str>)> = Vec::new();
+    let mut rest = title.as_str();
+    loop {
+        if let Some(pos) = rest.find(|c: char| DELIMITERS.contains(&c)) {
+            let delim_char = rest[pos..].chars().next().unwrap();
+            let delim_end = pos + delim_char.len_utf8();
+            // Segment text is everything before the delimiter (including its
+            // surrounding whitespace — we'll trim when we inspect it).
+            let seg = &rest[..pos];
+            // Capture the delimiter with its surrounding whitespace so we
+            // can reproduce it verbatim when stitching the title back.
+            let after = &rest[delim_end..];
+            let ws_after = after.len() - after.trim_start().len();
+            let ws_before = seg.len() - seg.trim_end().len();
+            let delim_span = &rest[pos - ws_before..delim_end + ws_after];
+            let seg_text = &rest[..pos - ws_before];
+            parts.push((seg_text, Some(delim_span)));
+            rest = &rest[delim_end + ws_after..];
+        } else {
+            parts.push((rest, None));
+            break;
+        }
+    }
+
+    // Filter: remove app-name matches and duplicates, tracking which
+    // parts to keep by index.
+    let mut kept: Vec<usize> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    for raw in title.split(|c| DELIMITERS.contains(&c)) {
-        let segment = raw.trim();
+    for (i, (seg_text, _)) in parts.iter().enumerate() {
+        let segment = seg_text.trim();
         if segment.is_empty() {
             continue;
         }
@@ -390,10 +427,29 @@ fn clean_title(title: &str, friendly_app: &str) -> String {
             continue;
         }
         seen.insert(normalized);
-        segments.push(segment.to_string());
+        kept.push(i);
     }
 
-    segments.join(" \u{2014} ")
+    // Reconstruct using original delimiters between kept segments.
+    // When a removed segment sits between two kept segments, use the
+    // delimiter that follows the left kept segment (its original
+    // right-hand delimiter).
+    let mut result = String::new();
+    for (k, &idx) in kept.iter().enumerate() {
+        result.push_str(parts[idx].0.trim());
+        if k + 1 < kept.len() {
+            // Find the delimiter to place between this kept segment and
+            // the next one. Walk from the current kept index forward and
+            // use the first available delimiter we encounter.
+            let next_idx = kept[k + 1];
+            let delim = (idx..next_idx)
+                .find_map(|j| parts[j].1)
+                .expect("delimiter must exist between consecutive kept segments");
+            result.push_str(delim);
+        }
+    }
+
+    result
 }
 
 /// Get a friendly app name from the app_id.
@@ -589,7 +645,9 @@ mod tests {
         // Title with only delimiters/whitespace
         assert_eq!(clean_title("—", "Firefox"), "");
         assert_eq!(clean_title(" — ", "Firefox"), "");
-        assert_eq!(clean_title("- | -", "Firefox"), "");
+        // Bare "-" is not a delimiter, so it's treated as a segment.
+        // Splits on "|" → ["-", "-"], dedup → "-"
+        assert_eq!(clean_title("- | -", "Firefox"), "-");
     }
 
     #[test]
@@ -617,15 +675,15 @@ mod tests {
 
     #[test]
     fn test_clean_title_multiple_segments() {
-        // Multiple segments, first matches app
+        // Multiple segments, first matches app — original delimiter preserved
         let cleaned = clean_title("Firefox — Tab 1 — mozilla.org", "Firefox");
         assert_eq!(cleaned, "Tab 1 \u{2014} mozilla.org");
 
-        // Multiple segments, middle matches app
+        // Multiple segments, middle matches app — left delimiter preserved
         let cleaned_mid = clean_title("Tab 1 — Firefox — mozilla.org", "Firefox");
         assert_eq!(cleaned_mid, "Tab 1 \u{2014} mozilla.org");
 
-        // Multiple segments, last matches app
+        // Multiple segments, last matches app — original delimiter preserved
         let cleaned_last = clean_title("Tab 1 — mozilla.org — Firefox", "Firefox");
         assert_eq!(cleaned_last, "Tab 1 \u{2014} mozilla.org");
     }
@@ -662,5 +720,108 @@ mod tests {
         // Output should preserve the original casing of non-app segments
         let cleaned = clean_title("Firefox — SoMe WeIrD CaSe", "Firefox");
         assert_eq!(cleaned, "SoMe WeIrD CaSe");
+    }
+
+    #[test]
+    fn test_clean_title_preserves_hyphenated_words() {
+        // Bare hyphens inside words should NOT be treated as delimiters
+        assert_eq!(clean_title("A-B", "SomeApp"), "A-B");
+        assert_eq!(clean_title("my-project", "SomeApp"), "my-project");
+        assert_eq!(clean_title("v1-beta-2", "SomeApp"), "v1-beta-2");
+
+        // Hyphenated word with app name removal
+        assert_eq!(clean_title("A-B — Firefox", "Firefox"), "A-B");
+        assert_eq!(
+            clean_title("my-project — Visual Studio Code", "Code"),
+            "my-project"
+        );
+    }
+
+    #[test]
+    fn test_clean_title_spaced_hyphen_delimiter() {
+        // " - " (space-hyphen-space) should still work as a delimiter
+        assert_eq!(clean_title("Firefox - Some Page", "Firefox"), "Some Page");
+        assert_eq!(
+            clean_title("some-file.rs - VS Code", "Code"),
+            "some-file.rs"
+        );
+        assert_eq!(clean_title("A-B - Firefox", "Firefox"), "A-B");
+    }
+
+    #[test]
+    fn test_clean_title_preserves_original_delimiters() {
+        // Pipe delimiter should be preserved, not replaced with em-dash
+        assert_eq!(
+            clean_title("Firefox | Tab 1 | mozilla.org", "Firefox"),
+            "Tab 1 | mozilla.org"
+        );
+
+        // Mixed delimiters should each be preserved
+        assert_eq!(
+            clean_title("Firefox \u{2014} Tab 1 | mozilla.org", "Firefox"),
+            "Tab 1 | mozilla.org"
+        );
+
+        // When removing a middle segment, the left delimiter is used
+        assert_eq!(
+            clean_title("Tab 1 | Firefox \u{2014} mozilla.org", "Firefox"),
+            "Tab 1 | mozilla.org"
+        );
+
+        // Bullet delimiter preserved
+        assert_eq!(
+            clean_title("Tab 1 \u{2022} mozilla.org", ""),
+            "Tab 1 \u{2022} mozilla.org"
+        );
+    }
+
+    #[test]
+    fn test_clean_title_all_segments_removed() {
+        // Single segment that matches app
+        assert_eq!(clean_title("Firefox", "Firefox"), "");
+
+        // All segments match app (duplicates collapsed then removed)
+        assert_eq!(clean_title("Firefox \u{2014} Firefox", "Firefox"), "");
+    }
+
+    #[test]
+    fn test_clean_title_consecutive_removals() {
+        // First two consecutive segments removed, third kept
+        assert_eq!(
+            clean_title("Firefox \u{2014} Firefox \u{2014} Page", "Firefox"),
+            "Page"
+        );
+    }
+
+    #[test]
+    fn test_clean_title_no_matches_full_preservation() {
+        // No segments match — title returned verbatim with original delimiters
+        assert_eq!(
+            clean_title("A \u{2014} B \u{2014} C", "SomeApp"),
+            "A \u{2014} B \u{2014} C"
+        );
+
+        assert_eq!(
+            clean_title("Tab 1 | Page 2 \u{2022} Info", "SomeApp"),
+            "Tab 1 | Page 2 \u{2022} Info"
+        );
+    }
+
+    #[test]
+    fn test_clean_title_no_whitespace_around_delimiter() {
+        // Delimiters without surrounding spaces should still work
+        assert_eq!(clean_title("Firefox|Page", "Firefox"), "Page");
+        assert_eq!(clean_title("A|B|C", "SomeApp"), "A|B|C");
+    }
+
+    #[test]
+    fn test_clean_title_delimiter_at_boundaries() {
+        // Leading delimiter — empty first segment is skipped
+        assert_eq!(clean_title("\u{2014} Firefox", "Firefox"), "");
+        assert_eq!(clean_title("\u{2014} Page", "Firefox"), "Page");
+
+        // Trailing delimiter — empty last segment is skipped
+        assert_eq!(clean_title("Firefox \u{2014}", "Firefox"), "");
+        assert_eq!(clean_title("Page \u{2014}", "Firefox"), "Page");
     }
 }
