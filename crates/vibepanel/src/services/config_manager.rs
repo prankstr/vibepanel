@@ -40,6 +40,7 @@ const FILE_CHANGE_DEBOUNCE_MS: u64 = 300;
 use crate::bar;
 use crate::services::bar_manager::BarManager;
 use crate::services::icons::IconsService;
+use crate::services::network::NetworkService;
 use crate::services::surfaces::SurfaceStyleManager;
 use crate::services::tooltip::TooltipManager;
 
@@ -389,6 +390,11 @@ impl ConfigManager {
             );
             IconsService::global()
                 .reconfigure(&new_config.theme.icons.theme, new_config.theme.icons.weight);
+
+            // Icon theme changes affect Material unified mode logic in network
+            // callbacks (e.g., showing cell_wifi vs separate icons). Re-emit
+            // the current network snapshot so those callbacks re-evaluate.
+            NetworkService::global().re_notify();
         }
 
         // Determine what changed

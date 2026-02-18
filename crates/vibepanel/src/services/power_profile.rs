@@ -15,7 +15,7 @@ use gtk4::prelude::ToVariant;
 use gtk4::prelude::*;
 use tracing::{error, warn};
 
-use super::callbacks::Callbacks;
+use super::callbacks::{CallbackId, Callbacks};
 
 /// DBus constants for power-profiles-daemon.
 const BUS_NAME: &str = "net.hadess.PowerProfiles";
@@ -76,14 +76,20 @@ impl PowerProfileService {
 
     /// Register a callback to be invoked whenever the power profile snapshot changes.
     /// The callback is always executed on the GLib main loop.
-    pub fn connect<F>(&self, callback: F)
+    pub fn connect<F>(&self, callback: F) -> CallbackId
     where
         F: Fn(&PowerProfileSnapshot) + 'static,
     {
-        self.callbacks.register(callback);
+        let id = self.callbacks.register(callback);
 
         let snapshot = self.snapshot.borrow().clone();
-        self.callbacks.notify(&snapshot);
+        self.callbacks.notify_single(id, &snapshot);
+        id
+    }
+
+    /// Unregister a callback by its ID.
+    pub fn disconnect(&self, id: CallbackId) -> bool {
+        self.callbacks.unregister(id)
     }
 
     fn init_dbus(this: &Rc<Self>) {

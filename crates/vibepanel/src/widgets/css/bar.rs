@@ -4,10 +4,16 @@
 //! so it returns a formatted String rather than a static str.
 
 use super::WIDGET_BG_WITH_OPACITY;
+use crate::widgets::workspaces::{
+    INDICATOR_ACTIVE_MULT, INDICATOR_HEIGHT_MULT, INDICATOR_INACTIVE_MULT,
+};
 
 /// Return bar CSS with config values interpolated.
 pub fn css(screen_margin: u32, spacing: u32) -> String {
     let widget_bg = WIDGET_BG_WITH_OPACITY;
+    let inactive_mult = INDICATOR_INACTIVE_MULT;
+    let active_mult = INDICATOR_ACTIVE_MULT;
+    let height_mult = INDICATOR_HEIGHT_MULT;
     format!(
         r#"
 /* ===== BAR ===== */
@@ -96,11 +102,12 @@ sectioned-bar.bar {{
 /* ===== WORKSPACE ===== */
 
 .workspace-indicator {{
-    padding: 0 4px;
-    min-width: 1em;
-    min-height: 0.2em;
-    border-radius: var(--radius-pill);
+    padding: 0;
+    min-width: calc(var(--widget-height) * {inactive_mult});
+    min-height: calc(var(--widget-height) * {height_mult});
+    border-radius: calc(var(--radius-pill) * 1.2);
     color: var(--color-foreground-faint);
+    transition: min-width 200ms linear, background-color 200ms ease;
 }}
 
 /* Workspace indicator hover state - clickable indicators */
@@ -115,7 +122,18 @@ sectioned-bar.bar {{
 .workspace-indicator.active {{
     color: var(--color-accent-text, #fff);
     background-color: var(--color-accent-primary);
+    min-width: calc(var(--widget-height) * {active_mult});
 }}
+
+.workspace-indicator.workspace-no-animate {{
+    transition: none;
+}}
+
+/* Collapsed state for enter animations — forces zero width so CSS transition grows it in */
+.workspace-indicator.workspace-indicator-collapsed {{
+    min-width: 0;
+}}
+
 "#
     )
 }

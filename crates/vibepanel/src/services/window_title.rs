@@ -10,7 +10,7 @@ use std::rc::Rc;
 
 use tracing::debug;
 
-use super::callbacks::Callbacks;
+use super::callbacks::{CallbackId, Callbacks};
 use super::compositor::{CompositorManager, WindowInfo};
 
 /// Snapshot of window title service state for callbacks.
@@ -92,22 +92,23 @@ impl WindowTitleService {
 
     /// Register a callback to be invoked when window title changes.
     /// The callback is always executed on the GLib main loop.
-    pub fn connect<F>(&self, callback: F)
+    pub fn connect<F>(&self, callback: F) -> CallbackId
     where
         F: Fn(&WindowTitleSnapshot) + 'static,
     {
-        // Wrap callback in Rc to allow immediate invocation before registering
-        let callback = Rc::new(callback);
+        let id = self.callbacks.register(callback);
 
         // Immediately send current state so this widget can render.
         if *self.ready.borrow() {
             let snapshot = self.current.borrow().clone();
-            callback(&snapshot);
+            self.callbacks.notify_single(id, &snapshot);
         }
+        id
+    }
 
-        // Now register for future updates
-        let cb_clone = callback.clone();
-        self.callbacks.register(move |snapshot| cb_clone(snapshot));
+    /// Unregister a callback by its ID.
+    pub fn disconnect(&self, id: CallbackId) -> bool {
+        self.callbacks.unregister(id)
     }
 
     fn handle_update(&self, window_info: &WindowInfo) {

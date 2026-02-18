@@ -21,7 +21,7 @@ use std::time::SystemTime;
 use gtk4::glib::{self, SourceId};
 use tracing::{debug, info, warn};
 
-use super::callbacks::Callbacks;
+use super::callbacks::{CallbackId, Callbacks};
 
 /// Default check interval in seconds (1 hour).
 const DEFAULT_CHECK_INTERVAL: u64 = 3600;
@@ -156,13 +156,19 @@ impl UpdatesService {
     }
 
     /// Register a callback to be invoked whenever the snapshot changes.
-    pub fn connect<F>(&self, callback: F)
+    pub fn connect<F>(&self, callback: F) -> CallbackId
     where
         F: Fn(&UpdatesSnapshot) + 'static,
     {
-        self.callbacks.register(callback);
+        let id = self.callbacks.register(callback);
         // Immediately notify with current snapshot
-        self.callbacks.notify(&self.snapshot.borrow());
+        self.callbacks.notify_single(id, &self.snapshot.borrow());
+        id
+    }
+
+    /// Unregister a callback by its ID.
+    pub fn disconnect(&self, id: CallbackId) -> bool {
+        self.callbacks.unregister(id)
     }
 
     /// Return the current snapshot.

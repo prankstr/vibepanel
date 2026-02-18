@@ -30,7 +30,7 @@ use tracing::{debug, error, info, warn};
 
 use libpulse_binding as pulse;
 
-use super::callbacks::Callbacks;
+use super::callbacks::{CallbackId, Callbacks};
 
 /// Duration (in ms) after connecting to PulseAudio during which the OSD
 /// should stay quiet. PulseAudio/PipeWire emits a flurry of updates as
@@ -294,16 +294,22 @@ impl AudioService {
     ///
     /// The callback is executed on the GLib main loop and is called
     /// immediately with the current snapshot if the service is ready.
-    pub fn connect<F>(&self, callback: F)
+    pub fn connect<F>(&self, callback: F) -> CallbackId
     where
         F: Fn(&AudioSnapshot) + 'static,
     {
-        self.callbacks.register(callback);
+        let id = self.callbacks.register(callback);
 
         if self.ready.get() {
             let snapshot = self.current.borrow().clone();
-            self.callbacks.notify(&snapshot);
+            self.callbacks.notify_single(id, &snapshot);
         }
+        id
+    }
+
+    /// Unregister a callback by its ID.
+    pub fn disconnect(&self, id: CallbackId) -> bool {
+        self.callbacks.unregister(id)
     }
 
     /// Get the current audio snapshot.

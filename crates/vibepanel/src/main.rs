@@ -61,14 +61,10 @@ enum Command {
         #[command(subcommand)]
         action: VolumeAction,
     },
-    /// Run a command with idle/sleep inhibited
+    /// Control idle/sleep inhibitor
     Inhibit {
-        /// Reason for inhibiting (shown in system monitors)
-        #[arg(short, long, default_value = "User requested")]
-        reason: String,
-        /// Command to run (idle inhibited while running)
-        #[arg(trailing_var_arg = true, required = true)]
-        command: Vec<String>,
+        #[command(subcommand)]
+        action: InhibitAction,
     },
     /// Control media playback (MPRIS)
     Media {
@@ -145,6 +141,12 @@ enum MediaAction {
     Status,
 }
 
+#[derive(Subcommand, Debug)]
+enum InhibitAction {
+    /// Toggle idle/sleep inhibitor on the running panel
+    Toggle,
+}
+
 fn main() -> ExitCode {
     let args = Args::parse();
 
@@ -216,7 +218,7 @@ fn handle_command(command: Command) -> ExitCode {
     match command {
         Command::Brightness { action } => handle_brightness_command(action),
         Command::Volume { action } => handle_volume_command(action),
-        Command::Inhibit { reason, command } => handle_inhibit_command(&reason, &command),
+        Command::Inhibit { action } => handle_inhibit_command(action),
         Command::Media { action } => handle_media_command(action),
     }
 }
@@ -276,7 +278,7 @@ fn handle_brightness_command(action: BrightnessAction) -> ExitCode {
 /// Handle volume subcommands using PulseAudio.
 fn handle_volume_command(action: VolumeAction) -> ExitCode {
     use crate::services::audio::AudioCli;
-    use crate::services::osd_ipc::{notify_volume, notify_volume_unavailable};
+    use crate::services::ipc::{notify_volume, notify_volume_unavailable};
 
     /// Check if an error indicates the audio sink is unavailable for control.
     /// This covers sinks that aren't ready (0 channels, invalid specs, etc.)
@@ -389,46 +391,25 @@ fn handle_volume_command(action: VolumeAction) -> ExitCode {
     }
 }
 
-/// Handle inhibit subcommand - run a command with idle/sleep inhibited.
-fn handle_inhibit_command(reason: &str, command: &[String]) -> ExitCode {
-    use crate::services::idle_inhibitor::IdleInhibitorCli;
-    use std::process::Command as ProcessCommand;
+/// Handle inhibit subcommand.
+fn handle_inhibit_command(action: InhibitAction) -> ExitCode {
+    use crate::services::ipc::{IpcMessage, send_ipc_message};
 
-    if command.is_empty() {
-        eprintln!("Error: no command specified");
-        return ExitCode::FAILURE;
-    }
-
-    // Acquire the inhibit lock
-    let _inhibitor = match IdleInhibitorCli::new(reason) {
-        Some(i) => i,
-        None => {
-            eprintln!("Error: could not acquire idle inhibitor (is systemd-logind running?)");
-            return ExitCode::FAILURE;
-        }
-    };
-
-    // Run the command while holding the inhibit lock
-    let program = &command[0];
-    let args = &command[1..];
-
-    let status = ProcessCommand::new(program).args(args).status();
-
-    match status {
-        Ok(exit_status) => {
-            if exit_status.success() {
-                ExitCode::SUCCESS
-            } else {
-                // Return the same exit code as the child process
-                ExitCode::from(exit_status.code().unwrap_or(1) as u8)
+    match action {
+        InhibitAction::Toggle => {
+            let msg = IpcMessage::ToggleInhibitor;
+            match send_ipc_message(&msg) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!(
+                        "Error: could not reach vibepanel IPC socket (is the panel running?): {}",
+                        e
+                    );
+                    ExitCode::FAILURE
+                }
             }
         }
-        Err(e) => {
-            eprintln!("Error: failed to run command '{}': {}", program, e);
-            ExitCode::FAILURE
-        }
     }
-    // _inhibitor is dropped here, releasing the lock
 }
 
 /// Handle media subcommands using MPRIS D-Bus.
@@ -553,7 +534,7 @@ fn run_gtk_app(config: Config, config_source: Option<PathBuf>) -> ExitCode {
         services::tooltip::TooltipManager::init_global(surface_styles);
         debug!("Tooltip manager initialized with theme styles");
 
-        // Initialize idle inhibitor service (uses D-Bus ScreenSaver API)
+        // Initialize idle inhibitor service (uses logind D-Bus API)
         let _ = services::idle_inhibitor::IdleInhibitorService::global();
         debug!("Idle inhibitor service initialized");
 
@@ -617,17 +598,62 @@ fn run_gtk_app(config: Config, config_source: Option<PathBuf>) -> ExitCode {
                 });
         }
 
-        // Create OSD overlay if enabled and keep it alive on the application
-        if config_for_activate.osd.enabled {
-            let overlay = crate::widgets::OsdOverlay::new(app, &config_for_activate.osd);
-            // Attach to the application so the Rc stays alive for the
-            // lifetime of the app.
-            unsafe {
-                app.set_data("vibepanel-osd-overlay", overlay);
+        // Initialize panel IPC listener unconditionally (handles CLI → panel messages).
+        // This must be created regardless of OSD enabled state so that
+        // `vibepanel inhibit` and other CLI commands always work.
+        {
+            use crate::services::ipc::{IpcListener, IpcMessage};
+
+            let osd_enabled = config_for_activate.osd.enabled;
+            let osd_overlay = if osd_enabled {
+                let overlay = crate::widgets::OsdOverlay::new(app, &config_for_activate.osd);
+                debug!("OSD overlay initialized");
+                Some(overlay)
+            } else {
+                debug!("OSD overlay disabled via configuration");
+                None
+            };
+
+            if let Some(listener) = IpcListener::new() {
+                let osd_for_ipc = osd_overlay.clone();
+
+                listener.borrow().connect(move |msg| {
+                    match &msg {
+                        IpcMessage::ToggleInhibitor => {
+                            debug!("IPC: toggling idle inhibitor");
+                            services::idle_inhibitor::IdleInhibitorService::global().toggle();
+                        }
+                        // OSD-visual messages: forward to OSD overlay if enabled.
+                        IpcMessage::Volume { .. }
+                        | IpcMessage::VolumeUnavailable
+                        | IpcMessage::Brightness { .. } => {
+                            if let Some(ref overlay) = osd_for_ipc {
+                                overlay.handle_ipc_message(&msg);
+                            }
+                        }
+                    }
+                });
+
+                // Attach listener to the application so it stays alive.
+                // SAFETY: Key is unique to vibepanel; stored type matches what
+                // would be retrieved. The data keeps the Rc alive for the
+                // application's lifetime.
+                unsafe {
+                    app.set_data("vibepanel-ipc-listener", listener);
+                }
+                debug!("IPC listener initialized and attached to application");
             }
-            debug!("OSD overlay initialized and attached to application");
-        } else {
-            debug!("OSD overlay disabled via configuration");
+
+            // Attach OSD overlay to the application so the Rc stays alive.
+            if let Some(overlay) = osd_overlay {
+                // SAFETY: Key is unique to vibepanel; stored type matches what
+                // would be retrieved. The data keeps the Rc alive for the
+                // application's lifetime.
+                unsafe {
+                    app.set_data("vibepanel-osd-overlay", overlay);
+                }
+                debug!("OSD overlay attached to application");
+            }
         }
 
         // Start config file watcher for live reload

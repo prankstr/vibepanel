@@ -81,7 +81,7 @@ where
     popout_btn.add_css_class(surface::POPOVER_ICON_BTN);
     popout_btn.add_css_class(media::POPOUT_BTN);
 
-    let popout_icon = icons.create_icon("open_in_new", &[icon::ICON, media::POPOUT_ICON]);
+    let popout_icon = icons.create_icon("window-new-symbolic", &[icon::ICON, media::POPOUT_ICON]);
     popout_icon.widget().set_halign(Align::Center);
     popout_icon.widget().set_valign(Align::Center);
     popout_btn.set_child(Some(&popout_icon.widget()));
@@ -233,7 +233,7 @@ fn create_player_menu_item(name: &str, subtitle: Option<&str>, is_active: bool) 
     let icons = IconsService::global();
     if is_active {
         let check_icon = icons.create_icon(
-            "check",
+            "object-select-symbolic",
             &[icon::ICON, color::ACCENT, media::PLAYER_MENU_CHECK],
         );
         hbox.append(&check_icon.widget());

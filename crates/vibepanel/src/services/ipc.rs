@@ -1,13 +1,14 @@
-//! Minimal IPC for CLI → OSD communication.
+//! Panel IPC for CLI → bar communication.
 //!
-//! Uses a Unix datagram socket in `$XDG_RUNTIME_DIR/vibepanel-osd.sock`.
-//! The CLI sends short text messages to trigger OSD display; the bar
-//! listens and dispatches to the OSD widget.
+//! Uses a Unix datagram socket in `$XDG_RUNTIME_DIR/vibepanel.sock`.
+//! The CLI sends short text messages; the bar listens and dispatches
+//! to the appropriate handler (OSD display, idle inhibitor toggle, etc.).
 //!
 //! Message format (line-based text):
 //! - `volume:<percent>:<muted>` – show volume OSD (e.g., `volume:42:0`)
 //! - `volume_unavailable` – show "sink suspended" OSD
-//! - `brightness:<percent>` – show brightness OSD (for future use)
+//! - `brightness:<percent>` – show brightness OSD
+//! - `toggle_inhibitor` – toggle idle inhibitor on/off
 //!
 //! This is best-effort, fire-and-forget IPC. If the bar isn't running or
 //! the socket doesn't exist, the CLI silently continues.
@@ -23,40 +24,44 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use tracing::{debug, warn};
 
-/// Type alias for OSD message callback storage.
-type OsdCallback = Rc<RefCell<Option<Rc<dyn Fn(OsdMessage)>>>>;
+/// Type alias for IPC message callback storage.
+type IpcCallback = Rc<RefCell<Option<Rc<dyn Fn(IpcMessage)>>>>;
 
-/// Get the socket path for OSD IPC.
+/// Get the socket path for panel IPC.
 ///
-/// Returns `$XDG_RUNTIME_DIR/vibepanel-osd.sock` or falls back to `/tmp/vibepanel-osd.sock`.
+/// Returns `$XDG_RUNTIME_DIR/vibepanel.sock` or falls back to `/tmp/vibepanel.sock`.
 pub fn socket_path() -> PathBuf {
     if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
-        PathBuf::from(runtime_dir).join("vibepanel-osd.sock")
+        PathBuf::from(runtime_dir).join("vibepanel.sock")
     } else {
-        PathBuf::from("/tmp/vibepanel-osd.sock")
+        warn!("XDG_RUNTIME_DIR not set, falling back to /tmp/vibepanel.sock");
+        PathBuf::from("/tmp/vibepanel.sock")
     }
 }
 
-/// OSD IPC message types.
+/// Panel IPC message types.
 #[derive(Debug, Clone, PartialEq)]
-pub enum OsdMessage {
+pub enum IpcMessage {
     /// Show volume OSD with given percentage and mute state.
     Volume { percent: u32, muted: bool },
     /// Show "volume unavailable" OSD (sink suspended).
     VolumeUnavailable,
     /// Show brightness OSD with given percentage.
     Brightness { percent: u32 },
+    /// Toggle the idle inhibitor on/off.
+    ToggleInhibitor,
 }
 
-impl OsdMessage {
+impl IpcMessage {
     /// Serialize to wire format.
     pub fn to_wire(&self) -> String {
         match self {
-            OsdMessage::Volume { percent, muted } => {
+            IpcMessage::Volume { percent, muted } => {
                 format!("volume:{}:{}", percent, if *muted { 1 } else { 0 })
             }
-            OsdMessage::VolumeUnavailable => "volume_unavailable".to_string(),
-            OsdMessage::Brightness { percent } => format!("brightness:{}", percent),
+            IpcMessage::VolumeUnavailable => "volume_unavailable".to_string(),
+            IpcMessage::Brightness { percent } => format!("brightness:{}", percent),
+            IpcMessage::ToggleInhibitor => "toggle_inhibitor".to_string(),
         }
     }
 
@@ -64,30 +69,33 @@ impl OsdMessage {
     pub fn from_wire(s: &str) -> Option<Self> {
         let s = s.trim();
         if s == "volume_unavailable" {
-            return Some(OsdMessage::VolumeUnavailable);
+            return Some(IpcMessage::VolumeUnavailable);
+        }
+        if s == "toggle_inhibitor" {
+            return Some(IpcMessage::ToggleInhibitor);
         }
         if let Some(rest) = s.strip_prefix("volume:") {
             let parts: Vec<&str> = rest.split(':').collect();
             if parts.len() == 2 {
                 let percent = parts[0].parse().ok()?;
                 let muted = parts[1] == "1";
-                return Some(OsdMessage::Volume { percent, muted });
+                return Some(IpcMessage::Volume { percent, muted });
             }
         }
         if let Some(rest) = s.strip_prefix("brightness:") {
             let percent = rest.parse().ok()?;
-            return Some(OsdMessage::Brightness { percent });
+            return Some(IpcMessage::Brightness { percent });
         }
         None
     }
 }
 
-/// Send an OSD message to the running bar (best-effort, fire-and-forget).
+/// Send an IPC message to the running panel (best-effort, fire-and-forget).
 ///
 /// Returns `Ok(())` if the message was sent, or an error if the socket
 /// doesn't exist or sending failed. The caller should typically ignore
-/// errors since the bar may not be running.
-pub fn send_osd_message(msg: &OsdMessage) -> io::Result<()> {
+/// errors since the panel may not be running.
+pub fn send_ipc_message(msg: &IpcMessage) -> io::Result<()> {
     let path = socket_path();
     let socket = UnixDatagram::unbound()?;
     let wire = msg.to_wire();
@@ -97,27 +105,27 @@ pub fn send_osd_message(msg: &OsdMessage) -> io::Result<()> {
 
 /// Convenience: send a volume OSD message.
 pub fn notify_volume(percent: u32, muted: bool) {
-    let msg = OsdMessage::Volume { percent, muted };
-    if let Err(e) = send_osd_message(&msg) {
-        debug!("OSD IPC: failed to send volume message: {}", e);
+    let msg = IpcMessage::Volume { percent, muted };
+    if let Err(e) = send_ipc_message(&msg) {
+        debug!("IPC: failed to send volume message: {}", e);
     }
 }
 
 /// Convenience: send a "volume unavailable" OSD message.
 pub fn notify_volume_unavailable() {
-    let msg = OsdMessage::VolumeUnavailable;
-    if let Err(e) = send_osd_message(&msg) {
-        debug!("OSD IPC: failed to send volume_unavailable message: {}", e);
+    let msg = IpcMessage::VolumeUnavailable;
+    if let Err(e) = send_ipc_message(&msg) {
+        debug!("IPC: failed to send volume_unavailable message: {}", e);
     }
 }
 
 use gtk4::glib;
 
-/// Listener for OSD IPC messages.
+/// Listener for panel IPC messages.
 ///
 /// Uses glib::unix_fd_add_local() to watch the socket fd on the GTK main loop.
 /// Fully event-driven - zero polling, zero background threads.
-pub struct OsdIpcListener {
+pub struct IpcListener {
     /// The bound socket (must stay alive while listening).
     _socket: UnixDatagram,
     /// Path to the socket file (for cleanup on drop).
@@ -125,10 +133,10 @@ pub struct OsdIpcListener {
     /// GLib source ID for the fd watcher.
     source_id: Option<glib::SourceId>,
     /// Registered callback for incoming messages.
-    callback: OsdCallback,
+    callback: IpcCallback,
 }
 
-impl OsdIpcListener {
+impl IpcListener {
     /// Create and start a new IPC listener.
     ///
     /// The listener binds to the socket and watches for incoming messages
@@ -145,21 +153,22 @@ impl OsdIpcListener {
         let socket = match UnixDatagram::bind(&path) {
             Ok(s) => s,
             Err(e) => {
-                warn!("OSD IPC: failed to bind socket at {:?}: {}", path, e);
+                warn!("IPC: failed to bind socket at {:?}: {}", path, e);
                 return None;
             }
         };
 
         // Set non-blocking so recv doesn't block the main loop.
         if let Err(e) = socket.set_nonblocking(true) {
-            warn!("OSD IPC: failed to set socket non-blocking: {}", e);
+            warn!("IPC: failed to set socket non-blocking: {}", e);
+            let _ = std::fs::remove_file(&path);
             return None;
         }
 
-        debug!("OSD IPC: listening on {:?}", path);
+        debug!("IPC: listening on {:?}", path);
 
         let socket_fd = socket.as_raw_fd();
-        let callback: OsdCallback = Rc::new(RefCell::new(None));
+        let callback: IpcCallback = Rc::new(RefCell::new(None));
         let callback_for_watcher = callback.clone();
 
         let listener = Rc::new(RefCell::new(Self {
@@ -189,12 +198,14 @@ impl OsdIpcListener {
 
                     let n = n as usize;
                     if let Ok(s) = std::str::from_utf8(&buf[..n]) {
-                        debug!("OSD IPC: received message: {:?}", s);
-                        if let Some(msg) = OsdMessage::from_wire(s) {
+                        debug!("IPC: received message: {:?}", s);
+                        if let Some(msg) = IpcMessage::from_wire(s) {
                             // Invoke the callback if registered.
                             if let Some(ref cb) = *callback_for_watcher.borrow() {
                                 cb(msg);
                             }
+                        } else {
+                            debug!("IPC: ignoring unparseable message: {:?}", s);
                         }
                     }
                 }
@@ -217,15 +228,18 @@ impl OsdIpcListener {
     /// The callback is invoked directly on the GTK main loop when messages arrive.
     pub fn connect<F>(&self, callback: F)
     where
-        F: Fn(OsdMessage) + 'static,
+        F: Fn(IpcMessage) + 'static,
     {
         *self.callback.borrow_mut() = Some(Rc::new(callback));
     }
 }
 
-impl Drop for OsdIpcListener {
+impl Drop for IpcListener {
     fn drop(&mut self) {
-        // Remove the fd watcher from the main loop.
+        // Remove the fd watcher from the main loop BEFORE the socket is closed.
+        // This is essential: if _socket were dropped first, the glib source
+        // would briefly hold a dangling fd. The manual Drop ensures correct
+        // teardown order regardless of struct field declaration order.
         if let Some(source_id) = self.source_id.take() {
             source_id.remove();
         }
@@ -233,7 +247,7 @@ impl Drop for OsdIpcListener {
         // Clean up the socket file.
         let _ = std::fs::remove_file(&self.socket_path);
 
-        debug!("OSD IPC: listener stopped");
+        debug!("IPC: listener stopped");
     }
 }
 
@@ -244,22 +258,92 @@ mod tests {
     #[test]
     fn test_message_roundtrip() {
         let cases = vec![
-            OsdMessage::Volume {
+            IpcMessage::Volume {
                 percent: 42,
                 muted: false,
             },
-            OsdMessage::Volume {
+            IpcMessage::Volume {
                 percent: 100,
                 muted: true,
             },
-            OsdMessage::VolumeUnavailable,
-            OsdMessage::Brightness { percent: 75 },
+            IpcMessage::VolumeUnavailable,
+            IpcMessage::Brightness { percent: 75 },
+            IpcMessage::ToggleInhibitor,
         ];
 
         for msg in cases {
             let wire = msg.to_wire();
-            let parsed = OsdMessage::from_wire(&wire).expect("failed to parse");
+            let parsed = IpcMessage::from_wire(&wire).expect("failed to parse");
             assert_eq!(msg, parsed);
         }
+    }
+
+    #[test]
+    fn test_from_wire_rejects_empty() {
+        assert_eq!(IpcMessage::from_wire(""), None);
+        assert_eq!(IpcMessage::from_wire("   "), None);
+    }
+
+    #[test]
+    fn test_from_wire_rejects_garbage() {
+        assert_eq!(IpcMessage::from_wire("hello"), None);
+        assert_eq!(IpcMessage::from_wire("not_a_message"), None);
+        assert_eq!(IpcMessage::from_wire("volume"), None);
+        assert_eq!(IpcMessage::from_wire("brightness"), None);
+    }
+
+    #[test]
+    fn test_from_wire_rejects_missing_fields() {
+        // volume needs percent and muted
+        assert_eq!(IpcMessage::from_wire("volume:"), None);
+        assert_eq!(IpcMessage::from_wire("volume:42"), None);
+        // brightness needs percent
+        assert_eq!(IpcMessage::from_wire("brightness:"), None);
+    }
+
+    #[test]
+    fn test_from_wire_rejects_non_numeric() {
+        assert_eq!(IpcMessage::from_wire("volume:abc:0"), None);
+        assert_eq!(IpcMessage::from_wire("brightness:xyz"), None);
+    }
+
+    #[test]
+    fn test_from_wire_muted_non_one_is_unmuted() {
+        // Any non-"1" value for the muted field is treated as unmuted.
+        assert_eq!(
+            IpcMessage::from_wire("volume:42:abc"),
+            Some(IpcMessage::Volume {
+                percent: 42,
+                muted: false
+            })
+        );
+        assert_eq!(
+            IpcMessage::from_wire("volume:42:0"),
+            Some(IpcMessage::Volume {
+                percent: 42,
+                muted: false
+            })
+        );
+    }
+
+    #[test]
+    fn test_from_wire_rejects_extra_fields() {
+        assert_eq!(IpcMessage::from_wire("volume:42:0:extra"), None);
+    }
+
+    #[test]
+    fn test_from_wire_handles_whitespace() {
+        // Leading/trailing whitespace should be trimmed
+        assert_eq!(
+            IpcMessage::from_wire("  volume:42:1  "),
+            Some(IpcMessage::Volume {
+                percent: 42,
+                muted: true
+            })
+        );
+        assert_eq!(
+            IpcMessage::from_wire("\ntoggle_inhibitor\n"),
+            Some(IpcMessage::ToggleInhibitor)
+        );
     }
 }

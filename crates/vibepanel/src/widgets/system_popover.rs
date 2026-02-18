@@ -118,9 +118,9 @@ impl SystemPopoverController {
         self.cores_revealer.set_reveal_child(expanded);
 
         let chevron = if expanded {
-            "keyboard_arrow_up"
+            "pan-up-symbolic"
         } else {
-            "keyboard_arrow_down"
+            "pan-down-symbolic"
         };
         self.cores_expander_chevron.set_icon(chevron);
     }
@@ -247,7 +247,7 @@ pub fn build_system_popover_with_controller() -> (Widget, SystemPopoverControlle
 
     let cpu_section = GtkBox::new(Orientation::Vertical, 8);
 
-    let (cpu_title, cpu_temp_label) = section_title_with_value("memory", "CPU", &icons);
+    let (cpu_title, cpu_temp_label) = section_title_with_value("cpu-symbolic", "CPU", &icons);
     cpu_section.append(&cpu_title);
 
     let (cpu_usage_row, cpu_usage_label) = stat_row("Usage", 6);
@@ -268,7 +268,7 @@ pub fn build_system_popover_with_controller() -> (Widget, SystemPopoverControlle
     expander_row.append(&cores_expander_label);
 
     let cores_expander_chevron =
-        icons.create_icon("keyboard_arrow_down", &[icon::TEXT, color::MUTED]);
+        icons.create_icon("pan-down-symbolic", &[icon::TEXT, color::MUTED]);
     expander_row.append(&cores_expander_chevron.widget());
 
     let expander_btn = gtk4::Button::new();
@@ -285,7 +285,7 @@ pub fn build_system_popover_with_controller() -> (Widget, SystemPopoverControlle
     memory_card.add_css_class(sp::SECTION_CARD);
 
     let memory_section = GtkBox::new(Orientation::Vertical, 8);
-    memory_section.append(&section_title("memory_alt", "Memory", &icons));
+    memory_section.append(&section_title("ram-symbolic", "Memory", &icons));
 
     let (memory_usage_row, memory_usage_label) = stat_row("Usage", 6);
     memory_section.append(&memory_usage_row);
@@ -322,7 +322,7 @@ pub fn build_system_popover_with_controller() -> (Widget, SystemPopoverControlle
     load_card.add_css_class(sp::SECTION_CARD);
 
     let load_section = GtkBox::new(Orientation::Vertical, 8);
-    load_section.append(&section_title("speed", "Load", &icons));
+    load_section.append(&section_title("system-monitor-symbolic", "Load", &icons));
 
     let load_grid = GtkBox::new(Orientation::Horizontal, 12);
     load_grid.set_halign(Align::Fill);
@@ -375,7 +375,11 @@ pub fn build_system_popover_with_controller() -> (Widget, SystemPopoverControlle
     network_card.add_css_class(sp::SECTION_CARD);
 
     let network_section = GtkBox::new(Orientation::Vertical, 8);
-    network_section.append(&section_title("lan", "Network", &icons));
+    network_section.append(&section_title(
+        "network-transmit-receive-symbolic",
+        "Network",
+        &icons,
+    ));
 
     let net_grid = GtkBox::new(Orientation::Horizontal, 12);
     net_grid.set_halign(Align::Fill);
@@ -383,7 +387,7 @@ pub fn build_system_popover_with_controller() -> (Widget, SystemPopoverControlle
     let col_down = GtkBox::new(Orientation::Vertical, 2);
     let down_header = GtkBox::new(Orientation::Horizontal, 4);
     let down_icon = icons.create_icon(
-        "arrow_downward",
+        "go-down-symbolic",
         &[icon::TEXT, color::MUTED, sp::NETWORK_ICON],
     );
     down_header.append(&down_icon.widget());
@@ -402,7 +406,7 @@ pub fn build_system_popover_with_controller() -> (Widget, SystemPopoverControlle
     let col_up = GtkBox::new(Orientation::Vertical, 2);
     let up_header = GtkBox::new(Orientation::Horizontal, 4);
     let up_icon = icons.create_icon(
-        "arrow_upward",
+        "go-up-symbolic",
         &[icon::TEXT, color::MUTED, sp::NETWORK_ICON],
     );
     up_header.append(&up_icon.widget());

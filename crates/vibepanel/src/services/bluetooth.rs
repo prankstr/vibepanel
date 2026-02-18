@@ -14,7 +14,7 @@ use gtk4::gio::{self, BusType, DBusCallFlags, DBusProxy, DBusProxyFlags, prelude
 use gtk4::glib::{self, Variant};
 use tracing::{debug, error};
 
-use super::callbacks::Callbacks;
+use super::callbacks::{CallbackId, Callbacks};
 
 // BlueZ D-Bus constants
 const BLUEZ_SERVICE: &str = "org.bluez";
@@ -299,15 +299,21 @@ impl BluetoothService {
     }
 
     /// Register a callback to be invoked whenever the Bluetooth snapshot changes.
-    pub fn connect<F>(&self, callback: F)
+    pub fn connect<F>(&self, callback: F) -> CallbackId
     where
         F: Fn(&BluetoothSnapshot) + 'static,
     {
-        self.callbacks.register(callback);
+        let id = self.callbacks.register(callback);
 
         // Immediately send current snapshot.
         let snapshot = self.snapshot.borrow().clone();
-        self.callbacks.notify(&snapshot);
+        self.callbacks.notify_single(id, &snapshot);
+        id
+    }
+
+    /// Unregister a callback by its ID.
+    pub fn disconnect(&self, id: CallbackId) -> bool {
+        self.callbacks.unregister(id)
     }
 
     /// Return the current snapshot.

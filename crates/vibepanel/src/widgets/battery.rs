@@ -16,6 +16,7 @@ use vibepanel_core::config::WidgetEntry;
 use crate::services::battery::{
     BatteryService, BatterySnapshot, STATE_CHARGING, STATE_FULLY_CHARGED,
 };
+use crate::services::callbacks::CallbackId;
 use crate::services::icons::IconHandle;
 use crate::styles::{class, state, widget};
 use std::cell::RefCell;
@@ -78,16 +79,10 @@ impl Default for BatteryConfig {
 pub struct BatteryWidget {
     /// Shared base widget container.
     base: BaseWidget,
-    /// Icon handle from IconsService (uses Material Symbols when available).
-    icon_handle: IconHandle,
-    /// Percentage text label.
-    percentage_label: Label,
-    /// Whether to show the textual percentage.
-    show_percentage: bool,
-    /// Whether to show an icon.
-    show_icon: bool,
-    /// Optional live controller used to update the popover while open.
-    popover_controller: Rc<RefCell<Option<BatteryPopoverController>>>,
+    /// Callback ID for BatteryService, used to disconnect on drop.
+    battery_callback_id: CallbackId,
+    /// Callback ID for PowerProfileService, used to disconnect on drop.
+    power_profile_callback_id: CallbackId,
 }
 
 impl BatteryWidget {
@@ -116,29 +111,28 @@ impl BatteryWidget {
             widget
         });
 
-        let widget = Self {
-            base,
-            icon_handle,
-            percentage_label,
-            show_percentage: config.show_percentage,
-            show_icon: config.show_icon,
-            popover_controller: controller_cell.clone(),
-        };
-
         // Initial neutral state until the first snapshot arrives.
-        widget.update_widgets_from_state(false, None, None);
+        update_widgets_from_state_impl(
+            base.widget(),
+            &icon_handle,
+            &percentage_label,
+            config.show_percentage,
+            config.show_icon,
+            false,
+            None,
+            None,
+        );
 
         // Subscribe to the shared BatteryService for live updates.
-        let battery_service = BatteryService::global();
-        {
-            let container = widget.base.widget().clone();
-            let icon_handle = widget.icon_handle.clone();
-            let percentage_label = widget.percentage_label.clone();
-            let show_percentage = widget.show_percentage;
-            let show_icon = widget.show_icon;
-            let controller_for_cb = widget.popover_controller.clone();
+        let battery_callback_id = {
+            let container = base.widget().clone();
+            let icon_handle = icon_handle.clone();
+            let percentage_label = percentage_label.clone();
+            let show_percentage = config.show_percentage;
+            let show_icon = config.show_icon;
+            let controller_for_cb = controller_cell.clone();
 
-            battery_service.connect(move |snapshot: &BatterySnapshot| {
+            BatteryService::global().connect(move |snapshot: &BatterySnapshot| {
                 update_widgets_from_state_impl(
                     &container,
                     &icon_handle,
@@ -155,46 +149,38 @@ impl BatteryWidget {
                     let power_snapshot = PowerProfileService::global().snapshot();
                     controller.update_from_snapshots(snapshot, &power_snapshot);
                 }
-            });
-        }
+            })
+        };
 
         // Subscribe to power profile updates so profile button styles stay in sync
         // even when changes are triggered externally.
-        let power_service = PowerProfileService::global();
-        {
-            let controller_for_cb = widget.popover_controller.clone();
-            power_service.connect(move |power_snapshot: &PowerProfileSnapshot| {
+        let power_profile_callback_id = {
+            let controller_for_cb = controller_cell.clone();
+            PowerProfileService::global().connect(move |power_snapshot: &PowerProfileSnapshot| {
                 if let Some(controller) = controller_for_cb.borrow().as_ref() {
                     let battery_snapshot = BatteryService::global().snapshot();
                     controller.update_from_snapshots(&battery_snapshot, power_snapshot);
                 }
-            });
-        }
+            })
+        };
 
-        widget
+        Self {
+            base,
+            battery_callback_id,
+            power_profile_callback_id,
+        }
     }
 
     /// Get the root GTK widget for embedding in the bar.
     pub fn widget(&self) -> &gtk4::Box {
         self.base.widget()
     }
+}
 
-    /// Update the GTK widgets from a logical battery state.
-    ///
-    /// - `available` is whether the UPower service is available
-    /// - `percent` is 0.0-100.0 if known
-    /// - `state` is the UPower state code (u32), if known
-    fn update_widgets_from_state(&self, available: bool, percent: Option<f64>, state: Option<u32>) {
-        update_widgets_from_state_impl(
-            self.base.widget(),
-            &self.icon_handle,
-            &self.percentage_label,
-            self.show_percentage,
-            self.show_icon,
-            available,
-            percent,
-            state,
-        );
+impl Drop for BatteryWidget {
+    fn drop(&mut self) {
+        BatteryService::global().disconnect(self.battery_callback_id);
+        PowerProfileService::global().disconnect(self.power_profile_callback_id);
     }
 }
 

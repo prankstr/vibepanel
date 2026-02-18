@@ -13,6 +13,7 @@ use gtk4::Label;
 use gtk4::prelude::*;
 use vibepanel_core::config::WidgetEntry;
 
+use crate::services::callbacks::CallbackId;
 use crate::services::icons::IconHandle;
 use crate::services::system::{SystemService, SystemSnapshot};
 use crate::services::tooltip::TooltipManager;
@@ -71,14 +72,8 @@ impl Default for CpuConfig {
 pub struct CpuWidget {
     /// Shared base widget container.
     base: BaseWidget,
-    /// Icon handle from IconsService.
-    icon_handle: IconHandle,
-    /// Usage percentage label.
-    percentage_label: Label,
-    /// Configuration.
-    config: CpuConfig,
-    /// Popover binding for the shared system popover.
-    popover_binding: SystemPopoverBinding,
+    /// Callback ID for SystemService, used to disconnect on drop.
+    system_callback_id: CallbackId,
 }
 
 impl CpuWidget {
@@ -88,36 +83,23 @@ impl CpuWidget {
 
         base.set_tooltip("CPU: unknown");
 
-        let icon_handle = base.add_icon("memory", &[widget::CPU_ICON]);
+        let icon_handle = base.add_icon("cpu-symbolic", &[widget::CPU_ICON]);
 
         let percentage_label = base.add_label(None, &[widget::CPU_LABEL, class::VCENTER_CAPS]);
 
         let popover_binding = SystemPopoverBinding::new(&base);
 
-        let widget = Self {
-            base,
-            icon_handle,
-            percentage_label,
-            config,
-            popover_binding,
-        };
-
-        widget
-            .icon_handle
-            .widget()
-            .set_visible(widget.config.show_icon);
-        widget
-            .percentage_label
-            .set_visible(widget.config.show_percentage);
+        icon_handle.widget().set_visible(config.show_icon);
+        percentage_label.set_visible(config.show_percentage);
 
         let system_service = SystemService::global();
-        {
-            let container = widget.base.widget().clone();
-            let icon_handle = widget.icon_handle.clone();
-            let percentage_label = widget.percentage_label.clone();
-            let show_icon = widget.config.show_icon;
-            let show_percentage = widget.config.show_percentage;
-            let popover_binding = widget.popover_binding.clone();
+        let system_callback_id = {
+            let container = base.widget().clone();
+            let icon_handle = icon_handle.clone();
+            let percentage_label = percentage_label.clone();
+            let show_icon = config.show_icon;
+            let show_percentage = config.show_percentage;
+            let popover_binding = popover_binding.clone();
 
             system_service.connect(move |snapshot: &SystemSnapshot| {
                 update_cpu_widget(
@@ -130,15 +112,24 @@ impl CpuWidget {
                 );
 
                 popover_binding.update_if_open(snapshot);
-            });
-        }
+            })
+        };
 
-        widget
+        Self {
+            base,
+            system_callback_id,
+        }
     }
 
     /// Get the root GTK widget for embedding in the bar.
     pub fn widget(&self) -> &gtk4::Box {
         self.base.widget()
+    }
+}
+
+impl Drop for CpuWidget {
+    fn drop(&mut self) {
+        SystemService::global().disconnect(self.system_callback_id);
     }
 }
 

@@ -22,7 +22,7 @@ use gtk4::gio;
 use gtk4::glib;
 use tracing::{debug, error, warn};
 
-use super::callbacks::Callbacks;
+use super::callbacks::{CallbackId, Callbacks};
 
 /// Logind D-Bus constants.
 const LOGIND_BUS_NAME: &str = "org.freedesktop.login1";
@@ -159,16 +159,22 @@ impl BrightnessService {
     ///
     /// The callback is executed on the GLib main loop and is called
     /// immediately with the current snapshot if the service is ready.
-    pub fn connect<F>(&self, callback: F)
+    pub fn connect<F>(&self, callback: F) -> CallbackId
     where
         F: Fn(&BrightnessSnapshot) + 'static,
     {
-        self.callbacks.register(callback);
+        let id = self.callbacks.register(callback);
 
         if self.ready.get() {
             let snapshot = self.current.borrow().clone();
-            self.callbacks.notify(&snapshot);
+            self.callbacks.notify_single(id, &snapshot);
         }
+        id
+    }
+
+    /// Unregister a callback by its ID.
+    pub fn disconnect(&self, id: CallbackId) -> bool {
+        self.callbacks.unregister(id)
     }
 
     /// Get the current brightness snapshot.

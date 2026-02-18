@@ -14,6 +14,7 @@ use gtk4::prelude::*;
 use gtk4::{GestureClick, Label};
 use vibepanel_core::config::WidgetEntry;
 
+use crate::services::callbacks::CallbackId;
 use crate::services::icons::IconHandle;
 use crate::services::tooltip::TooltipManager;
 use crate::services::updates::{UpdatesService, UpdatesSnapshot};
@@ -70,12 +71,8 @@ impl Default for UpdatesConfig {
 pub struct UpdatesWidget {
     /// Shared base widget container.
     base: BaseWidget,
-    /// Icon handle for the update icon.
-    icon_handle: IconHandle,
-    /// Label showing update count or "!".
-    count_label: Label,
-    /// Terminal override from config.
-    terminal: Option<String>,
+    /// Callback ID for UpdatesService, used to disconnect on drop.
+    updates_callback_id: CallbackId,
 }
 
 impl UpdatesWidget {
@@ -94,17 +91,10 @@ impl UpdatesWidget {
         let service = UpdatesService::global();
         service.set_check_interval(config.check_interval);
 
-        let widget = Self {
-            base,
-            icon_handle,
-            count_label,
-            terminal: config.terminal,
-        };
-
         // Set up click handler to spawn terminal
         {
-            let terminal = widget.terminal.clone();
-            let container = widget.base.widget().clone();
+            let terminal = config.terminal.clone();
+            let container = base.widget().clone();
 
             let click = GestureClick::new();
             click.connect_released(move |_, _, _, _| {
@@ -119,22 +109,31 @@ impl UpdatesWidget {
         }
 
         // Subscribe to updates service
-        {
-            let container = widget.base.widget().clone();
-            let icon_handle = widget.icon_handle.clone();
-            let count_label = widget.count_label.clone();
+        let updates_callback_id = {
+            let container = base.widget().clone();
+            let icon_handle = icon_handle.clone();
+            let count_label = count_label.clone();
 
             service.connect(move |snapshot: &UpdatesSnapshot| {
                 update_widget_from_snapshot(&container, &icon_handle, &count_label, snapshot);
-            });
-        }
+            })
+        };
 
-        widget
+        Self {
+            base,
+            updates_callback_id,
+        }
     }
 
     /// Get the root GTK widget for embedding in the bar.
     pub fn widget(&self) -> &gtk4::Box {
         self.base.widget()
+    }
+}
+
+impl Drop for UpdatesWidget {
+    fn drop(&mut self) {
+        UpdatesService::global().disconnect(self.updates_callback_id);
     }
 }
 

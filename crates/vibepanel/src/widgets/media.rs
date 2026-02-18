@@ -421,14 +421,14 @@ fn create_controls(_parent_widget: &gtk4::Box) -> ControlsHandle {
 
     let prev_btn = create_media_control_button(
         &icons,
-        "skip_previous",
+        "media-skip-backward",
         "Previous",
         &[media::CONTROL_BTN, button::COMPACT],
         || MediaService::global().previous(),
     );
     container.append(&prev_btn);
 
-    let play_pause_icon = icons.create_icon("play_arrow", &[icon::ICON]);
+    let play_pause_icon = icons.create_icon("media-playback-start", &[icon::ICON]);
     let play_pause_btn = Button::new();
     play_pause_btn.set_has_frame(false);
     play_pause_btn.set_valign(gtk4::Align::Center);
@@ -444,7 +444,7 @@ fn create_controls(_parent_widget: &gtk4::Box) -> ControlsHandle {
 
     let next_btn = create_media_control_button(
         &icons,
-        "skip_next",
+        "media-skip-forward",
         "Next",
         &[media::CONTROL_BTN, button::COMPACT],
         || MediaService::global().next(),
@@ -860,8 +860,8 @@ fn update_widgets_from_snapshot_impl(ctx: &WidgetUpdateContext<'_>, snapshot: &M
 
     if let Some(ctrl) = ctx.controls {
         let icon_name = match snapshot.playback_status {
-            PlaybackStatus::Playing => "pause",
-            PlaybackStatus::Paused | PlaybackStatus::Stopped => "play_arrow",
+            PlaybackStatus::Playing => media::ICON_PAUSE,
+            PlaybackStatus::Paused | PlaybackStatus::Stopped => media::ICON_PLAY,
         };
         ctrl.play_pause_icon.set_icon(icon_name);
         ctrl.container.set_visible(true);

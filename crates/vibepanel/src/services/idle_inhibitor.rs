@@ -1,21 +1,18 @@
-//! IdleInhibitorService - Prevents system idle/sleep using D-Bus ScreenSaver API.
+//! IdleInhibitorService - Prevents system idle/sleep using systemd-logind.
 //!
-//! This service uses the `org.freedesktop.ScreenSaver` D-Bus interface on the session bus,
-//! which is the standard mechanism for GUI applications to inhibit idle on Wayland.
-//! This is supported by hypridle, swayidle, and other idle daemons.
+//! This service uses the `org.freedesktop.login1.Manager.Inhibit` D-Bus API
+//! on the system bus to acquire an fd-based inhibit lock. Holding the fd
+//! prevents idle and sleep; dropping it releases the lock. This is the same
+//! mechanism used by systemd-inhibit(1) and is supported by all systemd-based
+//! systems regardless of which idle daemon is running (hypridle, swayidle, etc.).
 //!
 //! ## Usage
 //!
 //! The service is a singleton that can be toggled on/off. When active,
 //! it prevents the system from going idle or suspending.
-//!
-//! ## CLI Usage
-//!
-//! The `IdleInhibitorCli` struct provides a standalone idle inhibitor using
-//! systemd-logind's D-Bus API. This doesn't require GTK and is suitable for
-//! CLI commands like `vibepanel inhibit <command>`.
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
+use std::os::unix::io::OwnedFd;
 use std::rc::Rc;
 
 use gtk4::gio;
@@ -23,7 +20,7 @@ use gtk4::glib;
 use gtk4::prelude::*;
 use tracing::{debug, warn};
 
-use super::callbacks::Callbacks;
+use super::callbacks::{CallbackId, Callbacks};
 
 /// Canonical snapshot of idle inhibitor state.
 #[derive(Debug, Clone)]
@@ -34,46 +31,52 @@ pub struct IdleInhibitorSnapshot {
     pub available: bool,
 }
 
-impl IdleInhibitorSnapshot {
-    /// Create an initial snapshot.
-    fn new() -> Self {
-        Self {
-            active: false,
-            available: true,
-        }
-    }
-}
-
 /// Shared, process-wide idle inhibitor service.
 ///
-/// Uses the `org.freedesktop.ScreenSaver` D-Bus interface to inhibit idle.
-/// This is the standard mechanism used by Firefox, Steam, and other GUI apps,
-/// and is supported by hypridle, swayidle, and other Wayland idle daemons.
+/// Uses `org.freedesktop.login1.Manager.Inhibit` on the system bus to acquire
+/// an fd-based inhibit lock. The lock prevents idle and sleep while the fd is
+/// open. Dropping the fd releases the lock — the kernel guarantees cleanup
+/// even on SIGKILL.
 pub struct IdleInhibitorService {
     /// Current snapshot of inhibitor state.
     snapshot: RefCell<IdleInhibitorSnapshot>,
     /// Registered callbacks for state changes.
     callbacks: Callbacks<IdleInhibitorSnapshot>,
-    /// D-Bus inhibit cookie (for releasing the inhibitor).
-    inhibit_cookie: Cell<u32>,
-    /// D-Bus proxy for org.freedesktop.ScreenSaver.
-    dbus_proxy: RefCell<Option<gio::DBusProxy>>,
+    /// System bus connection for logind calls.
+    dbus_connection: Option<gio::DBusConnection>,
+    /// Inhibit lock fd. Holding this = inhibited, dropping it = released.
+    inhibit_fd: RefCell<Option<OwnedFd>>,
 }
 
 impl IdleInhibitorService {
     /// Create a new IdleInhibitorService.
     fn new() -> Rc<Self> {
-        let service = Rc::new(Self {
-            snapshot: RefCell::new(IdleInhibitorSnapshot::new()),
+        let connection = match gio::bus_get_sync(gio::BusType::System, gio::Cancellable::NONE) {
+            Ok(conn) => {
+                debug!("IdleInhibitorService: connected to system bus");
+                Some(conn)
+            }
+            Err(e) => {
+                warn!(
+                    "IdleInhibitorService: failed to connect to system bus: {}. \
+                     Idle inhibition will not work.",
+                    e
+                );
+                None
+            }
+        };
+
+        let available = connection.is_some();
+
+        Rc::new(Self {
+            snapshot: RefCell::new(IdleInhibitorSnapshot {
+                active: false,
+                available,
+            }),
             callbacks: Callbacks::new(),
-            inhibit_cookie: Cell::new(0),
-            dbus_proxy: RefCell::new(None),
-        });
-
-        // Initialize D-Bus proxy asynchronously
-        service.init_dbus_proxy();
-
-        service
+            dbus_connection: connection,
+            inhibit_fd: RefCell::new(None),
+        })
     }
 
     /// Get the global IdleInhibitorService singleton.
@@ -85,46 +88,22 @@ impl IdleInhibitorService {
         INSTANCE.with(|s| s.clone())
     }
 
-    /// Initialize the D-Bus proxy for org.freedesktop.ScreenSaver.
-    fn init_dbus_proxy(&self) {
-        // Create proxy synchronously for simplicity - this is fast since it's just
-        // setting up the proxy object, not making any D-Bus calls yet.
-        match gio::DBusProxy::for_bus_sync(
-            gio::BusType::Session,
-            gio::DBusProxyFlags::NONE,
-            None, // No interface info
-            "org.freedesktop.ScreenSaver",
-            "/org/freedesktop/ScreenSaver",
-            "org.freedesktop.ScreenSaver",
-            gio::Cancellable::NONE,
-        ) {
-            Ok(proxy) => {
-                debug!("IdleInhibitorService: D-Bus proxy created for org.freedesktop.ScreenSaver");
-                *self.dbus_proxy.borrow_mut() = Some(proxy);
-            }
-            Err(e) => {
-                warn!(
-                    "IdleInhibitorService: Failed to create D-Bus proxy: {}. \
-                     Idle inhibition will not work. Is an idle daemon (hypridle, swayidle) running?",
-                    e
-                );
-                // Mark as unavailable
-                let mut snapshot = self.snapshot.borrow_mut();
-                snapshot.available = false;
-            }
-        }
-    }
-
     /// Register a callback to be invoked whenever the inhibitor state changes.
-    pub fn connect<F>(&self, callback: F)
+    pub fn connect<F>(&self, callback: F) -> CallbackId
     where
         F: Fn(&IdleInhibitorSnapshot) + 'static,
     {
-        self.callbacks.register(callback);
+        let id = self.callbacks.register(callback);
 
         // Immediately send current snapshot.
         let snapshot = self.snapshot.borrow().clone();
-        self.callbacks.notify(&snapshot);
+        self.callbacks.notify_single(id, &snapshot);
+        id
+    }
+
+    /// Unregister a callback by its ID.
+    pub fn disconnect(&self, id: CallbackId) -> bool {
+        self.callbacks.unregister(id)
     }
 
     /// Return the current inhibitor snapshot.
@@ -132,20 +111,13 @@ impl IdleInhibitorService {
         self.snapshot.borrow().clone()
     }
 
-    /// Whether the inhibitor is currently active.
-    #[allow(dead_code)] // API for potential CLI/external use
-    pub fn active(&self) -> bool {
-        self.snapshot.borrow().active
-    }
-
     /// Whether the inhibitor is available.
-    #[allow(dead_code)] // API for potential CLI/external use
+    #[allow(dead_code)]
     pub fn available(&self) -> bool {
         self.snapshot.borrow().available
     }
 
     /// Toggle the inhibitor state.
-    #[allow(dead_code)] // API for potential CLI/external use
     pub fn toggle(&self) {
         let current = self.snapshot.borrow().active;
         self.set_active(!current);
@@ -166,169 +138,29 @@ impl IdleInhibitorService {
     }
 
     /// Stop the service and release any inhibitor.
-    #[allow(dead_code)] // API for potential CLI/external use
+    #[allow(dead_code)]
     pub fn stop(&self) {
         if self.snapshot.borrow().active {
             self.disable_inhibitor();
         }
     }
 
-    // Internal - D-Bus ScreenSaver API
+    // Internal - logind Inhibit API
 
     fn enable_inhibitor(&self) {
-        let proxy_opt = self.dbus_proxy.borrow();
-        let Some(proxy) = proxy_opt.as_ref() else {
-            warn!("IdleInhibitorService: Cannot enable - no D-Bus proxy available");
+        let Some(connection) = self.dbus_connection.as_ref() else {
+            warn!("IdleInhibitorService: cannot enable - no system bus connection");
             return;
         };
 
-        // Call org.freedesktop.ScreenSaver.Inhibit(application_name, reason) -> cookie
-        let args = ("vibepanel", "User requested idle inhibition").to_variant();
-
-        match proxy.call_sync(
-            "Inhibit",
-            Some(&args),
-            gio::DBusCallFlags::NONE,
-            5000, // 5 second timeout
-            gio::Cancellable::NONE,
-        ) {
-            Ok(result) => {
-                // Result is (u,) - a tuple containing the cookie
-                let cookie: u32 = result.child_get(0);
-                if cookie == 0 {
-                    warn!("IdleInhibitorService: Inhibit returned cookie=0, may not be working");
-                }
-                self.inhibit_cookie.set(cookie);
-                debug!("IdleInhibitorService: Enabled (cookie={})", cookie);
-
-                let mut snapshot = self.snapshot.borrow_mut();
-                snapshot.active = true;
-                let snapshot_clone = snapshot.clone();
-                drop(snapshot);
-
-                self.callbacks.notify(&snapshot_clone);
-            }
-            Err(e) => {
-                warn!("IdleInhibitorService: Failed to call Inhibit: {}", e);
-                // Don't update state since we failed
-            }
-        }
-    }
-
-    fn disable_inhibitor(&self) {
-        let cookie = self.inhibit_cookie.get();
-        if cookie == 0 {
-            // No active inhibitor - but still update state for consistency
-            let mut snapshot = self.snapshot.borrow_mut();
-            if snapshot.active {
-                snapshot.active = false;
-                let snapshot_clone = snapshot.clone();
-                drop(snapshot);
-                self.callbacks.notify(&snapshot_clone);
-            }
-            return;
-        }
-
-        let proxy_opt = self.dbus_proxy.borrow();
-        if let Some(proxy) = proxy_opt.as_ref() {
-            // Call org.freedesktop.ScreenSaver.UnInhibit(cookie)
-            let args = (cookie,).to_variant();
-
-            match proxy.call_sync(
-                "UnInhibit",
-                Some(&args),
-                gio::DBusCallFlags::NONE,
-                5000,
-                gio::Cancellable::NONE,
-            ) {
-                Ok(_) => {
-                    debug!("IdleInhibitorService: Disabled (cookie={})", cookie);
-                }
-                Err(e) => {
-                    warn!("IdleInhibitorService: Failed to call UnInhibit: {}", e);
-                    // Continue anyway to update local state
-                }
-            }
-        }
-
-        self.inhibit_cookie.set(0);
-
-        let mut snapshot = self.snapshot.borrow_mut();
-        snapshot.active = false;
-        let snapshot_clone = snapshot.clone();
-        drop(snapshot);
-
-        self.callbacks.notify(&snapshot_clone);
-    }
-}
-
-impl Drop for IdleInhibitorService {
-    fn drop(&mut self) {
-        // Ensure we release the inhibitor when the service is dropped.
-        let cookie = self.inhibit_cookie.get();
-        if cookie != 0
-            && let Some(proxy) = self.dbus_proxy.borrow().as_ref()
-        {
-            let args = (cookie,).to_variant();
-            let _ = proxy.call_sync(
-                "UnInhibit",
-                Some(&args),
-                gio::DBusCallFlags::NONE,
-                1000,
-                gio::Cancellable::NONE,
-            );
-        }
-    }
-}
-
-// CLI interface - uses systemd-logind D-Bus API (no GTK required)
-
-use gtk4::prelude::ToVariant;
-use std::os::unix::io::OwnedFd;
-
-/// CLI idle inhibitor using systemd-logind D-Bus API.
-///
-/// This creates an inhibit lock via org.freedesktop.login1.Manager.Inhibit.
-/// The lock is held as long as the returned file descriptor is open.
-///
-/// Unlike the GTK-based service, this is designed for CLI usage where we
-/// want to inhibit idle for the duration of a command (e.g., `vibepanel inhibit <command>`).
-pub struct IdleInhibitorCli {
-    /// The inhibit lock file descriptor. Dropping this releases the lock.
-    _inhibit_fd: Option<OwnedFd>,
-}
-
-impl IdleInhibitorCli {
-    /// Create a new idle inhibitor lock.
-    ///
-    /// Returns `None` if the inhibitor could not be acquired.
-    pub fn new(reason: &str) -> Option<Self> {
-        let fd = Self::acquire_inhibit_lock(reason)?;
-        Some(Self {
-            _inhibit_fd: Some(fd),
-        })
-    }
-
-    /// Acquire an inhibit lock from systemd-logind.
-    ///
-    /// The lock prevents idle and sleep while the returned fd is open.
-    fn acquire_inhibit_lock(reason: &str) -> Option<OwnedFd> {
-        let connection = gio::bus_get_sync(gio::BusType::System, gio::Cancellable::NONE).ok()?;
-
-        // Call org.freedesktop.login1.Manager.Inhibit
-        // Arguments: (what, who, why, mode)
-        // - what: colon-separated list of what to inhibit (idle:sleep)
-        // - who: application name
-        // - why: human-readable reason
-        // - mode: "block" (hard block) or "delay" (delay for grace period)
+        // Call org.freedesktop.login1.Manager.Inhibit(what, who, why, mode)
         let args = (
-            "idle:sleep", // what
-            "vibepanel",  // who
-            reason,       // why
-            "block",      // mode
+            "idle:sleep",                     // what
+            "vibepanel",                      // who
+            "User requested idle inhibition", // why
+            "block",                          // mode
         );
 
-        // Use call_with_unix_fd_list_sync to receive the file descriptor
         let result = connection.call_with_unix_fd_list_sync(
             Some("org.freedesktop.login1"),
             "/org/freedesktop/login1",
@@ -343,38 +175,45 @@ impl IdleInhibitorCli {
         );
 
         match result {
-            Ok((_reply, Some(fd_list))) => {
-                // Get the fd from the list (index 0)
-                match fd_list.get(0) {
-                    Ok(owned_fd) => {
-                        debug!(
-                            "IdleInhibitorCli: Acquired inhibit lock (fd={:?})",
-                            owned_fd
-                        );
-                        Some(owned_fd)
-                    }
-                    Err(e) => {
-                        warn!("IdleInhibitorCli: Failed to get fd from list: {}", e);
-                        None
-                    }
+            Ok((_reply, Some(fd_list))) => match fd_list.get(0) {
+                Ok(owned_fd) => {
+                    debug!("IdleInhibitorService: enabled (fd={:?})", owned_fd);
+                    *self.inhibit_fd.borrow_mut() = Some(owned_fd);
+
+                    let mut snapshot = self.snapshot.borrow_mut();
+                    snapshot.active = true;
+                    let snapshot_clone = snapshot.clone();
+                    drop(snapshot);
+
+                    self.callbacks.notify(&snapshot_clone);
                 }
-            }
+                Err(e) => {
+                    warn!("IdleInhibitorService: failed to get fd from reply: {}", e);
+                }
+            },
             Ok((_reply, None)) => {
-                warn!("IdleInhibitorCli: No fd list in reply");
-                None
+                warn!("IdleInhibitorService: no fd list in reply");
             }
             Err(e) => {
-                warn!("IdleInhibitorCli: Failed to acquire inhibit lock: {}", e);
-                None
+                warn!("IdleInhibitorService: failed to call Inhibit: {}", e);
             }
         }
     }
-}
 
-impl Drop for IdleInhibitorCli {
-    fn drop(&mut self) {
-        if self._inhibit_fd.is_some() {
-            debug!("IdleInhibitorCli: Released inhibit lock");
+    fn disable_inhibitor(&self) {
+        // Drop the fd — this releases the logind inhibit lock.
+        let had_fd = self.inhibit_fd.borrow_mut().take().is_some();
+
+        if had_fd {
+            debug!("IdleInhibitorService: disabled (fd dropped)");
+        }
+
+        let mut snapshot = self.snapshot.borrow_mut();
+        if snapshot.active {
+            snapshot.active = false;
+            let snapshot_clone = snapshot.clone();
+            drop(snapshot);
+            self.callbacks.notify(&snapshot_clone);
         }
     }
 }

@@ -23,7 +23,7 @@ use gtk4::glib::{self, SourceId};
 use sysinfo::{Components, CpuRefreshKind, MemoryRefreshKind, Networks, RefreshKind, System};
 use tracing::{debug, trace};
 
-use super::callbacks::Callbacks;
+use super::callbacks::{CallbackId, Callbacks};
 
 /// Default polling interval in seconds.
 const DEFAULT_POLL_INTERVAL_SECS: u32 = 3;
@@ -164,13 +164,19 @@ impl SystemService {
     /// Register a callback to be invoked whenever the system snapshot changes.
     ///
     /// The callback is immediately invoked with the current snapshot.
-    pub fn connect<F>(&self, callback: F)
+    pub fn connect<F>(&self, callback: F) -> CallbackId
     where
         F: Fn(&SystemSnapshot) + 'static,
     {
-        self.callbacks.register(callback);
+        let id = self.callbacks.register(callback);
         // Immediately send current snapshot so widgets can render
-        self.callbacks.notify(&self.snapshot.borrow());
+        self.callbacks.notify_single(id, &self.snapshot.borrow());
+        id
+    }
+
+    /// Unregister a callback by its ID.
+    pub fn disconnect(&self, id: CallbackId) -> bool {
+        self.callbacks.unregister(id)
     }
 
     /// Return the current system snapshot.

@@ -11,7 +11,7 @@ use std::rc::Rc;
 
 use tracing::debug;
 
-use super::callbacks::Callbacks;
+use super::callbacks::{CallbackId, Callbacks};
 use super::compositor::{CompositorManager, WorkspaceMeta, WorkspaceSnapshot};
 
 /// Enriched workspace object for widget consumption.
@@ -181,17 +181,23 @@ impl WorkspaceService {
 
     /// Register a callback to be invoked when workspace state changes.
     /// The callback is always executed on the GLib main loop.
-    pub fn connect<F>(&self, callback: F)
+    pub fn connect<F>(&self, callback: F) -> CallbackId
     where
         F: Fn(&WorkspaceServiceSnapshot) + 'static,
     {
-        self.callbacks.register(callback);
+        let id = self.callbacks.register(callback);
 
         // Immediately send current state so widgets can render.
         if *self.ready.borrow() {
             let snapshot = self.build_snapshot();
-            self.callbacks.notify(&snapshot);
+            self.callbacks.notify_single(id, &snapshot);
         }
+        id
+    }
+
+    /// Unregister a callback by its ID.
+    pub fn disconnect(&self, id: CallbackId) -> bool {
+        self.callbacks.unregister(id)
     }
 
     /// Request the compositor to switch to a workspace.

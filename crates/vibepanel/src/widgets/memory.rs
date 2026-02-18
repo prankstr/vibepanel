@@ -13,6 +13,7 @@ use gtk4::Label;
 use gtk4::prelude::*;
 use vibepanel_core::config::WidgetEntry;
 
+use crate::services::callbacks::CallbackId;
 use crate::services::icons::IconHandle;
 use crate::services::system::{SystemService, SystemSnapshot, format_bytes, format_bytes_long};
 use crate::services::tooltip::TooltipManager;
@@ -91,14 +92,8 @@ impl Default for MemoryConfig {
 pub struct MemoryWidget {
     /// Shared base widget container.
     base: BaseWidget,
-    /// Icon handle from IconsService.
-    icon_handle: IconHandle,
-    /// Usage label.
-    memory_label: Label,
-    /// Configuration.
-    config: MemoryConfig,
-    /// Popover binding for the shared system popover.
-    popover_binding: SystemPopoverBinding,
+    /// Callback ID for SystemService, used to disconnect on drop.
+    system_callback_id: CallbackId,
 }
 
 impl MemoryWidget {
@@ -108,33 +103,22 @@ impl MemoryWidget {
 
         base.set_tooltip("Memory: unknown");
 
-        let icon_handle = base.add_icon("memory_alt", &[widget::MEMORY_ICON]);
+        let icon_handle = base.add_icon("ram-symbolic", &[widget::MEMORY_ICON]);
 
         let memory_label = base.add_label(None, &[widget::MEMORY_LABEL, class::VCENTER_CAPS]);
 
         let popover_binding = SystemPopoverBinding::new(&base);
 
-        let widget = Self {
-            base,
-            icon_handle,
-            memory_label,
-            config,
-            popover_binding,
-        };
-
-        widget
-            .icon_handle
-            .widget()
-            .set_visible(widget.config.show_icon);
+        icon_handle.widget().set_visible(config.show_icon);
 
         let system_service = SystemService::global();
-        {
-            let container = widget.base.widget().clone();
-            let icon_handle = widget.icon_handle.clone();
-            let memory_label = widget.memory_label.clone();
-            let show_icon = widget.config.show_icon;
-            let format = widget.config.format.clone();
-            let popover_binding = widget.popover_binding.clone();
+        let system_callback_id = {
+            let container = base.widget().clone();
+            let icon_handle = icon_handle.clone();
+            let memory_label = memory_label.clone();
+            let show_icon = config.show_icon;
+            let format = config.format.clone();
+            let popover_binding = popover_binding.clone();
 
             system_service.connect(move |snapshot: &SystemSnapshot| {
                 update_memory_widget(
@@ -147,15 +131,24 @@ impl MemoryWidget {
                 );
 
                 popover_binding.update_if_open(snapshot);
-            });
-        }
+            })
+        };
 
-        widget
+        Self {
+            base,
+            system_callback_id,
+        }
     }
 
     /// Get the root GTK widget for embedding in the bar.
     pub fn widget(&self) -> &gtk4::Box {
         self.base.widget()
+    }
+}
+
+impl Drop for MemoryWidget {
+    fn drop(&mut self) {
+        SystemService::global().disconnect(self.system_callback_id);
     }
 }
 

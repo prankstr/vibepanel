@@ -1,9 +1,10 @@
-//! Wi-Fi card for Quick Settings panel.
+//! Network card for Quick Settings panel.
 //!
 //! This module contains:
-//! - Wi-Fi icon helpers (merged from qs_wifi_helpers.rs)
-//! - Wi-Fi details panel building
-//! - Network list population
+//! - Network icon helpers (Wi-Fi, cellular, wired)
+//! - Wi-Fi details panel and network list population
+//! - Ethernet status display
+//! - Mobile/cellular row with ModemManager integration
 //! - Password dialog handling
 
 use std::cell::{Cell, RefCell};
@@ -19,55 +20,94 @@ use tracing::debug;
 
 use super::components::ListRow;
 use super::ui_helpers::{
-    ExpandableCard, ExpandableCardBase, ScanButton, add_placeholder_row, build_accent_subtitle,
-    build_error_subtitle, clear_list_box, create_qs_list_box, create_row_action_label,
-    create_row_menu_action, create_row_menu_button, set_icon_active,
+    ExpandableCard, ExpandableCardBase, ScanButton, add_disabled_placeholder, add_placeholder_row,
+    build_accent_subtitle, build_error_subtitle, clear_list_box, create_qs_list_box,
+    create_row_action_label, create_row_menu_action, create_row_menu_button, set_icon_active,
 };
 use super::window::current_quick_settings_window;
-use crate::services::icons::IconsService;
-use crate::services::surfaces::SurfaceStyleManager;
-use crate::services::wifi::{
-    AUTH_FAILURE_REASON, CONNECTION_FAILURE_REASON, WifiConnectionState, WifiNetwork, WifiService,
-    WifiSnapshot,
+use crate::services::icons::{IconHandle, IconsService};
+use crate::services::network::{
+    AUTH_FAILURE_REASON, CONNECTION_FAILURE_REASON, NetworkConnectionState, NetworkService,
+    NetworkSnapshot, WifiNetwork,
 };
+use crate::services::surfaces::SurfaceStyleManager;
 use crate::styles::{button, color, icon, qs, row, state, surface};
 use crate::widgets::base::configure_popover;
 
-/// Return a simple connected/disconnected Wi-Fi icon.
-///
-/// The main card widget uses this for a stable "connected" icon,
-/// while the per-network list rows use `wifi_strength_icon` for
-/// detailed signal levels.
-pub fn wifi_icon_name(
-    available: bool,
-    connected: bool,
-    wifi_enabled: bool,
-    wired_connected: bool,
-    has_wifi_device: bool,
-) -> &'static str {
+/// Snapshot of network state used to resolve bar and card icons.
+pub struct NetworkIconContext {
+    pub available: bool,
+    pub connected: bool,
+    pub wifi_enabled: bool,
+    pub wired_connected: bool,
+    pub has_wifi_device: bool,
+    pub mobile_is_primary: bool,
+    pub has_modem_device: bool,
+    pub mobile_signal_quality: Option<u32>,
+}
+
+impl NetworkIconContext {
+    /// Build a full icon context from a [`NetworkSnapshot`].
+    pub fn from_snapshot(snapshot: &NetworkSnapshot) -> Self {
+        Self {
+            available: snapshot.available(),
+            connected: snapshot.connected(),
+            wifi_enabled: snapshot.wifi_enabled().unwrap_or(false),
+            wired_connected: snapshot.wired_connected(),
+            has_wifi_device: snapshot.has_wifi_device(),
+            mobile_is_primary: snapshot.mobile_is_primary(),
+            has_modem_device: snapshot.has_modem_device(),
+            mobile_signal_quality: snapshot.mobile_signal_quality(),
+        }
+    }
+
+    /// Build an icon context for the bar widget (excludes mobile — bar has
+    /// a separate cellular icon). Mobile fields are zeroed so
+    /// `network_icon_name()` produces only Wi-Fi/wired icons; the bar renders
+    /// cellular status independently via `cellular_signal_icon_name()`.
+    pub fn for_bar(snapshot: &NetworkSnapshot) -> Self {
+        Self {
+            available: snapshot.available(),
+            connected: snapshot.connected(),
+            wifi_enabled: snapshot.wifi_enabled().unwrap_or(false),
+            wired_connected: snapshot.wired_connected(),
+            has_wifi_device: snapshot.has_wifi_device(),
+            mobile_is_primary: false,
+            has_modem_device: false,
+            mobile_signal_quality: None,
+        }
+    }
+}
+
+/// Pick the card icon based on connection state.
+/// Precedence: unavailable → wired → mobile-primary → no-wifi fallback → wifi.
+pub fn network_icon_name(ctx: &NetworkIconContext) -> &'static str {
     // Service unavailable - show offline icon regardless of device type
-    if !available {
+    if !ctx.available {
         return "network-wireless-offline-symbolic";
     }
 
-    if wired_connected {
+    if ctx.wired_connected {
         "network-wired-symbolic"
-    } else if !has_wifi_device {
-        // Ethernet-only system, not connected - show lan icon (will be grayed out)
-        "network-wired-symbolic"
-    } else if !wifi_enabled {
+    } else if ctx.mobile_is_primary {
+        cellular_signal_icon_name(ctx.mobile_signal_quality.unwrap_or(0))
+    } else if !ctx.has_wifi_device {
+        if ctx.has_modem_device {
+            "network-cellular-signal-none-symbolic"
+        } else {
+            // Ethernet-only system, not connected - show lan icon (will be grayed out)
+            "network-wired-symbolic"
+        }
+    } else if !ctx.wifi_enabled {
         "network-wireless-offline-symbolic"
-    } else if connected {
+    } else if ctx.connected {
         "network-wireless-signal-excellent-symbolic"
     } else {
         "network-wireless-offline-symbolic"
     }
 }
 
-/// Return a Wi-Fi icon name based on a raw signal strength percentage.
-///
-/// The list rows use this to express 1/2/3/4-bar states. The Material
-/// icon mapping compresses these into the available glyph set.
+/// Return a Wi-Fi icon name based on signal strength percentage.
 pub fn wifi_strength_icon(level: i32) -> &'static str {
     if level >= 70 {
         "network-wireless-signal-excellent-symbolic"
@@ -82,22 +122,81 @@ pub fn wifi_strength_icon(level: i32) -> &'static str {
     }
 }
 
+/// Map cellular signal quality (0–100%) to a symbolic icon name.
+///
+/// Thresholds (75/55/35/15) are higher than Wi-Fi (70/60/40/20) because
+/// ModemManager reports a coarser, already-processed percentage where
+/// values below ~15% typically mean no usable signal, whereas Wi-Fi
+/// RSSI-derived percentages spread more evenly across the range.
+pub fn cellular_signal_icon_name(quality: u32) -> &'static str {
+    if quality >= 75 {
+        "network-cellular-signal-excellent-symbolic"
+    } else if quality >= 55 {
+        "network-cellular-signal-good-symbolic"
+    } else if quality >= 35 {
+        "network-cellular-signal-ok-symbolic"
+    } else if quality >= 15 {
+        "network-cellular-signal-weak-symbolic"
+    } else {
+        "network-cellular-signal-none-symbolic"
+    }
+}
+
+/// Returns the appropriate cellular icon name based on modem state.
+pub fn mobile_state_icon_name(enabled: bool, active: bool, signal_quality: u32) -> &'static str {
+    if !enabled {
+        "network-cellular-offline-symbolic"
+    } else if active {
+        cellular_signal_icon_name(signal_quality)
+    } else {
+        "network-cellular-signal-none-symbolic"
+    }
+}
+
+/// Check if Material unified icon mode is active for this snapshot.
+///
+/// Returns `true` when Material icons are enabled and the device has a modem,
+/// meaning the network icon should use unified cellular/wifi glyphs.
+pub fn is_material_unified(snapshot: &NetworkSnapshot) -> bool {
+    snapshot.mobile_supported() && IconsService::global().uses_material()
+}
+
+/// Resolve the network icon for Material unified mode.
+///
+/// When Material icons are active and a modem is present, this picks the
+/// appropriate unified icon: combined (cell_wifi), cellular-only, or
+/// wifi/wired. Falls back to the standard [`network_icon_name`] when
+/// Material unified mode is inactive.
+pub fn resolve_material_network_icon(snapshot: &NetworkSnapshot) -> &'static str {
+    let material_unified = is_material_unified(snapshot);
+    let wifi_or_wired = snapshot.connected() || snapshot.wired_connected();
+
+    if material_unified && snapshot.mobile_active() && wifi_or_wired {
+        "network-wifi-cellular-symbolic"
+    } else if material_unified && snapshot.mobile_active() {
+        let quality = snapshot.mobile_signal_quality().unwrap_or(0);
+        cellular_signal_icon_name(quality)
+    } else {
+        let ctx = NetworkIconContext::from_snapshot(snapshot);
+        let icon_name = network_icon_name(&ctx);
+        // In Material mode, use the regular wifi shape for disabled state —
+        // the WIFI_DISABLED_ICON CSS class dims the color instead.
+        if material_unified && icon_name == "network-wireless-offline-symbolic" {
+            "network-wireless-signal-excellent-symbolic"
+        } else {
+            icon_name
+        }
+    }
+}
+
 /// Result of building the network card subtitle widget.
 pub struct NetworkSubtitleResult {
-    /// The container widget holding the label.
     pub container: GtkBox,
-    /// Label for text (SSID or status).
     pub label: Label,
 }
 
 /// Build the subtitle widget for the network card.
-///
-/// Creates a label that shows connection status text like:
-/// - "Ethernet • SSID" (both connected)
-/// - "Ethernet" (wired only)
-/// - "SSID" (Wi-Fi only)
-/// - "Disconnected" / "Off"
-pub fn build_network_subtitle(snapshot: &WifiSnapshot) -> NetworkSubtitleResult {
+pub fn build_network_subtitle(snapshot: &NetworkSnapshot) -> NetworkSubtitleResult {
     use gtk4::pango::EllipsizeMode;
 
     let container = GtkBox::new(Orientation::Horizontal, 4);
@@ -110,67 +209,95 @@ pub fn build_network_subtitle(snapshot: &WifiSnapshot) -> NetworkSubtitleResult 
     label.add_css_class(color::MUTED);
     container.append(&label);
 
-    // Set initial state
     update_network_subtitle(&label, snapshot);
 
     NetworkSubtitleResult { container, label }
 }
 
 /// Generate the subtitle text for the network card based on connection state.
-///
-/// Returns a string describing the current network status:
-/// - Service unavailable: "Unavailable"
-/// - Wired + connecting: "Ethernet · Connecting to {ssid}"
-/// - Wired + Wi-Fi connected: "Ethernet · {ssid}"
-/// - Wired only: "Ethernet"
-/// - Wi-Fi connecting: "Connecting to {ssid}"
-/// - Wi-Fi connected: "{ssid}"
-/// - Disconnected (has Wi-Fi): "Disconnected"
-/// - Wi-Fi disabled: "Off"
-/// - Ethernet-only system, disconnected: "Disconnected"
-pub fn get_network_subtitle_text(snapshot: &WifiSnapshot) -> String {
-    // Service unavailable (e.g., NetworkManager not running)
+pub fn get_network_subtitle_text(snapshot: &NetworkSnapshot) -> String {
     if !snapshot.available() {
         return "Unavailable".to_string();
     }
 
     let wifi_enabled = snapshot.wifi_enabled().unwrap_or(false);
-    let is_connecting = snapshot.connection_state() == WifiConnectionState::Connecting;
+    let is_connecting = snapshot.connection_state() == NetworkConnectionState::Connecting;
+    let mobile_active = snapshot.mobile_active();
+    let mobile_connecting = snapshot.mobile_connecting();
+    let carrier = snapshot.mobile_display_name();
 
-    match (
-        snapshot.wired_connected(),
-        is_connecting,
-        &snapshot.active_ssid(),
-    ) {
-        // Wired connected cases
-        (true, true, Some(ssid)) => format!("Ethernet \u{2022} Connecting to {}", ssid),
-        (true, true, None) => "Ethernet \u{2022} Connecting...".to_string(),
-        (true, false, Some(ssid)) => format!("Ethernet \u{2022} {}", ssid),
-        (true, false, None) => "Ethernet".to_string(),
+    // Wired connected — may also have wifi and/or cellular
+    if snapshot.wired_connected() {
+        let mut parts = vec!["Ethernet".to_string()];
+        if is_connecting {
+            if let Some(ssid) = snapshot.active_ssid() {
+                parts.push(format!("Connecting to {}", ssid));
+            }
+        } else if let Some(ssid) = snapshot.active_ssid() {
+            parts.push(ssid.to_string());
+        }
+        if mobile_active {
+            parts.push(carrier.to_string());
+        }
+        return parts.join(" \u{2022} ");
+    }
 
-        // Wi-Fi only cases
-        (false, true, Some(ssid)) => format!("Connecting to {}", ssid),
-        (false, true, None) => "Connecting...".to_string(),
-        (false, false, Some(ssid)) => ssid.to_string().clone(),
-        (false, false, None) if !snapshot.has_wifi_device() => "Disconnected".to_string(),
-        (false, false, None) if wifi_enabled => "Disconnected".to_string(),
-        (false, false, None) => "Off".to_string(),
+    // Mobile active (has activated connection) — may also have wifi
+    if mobile_active {
+        if is_connecting {
+            if let Some(ssid) = snapshot.active_ssid() {
+                return format!("{} \u{2022} Connecting to {}", carrier, ssid);
+            }
+        } else if let Some(ssid) = snapshot.active_ssid() {
+            return format!("{} \u{2022} {}", ssid, carrier);
+        }
+        return carrier.to_string();
+    }
+
+    // Wi-Fi only (no wired, no cellular active)
+    if is_connecting {
+        return if let Some(ssid) = snapshot.active_ssid() {
+            format!("Connecting to {}", ssid)
+        } else {
+            "Connecting...".to_string()
+        };
+    }
+
+    if let Some(ssid) = snapshot.active_ssid() {
+        return ssid.to_string();
+    }
+
+    // Mobile connecting (not yet active)
+    if mobile_connecting {
+        return format!("{} \u{2022} Connecting...", carrier);
+    }
+
+    // Fallback disconnected/off states
+    if !snapshot.has_wifi_device() || wifi_enabled {
+        "Disconnected".to_string()
+    } else {
+        "Off".to_string()
     }
 }
 
-/// Determine if the network subtitle should be styled as "active" (connected).
-///
-/// Returns true when any network is connected and not in a connecting state.
-pub fn is_network_subtitle_active(snapshot: &WifiSnapshot) -> bool {
+/// Whether the network subtitle should be styled as "active" (connected, not connecting).
+pub fn is_network_subtitle_active(snapshot: &NetworkSnapshot) -> bool {
     let state = snapshot.connection_state();
-    let is_connecting = state == WifiConnectionState::Connecting;
-    let any_connected = snapshot.wired_connected() || state == WifiConnectionState::Connected;
+    let is_connecting = state == NetworkConnectionState::Connecting;
+    let any_connected = snapshot.wired_connected()
+        || snapshot.mobile_active()
+        || state == NetworkConnectionState::Connected;
+
+    // If only mobile is connecting (no other connection active), not active.
+    if !any_connected && snapshot.mobile_connecting() {
+        return false;
+    }
 
     any_connected && !is_connecting
 }
 
 /// Update the network subtitle label based on connection state.
-pub fn update_network_subtitle(label: &Label, snapshot: &WifiSnapshot) {
+pub fn update_network_subtitle(label: &Label, snapshot: &NetworkSnapshot) {
     label.set_label(&get_network_subtitle_text(snapshot));
 
     if is_network_subtitle_active(snapshot) {
@@ -182,53 +309,80 @@ pub fn update_network_subtitle(label: &Label, snapshot: &WifiSnapshot) {
     }
 }
 
-/// State for the Wi-Fi card in the Quick Settings panel.
-///
-/// Uses `ExpandableCardBase` for common expandable card fields and adds
-/// Wi-Fi specific state (scan button, password dialog, animation).
-pub struct WifiCardState {
-    /// Common expandable card state (toggle, icon, subtitle, list_box, revealer, arrow).
-    pub base: ExpandableCardBase,
-    /// Card title label (for updating between "Wi-Fi" and "Network").
-    pub title_label: RefCell<Option<Label>>,
-    /// Text label in the subtitle (SSID or status).
-    pub subtitle_label: RefCell<Option<Label>>,
-    /// The Wi-Fi scan button (self-contained with animation).
-    pub scan_button: RefCell<Option<Rc<ScanButton>>>,
-    /// Inline password box.
-    pub password_box: RefCell<Option<GtkBox>>,
-    /// Label in the password box.
-    pub password_label: RefCell<Option<Label>>,
-    /// Error/status label in the password box (shows errors or "Connecting...").
-    pub password_error_label: RefCell<Option<Label>>,
-    /// Password entry field.
-    pub password_entry: RefCell<Option<Entry>>,
-    /// Cancel button in password box.
-    pub password_cancel_button: RefCell<Option<Button>>,
-    /// Connect button in password box.
-    pub password_connect_button: RefCell<Option<Button>>,
-    /// Target SSID for the inline password prompt.
-    pub password_target_ssid: RefCell<Option<String>>,
-    /// Connect animation GLib source ID.
-    pub connect_anim_source: RefCell<Option<glib::SourceId>>,
-    /// Connect animation step counter.
-    pub connect_anim_step: Cell<u8>,
-    /// Flag to prevent toggle signal handler from firing during programmatic updates.
-    /// This prevents feedback loops when the service notifies us of state changes.
-    pub updating_toggle: Cell<bool>,
-    /// The Wi-Fi switch row container (label + switch + scan button).
-    pub wifi_switch_row: RefCell<Option<GtkBox>>,
-    /// The Wi-Fi label in the expanded details section.
-    /// Only visible when ethernet device is present.
-    pub wifi_label: RefCell<Option<Label>>,
-    /// The Wi-Fi switch in the expanded details section.
-    /// Only visible when ethernet device is present.
-    pub wifi_switch: RefCell<Option<Switch>>,
-    /// Ethernet row container (shown above Wi-Fi controls when connected).
-    pub ethernet_row: RefCell<Option<GtkBox>>,
+/// Cached widget references for the Ethernet row in the expanded details.
+pub struct EthernetRowWidgets {
+    pub container: GtkBox,
+    pub title_label: Label,
+    pub subtitle_box: GtkBox,
+    /// Cached key for the subtitle content to skip redundant rebuilds.
+    pub subtitle_key: RefCell<String>,
 }
 
-impl WifiCardState {
+/// Cached widget references for the mobile/cellular row.
+/// Grouped in a single `RefCell<Option<…>>` (in [`MobileRowState`]) to avoid per-field borrow overhead.
+pub struct MobileRowWidgets {
+    pub switch: Switch,
+    pub action_button: Button,
+    pub status_label: Label,
+    pub accent_label: Label,
+    pub details_label: Label,
+    pub icon_handle: IconHandle,
+    pub connection_row: GtkBox,
+    pub title_label: Label,
+}
+
+/// State for the mobile/cellular row in the expanded details.
+pub struct MobileRowState {
+    pub row: RefCell<Option<GtkBox>>,
+    pub widgets: RefCell<Option<MobileRowWidgets>>,
+}
+
+impl MobileRowState {
+    fn new() -> Self {
+        Self {
+            row: RefCell::new(None),
+            widgets: RefCell::new(None),
+        }
+    }
+}
+
+/// State for the network card in the Quick Settings panel.
+pub struct NetworkCardState {
+    pub base: ExpandableCardBase,
+    pub title_label: RefCell<Option<Label>>,
+    pub subtitle_label: RefCell<Option<Label>>,
+    pub scan_button: RefCell<Option<Rc<ScanButton>>>,
+    pub password_box: RefCell<Option<GtkBox>>,
+    pub password_label: RefCell<Option<Label>>,
+    pub password_error_label: RefCell<Option<Label>>,
+    pub password_entry: RefCell<Option<Entry>>,
+    pub password_cancel_button: RefCell<Option<Button>>,
+    pub password_connect_button: RefCell<Option<Button>>,
+    pub password_target_ssid: RefCell<Option<String>>,
+    pub connect_anim_source: RefCell<Option<glib::SourceId>>,
+    pub connect_anim_step: Cell<u8>,
+    /// Prevents `state_set` handlers from dispatching during programmatic updates.
+    pub updating_wifi_toggle: Cell<bool>,
+    /// Same purpose as `updating_wifi_toggle` but scoped to the mobile switch.
+    pub updating_mobile_switch: Cell<bool>,
+    pub wifi_switch_row: RefCell<Option<GtkBox>>,
+    pub wifi_label: RefCell<Option<Label>>,
+    pub wifi_switch: RefCell<Option<Switch>>,
+    pub ethernet: RefCell<Option<EthernetRowWidgets>>,
+    pub mobile: MobileRowState,
+    /// Prevents timer accumulation under rapid state transitions.
+    pub wifi_failed_clear_source: RefCell<Option<glib::SourceId>>,
+    /// Separate from Wi-Fi so simultaneous failures are cleared independently.
+    pub mobile_failed_clear_source: RefCell<Option<glib::SourceId>>,
+    /// Keeps the connecting WiFi row's `IconHandle` alive so the spinner
+    /// timer isn't killed when the handle goes out of scope in `populate_wifi_list`.
+    /// Without this, the `Rc<IconHandleInner>` drops at end of the loop body,
+    /// which drops the `CairoSpinner`, which cancels the animation timer — leaving
+    /// the spinner DrawingArea visible but frozen.
+    pub wifi_connecting_icon: RefCell<Option<IconHandle>>,
+}
+
+impl NetworkCardState {
     pub fn new() -> Self {
         Self {
             base: ExpandableCardBase::new(),
@@ -244,39 +398,51 @@ impl WifiCardState {
             password_target_ssid: RefCell::new(None),
             connect_anim_source: RefCell::new(None),
             connect_anim_step: Cell::new(0),
-            updating_toggle: Cell::new(false),
+            updating_wifi_toggle: Cell::new(false),
+            updating_mobile_switch: Cell::new(false),
             wifi_switch_row: RefCell::new(None),
             wifi_label: RefCell::new(None),
             wifi_switch: RefCell::new(None),
-            ethernet_row: RefCell::new(None),
+            ethernet: RefCell::new(None),
+            mobile: MobileRowState::new(),
+            wifi_failed_clear_source: RefCell::new(None),
+            mobile_failed_clear_source: RefCell::new(None),
+            wifi_connecting_icon: RefCell::new(None),
         }
     }
 }
 
-impl Default for WifiCardState {
+impl Default for NetworkCardState {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl ExpandableCard for WifiCardState {
+impl ExpandableCard for NetworkCardState {
     fn base(&self) -> &ExpandableCardBase {
         &self.base
     }
 }
 
-impl Drop for WifiCardState {
+impl Drop for NetworkCardState {
     fn drop(&mut self) {
         // Cancel any active connect animation timer
         if let Some(source_id) = self.connect_anim_source.borrow_mut().take() {
             source_id.remove();
-            debug!("WifiCardState: connect animation timer cancelled on drop");
+            debug!("NetworkCardState: connect animation timer cancelled on drop");
+        }
+        // Cancel any pending failed-state clear timers
+        if let Some(source_id) = self.wifi_failed_clear_source.borrow_mut().take() {
+            source_id.remove();
+        }
+        if let Some(source_id) = self.mobile_failed_clear_source.borrow_mut().take() {
+            source_id.remove();
         }
     }
 }
 
 /// Result of building Wi-Fi details section.
-pub struct WifiDetailsResult {
+pub struct NetworkDetailsResult {
     pub container: GtkBox,
     pub list_box: ListBox,
     pub scan_button: Rc<ScanButton>,
@@ -286,40 +452,46 @@ pub struct WifiDetailsResult {
 /// Build the Wi-Fi details section with scan button, network list, and
 /// inline password prompt.
 pub fn build_wifi_details(
-    state: &Rc<WifiCardState>,
+    state: &Rc<NetworkCardState>,
     window: WeakRef<ApplicationWindow>,
-) -> WifiDetailsResult {
+) -> NetworkDetailsResult {
     let container = GtkBox::new(Orientation::Vertical, 0);
 
-    // Get current network state for initial values
-    let snapshot = WifiService::global().snapshot();
+    let snapshot = NetworkService::global().snapshot();
 
-    // Ethernet row (above Wi-Fi controls, shown only when connected)
-    let ethernet_row = build_ethernet_row(&snapshot);
-    container.append(&ethernet_row);
+    // Ethernet row (shown only when connected)
+    let ethernet_widgets = build_ethernet_row(&snapshot);
+    container.append(&ethernet_widgets.container);
 
     // Store ethernet row reference for dynamic updates
-    *state.ethernet_row.borrow_mut() = Some(ethernet_row);
+    *state.ethernet.borrow_mut() = Some(ethernet_widgets);
+
+    // Mobile row (above Wi-Fi controls, shown when mobile is supported)
+    let mobile_row = build_mobile_row(state, &snapshot);
+    container.append(&mobile_row);
+
+    // Store mobile row reference for dynamic updates
+    *state.mobile.row.borrow_mut() = Some(mobile_row);
 
     // Wi-Fi switch row: "Wi-Fi" label + switch + scan button
-    // The label+switch are only visible when ethernet device present, but scan button always visible
+    // The label+switch are only visible when a non-WiFi device is present, but scan button always visible
     let wifi_switch_row = GtkBox::new(Orientation::Horizontal, 8);
-    wifi_switch_row.add_css_class(qs::WIFI_SWITCH_ROW);
+    wifi_switch_row.add_css_class(qs::NETWORK_SECTION_ROW);
     // Disable baseline alignment to prevent GTK baseline issues with Switch widget
     wifi_switch_row.set_baseline_position(gtk4::BaselinePosition::Center);
 
-    // Wi-Fi label + switch (only visible when ethernet device present)
+    // Wi-Fi label + switch (only visible when a non-WiFi device is present)
     let wifi_label = Label::new(Some("Wi-Fi"));
     wifi_label.add_css_class(color::PRIMARY);
-    wifi_label.add_css_class(qs::WIFI_SWITCH_LABEL);
+    wifi_label.add_css_class(qs::NETWORK_SECTION_LABEL);
     wifi_label.set_valign(gtk4::Align::Center);
-    wifi_label.set_visible(snapshot.has_ethernet_device());
+    wifi_label.set_visible(snapshot.has_non_wifi_device());
     wifi_switch_row.append(&wifi_label);
 
     let wifi_switch = Switch::new();
     wifi_switch.set_valign(gtk4::Align::Center);
     wifi_switch.set_active(snapshot.wifi_enabled().unwrap_or(false));
-    wifi_switch.set_visible(snapshot.has_ethernet_device());
+    wifi_switch.set_visible(snapshot.has_non_wifi_device());
     wifi_switch_row.append(&wifi_switch);
 
     // Spacer to push scan button to the right
@@ -329,7 +501,7 @@ pub fn build_wifi_details(
 
     // Scan button (always visible)
     let scan_button = ScanButton::new(|| {
-        WifiService::global().scan();
+        NetworkService::global().scan();
     });
     wifi_switch_row.append(scan_button.widget());
 
@@ -439,7 +611,7 @@ pub fn build_wifi_details(
     // Populate with current network state
     populate_wifi_list(state, &list_box, &snapshot);
 
-    WifiDetailsResult {
+    NetworkDetailsResult {
         container,
         list_box,
         scan_button,
@@ -447,89 +619,21 @@ pub fn build_wifi_details(
     }
 }
 
-/// Add "No network connections" empty state with icon.
-fn add_no_connections_state(list_box: &ListBox) {
-    let icons = IconsService::global();
-
-    let container = GtkBox::new(Orientation::Vertical, 8);
-    container.add_css_class(qs::NO_CONNECTIONS_STATE);
-    container.set_valign(gtk4::Align::Center);
-    container.set_halign(gtk4::Align::Center);
-    container.set_hexpand(true);
-
-    // Icon - use IconsService for proper Material icon mapping
-    // GTK: network-offline-symbolic, Material: settings_ethernet (grayed out)
-    let icon_handle = icons.create_icon(
-        "network-offline-symbolic",
-        &[qs::NO_CONNECTIONS_ICON, color::MUTED],
-    );
-    let icon_widget = icon_handle.widget();
-    icon_widget.set_halign(gtk4::Align::Center);
-    container.append(&icon_widget);
-
-    // Message - centered like notifications empty state
-    let label = Label::new(Some("No network connections"));
-    label.add_css_class(qs::NO_CONNECTIONS_LABEL);
-    label.add_css_class(color::MUTED);
-    label.set_halign(gtk4::Align::Center);
-    label.set_justify(gtk4::Justification::Center);
-    container.append(&label);
-
-    let row = ListBoxRow::new();
-    row.set_child(Some(&container));
-    row.set_activatable(false);
-    list_box.append(&row);
-}
-
-fn add_wifi_disabled_placeholder(list_box: &ListBox) {
-    let icons = IconsService::global();
-
-    let container = GtkBox::new(Orientation::Vertical, 6);
-    container.add_css_class(qs::WIFI_DISABLED_STATE);
-    container.set_valign(gtk4::Align::Center);
-    container.set_halign(gtk4::Align::Center);
-    container.set_hexpand(true);
-
-    // Icon - disabled Wi-Fi icon, grayed out
-    let icon_handle = icons.create_icon(
-        "network-wireless-offline-symbolic",
-        &[qs::WIFI_DISABLED_STATE_ICON, color::MUTED],
-    );
-    let icon_widget = icon_handle.widget();
-    icon_widget.set_halign(gtk4::Align::Center);
-    container.append(&icon_widget);
-
-    // Message
-    let label = Label::new(Some("Wi-Fi is disabled"));
-    label.add_css_class(qs::WIFI_DISABLED_LABEL);
-    label.add_css_class(color::MUTED);
-    label.set_halign(gtk4::Align::Center);
-    label.set_justify(gtk4::Justification::Center);
-    container.append(&label);
-
-    let row = ListBoxRow::new();
-    row.set_child(Some(&container));
-    row.set_activatable(false);
-    list_box.append(&row);
-}
-
-/// Build a standalone Ethernet section widget (not in a ListBox).
-/// Includes a header label and connection details row.
-/// Returns a GtkBox that can be shown/hidden based on connection state.
-fn build_ethernet_row(snapshot: &WifiSnapshot) -> GtkBox {
+/// Build a standalone Ethernet section widget.
+fn build_ethernet_row(snapshot: &NetworkSnapshot) -> EthernetRowWidgets {
     let icons = IconsService::global();
 
     // Main container for the entire Ethernet section
     let container = GtkBox::new(Orientation::Vertical, 0);
-    container.add_css_class(qs::ETHERNET_ROW_CONTAINER);
+    container.add_css_class(qs::NETWORK_SECTION);
 
     // Header row with "Ethernet" label (matches Wi-Fi header style)
     let header_row = GtkBox::new(Orientation::Horizontal, 8);
-    header_row.add_css_class(qs::WIFI_SWITCH_ROW);
+    header_row.add_css_class(qs::NETWORK_SECTION_ROW);
 
     let header_label = Label::new(Some("Ethernet"));
     header_label.add_css_class(color::PRIMARY);
-    header_label.add_css_class(qs::WIFI_SWITCH_LABEL);
+    header_label.add_css_class(qs::NETWORK_SECTION_LABEL);
     header_label.set_valign(gtk4::Align::Center);
     header_row.append(&header_label);
 
@@ -547,7 +651,43 @@ fn build_ethernet_row(snapshot: &WifiSnapshot) -> GtkBox {
         .or(snapshot.wired_iface())
         .unwrap_or("Wired Connection");
 
-    // Build subtitle extra parts: interface name, speed
+    // Build subtitle with connection details
+    let subtitle_box = build_ethernet_subtitle(snapshot);
+
+    // Connection details row with connection name as title
+    let row_result = ListRow::builder()
+        .title(title)
+        .subtitle_widget(subtitle_box.clone().upcast())
+        .leading_widget(icon_handle.widget())
+        .css_class(qs::NETWORK_ROW)
+        .build();
+
+    // Connection row container with background styling
+    let connection_row = GtkBox::new(Orientation::Vertical, 0);
+    connection_row.add_css_class(row::QS);
+    connection_row.add_css_class(qs::NETWORK_CONNECTION_ROW);
+
+    // Extract the row's child and put it in our container
+    if let Some(child) = row_result.row.child() {
+        row_result.row.set_child(None::<&gtk4::Widget>);
+        connection_row.append(&child);
+    }
+
+    container.append(&connection_row);
+
+    // Initially visible only if wired is connected
+    container.set_visible(snapshot.wired_connected());
+
+    EthernetRowWidgets {
+        container,
+        title_label: row_result.title,
+        subtitle_key: RefCell::new(ethernet_subtitle_key(snapshot)),
+        subtitle_box,
+    }
+}
+
+/// Build the Ethernet subtitle widget (accent "Connected" + muted details).
+fn build_ethernet_subtitle(snapshot: &NetworkSnapshot) -> GtkBox {
     let mut extra_parts: Vec<String> = Vec::new();
     if let Some(ref iface) = snapshot.wired_iface() {
         extra_parts.push(iface.to_string());
@@ -565,50 +705,323 @@ fn build_ethernet_row(snapshot: &WifiSnapshot) -> GtkBox {
         }
     }
 
-    // Build connected subtitle widget with accent "Connected" and muted extra parts
     let extra_refs: Vec<&str> = extra_parts.iter().map(|s| s.as_str()).collect();
-    let subtitle_widget = build_accent_subtitle("Connected", &extra_refs);
+    build_accent_subtitle("Connected", &extra_refs)
+}
 
-    // Connection details row with connection name as title
+/// Build a comparable key from the ethernet subtitle inputs (interface name + speed).
+/// Used to skip redundant subtitle rebuilds when the data hasn't changed.
+fn ethernet_subtitle_key(snapshot: &NetworkSnapshot) -> String {
+    let iface = snapshot.wired_iface().unwrap_or("");
+    let speed = snapshot.wired_speed().unwrap_or(0);
+    format!("{iface}:{speed}")
+}
+
+/// Update the mobile subtitle labels for the current state.
+fn set_mobile_subtitle(widgets: &MobileRowWidgets, snapshot: &NetworkSnapshot) {
+    let mobile_enabled = snapshot.mobile_enabled().unwrap_or(false);
+
+    let status_label = &widgets.status_label;
+    let accent_label = &widgets.accent_label;
+    let details_label = &widgets.details_label;
+
+    if !mobile_enabled {
+        status_label.set_text("Off");
+        status_label.remove_css_class(color::ERROR);
+        status_label.add_css_class(color::MUTED);
+        status_label.set_visible(true);
+        accent_label.set_visible(false);
+        details_label.set_visible(false);
+    } else if snapshot.mobile_connecting() {
+        status_label.set_text("Connecting...");
+        status_label.set_visible(true);
+        status_label.remove_css_class(color::ERROR);
+        status_label.add_css_class(color::MUTED);
+        accent_label.set_visible(false);
+        details_label.set_visible(false);
+    } else if snapshot.mobile_active() {
+        status_label.set_visible(false);
+        accent_label.set_text("Connected");
+        accent_label.set_visible(true);
+
+        let signal = snapshot.mobile_signal_quality().unwrap_or(0);
+        let mut extra_parts: Vec<String> = Vec::new();
+        if let Some(tech) = snapshot.mobile_access_technology()
+            && !tech.is_empty()
+        {
+            extra_parts.push(tech.to_string());
+        }
+        if signal > 0 {
+            extra_parts.push(format!("{}%", signal));
+        }
+        if extra_parts.is_empty() {
+            details_label.set_visible(false);
+        } else {
+            let rest = format!(" \u{2022} {}", extra_parts.join(" \u{2022} "));
+            details_label.set_text(&rest);
+            details_label.set_visible(true);
+        }
+    } else if snapshot.mobile_failed() {
+        status_label.set_text(CONNECTION_FAILURE_REASON);
+        status_label.remove_css_class(color::MUTED);
+        status_label.add_css_class(color::ERROR);
+        status_label.set_visible(true);
+        accent_label.set_visible(false);
+        details_label.set_visible(false);
+    } else {
+        status_label.set_text("Disconnected");
+        status_label.remove_css_class(color::ERROR);
+        status_label.add_css_class(color::MUTED);
+        status_label.set_visible(true);
+        accent_label.set_visible(false);
+        details_label.set_visible(false);
+    }
+}
+
+/// Build a standalone Mobile section widget (not in a ListBox).
+fn build_mobile_row(state: &Rc<NetworkCardState>, snapshot: &NetworkSnapshot) -> GtkBox {
+    let icons = IconsService::global();
+
+    let container = GtkBox::new(Orientation::Vertical, 0);
+    container.add_css_class(qs::NETWORK_SECTION);
+
+    let header_row = GtkBox::new(Orientation::Horizontal, 8);
+    header_row.add_css_class(qs::NETWORK_SECTION_ROW);
+
+    let header_label = Label::new(Some("Mobile"));
+    header_label.add_css_class(color::PRIMARY);
+    header_label.add_css_class(qs::NETWORK_SECTION_LABEL);
+    header_label.set_valign(gtk4::Align::Center);
+    header_row.append(&header_label);
+
+    let mobile_switch = Switch::new();
+    mobile_switch.set_valign(gtk4::Align::Center);
+    let mobile_enabled = snapshot.mobile_enabled().unwrap_or(false);
+    mobile_switch.set_active(mobile_enabled);
+    mobile_switch.set_sensitive(snapshot.available() && snapshot.has_modem_device());
+    {
+        let state_weak = Rc::downgrade(state);
+        // `state_set` fires for both user and programmatic changes. When
+        // `updating_mobile_switch` is set, the switch is being synced to
+        // match D-Bus state — return `Proceed` to accept the visual change
+        // but skip the `set_mobile_enabled` call to avoid a feedback loop.
+        // We return `Proceed` (not `Stop`) in both branches because GTK4
+        // `state_set` expects `Proceed` to let the switch actually transition;
+        // `Stop` would reject the state change entirely.
+        mobile_switch.connect_state_set(move |_, is_active| {
+            if let Some(state) = state_weak.upgrade()
+                && state.updating_mobile_switch.get()
+            {
+                return glib::Propagation::Proceed;
+            }
+            NetworkService::global().set_mobile_enabled(is_active);
+            glib::Propagation::Proceed
+        });
+    }
+    header_row.append(&mobile_switch);
+
+    let spacer = GtkBox::new(Orientation::Horizontal, 0);
+    spacer.set_hexpand(true);
+    header_row.append(&spacer);
+
+    container.append(&header_row);
+
+    let signal = snapshot.mobile_signal_quality().unwrap_or(0);
+    let mobile_active = snapshot.mobile_active();
+    let icon_handle = icons.create_icon(
+        mobile_state_icon_name(mobile_enabled, mobile_active, signal),
+        &[
+            icon::TEXT,
+            row::QS_ICON,
+            if !mobile_enabled {
+                color::MUTED
+            } else if mobile_active {
+                color::ACCENT
+            } else {
+                color::PRIMARY
+            },
+        ],
+    );
+
+    let title = snapshot.mobile_display_name();
+
+    let subtitle_box = GtkBox::new(Orientation::Horizontal, 0);
+
+    let status_label = Label::new(None);
+    status_label.add_css_class(color::MUTED);
+    status_label.add_css_class(row::QS_SUBTITLE);
+    subtitle_box.append(&status_label);
+
+    let accent_label = Label::new(None);
+    accent_label.add_css_class(color::ACCENT);
+    accent_label.add_css_class(row::QS_SUBTITLE);
+    subtitle_box.append(&accent_label);
+
+    let details_label = Label::new(None);
+    details_label.add_css_class(color::MUTED);
+    details_label.add_css_class(row::QS_SUBTITLE);
+    details_label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+    subtitle_box.append(&details_label);
+
+    let action_button = create_row_action_label(if mobile_active {
+        "Disconnect"
+    } else {
+        "Connect"
+    });
+    action_button.set_sensitive(!snapshot.mobile_connecting() && mobile_enabled);
+    action_button.connect_clicked(move |_| {
+        let service = NetworkService::global();
+        let snap = service.snapshot();
+        if snap.mobile_active() {
+            service.disconnect_mobile();
+        } else {
+            service.connect_mobile();
+        }
+    });
+
     let row_result = ListRow::builder()
         .title(title)
-        .subtitle_widget(subtitle_widget.upcast())
+        .subtitle_widget(subtitle_box.clone().upcast())
         .leading_widget(icon_handle.widget())
-        .css_class(qs::WIFI_ROW)
+        .trailing_widget(action_button.clone().upcast())
+        .css_class(qs::NETWORK_ROW)
         .build();
 
-    // Connection row container with background styling
     let connection_row = GtkBox::new(Orientation::Vertical, 0);
     connection_row.add_css_class(row::QS);
-    connection_row.add_css_class(qs::ETHERNET_CONNECTION_ROW);
+    connection_row.add_css_class(qs::NETWORK_CONNECTION_ROW);
+    connection_row.set_visible(mobile_enabled);
 
-    // Extract the row's child and put it in our container
     if let Some(child) = row_result.row.child() {
         row_result.row.set_child(None::<&gtk4::Widget>);
         connection_row.append(&child);
     }
 
     container.append(&connection_row);
+    container.set_visible(snapshot.mobile_supported());
 
-    // Initially visible only if wired is connected
-    container.set_visible(snapshot.wired_connected());
+    let widgets = MobileRowWidgets {
+        switch: mobile_switch,
+        action_button,
+        status_label,
+        accent_label,
+        details_label,
+        icon_handle,
+        connection_row,
+        title_label: row_result.title,
+    };
+    set_mobile_subtitle(&widgets, snapshot);
+    *state.mobile.widgets.borrow_mut() = Some(widgets);
 
     container
 }
 
-/// Update the Ethernet row visibility and content based on connection state.
-pub fn update_ethernet_row(state: &WifiCardState, snapshot: &WifiSnapshot) {
-    if let Some(ethernet_row) = state.ethernet_row.borrow().as_ref() {
-        ethernet_row.set_visible(snapshot.wired_connected());
+/// Update the Ethernet row visibility and content.
+pub fn update_ethernet_row(state: &NetworkCardState, snapshot: &NetworkSnapshot) {
+    let ethernet_ref = state.ethernet.borrow();
+    let Some(w) = ethernet_ref.as_ref() else {
+        return;
+    };
 
-        // If connected and row is visible, we might want to update the subtitle
-        // For now, the subtitle is static after creation. If we need dynamic updates,
-        // we'd need to store subtitle label reference and update it here.
+    w.container.set_visible(snapshot.wired_connected());
+
+    if !snapshot.wired_connected() {
+        return;
+    }
+
+    // Update title
+    let new_title = snapshot
+        .wired_name()
+        .or(snapshot.wired_iface())
+        .unwrap_or("Wired Connection");
+    if w.title_label.text().as_str() != new_title {
+        w.title_label.set_text(new_title);
+    }
+
+    // Rebuild subtitle only when the underlying data changes.
+    // The subtitle is "Connected • <iface> • <speed>" — derive a key from the inputs
+    // and compare against the cached value to avoid unnecessary re-renders.
+    let new_key = ethernet_subtitle_key(snapshot);
+    if *w.subtitle_key.borrow() != new_key {
+        *w.subtitle_key.borrow_mut() = new_key;
+        let new_subtitle = build_ethernet_subtitle(snapshot);
+        while let Some(child) = w.subtitle_box.first_child() {
+            w.subtitle_box.remove(&child);
+        }
+        while let Some(child) = new_subtitle.first_child() {
+            new_subtitle.remove(&child);
+            w.subtitle_box.append(&child);
+        }
     }
 }
 
+/// Update the Mobile row visibility and content based on connection state.
+pub fn update_mobile_row(state: &NetworkCardState, snapshot: &NetworkSnapshot) {
+    let mobile = &state.mobile;
+    let enabled = snapshot.mobile_enabled().unwrap_or(false);
+
+    if let Some(mobile_row) = mobile.row.borrow().as_ref() {
+        mobile_row.set_visible(snapshot.mobile_supported());
+    }
+
+    let mut widgets_ref = mobile.widgets.borrow_mut();
+    let Some(w) = widgets_ref.as_mut() else {
+        return;
+    };
+
+    // Update the row title (operator name may change, e.g., roaming).
+    let new_title = snapshot.mobile_display_name();
+    if w.title_label.text().as_str() != new_title {
+        w.title_label.set_text(new_title);
+    }
+
+    // Hide the connection details row when modem is disabled (only header+switch remain)
+    w.connection_row.set_visible(enabled);
+
+    if w.switch.is_active() != enabled {
+        w.switch.set_active(enabled);
+    }
+    w.switch
+        .set_sensitive(snapshot.available() && snapshot.has_modem_device());
+
+    w.action_button.set_label(if snapshot.mobile_active() {
+        "Disconnect"
+    } else {
+        "Connect"
+    });
+    w.action_button
+        .set_sensitive(!snapshot.mobile_connecting() && enabled);
+
+    set_mobile_subtitle(w, snapshot);
+
+    let signal = snapshot.mobile_signal_quality().unwrap_or(0);
+    let connecting = snapshot.mobile_connecting();
+    let active = snapshot.mobile_active();
+
+    // Update icon and spinner state
+    w.icon_handle
+        .set_icon(mobile_state_icon_name(enabled, active, signal));
+    w.icon_handle.set_spinning(connecting);
+
+    // Update CSS color class
+    let (add, remove1, remove2) = if !enabled {
+        (color::MUTED, color::ACCENT, color::PRIMARY)
+    } else if connecting || active {
+        (color::ACCENT, color::PRIMARY, color::MUTED)
+    } else {
+        (color::PRIMARY, color::ACCENT, color::MUTED)
+    };
+    w.icon_handle.remove_css_class(remove1);
+    w.icon_handle.remove_css_class(remove2);
+    w.icon_handle.add_css_class(add);
+}
+
 /// Populate the Wi-Fi list with network data from snapshot.
-pub fn populate_wifi_list(state: &WifiCardState, list_box: &ListBox, snapshot: &WifiSnapshot) {
+pub fn populate_wifi_list(
+    state: &NetworkCardState,
+    list_box: &ListBox,
+    snapshot: &NetworkSnapshot,
+) {
     // Unparent and unrealize the password box BEFORE clearing the list.
     // This is critical: when clear_list_box removes rows, the password box would become
     // orphaned but still realized. Then when we try to add it to a new row, GTK fails
@@ -622,6 +1035,9 @@ pub fn populate_wifi_list(state: &WifiCardState, list_box: &ListBox, snapshot: &
 
     clear_list_box(list_box);
 
+    // Drop any previously-stored connecting icon handle (its row was just removed).
+    *state.wifi_connecting_icon.borrow_mut() = None;
+
     // Check if Wi-Fi is disabled (or no Wi-Fi device exists)
     let wifi_enabled = snapshot.wifi_enabled().unwrap_or(false);
     let has_wifi = snapshot.has_wifi_device();
@@ -630,10 +1046,18 @@ pub fn populate_wifi_list(state: &WifiCardState, list_box: &ListBox, snapshot: &
         // Wi-Fi is off or unavailable
         if has_wifi && !wifi_enabled {
             // Device has Wi-Fi but it's disabled - show "Wi-Fi is disabled"
-            add_wifi_disabled_placeholder(list_box);
-        } else if !snapshot.wired_connected() {
+            add_disabled_placeholder(
+                list_box,
+                "network-wireless-offline-symbolic",
+                "Wi-Fi is disabled",
+            );
+        } else if !snapshot.wired_connected() && !snapshot.mobile_active() {
             // No Wi-Fi device and no Ethernet - show "No network connections"
-            add_no_connections_state(list_box);
+            add_disabled_placeholder(
+                list_box,
+                "network-offline-symbolic",
+                "No network connections",
+            );
         }
         // If no Wi-Fi device but Ethernet is connected, nothing to show in Wi-Fi list
         return;
@@ -686,14 +1110,22 @@ pub fn populate_wifi_list(state: &WifiCardState, list_box: &ListBox, snapshot: &
                 | "network-wireless-signal-good-symbolic"
         );
 
-        // Use accent color for active network icons
-        let icon_color = if net.active {
+        let icon_color = if net.active || is_connecting {
             color::ACCENT
         } else {
             color::PRIMARY
         };
 
-        let leading_icon: gtk4::Widget = if icons.uses_material() && needs_overlay {
+        let leading_icon: gtk4::Widget = if is_connecting {
+            // Connecting: show a spinner in place of the signal icon.
+            // Store the handle in state so the Rc<IconHandleInner> stays alive —
+            // if it drops, the CairoSpinner timer is cancelled and the spinner freezes.
+            let icon_handle =
+                icons.create_icon(strength_icon_name, &[icon::TEXT, row::QS_ICON, icon_color]);
+            icon_handle.set_spinning(true);
+            *state.wifi_connecting_icon.borrow_mut() = Some(icon_handle.clone());
+            icon_handle.widget()
+        } else if icons.uses_material() && needs_overlay {
             // Create base icon (full signal, dimmed)
             let base_handle = icons.create_icon(
                 "network-wireless-signal-excellent-symbolic",
@@ -736,7 +1168,7 @@ pub fn populate_wifi_list(state: &WifiCardState, list_box: &ListBox, snapshot: &
             .title(&net.ssid)
             .leading_widget(leading_icon)
             .trailing_widget(right_widget)
-            .css_class(qs::WIFI_ROW);
+            .css_class(qs::NETWORK_ROW);
 
         if net.active && !is_connecting {
             // Active network: accent "Connected" + muted extras
@@ -757,10 +1189,11 @@ pub fn populate_wifi_list(state: &WifiCardState, list_box: &ListBox, snapshot: &
 
         let row_result = row_builder.build();
 
-        // Disable row activation if this network is currently connecting
+        // Disable row activation if this network is currently connecting.
+        // Only set activatable to false — setting sensitive to false would
+        // dim the row and prevent the spinner DrawingArea from redrawing.
         if is_connecting {
             row_result.row.set_activatable(false);
-            row_result.row.set_sensitive(false);
         }
 
         // Connect row activation to the primary network action
@@ -771,7 +1204,7 @@ pub fn populate_wifi_list(state: &WifiCardState, list_box: &ListBox, snapshot: &
             let active = net.active;
             let path = net.path.clone();
             row_result.row.connect_activate(move |_| {
-                let service = WifiService::global();
+                let service = NetworkService::global();
                 if active {
                     service.disconnect();
                 } else if !security.is_secured() || known {
@@ -830,7 +1263,7 @@ fn create_network_action_widget(net: &WifiNetwork) -> gtk4::Widget {
         let is_secured = net.security.is_secured();
         let path = net.path.clone();
         action_label.connect_clicked(move |_| {
-            let service = WifiService::global();
+            let service = NetworkService::global();
             if is_secured {
                 // IWD: connect first, agent callback shows password dialog.
                 // NM: show password dialog first, then connect.
@@ -838,7 +1271,7 @@ fn create_network_action_widget(net: &WifiNetwork) -> gtk4::Widget {
                 // Backend-specific: IWD uses connect-then-prompt (agent callback
                 // shows password dialog), NM uses prompt-then-connect. These flows
                 // are fundamentally different and cannot be unified.
-                if matches!(snapshot, WifiSnapshot::Iwd(_)) {
+                if matches!(snapshot, NetworkSnapshot::Iwd(_)) {
                     service.connect_to_network(&ssid_clone, None, path.as_deref());
                 } else if let Some(qs) = current_quick_settings_window() {
                     qs.show_wifi_password_dialog(&ssid_clone);
@@ -879,7 +1312,7 @@ fn create_network_action_widget(net: &WifiNetwork) -> gtk4::Widget {
                 if let Some(p) = popover_weak.upgrade() {
                     p.popdown();
                 }
-                let network = WifiService::global();
+                let network = NetworkService::global();
                 debug!("wifi_disconnect_from_menu ssid={}", ssid_clone);
                 network.disconnect();
             });
@@ -893,7 +1326,7 @@ fn create_network_action_widget(net: &WifiNetwork) -> gtk4::Widget {
                 if let Some(p) = popover_weak.upgrade() {
                     p.popdown();
                 }
-                let network = WifiService::global();
+                let network = NetworkService::global();
                 debug!("wifi_connect_from_menu ssid={}", ssid_clone);
                 // Known networks connect without password prompt
                 network.connect_to_network(&ssid_clone, None, path_clone.as_deref());
@@ -911,7 +1344,7 @@ fn create_network_action_widget(net: &WifiNetwork) -> gtk4::Widget {
                 if let Some(p) = popover_weak.upgrade() {
                     p.popdown();
                 }
-                let network = WifiService::global();
+                let network = NetworkService::global();
                 debug!("wifi_forget_from_menu ssid={}", ssid_clone);
                 network.forget(&ssid_clone, path_clone.as_deref());
             });
@@ -940,7 +1373,7 @@ fn create_network_action_widget(net: &WifiNetwork) -> gtk4::Widget {
 /// Show inline Wi-Fi password dialog for the given SSID.
 /// If `error_message` is provided, displays it as an error message.
 pub fn show_password_dialog_with_error(
-    state: &WifiCardState,
+    state: &NetworkCardState,
     ssid: &str,
     error_message: Option<&str>,
 ) {
@@ -971,38 +1404,53 @@ pub fn show_password_dialog_with_error(
     }
 
     if let Some(list_box) = state.base.list_box.borrow().as_ref() {
-        let snapshot = WifiService::global().snapshot();
+        let snapshot = NetworkService::global().snapshot();
         populate_wifi_list(state, list_box, &snapshot);
     }
 }
 
 /// Show inline Wi-Fi password dialog for the given SSID.
-pub fn show_password_dialog(state: &WifiCardState, ssid: &str) {
+pub fn show_password_dialog(state: &NetworkCardState, ssid: &str) {
     show_password_dialog_with_error(state, ssid, None);
 }
 
 /// Called when the password entry is mapped; grabs focus if we have a target.
-fn on_password_entry_mapped(state: &WifiCardState, entry: &Entry) {
+fn on_password_entry_mapped(state: &NetworkCardState, entry: &Entry) {
     if state.password_target_ssid.borrow().is_some() {
         entry.grab_focus();
     }
 }
 
 /// Cancel the inline password prompt.
-fn on_password_cancel_clicked(state: &WifiCardState) {
+fn on_password_cancel_clicked(state: &NetworkCardState) {
     hide_password_dialog(state);
 
     // Cancel any pending IWD auth, abort active connection, and clear failed state
-    let service = WifiService::global();
+    let service = NetworkService::global();
     service.cancel_auth();
-    if service.snapshot().connection_state() == WifiConnectionState::Connecting {
+    if service.snapshot().connection_state() == NetworkConnectionState::Connecting {
         service.disconnect();
     }
     service.clear_failed_state();
 }
 
+/// Schedule a delayed clear of a failed-connection state after 5 seconds.
+fn schedule_failed_clear<F: FnOnce() + 'static>(
+    source: &RefCell<Option<glib::SourceId>>,
+    clear_fn: F,
+) {
+    let mut source = source.borrow_mut();
+    if let Some(prev) = source.take() {
+        prev.remove();
+    }
+    *source = Some(glib::timeout_add_local_once(
+        std::time::Duration::from_secs(5),
+        clear_fn,
+    ));
+}
+
 /// Hide the password dialog and reset its state.
-fn hide_password_dialog(state: &WifiCardState) {
+fn hide_password_dialog(state: &NetworkCardState) {
     if let Some(entry) = state.password_entry.borrow().as_ref() {
         entry.set_text("");
     }
@@ -1019,13 +1467,13 @@ fn hide_password_dialog(state: &WifiCardState) {
     *state.password_target_ssid.borrow_mut() = None;
 
     if let Some(list_box) = state.base.list_box.borrow().as_ref() {
-        let snapshot = WifiService::global().snapshot();
+        let snapshot = NetworkService::global().snapshot();
         populate_wifi_list(state, list_box, &snapshot);
     }
 }
 
 /// Attempt to connect using the inline password prompt.
-fn on_password_connect_clicked(state: &WifiCardState, window: WeakRef<ApplicationWindow>) {
+fn on_password_connect_clicked(state: &NetworkCardState, window: WeakRef<ApplicationWindow>) {
     let ssid_opt = state.password_target_ssid.borrow().clone();
     let Some(ssid) = ssid_opt else {
         return;
@@ -1044,7 +1492,7 @@ fn on_password_connect_clicked(state: &WifiCardState, window: WeakRef<Applicatio
     // Show connecting state: disable inputs, start animation
     set_password_connecting_state(state, true, Some(window));
 
-    let service = WifiService::global();
+    let service = NetworkService::global();
     let snapshot = service.snapshot();
 
     // Check if this is an IWD auth request (agent callback pending)
@@ -1085,7 +1533,7 @@ fn on_password_connect_clicked(state: &WifiCardState, window: WeakRef<Applicatio
 /// When `connecting` is true, `window` must be provided to start the animation.
 /// When `connecting` is false, `window` can be None as we're just stopping.
 fn set_password_connecting_state(
-    state: &WifiCardState,
+    state: &NetworkCardState,
     connecting: bool,
     window: Option<WeakRef<ApplicationWindow>>,
 ) {
@@ -1118,7 +1566,7 @@ fn set_password_connecting_state(
                 move || {
                     if let Some(window) = window.upgrade()
                         && let Some(qs) = super::window::get_qs_window_data(&window)
-                        && let Some(label) = qs.wifi.password_error_label.borrow().as_ref()
+                        && let Some(label) = qs.network.password_error_label.borrow().as_ref()
                     {
                         let step = step_cell.get().wrapping_add(1) % 4;
                         step_cell.set(step);
@@ -1152,14 +1600,14 @@ fn set_password_connecting_state(
 }
 
 /// Update the Wi-Fi subtitle based on connection state.
-pub fn update_subtitle(state: &WifiCardState, snapshot: &WifiSnapshot) {
+pub fn update_subtitle(state: &NetworkCardState, snapshot: &NetworkSnapshot) {
     if let Some(label) = state.subtitle_label.borrow().as_ref() {
         update_network_subtitle(label, snapshot);
     }
 }
 
 /// Update the scan button UI and animate while scanning.
-pub fn update_scan_ui(state: &WifiCardState, snapshot: &WifiSnapshot) {
+pub fn update_scan_ui(state: &NetworkCardState, snapshot: &NetworkSnapshot) {
     let scanning = snapshot.scanning();
     let wifi_enabled = snapshot.wifi_enabled().unwrap_or(false);
 
@@ -1170,20 +1618,20 @@ pub fn update_scan_ui(state: &WifiCardState, snapshot: &WifiSnapshot) {
     }
 }
 
-/// Handle network state changes from WifiService.
+/// Handle network state changes from NetworkService.
 pub fn on_network_changed(
-    state: &WifiCardState,
-    snapshot: &WifiSnapshot,
+    state: &NetworkCardState,
+    snapshot: &NetworkSnapshot,
     window: &ApplicationWindow,
 ) {
     // Backend-specific: NM provides the password upfront and tracks connection
     // failure via failed_ssid. This block handles the NM password dialog lifecycle
     // (error display, success dismiss, stale dialog cleanup). Cannot be unified with
     // the IWD block below because NM has no agent-based auth flow.
-    if let WifiSnapshot::NetworkManager(nm_snap) = snapshot {
+    if let NetworkSnapshot::NetworkManager(nm_snap) = snapshot {
         let current_target = state.password_target_ssid.borrow().clone();
         if let Some(ref target_ssid) = current_target {
-            if let Some(ref failed_ssid) = nm_snap.failed_ssid {
+            if let Some(ref failed_ssid) = nm_snap.wifi.failed_ssid {
                 if failed_ssid == target_ssid {
                     // Connection failed for our target - show error and re-enable form
                     debug!("Connection failed for '{}', showing error", failed_ssid);
@@ -1200,10 +1648,10 @@ pub fn on_network_changed(
                         SurfaceStyleManager::global().apply_pango_attrs_all(list_box);
                     }
                     // Clear the failed state so we don't re-trigger
-                    WifiService::global().clear_failed_state();
+                    NetworkService::global().clear_failed_state();
                 }
-            } else if nm_snap.ssid.as_ref() == Some(target_ssid)
-                && nm_snap.connecting_ssid.is_none()
+            } else if nm_snap.wifi.ssid.as_ref() == Some(target_ssid)
+                && nm_snap.wifi.connecting_ssid.is_none()
             {
                 // Successfully connected to target - hide dialog and clear state
                 debug!(
@@ -1211,29 +1659,29 @@ pub fn on_network_changed(
                     target_ssid
                 );
                 hide_password_dialog(state);
-            } else if nm_snap.connected
-                && nm_snap.ssid.as_ref() != Some(target_ssid)
-                && nm_snap.connecting_ssid.is_none()
+            } else if nm_snap.wifi.connected
+                && nm_snap.wifi.ssid.as_ref() != Some(target_ssid)
+                && nm_snap.wifi.connecting_ssid.is_none()
             {
                 // Connected to a different network while password dialog was open
                 // (user clicked a saved network). Hide the stale dialog.
                 debug!(
                     "NM connected to '{}' while password dialog was open for '{}', hiding dialog",
-                    nm_snap.ssid.as_deref().unwrap_or("?"),
+                    nm_snap.wifi.ssid.as_deref().unwrap_or("?"),
                     target_ssid
                 );
                 hide_password_dialog(state);
             }
             // If connecting_ssid matches target, keep showing animation (do nothing)
-        } else if let Some(ref _failed_ssid) = nm_snap.failed_ssid {
+        } else if let Some(ref failed_ssid) = nm_snap.wifi.failed_ssid {
             // NM doesn't provide failure reasons, so prompting for password is misleading.
             // Show inline error instead.
             debug!(
                 "NM connection failed for '{}', showing inline error",
-                _failed_ssid
+                failed_ssid
             );
-            glib::timeout_add_local_once(std::time::Duration::from_secs(5), move || {
-                WifiService::global().clear_failed_state();
+            schedule_failed_clear(&state.wifi_failed_clear_source, || {
+                NetworkService::global().clear_failed_state();
             });
         }
     }
@@ -1243,7 +1691,7 @@ pub fn on_network_changed(
     // handles auth request display, failure categorization (auth vs generic), and
     // retry prompts. Cannot be unified with the NM block above because the auth
     // flows are architecturally different.
-    if let WifiSnapshot::Iwd(iwd_snap) = snapshot {
+    if let NetworkSnapshot::Iwd(iwd_snap) = snapshot {
         let current_target = state.password_target_ssid.borrow().clone();
 
         // Check for auth request (IWD is asking for password)
@@ -1295,7 +1743,7 @@ pub fn on_network_changed(
                         SurfaceStyleManager::global().apply_pango_attrs_all(list_box);
                     }
                     // Clear the failed state so we don't re-trigger
-                    WifiService::global().clear_failed_state();
+                    NetworkService::global().clear_failed_state();
                 }
             } else if iwd_snap.ssid.as_ref() == Some(target_ssid) && iwd_snap.connected() {
                 // Successfully connected to target - hide dialog and clear state
@@ -1333,7 +1781,7 @@ pub fn on_network_changed(
                     "IWD auth failed for '{}', but window is closed - clearing failed state",
                     failed_ssid
                 );
-                WifiService::global().clear_failed_state();
+                NetworkService::global().clear_failed_state();
             } else {
                 // Non-auth failure: show inline on network row (handled by populate_wifi_list).
                 // Schedule delayed clear so the error is visible for a few seconds.
@@ -1341,8 +1789,8 @@ pub fn on_network_changed(
                     "IWD connection failed for '{}': {}, showing inline error",
                     failed_ssid, reason
                 );
-                glib::timeout_add_local_once(std::time::Duration::from_secs(5), move || {
-                    WifiService::global().clear_failed_state();
+                schedule_failed_clear(&state.wifi_failed_clear_source, || {
+                    NetworkService::global().clear_failed_state();
                 });
             }
         }
@@ -1350,26 +1798,30 @@ pub fn on_network_changed(
 
     // Update Wi-Fi toggle and switch state (with signal blocking to prevent feedback loop)
     let enabled = snapshot.wifi_enabled().unwrap_or(false);
-    state.updating_toggle.set(true);
+    state.updating_wifi_toggle.set(true);
+    state.updating_mobile_switch.set(true);
 
     // Update card toggle
     if let Some(toggle) = state.base.toggle.borrow().as_ref() {
         if toggle.is_active() != enabled {
             toggle.set_active(enabled);
         }
-        // Card toggle is only sensitive on WiFi-only devices (no ethernet port) and when service is available
-        // When ethernet is present, users must use the switch in expanded view
+        // Card toggle is only sensitive on WiFi-only devices (no ethernet port, no usable modem)
+        // When ethernet or a supported modem (SIM + profile) is present, users must use the switch in expanded view
         toggle.set_sensitive(
-            snapshot.available() && snapshot.has_wifi_device() && !snapshot.has_ethernet_device(),
+            snapshot.available()
+                && snapshot.has_wifi_device()
+                && !snapshot.has_ethernet_device()
+                && !snapshot.mobile_supported(),
         );
     }
 
-    // Update Wi-Fi label and switch visibility (only show when ethernet device present)
+    // Update Wi-Fi label and switch visibility (only show when alternative network device present)
     if let Some(wifi_label) = state.wifi_label.borrow().as_ref() {
-        wifi_label.set_visible(snapshot.has_ethernet_device());
+        wifi_label.set_visible(snapshot.has_non_wifi_device());
     }
     if let Some(wifi_switch) = state.wifi_switch.borrow().as_ref() {
-        wifi_switch.set_visible(snapshot.has_ethernet_device());
+        wifi_switch.set_visible(snapshot.has_non_wifi_device());
         if wifi_switch.is_active() != enabled {
             wifi_switch.set_active(enabled);
         }
@@ -1377,11 +1829,9 @@ pub fn on_network_changed(
         wifi_switch.set_sensitive(snapshot.available() && snapshot.has_wifi_device());
     }
 
-    state.updating_toggle.set(false);
-
-    // Update card title based on whether ethernet device exists
+    // Update card title based on whether ethernet/modem device exists
     if let Some(title_label) = state.title_label.borrow().as_ref() {
-        let expected_title = if snapshot.has_ethernet_device() {
+        let expected_title = if snapshot.has_non_wifi_device() {
             "Network"
         } else {
             "Wi-Fi"
@@ -1393,28 +1843,42 @@ pub fn on_network_changed(
 
     // Update Wi-Fi card icon and its active state class
     if let Some(icon_handle) = state.base.card_icon.borrow().as_ref() {
-        let icon_name = wifi_icon_name(
-            snapshot.available(),
-            snapshot.connected(),
-            enabled,
-            snapshot.wired_connected(),
-            snapshot.has_wifi_device(),
-        );
-        icon_handle.set_icon(icon_name);
-
         // Service unavailable - use warning styling
         if !snapshot.available() {
+            icon_handle.set_icon("network-wireless-offline-symbolic");
+            icon_handle.set_spinning(false);
             icon_handle.add_css_class(state::SERVICE_UNAVAILABLE);
             icon_handle.remove_css_class(qs::WIFI_DISABLED_ICON);
             icon_handle.remove_css_class(state::ICON_ACTIVE);
         } else {
             icon_handle.remove_css_class(state::SERVICE_UNAVAILABLE);
 
-            let icon_active = (enabled && snapshot.connected()) || snapshot.wired_connected();
+            let material_unified = is_material_unified(snapshot);
+            icon_handle.set_icon(resolve_material_network_icon(snapshot));
+
+            // Spinner: show when wifi or cellular is connecting, but only
+            // when the expanded details aren't visible (they have their own
+            // per-row spinners, so showing both would be redundant).
+            let wifi_connecting = snapshot.wifi_connecting();
+            let is_connecting = wifi_connecting || snapshot.mobile_connecting();
+            let expanded = state
+                .base
+                .revealer
+                .borrow()
+                .as_ref()
+                .is_some_and(|r| r.reveals_child());
+            icon_handle.set_spinning(is_connecting && !expanded);
+
+            let icon_active = (enabled && snapshot.connected())
+                || snapshot.wired_connected()
+                || snapshot.mobile_active();
             set_icon_active(icon_handle, icon_active);
 
-            // Additional disabled styling for Wi-Fi
-            if !enabled && !snapshot.wired_connected() {
+            // Disabled styling: only when actually showing a wifi icon, not
+            // when displaying a cellular or combined icon.
+            let showing_wifi_icon =
+                !material_unified || (!snapshot.mobile_active() && !snapshot.mobile_connecting());
+            if showing_wifi_icon && !enabled && !snapshot.wired_connected() {
                 icon_handle.add_css_class(qs::WIFI_DISABLED_ICON);
             } else {
                 icon_handle.remove_css_class(qs::WIFI_DISABLED_ICON);
@@ -1425,6 +1889,20 @@ pub fn on_network_changed(
     update_subtitle(state, snapshot);
 
     update_ethernet_row(state, snapshot);
+    update_mobile_row(state, snapshot);
+
+    // Auto-clear mobile connection failure after 5 seconds (matches Wi-Fi pattern).
+    if snapshot.mobile_failed() {
+        schedule_failed_clear(&state.mobile_failed_clear_source, || {
+            NetworkService::global().clear_mobile_failed_state();
+        });
+    }
+
+    // IMPORTANT: This must remain AFTER all switch/toggle updates (wifi toggle,
+    // wifi switch, mobile switch) to prevent their `state_set` signal handlers
+    // from triggering recursive state changes during programmatic updates.
+    state.updating_wifi_toggle.set(false);
+    state.updating_mobile_switch.set(false);
 
     update_scan_ui(state, snapshot);
 
@@ -1443,76 +1921,134 @@ pub fn on_network_changed(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::services::wifi::iwd::StationState;
-    use crate::services::wifi::{IwdSnapshot, NetworkSnapshot};
+    use crate::services::network::iwd::StationState;
+    use crate::services::network::network_manager::{MobileState, WifiState, WiredState};
+    use crate::services::network::{IwdSnapshot, NmSnapshot};
+
+    /// Default icon context for tests: available Wi-Fi system, nothing connected.
+    /// Tests override only the fields relevant to the scenario being tested.
+    fn test_icon_ctx() -> NetworkIconContext {
+        NetworkIconContext {
+            available: true,
+            connected: false,
+            wifi_enabled: true,
+            wired_connected: false,
+            has_wifi_device: true,
+            mobile_is_primary: false,
+            has_modem_device: false,
+            mobile_signal_quality: None,
+        }
+    }
 
     #[test]
-    fn test_wifi_icon_name_connected() {
+    fn test_network_icon_name_connected() {
         assert_eq!(
-            wifi_icon_name(true, true, true, false, true),
+            network_icon_name(&NetworkIconContext {
+                connected: true,
+                ..test_icon_ctx()
+            }),
             "network-wireless-signal-excellent-symbolic"
         );
     }
 
     #[test]
-    fn test_wifi_icon_name_disconnected() {
+    fn test_network_icon_name_disconnected() {
         assert_eq!(
-            wifi_icon_name(true, false, true, false, true),
+            network_icon_name(&test_icon_ctx()),
             "network-wireless-offline-symbolic"
         );
     }
 
     #[test]
-    fn test_wifi_icon_name_disabled() {
+    fn test_network_icon_name_disabled() {
         assert_eq!(
-            wifi_icon_name(true, true, false, false, true),
+            network_icon_name(&NetworkIconContext {
+                connected: true,
+                wifi_enabled: false,
+                ..test_icon_ctx()
+            }),
             "network-wireless-offline-symbolic"
         );
         assert_eq!(
-            wifi_icon_name(true, false, false, false, true),
+            network_icon_name(&NetworkIconContext {
+                wifi_enabled: false,
+                ..test_icon_ctx()
+            }),
             "network-wireless-offline-symbolic"
         );
     }
 
     #[test]
-    fn test_wifi_icon_name_wired_connected() {
+    fn test_network_icon_name_wired_connected() {
         // Wired connected takes precedence regardless of Wi-Fi state
         assert_eq!(
-            wifi_icon_name(true, false, false, true, true),
+            network_icon_name(&NetworkIconContext {
+                wifi_enabled: false,
+                wired_connected: true,
+                ..test_icon_ctx()
+            }),
             "network-wired-symbolic"
         );
         assert_eq!(
-            wifi_icon_name(true, true, true, true, true),
+            network_icon_name(&NetworkIconContext {
+                connected: true,
+                wired_connected: true,
+                ..test_icon_ctx()
+            }),
             "network-wired-symbolic"
         );
         assert_eq!(
-            wifi_icon_name(true, false, false, true, false),
+            network_icon_name(&NetworkIconContext {
+                wifi_enabled: false,
+                wired_connected: true,
+                has_wifi_device: false,
+                ..test_icon_ctx()
+            }),
             "network-wired-symbolic"
         );
     }
 
     #[test]
-    fn test_wifi_icon_name_ethernet_only_disconnected() {
+    fn test_network_icon_name_ethernet_only_disconnected() {
         // Ethernet-only system (no Wi-Fi device), not connected - shows lan icon (grayed)
         assert_eq!(
-            wifi_icon_name(true, false, false, false, false),
+            network_icon_name(&NetworkIconContext {
+                wifi_enabled: false,
+                has_wifi_device: false,
+                ..test_icon_ctx()
+            }),
             "network-wired-symbolic"
         );
     }
 
     #[test]
-    fn test_wifi_icon_name_service_unavailable() {
+    fn test_network_icon_name_service_unavailable() {
         // Service unavailable - always shows wireless offline icon regardless of other state
         assert_eq!(
-            wifi_icon_name(false, false, false, false, false),
+            network_icon_name(&NetworkIconContext {
+                available: false,
+                wifi_enabled: false,
+                has_wifi_device: false,
+                ..test_icon_ctx()
+            }),
             "network-wireless-offline-symbolic"
         );
         assert_eq!(
-            wifi_icon_name(false, true, true, false, true),
+            network_icon_name(&NetworkIconContext {
+                available: false,
+                connected: true,
+                ..test_icon_ctx()
+            }),
             "network-wireless-offline-symbolic"
         );
         assert_eq!(
-            wifi_icon_name(false, false, false, true, false),
+            network_icon_name(&NetworkIconContext {
+                available: false,
+                wifi_enabled: false,
+                wired_connected: true,
+                has_wifi_device: false,
+                ..test_icon_ctx()
+            }),
             "network-wireless-offline-symbolic"
         );
     }
@@ -1582,25 +2118,43 @@ mod tests {
     }
 
     // Helper to create a base snapshot for testing
-    fn test_snapshot() -> NetworkSnapshot {
-        NetworkSnapshot {
+    fn test_snapshot() -> NmSnapshot {
+        NmSnapshot {
             available: true,
-            wifi_enabled: Some(true),
-            connected: false,
-            wired_connected: false,
-            has_wifi_device: true,
-            has_ethernet_device: false,
+            wifi: WifiState {
+                enabled: Some(true),
+                connected: false,
+                has_device: true,
+                ssid: None,
+                strength: 0,
+                scanning: false,
+                is_ready: true,
+                networks: Vec::new(),
+                connecting_ssid: None,
+                failed_ssid: None,
+                device_state: None,
+            },
+            wired: WiredState {
+                connected: false,
+                has_device: false,
+                iface: None,
+                name: None,
+                speed: None,
+            },
+            mobile: MobileState {
+                is_primary: false,
+                active: false,
+                connecting: false,
+                supported: false,
+                enabled: Some(true),
+                has_device: false,
+                name: None,
+                operator: None,
+                access_technology: None,
+                signal_quality: None,
+                failed: false,
+            },
             primary_connection_type: None,
-            wired_iface: None,
-            wired_name: None,
-            wired_speed: None,
-            ssid: None,
-            strength: 0,
-            scanning: false,
-            is_ready: true,
-            networks: Vec::new(),
-            connecting_ssid: None,
-            failed_ssid: None,
         }
     }
 
@@ -1609,17 +2163,17 @@ mod tests {
     #[test]
     fn test_subtitle_wired_only() {
         let mut snapshot = test_snapshot();
-        snapshot.wired_connected = true;
-        let wrapped = WifiSnapshot::NetworkManager(snapshot);
+        snapshot.wired.connected = true;
+        let wrapped = NetworkSnapshot::NetworkManager(snapshot);
         assert_eq!(get_network_subtitle_text(&wrapped), "Ethernet");
     }
 
     #[test]
     fn test_subtitle_wired_and_wifi_connected() {
         let mut snapshot = test_snapshot();
-        snapshot.wired_connected = true;
-        snapshot.ssid = Some("MyNetwork".to_string());
-        let wrapped = WifiSnapshot::NetworkManager(snapshot);
+        snapshot.wired.connected = true;
+        snapshot.wifi.ssid = Some("MyNetwork".to_string());
+        let wrapped = NetworkSnapshot::NetworkManager(snapshot);
         assert_eq!(
             get_network_subtitle_text(&wrapped),
             "Ethernet \u{2022} MyNetwork"
@@ -1629,9 +2183,9 @@ mod tests {
     #[test]
     fn test_subtitle_wired_and_wifi_connecting() {
         let mut snapshot = test_snapshot();
-        snapshot.wired_connected = true;
-        snapshot.connecting_ssid = Some("MyNetwork".to_string());
-        let wrapped = WifiSnapshot::NetworkManager(snapshot);
+        snapshot.wired.connected = true;
+        snapshot.wifi.connecting_ssid = Some("MyNetwork".to_string());
+        let wrapped = NetworkSnapshot::NetworkManager(snapshot);
         assert_eq!(
             get_network_subtitle_text(&wrapped),
             "Ethernet \u{2022} Connecting to MyNetwork"
@@ -1641,16 +2195,16 @@ mod tests {
     #[test]
     fn test_subtitle_wifi_connected() {
         let mut snapshot = test_snapshot();
-        snapshot.ssid = Some("HomeWifi".to_string());
-        let wrapped = WifiSnapshot::NetworkManager(snapshot);
+        snapshot.wifi.ssid = Some("HomeWifi".to_string());
+        let wrapped = NetworkSnapshot::NetworkManager(snapshot);
         assert_eq!(get_network_subtitle_text(&wrapped), "HomeWifi");
     }
 
     #[test]
     fn test_subtitle_wifi_connecting() {
         let mut snapshot = test_snapshot();
-        snapshot.connecting_ssid = Some("HomeWifi".to_string());
-        let wrapped = WifiSnapshot::NetworkManager(snapshot);
+        snapshot.wifi.connecting_ssid = Some("HomeWifi".to_string());
+        let wrapped = NetworkSnapshot::NetworkManager(snapshot);
         assert_eq!(
             get_network_subtitle_text(&wrapped),
             "Connecting to HomeWifi"
@@ -1660,25 +2214,25 @@ mod tests {
     #[test]
     fn test_subtitle_wifi_disconnected() {
         let snapshot = test_snapshot();
-        let wrapped = WifiSnapshot::NetworkManager(snapshot);
+        let wrapped = NetworkSnapshot::NetworkManager(snapshot);
         assert_eq!(get_network_subtitle_text(&wrapped), "Disconnected");
     }
 
     #[test]
     fn test_subtitle_wifi_disabled() {
         let mut snapshot = test_snapshot();
-        snapshot.wifi_enabled = Some(false);
-        let wrapped = WifiSnapshot::NetworkManager(snapshot);
+        snapshot.wifi.enabled = Some(false);
+        let wrapped = NetworkSnapshot::NetworkManager(snapshot);
         assert_eq!(get_network_subtitle_text(&wrapped), "Off");
     }
 
     #[test]
     fn test_subtitle_ethernet_only_system_disconnected() {
         let mut snapshot = test_snapshot();
-        snapshot.has_wifi_device = false;
-        snapshot.has_ethernet_device = true;
-        snapshot.wifi_enabled = None;
-        let wrapped = WifiSnapshot::NetworkManager(snapshot);
+        snapshot.wifi.has_device = false;
+        snapshot.wired.has_device = true;
+        snapshot.wifi.enabled = None;
+        let wrapped = NetworkSnapshot::NetworkManager(snapshot);
         assert_eq!(get_network_subtitle_text(&wrapped), "Disconnected");
     }
 
@@ -1686,7 +2240,7 @@ mod tests {
     fn test_subtitle_service_unavailable() {
         let mut snapshot = test_snapshot();
         snapshot.available = false;
-        let wrapped = WifiSnapshot::NetworkManager(snapshot);
+        let wrapped = NetworkSnapshot::NetworkManager(snapshot);
         assert_eq!(get_network_subtitle_text(&wrapped), "Unavailable");
     }
 
@@ -1695,50 +2249,50 @@ mod tests {
     #[test]
     fn test_subtitle_active_when_wired_connected() {
         let mut snapshot = test_snapshot();
-        snapshot.wired_connected = true;
-        let wrapped = WifiSnapshot::NetworkManager(snapshot);
+        snapshot.wired.connected = true;
+        let wrapped = NetworkSnapshot::NetworkManager(snapshot);
         assert!(is_network_subtitle_active(&wrapped));
     }
 
     #[test]
     fn test_subtitle_active_when_wifi_connected() {
         let mut snapshot = test_snapshot();
-        snapshot.connected = true;
-        snapshot.ssid = Some("Network".to_string());
-        let wrapped = WifiSnapshot::NetworkManager(snapshot);
+        snapshot.wifi.connected = true;
+        snapshot.wifi.ssid = Some("Network".to_string());
+        let wrapped = NetworkSnapshot::NetworkManager(snapshot);
         assert!(is_network_subtitle_active(&wrapped));
     }
 
     #[test]
     fn test_subtitle_active_when_both_connected() {
         let mut snapshot = test_snapshot();
-        snapshot.wired_connected = true;
-        snapshot.ssid = Some("Network".to_string());
-        let wrapped = WifiSnapshot::NetworkManager(snapshot);
+        snapshot.wired.connected = true;
+        snapshot.wifi.ssid = Some("Network".to_string());
+        let wrapped = NetworkSnapshot::NetworkManager(snapshot);
         assert!(is_network_subtitle_active(&wrapped));
     }
 
     #[test]
     fn test_subtitle_not_active_when_connecting() {
         let mut snapshot = test_snapshot();
-        snapshot.connecting_ssid = Some("Network".to_string());
-        let wrapped = WifiSnapshot::NetworkManager(snapshot);
+        snapshot.wifi.connecting_ssid = Some("Network".to_string());
+        let wrapped = NetworkSnapshot::NetworkManager(snapshot);
         assert!(!is_network_subtitle_active(&wrapped));
     }
 
     #[test]
     fn test_subtitle_not_active_when_disconnected() {
         let snapshot = test_snapshot();
-        let wrapped = WifiSnapshot::NetworkManager(snapshot);
+        let wrapped = NetworkSnapshot::NetworkManager(snapshot);
         assert!(!is_network_subtitle_active(&wrapped));
     }
 
     #[test]
     fn test_subtitle_not_active_wired_but_wifi_connecting() {
         let mut snapshot = test_snapshot();
-        snapshot.wired_connected = true;
-        snapshot.connecting_ssid = Some("Network".to_string());
-        let wrapped = WifiSnapshot::NetworkManager(snapshot);
+        snapshot.wired.connected = true;
+        snapshot.wifi.connecting_ssid = Some("Network".to_string());
+        let wrapped = NetworkSnapshot::NetworkManager(snapshot);
         // Even though wired is connected, we're in a "connecting" state for Wi-Fi
         // so subtitle should not be fully active (shows connecting animation)
         assert!(!is_network_subtitle_active(&wrapped));
@@ -1767,7 +2321,7 @@ mod tests {
         let mut snap = iwd_snapshot();
         snap.state = Some(StationState::Connected);
         snap.ssid = Some("HomeWifi".to_string());
-        let wrapped = WifiSnapshot::Iwd(snap);
+        let wrapped = NetworkSnapshot::Iwd(snap);
         assert_eq!(get_network_subtitle_text(&wrapped), "HomeWifi");
     }
 
@@ -1776,7 +2330,7 @@ mod tests {
         let mut snap = iwd_snapshot();
         snap.state = Some(StationState::Connecting);
         snap.ssid = Some("HomeWifi".to_string());
-        let wrapped = WifiSnapshot::Iwd(snap);
+        let wrapped = NetworkSnapshot::Iwd(snap);
         assert_eq!(
             get_network_subtitle_text(&wrapped),
             "Connecting to HomeWifi"
@@ -1786,7 +2340,7 @@ mod tests {
     #[test]
     fn test_iwd_subtitle_disconnected() {
         let snap = iwd_snapshot();
-        let wrapped = WifiSnapshot::Iwd(snap);
+        let wrapped = NetworkSnapshot::Iwd(snap);
         assert_eq!(get_network_subtitle_text(&wrapped), "Disconnected");
     }
 
@@ -1794,7 +2348,7 @@ mod tests {
     fn test_iwd_subtitle_disabled() {
         let mut snap = iwd_snapshot();
         snap.wifi_enabled = Some(false);
-        let wrapped = WifiSnapshot::Iwd(snap);
+        let wrapped = NetworkSnapshot::Iwd(snap);
         assert_eq!(get_network_subtitle_text(&wrapped), "Off");
     }
 
@@ -1802,7 +2356,7 @@ mod tests {
     fn test_iwd_subtitle_unavailable() {
         let mut snap = iwd_snapshot();
         snap.available = false;
-        let wrapped = WifiSnapshot::Iwd(snap);
+        let wrapped = NetworkSnapshot::Iwd(snap);
         assert_eq!(get_network_subtitle_text(&wrapped), "Unavailable");
     }
 
@@ -1811,7 +2365,7 @@ mod tests {
         let mut snap = iwd_snapshot();
         snap.state = Some(StationState::Connected);
         snap.ssid = Some("Network".to_string());
-        let wrapped = WifiSnapshot::Iwd(snap);
+        let wrapped = NetworkSnapshot::Iwd(snap);
         assert!(is_network_subtitle_active(&wrapped));
     }
 
@@ -1820,14 +2374,14 @@ mod tests {
         let mut snap = iwd_snapshot();
         snap.state = Some(StationState::Connecting);
         snap.ssid = Some("Network".to_string());
-        let wrapped = WifiSnapshot::Iwd(snap);
+        let wrapped = NetworkSnapshot::Iwd(snap);
         assert!(!is_network_subtitle_active(&wrapped));
     }
 
     #[test]
     fn test_iwd_subtitle_not_active_when_disconnected() {
         let snap = iwd_snapshot();
-        let wrapped = WifiSnapshot::Iwd(snap);
+        let wrapped = NetworkSnapshot::Iwd(snap);
         assert!(!is_network_subtitle_active(&wrapped));
     }
 
@@ -1836,9 +2390,255 @@ mod tests {
         let mut snap = iwd_snapshot();
         snap.state = Some(StationState::Roaming);
         snap.ssid = Some("RoamNet".to_string());
-        let wrapped = WifiSnapshot::Iwd(snap);
+        let wrapped = NetworkSnapshot::Iwd(snap);
         // Roaming is considered connected
         assert_eq!(get_network_subtitle_text(&wrapped), "RoamNet");
         assert!(is_network_subtitle_active(&wrapped));
+    }
+
+    // ---- cellular_signal_icon_name tests ----
+
+    #[test]
+    fn test_cellular_signal_excellent() {
+        assert_eq!(
+            cellular_signal_icon_name(75),
+            "network-cellular-signal-excellent-symbolic"
+        );
+        assert_eq!(
+            cellular_signal_icon_name(100),
+            "network-cellular-signal-excellent-symbolic"
+        );
+    }
+
+    #[test]
+    fn test_cellular_signal_good() {
+        assert_eq!(
+            cellular_signal_icon_name(55),
+            "network-cellular-signal-good-symbolic"
+        );
+        assert_eq!(
+            cellular_signal_icon_name(74),
+            "network-cellular-signal-good-symbolic"
+        );
+    }
+
+    #[test]
+    fn test_cellular_signal_ok() {
+        assert_eq!(
+            cellular_signal_icon_name(35),
+            "network-cellular-signal-ok-symbolic"
+        );
+        assert_eq!(
+            cellular_signal_icon_name(54),
+            "network-cellular-signal-ok-symbolic"
+        );
+    }
+
+    #[test]
+    fn test_cellular_signal_weak() {
+        assert_eq!(
+            cellular_signal_icon_name(15),
+            "network-cellular-signal-weak-symbolic"
+        );
+        assert_eq!(
+            cellular_signal_icon_name(34),
+            "network-cellular-signal-weak-symbolic"
+        );
+    }
+
+    #[test]
+    fn test_cellular_signal_none() {
+        assert_eq!(
+            cellular_signal_icon_name(14),
+            "network-cellular-signal-none-symbolic"
+        );
+        assert_eq!(
+            cellular_signal_icon_name(0),
+            "network-cellular-signal-none-symbolic"
+        );
+    }
+
+    // ---- Mobile subtitle text tests ----
+
+    #[test]
+    fn test_subtitle_mobile_connected_with_operator() {
+        let mut snapshot = test_snapshot();
+        snapshot.mobile.is_primary = true;
+        snapshot.mobile.active = true;
+        snapshot.mobile.operator = Some("MyCarrier".to_string());
+        let wrapped = NetworkSnapshot::NetworkManager(snapshot);
+        assert_eq!(get_network_subtitle_text(&wrapped), "MyCarrier");
+    }
+
+    #[test]
+    fn test_subtitle_mobile_connected_with_name_only() {
+        let mut snapshot = test_snapshot();
+        snapshot.mobile.is_primary = true;
+        snapshot.mobile.active = true;
+        snapshot.mobile.name = Some("My SIM".to_string());
+        let wrapped = NetworkSnapshot::NetworkManager(snapshot);
+        assert_eq!(get_network_subtitle_text(&wrapped), "My SIM");
+    }
+
+    #[test]
+    fn test_subtitle_mobile_connected_no_name() {
+        let mut snapshot = test_snapshot();
+        snapshot.mobile.is_primary = true;
+        snapshot.mobile.active = true;
+        let wrapped = NetworkSnapshot::NetworkManager(snapshot);
+        assert_eq!(get_network_subtitle_text(&wrapped), "Mobile");
+    }
+
+    #[test]
+    fn test_subtitle_mobile_connecting() {
+        let mut snapshot = test_snapshot();
+        snapshot.mobile.connecting = true;
+        let wrapped = NetworkSnapshot::NetworkManager(snapshot);
+        assert_eq!(
+            get_network_subtitle_text(&wrapped),
+            "Mobile \u{2022} Connecting..."
+        );
+    }
+
+    #[test]
+    fn test_subtitle_mobile_connected_and_wifi_connecting() {
+        let mut snapshot = test_snapshot();
+        snapshot.mobile.is_primary = true;
+        snapshot.mobile.active = true;
+        snapshot.wifi.connecting_ssid = Some("HomeWifi".to_string());
+        let wrapped = NetworkSnapshot::NetworkManager(snapshot);
+        assert_eq!(
+            get_network_subtitle_text(&wrapped),
+            "Mobile \u{2022} Connecting to HomeWifi"
+        );
+    }
+
+    #[test]
+    fn test_subtitle_mobile_connected_and_wifi_connected() {
+        let mut snapshot = test_snapshot();
+        snapshot.mobile.is_primary = true;
+        snapshot.mobile.active = true;
+        snapshot.wifi.ssid = Some("HomeWifi".to_string());
+        let wrapped = NetworkSnapshot::NetworkManager(snapshot);
+        assert_eq!(
+            get_network_subtitle_text(&wrapped),
+            "HomeWifi \u{2022} Mobile"
+        );
+    }
+
+    #[test]
+    fn test_subtitle_active_mobile_connected() {
+        let mut snapshot = test_snapshot();
+        snapshot.mobile.is_primary = true;
+        snapshot.mobile.active = true;
+        let wrapped = NetworkSnapshot::NetworkManager(snapshot);
+        assert!(is_network_subtitle_active(&wrapped));
+    }
+
+    #[test]
+    fn test_subtitle_not_active_mobile_connecting() {
+        let mut snapshot = test_snapshot();
+        snapshot.mobile.connecting = true;
+        let wrapped = NetworkSnapshot::NetworkManager(snapshot);
+        assert!(!is_network_subtitle_active(&wrapped));
+    }
+
+    // ---- Mobile subtitle: active (not just primary) ----
+
+    #[test]
+    fn test_subtitle_mobile_active_not_primary_with_operator() {
+        let mut snapshot = test_snapshot();
+        snapshot.mobile.active = true;
+        snapshot.mobile.operator = Some("Vodafone".to_string());
+        let wrapped = NetworkSnapshot::NetworkManager(snapshot);
+        assert_eq!(get_network_subtitle_text(&wrapped), "Vodafone");
+    }
+
+    #[test]
+    fn test_subtitle_wired_and_mobile_active() {
+        let mut snapshot = test_snapshot();
+        snapshot.wired.connected = true;
+        snapshot.mobile.active = true;
+        snapshot.mobile.operator = Some("MyCarrier".to_string());
+        let wrapped = NetworkSnapshot::NetworkManager(snapshot);
+        assert_eq!(
+            get_network_subtitle_text(&wrapped),
+            "Ethernet \u{2022} MyCarrier"
+        );
+    }
+
+    #[test]
+    fn test_subtitle_wired_wifi_and_mobile_active() {
+        let mut snapshot = test_snapshot();
+        snapshot.wired.connected = true;
+        snapshot.wifi.ssid = Some("HomeWifi".to_string());
+        snapshot.mobile.active = true;
+        snapshot.mobile.operator = Some("MyCarrier".to_string());
+        let wrapped = NetworkSnapshot::NetworkManager(snapshot);
+        assert_eq!(
+            get_network_subtitle_text(&wrapped),
+            "Ethernet \u{2022} HomeWifi \u{2022} MyCarrier"
+        );
+    }
+
+    #[test]
+    fn test_subtitle_mobile_connecting_with_operator() {
+        let mut snapshot = test_snapshot();
+        snapshot.mobile.connecting = true;
+        snapshot.mobile.operator = Some("AT&T".to_string());
+        let wrapped = NetworkSnapshot::NetworkManager(snapshot);
+        assert_eq!(
+            get_network_subtitle_text(&wrapped),
+            "AT&T \u{2022} Connecting..."
+        );
+    }
+
+    #[test]
+    fn test_subtitle_active_mobile_active_not_primary() {
+        let mut snapshot = test_snapshot();
+        snapshot.mobile.active = true;
+        let wrapped = NetworkSnapshot::NetworkManager(snapshot);
+        assert!(is_network_subtitle_active(&wrapped));
+    }
+
+    // ---- network_icon_name with mobile ----
+
+    #[test]
+    fn test_wifi_icon_mobile_connected_with_signal() {
+        assert_eq!(
+            network_icon_name(&NetworkIconContext {
+                mobile_is_primary: true,
+                has_modem_device: true,
+                mobile_signal_quality: Some(80),
+                ..test_icon_ctx()
+            }),
+            "network-cellular-signal-excellent-symbolic"
+        );
+    }
+
+    #[test]
+    fn test_wifi_icon_mobile_connected_no_signal() {
+        assert_eq!(
+            network_icon_name(&NetworkIconContext {
+                mobile_is_primary: true,
+                has_modem_device: true,
+                ..test_icon_ctx()
+            }),
+            "network-cellular-signal-none-symbolic"
+        );
+    }
+
+    #[test]
+    fn test_wifi_icon_modem_only_no_wifi() {
+        // Modem-only system without mobile connection shows cellular none icon
+        assert_eq!(
+            network_icon_name(&NetworkIconContext {
+                wifi_enabled: false,
+                has_wifi_device: false,
+                has_modem_device: true,
+                ..test_icon_ctx()
+            }),
+            "network-cellular-signal-none-symbolic"
+        );
     }
 }

@@ -207,9 +207,6 @@ pub mod state {
 
     /// Urgent workspace state (`.urgent`).
     pub const URGENT: &str = "urgent";
-
-    /// Spinning/loading animation state (`.spinning`).
-    pub const SPINNING: &str = "spinning";
 }
 
 /// Quick Settings specific component classes.
@@ -284,26 +281,17 @@ pub mod qs {
     /// Scan spinner (`.qs-scan-spinner`).
     pub const SCAN_SPINNER: &str = "qs-scan-spinner";
 
-    /// Wi-Fi switch row container (`.qs-wifi-switch-row`).
-    pub const WIFI_SWITCH_ROW: &str = "qs-wifi-switch-row";
+    /// Network section header row container (`.qs-network-section-row`).
+    pub const NETWORK_SECTION_ROW: &str = "qs-network-section-row";
 
-    /// Wi-Fi switch label (`.qs-wifi-switch-label`).
-    pub const WIFI_SWITCH_LABEL: &str = "qs-wifi-switch-label";
+    /// Network section header label (`.qs-network-section-label`).
+    pub const NETWORK_SECTION_LABEL: &str = "qs-network-section-label";
 
-    /// Ethernet section container in expanded details (`.qs-ethernet-section`).
-    pub const ETHERNET_ROW_CONTAINER: &str = "qs-ethernet-section";
+    /// Shared network section container (Ethernet, Mobile) in expanded details (`.qs-network-section`).
+    pub const NETWORK_SECTION: &str = "qs-network-section";
 
-    /// Ethernet connection row with background (`.qs-ethernet-connection-row`).
-    pub const ETHERNET_CONNECTION_ROW: &str = "qs-ethernet-connection-row";
-
-    /// Network empty state container (`.qs-no-connections-state`).
-    pub const NO_CONNECTIONS_STATE: &str = "qs-no-connections-state";
-
-    /// Network empty state icon (`.qs-no-connections-icon`).
-    pub const NO_CONNECTIONS_ICON: &str = "qs-no-connections-icon";
-
-    /// Network empty state label (`.qs-no-connections-label`).
-    pub const NO_CONNECTIONS_LABEL: &str = "qs-no-connections-label";
+    /// Shared network connection row (`.qs-network-connection-row`).
+    pub const NETWORK_CONNECTION_ROW: &str = "qs-network-connection-row";
 
     /// Wi-Fi disabled icon state (`.qs-wifi-disabled-icon`).
     pub const WIFI_DISABLED_ICON: &str = "qs-wifi-disabled-icon";
@@ -311,14 +299,8 @@ pub mod qs {
     /// Bluetooth disabled icon state (`.qs-bt-disabled-icon`).
     pub const BT_DISABLED_ICON: &str = "qs-bt-disabled-icon";
 
-    /// Wi-Fi disabled state container (`.qs-wifi-disabled-state`).
-    pub const WIFI_DISABLED_STATE: &str = "qs-wifi-disabled-state";
-
-    /// Wi-Fi disabled state icon (`.qs-wifi-disabled-state-icon`).
-    pub const WIFI_DISABLED_STATE_ICON: &str = "qs-wifi-disabled-state-icon";
-
-    /// Wi-Fi disabled state label (`.qs-wifi-disabled-label`).
-    pub const WIFI_DISABLED_LABEL: &str = "qs-wifi-disabled-label";
+    /// Mobile disabled icon state (`.qs-mobile-disabled-icon`).
+    pub const MOBILE_DISABLED_ICON: &str = "qs-mobile-disabled-icon";
 
     /// Generic disabled state container (`.qs-disabled-state`).
     pub const DISABLED_STATE: &str = "qs-disabled-state";
@@ -363,9 +345,9 @@ pub mod qs {
     /// Updates error row (`.qs-updates-error`).
     pub const UPDATES_ERROR: &str = "qs-updates-error";
 
-    // Wi-Fi card
-    /// Wi-Fi network row (`.qs-wifi-row`).
-    pub const WIFI_ROW: &str = "qs-wifi-row";
+    // Network card
+    /// Network row shared by Wi-Fi, Ethernet, and Mobile sections (`.qs-network-row`).
+    pub const NETWORK_ROW: &str = "qs-network-row";
 
     /// Wi-Fi base signal icon (dimmed, full bars) (`.qs-wifi-base`).
     pub const WIFI_BASE: &str = "qs-wifi-base";
@@ -449,6 +431,12 @@ pub mod widget {
 
     /// Workspace indicator minimal style (`.workspace-indicator-minimal`).
     pub const WORKSPACE_INDICATOR_MINIMAL: &str = "workspace-indicator-minimal";
+
+    /// Workspace indicator no-animate (`.workspace-no-animate`).
+    pub const WORKSPACE_NO_ANIMATE: &str = "workspace-no-animate";
+
+    /// Workspace indicator collapsed for enter animation (`.workspace-indicator-collapsed`).
+    pub const WORKSPACE_INDICATOR_COLLAPSED: &str = "workspace-indicator-collapsed";
 
     /// Workspace separator (`.workspace-separator`).
     pub const WORKSPACE_SEPARATOR: &str = "workspace-separator";

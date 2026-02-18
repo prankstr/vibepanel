@@ -147,7 +147,7 @@ pub fn build_media_controls(
     container.set_halign(Align::Center);
 
     // Previous button
-    let prev_icon = icons.create_icon("skip_previous", &[icon::ICON]);
+    let prev_icon = icons.create_icon("media-skip-backward", &[icon::ICON]);
     prev_icon.widget().set_halign(Align::Center);
     prev_icon.widget().set_valign(Align::Center);
     let prev_btn = Button::new();
@@ -181,7 +181,7 @@ pub fn build_media_controls(
     container.append(&play_pause_btn);
 
     // Next button
-    let next_icon = icons.create_icon("skip_next", &[icon::ICON]);
+    let next_icon = icons.create_icon("media-skip-forward", &[icon::ICON]);
     next_icon.widget().set_halign(Align::Center);
     next_icon.widget().set_valign(Align::Center);
     let next_btn = Button::new();
@@ -317,7 +317,7 @@ pub fn build_album_art(size: i32) -> (GtkBox, RoundedPicture, GtkBox, Rc<RefCell
     placeholder_box.add_css_class(media::ART_PLACEHOLDER);
     placeholder_box.set_size_request(size, size);
 
-    let art_icon = icons.create_icon("album", &[media::EMPTY_ICON]);
+    let art_icon = icons.create_icon("media-album", &[media::EMPTY_ICON]);
     art_icon.widget().set_valign(Align::Center);
     art_icon.widget().set_vexpand(true);
     art_icon.widget().set_halign(Align::Center);

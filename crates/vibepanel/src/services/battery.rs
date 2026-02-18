@@ -15,7 +15,7 @@ use gtk4::glib;
 use gtk4::prelude::*;
 use tracing::{debug, error, warn};
 
-use super::callbacks::Callbacks;
+use super::callbacks::{CallbackId, Callbacks};
 
 /// Path to the kernel's power supply sysfs directory.
 const POWER_SUPPLY_PATH: &str = "/sys/class/power_supply";
@@ -160,15 +160,21 @@ impl BatteryService {
 
     /// Register a callback to be invoked whenever the battery snapshot changes.
     /// The callback is always executed on the GLib main loop.
-    pub fn connect<F>(&self, callback: F)
+    pub fn connect<F>(&self, callback: F) -> CallbackId
     where
         F: Fn(&BatterySnapshot) + 'static,
     {
-        self.callbacks.register(callback);
+        let id = self.callbacks.register(callback);
 
         // Immediately send current snapshot so widgets can render without
         // waiting for the next change.
-        self.callbacks.notify(&self.snapshot.borrow());
+        self.callbacks.notify_single(id, &self.snapshot.borrow());
+        id
+    }
+
+    /// Unregister a callback by its ID.
+    pub fn disconnect(&self, id: CallbackId) -> bool {
+        self.callbacks.unregister(id)
     }
 
     /// Return the current battery snapshot.

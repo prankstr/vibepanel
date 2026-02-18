@@ -11,6 +11,7 @@ use gtk4::{Box as GtkBox, Image, Label, Orientation};
 use tracing::{debug, trace};
 use vibepanel_core::config::WidgetEntry;
 
+use crate::services::callbacks::CallbackId;
 use crate::services::config_manager::ConfigManager;
 use crate::services::icons::get_app_icon_name;
 use crate::services::tooltip::TooltipManager;
@@ -127,6 +128,8 @@ impl Default for WindowTitleConfig {
 pub struct WindowTitleWidget {
     /// Shared base widget container.
     base: BaseWidget,
+    /// Callback ID for WindowTitleService, used to disconnect on drop.
+    window_title_callback_id: CallbackId,
 }
 
 impl WindowTitleWidget {
@@ -187,7 +190,7 @@ impl WindowTitleWidget {
         // The callback owns clones of the GTK widgets and config.
         // Each widget remembers its last state - we only update when a window
         // on THIS monitor gains focus, otherwise we keep showing the last value.
-        WindowTitleService::global().connect(move |snapshot| {
+        let window_title_callback_id = WindowTitleService::global().connect(move |snapshot| {
             // Filter by output_id if specified
             if let Some(ref target_output) = output_id {
                 // Only update if window is on this monitor
@@ -219,12 +222,21 @@ impl WindowTitleWidget {
             "WindowTitleWidget created (output_id={:?})",
             output_id_for_log
         );
-        Self { base }
+        Self {
+            base,
+            window_title_callback_id,
+        }
     }
 
     /// Get the root GTK widget for embedding in the bar.
     pub fn widget(&self) -> &gtk4::Box {
         self.base.widget()
+    }
+}
+
+impl Drop for WindowTitleWidget {
+    fn drop(&mut self) {
+        WindowTitleService::global().disconnect(self.window_title_callback_id);
     }
 }
 
