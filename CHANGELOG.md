@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0](https://github.com/prankstr/vibepanel/compare/v0.8.0...v0.9.0) (2026-02-18)
+
+
+### ⚠ BREAKING CHANGES
+
+* **ipc:** `vibepanel inhibit <command>` removed. Use `vibepanel inhibit toggle` to toggle the running panel's inhibitor, or `systemd-inhibit` for command-scoped inhibition.
+* **quick_settings:** the quick_settings config key `wifi` has been renamed to `network`
+
+### Features
+
+* **ipc:** generalize IPC beyond OSD, migrate inhibitor to logind ([f7ac749](https://github.com/prankstr/vibepanel/commit/f7ac749b6a5a971d757c28c43f0038762b906a74))
+* **network:** show WiFi connecting spinner from NM device state ([8015405](https://github.com/prankstr/vibepanel/commit/8015405588e50c30ec440a0a0fc85a746573fd30))
+* **quick_settings:** add support for mobile networks in network card ([#47](https://github.com/prankstr/vibepanel/issues/47)) ([8015405](https://github.com/prankstr/vibepanel/commit/8015405588e50c30ec440a0a0fc85a746573fd30))
+* **quick_settings:** dynamic brightness icon ([#46](https://github.com/prankstr/vibepanel/issues/46)) ([2f3178c](https://github.com/prankstr/vibepanel/commit/2f3178caa956d5eeff434f26056edb15ac0da7ff))
+* **quick_settings:** rename wifi setting to network ([8015405](https://github.com/prankstr/vibepanel/commit/8015405588e50c30ec440a0a0fc85a746573fd30))
+* **updates:** add Flatpak support for package updates ([#49](https://github.com/prankstr/vibepanel/issues/49)) ([dc358bb](https://github.com/prankstr/vibepanel/commit/dc358bb89b616a34d66cfd71c90927c5c3438992))
+* **updates:** show real-time progress during update checks, ui tweaks ([5db505d](https://github.com/prankstr/vibepanel/commit/5db505d85fa6bc7a12fde2ff7107376a6e56510a))
+* **workspaces:** animate indicator additions and removals ([#48](https://github.com/prankstr/vibepanel/issues/48)) ([f126cce](https://github.com/prankstr/vibepanel/commit/f126ccec11d678d5b3927caa9541abbbabc1e563))
+* **workspaces:** animated and proportionally sized workspace indicators ([bdef925](https://github.com/prankstr/vibepanel/commit/bdef9254c25d55901ee8e52b8e61421a8e3aec11))
+
+
+### Bug Fixes
+
+* **icons:** fix icon names in widgets and broken GTK mappings ([cbe4186](https://github.com/prankstr/vibepanel/commit/cbe41862e4fbe6f08a168ff6d4d4fe4c86f54404))
+* **services:** migrate 11 services to CallbackId pattern for deterministic cleanup ([9d02580](https://github.com/prankstr/vibepanel/commit/9d02580b5fca8d896a298f6d45897ad73f6d332b))
+* **vpn:** ensure password prompts get keyboard focus from quick toggle ([df82ed7](https://github.com/prankstr/vibepanel/commit/df82ed7bb2c1ee911d0b85fab8fef6ed44309a23))
+* **window_title:** preserve original delimiters in title ([#50](https://github.com/prankstr/vibepanel/issues/50)) ([67762f9](https://github.com/prankstr/vibepanel/commit/67762f935be7a4a2f89273f6c1d8c70896b60602))
+
 ## [0.8.0](https://github.com/prankstr/vibepanel/compare/v0.7.0...v0.8.0) (2026-02-10)
 
 
