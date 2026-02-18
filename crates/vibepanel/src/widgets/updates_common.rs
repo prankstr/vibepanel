@@ -191,7 +191,7 @@ pub fn spawn_upgrade_terminal(
         .or_else(detect_terminal)
         .ok_or_else(|| "No terminal emulator found".to_string())?;
 
-    let upgrade_cmd = package_manager.upgrade_command();
+    let upgrade_cmd = build_upgrade_command(package_manager);
 
     // Build the shell command that runs upgrade and waits for user input
     let shell_cmd = format!(
@@ -265,6 +265,23 @@ pub fn spawn_upgrade_terminal(
             error!("Failed to spawn terminal '{}': {}", terminal, e);
             Err(format!("Failed to spawn terminal: {}", e))
         }
+    }
+}
+
+/// Build the shell command used for update execution.
+///
+/// If Flatpak exists and the primary manager is not Flatpak, append a Flatpak
+/// update pass so one click upgrades both system packages and Flatpaks.
+fn build_upgrade_command(package_manager: PackageManager) -> String {
+    let primary = package_manager.upgrade_command();
+
+    if package_manager != PackageManager::Flatpak && which_exists("flatpak") {
+        format!(
+            "{}; echo ''; echo 'Running Flatpak updates...'; flatpak update",
+            primary
+        )
+    } else {
+        primary.to_string()
     }
 }
 
@@ -394,5 +411,17 @@ mod tests {
 
         snapshot.error = Some("test".to_string());
         assert_eq!(icon_for_state(&snapshot), "software-update-urgent");
+    }
+
+    #[test]
+    fn test_build_upgrade_command_flatpak_primary() {
+        let cmd = build_upgrade_command(PackageManager::Flatpak);
+        assert_eq!(cmd, "flatpak update");
+    }
+
+    #[test]
+    fn test_build_upgrade_command_non_flatpak_contains_primary() {
+        let cmd = build_upgrade_command(PackageManager::Paru);
+        assert!(cmd.starts_with("paru -Syu"));
     }
 }

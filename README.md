@@ -42,7 +42,7 @@ These examples use roughly ~10–35 lines of TOML to get completely different vi
 - **Battery** - status with detailed popover and power profiles
 - **System tray** - XDG tray support
 - **Notifications** - notification center with Do Not Disturb
-- **Updates** - package update indicator (dnf and pacman/paru support right now)
+- **Updates** - package update indicator (dnf, pacman/paru, and flatpak support)
 - **CPU & Memory** - system resource monitors
 - **Media** - MPRIS media player controls with album art
 - **Quick settings**:
@@ -131,7 +131,7 @@ If you find a bug or if you're missing a feature, please [open an issue](https:/
 ### Compatibility
 
 - **Compositors:** Hyprland, Niri, MangoWC/DWL. Sway support may be added based on demand.
-- **Updates widget:** dnf and pacman/paru. More package managers planned.
+- **Updates widget:** dnf, pacman/paru, and flatpak.
 
 ## Documentation
 
