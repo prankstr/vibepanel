@@ -22,6 +22,7 @@ use tracing::{debug, error, warn};
 
 use super::callbacks::{CallbackId, Callbacks};
 use super::state;
+use super::vpn_secret_agent::{VpnAuthRequest, VpnSecretAgent};
 
 /// NetworkManager service name.
 const NM_SERVICE: &str = "org.freedesktop.NetworkManager";
@@ -101,6 +102,12 @@ pub struct VpnSnapshot {
     pub is_ready: bool,
     /// Preferred VPN UUID from last session (used for primary() selection when no VPN is active).
     pub preferred_uuid: Option<String>,
+    /// Active authentication request from NM SecretAgent (show password prompt).
+    pub auth_request: Option<VpnAuthRequest>,
+    /// Whether a legacy auth-dialog (with its own GTK window) is currently running.
+    /// When true, the QS panel releases its keyboard grab so the dialog can
+    /// receive keyboard input on compositors that use Exclusive keyboard mode.
+    pub legacy_auth_dialog_active: bool,
 }
 
 impl VpnSnapshot {
@@ -113,6 +120,8 @@ impl VpnSnapshot {
             active_count: 0,
             is_ready: false,
             preferred_uuid: None,
+            auth_request: None,
+            legacy_auth_dialog_active: false,
         }
     }
 
@@ -133,7 +142,7 @@ impl VpnSnapshot {
 
 /// Messages sent from background threads to the main thread.
 #[derive(Debug)]
-pub(crate) enum VpnUpdate {
+pub enum VpnUpdate {
     /// Full refresh of VPN connections complete.
     ConnectionsRefreshed {
         connections: Vec<VpnConnection>,
@@ -142,11 +151,22 @@ pub(crate) enum VpnUpdate {
     },
     /// Request a refresh (from signal handler).
     RequestRefresh,
+    /// NM SecretAgent received a GetSecrets request — show auth UI.
+    AuthRequest(VpnAuthRequest),
+    /// Auth request was cleared (cancelled, timed out, or completed).
+    AuthCleared,
+    /// A legacy auth-dialog (with its own GTK window) was spawned.
+    /// The QS panel should release its keyboard grab so the dialog
+    /// can receive keyboard input.
+    LegacyAuthDialogSpawned,
+    /// A legacy auth-dialog has finished (success, cancel, or error).
+    /// The QS panel should restore its keyboard grab.
+    LegacyAuthDialogFinished,
 }
 
 /// Send a VPN update to the main thread via glib::idle_add_once.
 /// This schedules the update to run on the GLib main loop without polling.
-fn send_vpn_update(update: VpnUpdate) {
+pub fn send_vpn_update(update: VpnUpdate) {
     glib::idle_add_once(move || {
         VpnService::global().apply_update(update);
     });
@@ -230,6 +250,47 @@ impl VpnService {
     /// Return the current VPN snapshot.
     pub fn snapshot(&self) -> VpnSnapshot {
         self.snapshot.borrow().clone()
+    }
+
+    /// Submit secrets for a pending VPN auth request.
+    ///
+    /// Called from the UI when the user fills in credentials and clicks Connect.
+    pub fn submit_vpn_secrets(&self, secrets: &[(String, String)]) {
+        let setting_name = {
+            let snapshot = self.snapshot.borrow();
+            match snapshot.auth_request {
+                Some(ref req) => req.setting_name.clone(),
+                None => {
+                    warn!("VPN: submit_vpn_secrets called but no auth request pending");
+                    return;
+                }
+            }
+        };
+
+        VpnSecretAgent::submit_secrets(&setting_name, secrets);
+
+        // Clear the auth state
+        let mut snapshot = self.snapshot.borrow_mut();
+        snapshot.auth_request = None;
+        let snapshot_clone = snapshot.clone();
+        drop(snapshot);
+        self.callbacks.notify(&snapshot_clone);
+    }
+
+    /// Cancel a pending VPN auth request.
+    ///
+    /// Called from the UI when the user clicks Cancel on the password prompt.
+    pub fn cancel_vpn_auth(&self) {
+        VpnSecretAgent::cancel_auth();
+
+        // Clear the auth state
+        let mut snapshot = self.snapshot.borrow_mut();
+        if snapshot.auth_request.is_some() {
+            snapshot.auth_request = None;
+            let snapshot_clone = snapshot.clone();
+            drop(snapshot);
+            self.callbacks.notify(&snapshot_clone);
+        }
     }
 
     /// Set the state of a VPN connection (connect or disconnect).
@@ -489,6 +550,38 @@ impl VpnService {
             VpnUpdate::RequestRefresh => {
                 self.queue_refresh();
             }
+            VpnUpdate::AuthRequest(request) => {
+                let mut snapshot = self.snapshot.borrow_mut();
+                snapshot.auth_request = Some(request);
+                let snapshot_clone = snapshot.clone();
+                drop(snapshot);
+                self.callbacks.notify(&snapshot_clone);
+            }
+            VpnUpdate::AuthCleared => {
+                let mut snapshot = self.snapshot.borrow_mut();
+                if snapshot.auth_request.is_some() {
+                    snapshot.auth_request = None;
+                    let snapshot_clone = snapshot.clone();
+                    drop(snapshot);
+                    self.callbacks.notify(&snapshot_clone);
+                }
+            }
+            VpnUpdate::LegacyAuthDialogSpawned => {
+                let mut snapshot = self.snapshot.borrow_mut();
+                snapshot.legacy_auth_dialog_active = true;
+                let snapshot_clone = snapshot.clone();
+                drop(snapshot);
+                self.callbacks.notify(&snapshot_clone);
+            }
+            VpnUpdate::LegacyAuthDialogFinished => {
+                let mut snapshot = self.snapshot.borrow_mut();
+                if snapshot.legacy_auth_dialog_active {
+                    snapshot.legacy_auth_dialog_active = false;
+                    let snapshot_clone = snapshot.clone();
+                    drop(snapshot);
+                    self.callbacks.notify(&snapshot_clone);
+                }
+            }
         }
     }
 
@@ -565,6 +658,9 @@ impl VpnService {
 
                 *this.connection.borrow_mut() = Some(connection.clone());
 
+                // Register NM SecretAgent for VPN password prompts.
+                VpnSecretAgent::register(&connection);
+
                 // After resume from sleep, signal subscriptions on active connection
                 // paths may be stale. Refresh to re-subscribe to current paths.
                 let sub_sleep = connection.subscribe_to_signal(
@@ -620,6 +716,10 @@ impl VpnService {
                             let proxy = values[0].get::<gio::DBusProxy>().ok();
                             let has_owner = proxy.and_then(|p| p.name_owner()).is_some();
                             if has_owner {
+                                // Service reappeared — re-register SecretAgent with new NM instance.
+                                if let Some(conn) = this.connection.borrow().as_ref() {
+                                    VpnSecretAgent::re_register_with_agent_manager(conn);
+                                }
                                 // Service reappeared - refresh.
                                 send_vpn_update(VpnUpdate::RequestRefresh);
                             } else {

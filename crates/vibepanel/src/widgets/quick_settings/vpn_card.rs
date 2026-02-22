@@ -11,7 +11,7 @@ use std::collections::HashSet;
 use std::rc::{Rc, Weak};
 
 use gtk4::prelude::*;
-use gtk4::{Box as GtkBox, ListBox, Orientation, ScrolledWindow};
+use gtk4::{Box as GtkBox, Button, Entry, Label, ListBox, ListBoxRow, Orientation, ScrolledWindow};
 use tracing::debug;
 
 use super::components::ListRow;
@@ -23,7 +23,8 @@ use super::window::QuickSettingsWindow;
 use crate::services::icons::IconsService;
 use crate::services::surfaces::SurfaceStyleManager;
 use crate::services::vpn::{VpnConnection, VpnService, VpnSnapshot};
-use crate::styles::{color, icon, qs, row, state};
+use crate::services::vpn_secret_agent::VpnAuthRequest;
+use crate::styles::{button, color, icon, qs, row, state};
 
 // Global state for VPN keyboard grab management.
 // This needs to be global because QuickSettingsWindow is recreated each time it opens,
@@ -66,16 +67,10 @@ impl VpnKeyboardState {
         self.qs_window = None;
     }
 
-    /// Add a pending connect and release keyboard grab.
+    /// Add a pending connect. Keyboard grab release for legacy auth-dialogs
+    /// is handled separately via `VpnUpdate::LegacyAuthDialogSpawned`.
     fn begin_connect(&mut self, uuid: &str) {
         self.pending_connects.insert(uuid.to_string());
-        if let Some(ref weak) = self.qs_window
-            && let Some(qs) = weak.upgrade()
-        {
-            debug!("VPN: Releasing keyboard grab for pending connect");
-            qs.release_keyboard_grab();
-            self.keyboard_released = true;
-        }
     }
 
     /// Add a pending disconnect.
@@ -237,6 +232,16 @@ pub struct VpnCardState {
     pub base: ExpandableCardBase,
     /// Guard flag to prevent feedback loops when programmatically updating toggle.
     pub updating_toggle: Cell<bool>,
+    /// Inline auth prompt container (reusable, re-parented under the matching connection row).
+    pub auth_box: RefCell<Option<GtkBox>>,
+    /// Password entries keyed by secret field key (e.g., "password").
+    pub auth_entries: RefCell<Vec<(String, Entry)>>,
+    /// Label showing the connection name / prompt text.
+    pub auth_label: RefCell<Option<Label>>,
+    /// Status label (shows "Wrong password" on retry).
+    pub auth_status_label: RefCell<Option<Label>>,
+    /// UUID of the connection we're showing auth for.
+    pub auth_target_uuid: RefCell<Option<String>>,
 }
 
 impl VpnCardState {
@@ -244,6 +249,11 @@ impl VpnCardState {
         Self {
             base: ExpandableCardBase::new(),
             updating_toggle: Cell::new(false),
+            auth_box: RefCell::new(None),
+            auth_entries: RefCell::new(Vec::new()),
+            auth_label: RefCell::new(None),
+            auth_status_label: RefCell::new(None),
+            auth_target_uuid: RefCell::new(None),
         }
     }
 }
@@ -284,6 +294,9 @@ pub fn build_vpn_details(state: &Rc<VpnCardState>) -> VpnDetailsResult {
 
     container.append(&scroller);
 
+    // Build inline auth prompt box (initially hidden, re-parented as needed)
+    build_vpn_auth_box(state);
+
     // Populate with current VPN state
     let snapshot = VpnService::global().snapshot();
     populate_vpn_list(state, &list_box, &snapshot);
@@ -296,6 +309,16 @@ pub fn build_vpn_details(state: &Rc<VpnCardState>) -> VpnDetailsResult {
 
 /// Populate the VPN list with connection data from snapshot.
 pub fn populate_vpn_list(state: &Rc<VpnCardState>, list_box: &ListBox, snapshot: &VpnSnapshot) {
+    // Unparent and unrealize the auth box BEFORE clearing the list.
+    // Same pattern as network_card.rs: prevents GTK assertion failures when
+    // re-parenting the widget to a new row.
+    if let Some(auth_box) = state.auth_box.borrow().as_ref()
+        && auth_box.parent().is_some()
+    {
+        auth_box.unrealize();
+        auth_box.unparent();
+    }
+
     clear_list_box(list_box);
 
     if !snapshot.is_ready {
@@ -309,6 +332,8 @@ pub fn populate_vpn_list(state: &Rc<VpnCardState>, list_box: &ListBox, snapshot:
     }
 
     let icons = IconsService::global();
+    let target_uuid = state.auth_target_uuid.borrow().clone();
+    let mut inserted_auth_row = false;
 
     for conn in &snapshot.connections {
         // Build extra parts (Autoconnect, VPN type)
@@ -357,6 +382,35 @@ pub fn populate_vpn_list(state: &Rc<VpnCardState>, list_box: &ListBox, snapshot:
         // not by row activation, to avoid double-triggering.
 
         list_box.append(&row_result.row);
+
+        // Insert auth row directly under the matching connection row
+        if let Some(ref target) = target_uuid
+            && !target.is_empty()
+            && *target == conn.uuid
+            && let Some(auth_box) = state.auth_box.borrow().as_ref()
+        {
+            let auth_row = ListBoxRow::new();
+            auth_row.set_activatable(false);
+            auth_row.set_focusable(true);
+            auth_box.set_visible(true);
+            auth_row.set_child(Some(auth_box));
+            list_box.append(&auth_row);
+            inserted_auth_row = true;
+        }
+    }
+
+    // Fallback: append auth row at end if target UUID not found
+    if let Some(target) = target_uuid
+        && !target.is_empty()
+        && !inserted_auth_row
+        && let Some(auth_box) = state.auth_box.borrow().as_ref()
+    {
+        let auth_row = ListBoxRow::new();
+        auth_row.set_activatable(false);
+        auth_row.set_focusable(true);
+        auth_box.set_visible(true);
+        auth_row.set_child(Some(auth_box));
+        list_box.append(&auth_row);
     }
 }
 
@@ -393,6 +447,40 @@ pub fn on_vpn_changed(state: &Rc<VpnCardState>, snapshot: &VpnSnapshot) -> bool 
 
     if should_restore {
         VPN_KEYBOARD_STATE.with(|s| s.borrow_mut().restore_if_released());
+    }
+
+    // Handle legacy auth-dialog keyboard grab management.
+    // When a legacy auth-dialog (like OpenConnect) spawns its own GTK window,
+    // we release the exclusive keyboard grab so the dialog can receive input.
+    // When the dialog finishes, we restore the grab.
+    VPN_KEYBOARD_STATE.with(|s| {
+        let mut state = s.borrow_mut();
+        if snapshot.legacy_auth_dialog_active && !state.keyboard_released {
+            debug!("VPN: Releasing keyboard grab for legacy auth-dialog");
+            if let Some(ref weak) = state.qs_window
+                && let Some(qs) = weak.upgrade()
+            {
+                qs.release_keyboard_grab();
+            }
+            state.keyboard_released = true;
+        } else if !snapshot.legacy_auth_dialog_active && state.keyboard_released {
+            state.restore_if_released();
+        }
+    });
+
+    // Handle auth request from NM SecretAgent
+    if let Some(ref auth_request) = snapshot.auth_request {
+        let current_target = state.auth_target_uuid.borrow().clone();
+        if current_target.as_deref() != Some(&auth_request.uuid) {
+            // New auth request — show the prompt
+            show_vpn_auth_dialog(state, auth_request);
+        }
+    } else {
+        // No auth request — hide prompt if one was showing
+        let had_auth = state.auth_target_uuid.borrow().is_some();
+        if had_auth {
+            hide_vpn_auth_dialog(state);
+        }
     }
 
     // Update toggle state and sensitivity
@@ -449,4 +537,238 @@ pub fn on_vpn_changed(state: &Rc<VpnCardState>, snapshot: &VpnSnapshot) -> bool 
     }
 
     pending_connect_completed
+}
+
+// --- VPN Auth UI ---
+
+/// Build the reusable inline auth prompt box.
+///
+/// This is created once and re-parented into the connection list beneath the
+/// matching VPN row whenever NM sends a GetSecrets request. Follows the same
+/// pattern as the WiFi password box in network_card.rs.
+fn build_vpn_auth_box(state: &Rc<VpnCardState>) {
+    let auth_box = GtkBox::new(Orientation::Vertical, 6);
+    auth_box.set_visible(false);
+
+    let auth_label = Label::new(Some(""));
+    auth_label.set_xalign(0.0);
+    auth_label.set_wrap(true);
+    auth_label.set_wrap_mode(gtk4::pango::WrapMode::WordChar);
+    auth_label.set_max_width_chars(40);
+    auth_box.append(&auth_label);
+
+    // Entries are created dynamically per-request (in show_vpn_auth_dialog)
+    // because the number and type of fields varies per VPN connection.
+
+    // Button row: [status label (expands)] [cancel] [connect]
+    let btn_row = GtkBox::new(Orientation::Horizontal, 8);
+
+    // Status label (shows "Wrong password" on retry)
+    let status_label = Label::new(Some(""));
+    status_label.set_xalign(0.0);
+    status_label.set_hexpand(true);
+    btn_row.append(&status_label);
+
+    let btn_cancel = Button::with_label("Cancel");
+    btn_cancel.add_css_class(button::CARD);
+    let btn_ok = Button::with_label("Connect");
+    btn_ok.add_css_class(button::ACCENT);
+
+    // Apply Pango font attrs to fix text clipping on layer-shell surfaces
+    let style_mgr = SurfaceStyleManager::global();
+    style_mgr.apply_pango_attrs(&auth_label);
+    style_mgr.apply_pango_attrs(&status_label);
+
+    {
+        let state_weak = Rc::downgrade(state);
+        btn_cancel.connect_clicked(move |_| {
+            if let Some(state) = state_weak.upgrade() {
+                on_vpn_auth_cancel_clicked(&state);
+            }
+        });
+    }
+
+    {
+        let state_weak = Rc::downgrade(state);
+        btn_ok.connect_clicked(move |_| {
+            if let Some(state) = state_weak.upgrade() {
+                on_vpn_auth_connect_clicked(&state);
+            }
+        });
+    }
+
+    btn_row.append(&btn_cancel);
+    btn_row.append(&btn_ok);
+    auth_box.append(&btn_row);
+
+    *state.auth_box.borrow_mut() = Some(auth_box);
+    *state.auth_label.borrow_mut() = Some(auth_label);
+    *state.auth_status_label.borrow_mut() = Some(status_label);
+}
+
+/// Show the VPN auth dialog for the given auth request.
+fn show_vpn_auth_dialog(state: &Rc<VpnCardState>, request: &VpnAuthRequest) {
+    *state.auth_target_uuid.borrow_mut() = Some(request.uuid.clone());
+
+    // Update the prompt label
+    if let Some(label) = state.auth_label.borrow().as_ref() {
+        let text = if let Some(ref desc) = request.description {
+            // Use description from auth-dialog (external-ui-mode)
+            desc.clone()
+        } else if request.is_retry {
+            format!("Re-enter credentials for {}", request.name)
+        } else {
+            format!("Enter credentials for {}", request.name)
+        };
+        label.set_label(&text);
+    }
+
+    // Show retry error if applicable
+    if let Some(status_label) = state.auth_status_label.borrow().as_ref() {
+        if request.is_retry {
+            status_label.add_css_class(color::ERROR);
+            status_label.set_label("Wrong password");
+        } else {
+            status_label.remove_css_class(color::ERROR);
+            status_label.set_label("");
+        }
+    }
+
+    // Rebuild auth box contents: remove old entries, create new ones.
+    // The auth box layout is: [label] [entry...] [btn_row]
+    // We reconstruct by removing all children, then re-appending in order.
+    if let Some(auth_box) = state.auth_box.borrow().as_ref() {
+        let label = state.auth_label.borrow().as_ref().cloned();
+
+        // Collect the button row (last child) — it contains status + cancel + connect
+        let btn_row = {
+            let mut last = auth_box.first_child();
+            let mut prev = None;
+            while let Some(w) = last {
+                prev = Some(w.clone());
+                last = w.next_sibling();
+            }
+            prev
+        };
+
+        // Remove all children
+        while let Some(child) = auth_box.first_child() {
+            auth_box.remove(&child);
+        }
+
+        // Re-append label
+        if let Some(ref lbl) = label {
+            auth_box.append(lbl);
+        }
+
+        // Create new entries for each requested field
+        let mut entries = Vec::new();
+
+        for field in &request.fields {
+            let entry = Entry::new();
+            entry.set_placeholder_text(Some(&field.label));
+            entry.set_visibility(false);
+            entry.set_input_purpose(gtk4::InputPurpose::Password);
+            entry.set_can_focus(true);
+            entry.set_focus_on_click(true);
+
+            // Pre-fill with value from auth-dialog (external-ui-mode)
+            if let Some(ref value) = field.value {
+                entry.set_text(value);
+            }
+
+            // Enter key submits
+            {
+                let state_weak = Rc::downgrade(state);
+                entry.connect_activate(move |_| {
+                    if let Some(state) = state_weak.upgrade() {
+                        on_vpn_auth_connect_clicked(&state);
+                    }
+                });
+            }
+
+            // Auto-focus first entry when mapped
+            if entries.is_empty() {
+                entry.connect_map(move |entry| {
+                    entry.grab_focus();
+                });
+            }
+
+            auth_box.append(&entry);
+            entries.push((field.key.clone(), entry));
+        }
+
+        // Re-append button row
+        if let Some(ref row) = btn_row {
+            auth_box.append(row);
+        }
+
+        *state.auth_entries.borrow_mut() = entries;
+    }
+
+    // Expand the VPN card revealer so the auth row is visible
+    if let Some(revealer) = state.base.revealer.borrow().as_ref() {
+        revealer.set_reveal_child(true);
+    }
+    if let Some(arrow) = state.base.arrow.borrow().as_ref() {
+        arrow.set_icon("keyboard_arrow_up");
+    }
+
+    // Repopulate list to position the auth box under the correct connection
+    if let Some(list_box) = state.base.list_box.borrow().as_ref() {
+        let snapshot = VpnService::global().snapshot();
+        populate_vpn_list(state, list_box, &snapshot);
+        SurfaceStyleManager::global().apply_pango_attrs_all(list_box);
+    }
+}
+
+/// Hide the VPN auth dialog and reset its state.
+fn hide_vpn_auth_dialog(state: &Rc<VpnCardState>) {
+    // Clear entries
+    for (_key, entry) in state.auth_entries.borrow().iter() {
+        entry.set_text("");
+    }
+    *state.auth_entries.borrow_mut() = Vec::new();
+
+    if let Some(box_) = state.auth_box.borrow().as_ref() {
+        box_.set_visible(false);
+    }
+
+    // Clear status label
+    if let Some(status_label) = state.auth_status_label.borrow().as_ref() {
+        status_label.remove_css_class(color::ERROR);
+        status_label.set_label("");
+    }
+
+    *state.auth_target_uuid.borrow_mut() = None;
+
+    // Repopulate list without auth row
+    if let Some(list_box) = state.base.list_box.borrow().as_ref() {
+        let snapshot = VpnService::global().snapshot();
+        populate_vpn_list(state, list_box, &snapshot);
+        SurfaceStyleManager::global().apply_pango_attrs_all(list_box);
+    }
+}
+
+/// Handle Cancel click on the VPN auth dialog.
+fn on_vpn_auth_cancel_clicked(state: &Rc<VpnCardState>) {
+    hide_vpn_auth_dialog(state);
+    VpnService::global().cancel_vpn_auth();
+}
+
+/// Handle Connect click on the VPN auth dialog.
+fn on_vpn_auth_connect_clicked(state: &Rc<VpnCardState>) {
+    let secrets: Vec<(String, String)> = state
+        .auth_entries
+        .borrow()
+        .iter()
+        .map(|(key, entry)| (key.clone(), entry.text().to_string()))
+        .collect();
+
+    if secrets.is_empty() {
+        return;
+    }
+
+    VpnService::global().submit_vpn_secrets(&secrets);
+    hide_vpn_auth_dialog(state);
 }
