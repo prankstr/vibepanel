@@ -1708,8 +1708,7 @@ fn extract_variant_dict_strings(dict: &Variant) -> Vec<(String, String)> {
 
         let key_str = key.str().map(|s| s.to_string());
 
-        // Value is variant-wrapped in a{sv}
-        let value_str = if value.n_children() > 0 {
+        let value_str = if value.is_container() && value.n_children() > 0 {
             value.child_value(0).str().map(|s| s.to_string())
         } else {
             value.str().map(|s| s.to_string())
