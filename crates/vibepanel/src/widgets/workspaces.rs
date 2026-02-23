@@ -1000,6 +1000,8 @@ enum ChangeType {
     None,
     /// IDs were removed but none added (minimal mode only).
     Removal,
+    /// Same IDs in a different order (e.g., workspace reorder in Niri).
+    Reorder,
     /// New workspace IDs appeared (minimal mode only). Also covers
     /// simultaneous add+remove (e.g., `[1,2,3] → [1,4]`): the full
     /// recreate replaces all indicators at once — removed workspaces
@@ -1043,8 +1045,12 @@ fn classify_change(
     }
 
     if !has_additions && !old_ids_empty {
-        // Pure reorders also land here (harmless no-op); backends report sorted order.
-        ChangeType::Removal
+        if old_count == new_count {
+            // Same IDs, different order — pure reorder (e.g., user reordered in Niri).
+            ChangeType::Reorder
+        } else {
+            ChangeType::Removal
+        }
     } else if new_count == old_count {
         // Note: old_ids_empty with equal counts is unreachable (both would be 0).
         ChangeType::Swap
@@ -1211,6 +1217,21 @@ fn update_indicators(
 
                     wsc.seed_current_width(pre_removal_width as f64);
                 }
+                ChangeType::Reorder => {
+                    // ── Path A2: Reorder — same IDs, different order. ──
+                    // Full recreate without grow-in; container width unchanged.
+                    recreate_with_grow_in(
+                        container,
+                        wsc,
+                        labels_cell,
+                        ids_cell,
+                        label_type,
+                        separator,
+                        &display_workspaces,
+                        &old_ids,
+                        &new_ids,
+                    );
+                }
                 ChangeType::Swap => {
                     // ── Path B1: Swap — same count, different IDs. ──
                     pre_recreate_width = Some(wsc.imp().current_width.get());
@@ -1358,6 +1379,11 @@ fn update_indicators(
             ChangeType::Removal => {
                 // Target may be stale; tick callback corrects via
                 // live target correction + floor-clamp.
+                let target = wsc.compute_children_current_width();
+                wsc.set_target_width(target);
+            }
+            ChangeType::Reorder => {
+                // Same count, just reordered — snap to current width.
                 let target = wsc.compute_children_current_width();
                 wsc.set_target_width(target);
             }
@@ -1617,11 +1643,21 @@ mod tests {
 
     #[test]
     fn test_classify_removal_only() {
-        // IDs changed, no additions, old not empty, minimal mode.
+        // IDs changed, no additions, old not empty, count decreased, minimal mode.
         // e.g., [1,2,3] → [1,2] — workspace 3 removed.
         assert_eq!(
             classify_change(true, false, false, 3, 2, true),
             ChangeType::Removal
+        );
+    }
+
+    #[test]
+    fn test_classify_reorder() {
+        // IDs changed (different order), no additions, same count, minimal mode.
+        // e.g., [1,6,2,15] → [1,2,6,15] — user reordered workspaces.
+        assert_eq!(
+            classify_change(true, false, false, 4, 4, true),
+            ChangeType::Reorder
         );
     }
 
