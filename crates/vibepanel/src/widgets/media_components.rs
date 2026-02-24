@@ -8,7 +8,7 @@ use gtk4::gio;
 use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4::{Align, Box as GtkBox, Button, EventControllerLegacy, Label, Orientation, Scale};
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::services::config_manager::ConfigManager;
 use crate::services::icons::{IconHandle, IconsService};
@@ -46,18 +46,27 @@ pub struct MediaViewController {
 impl MediaViewController {
     /// Update all UI elements from a media snapshot.
     pub fn update_from_snapshot(&self, snapshot: &MediaSnapshot) {
-        update_track_info(
-            &self.title_label,
-            &self.artist_label,
-            &self.album_label,
-            snapshot,
-        );
-        load_album_art(
-            snapshot.metadata.art_url.as_deref(),
-            &self.art_picture,
-            &self.art_placeholder_box,
-            &self.art_state,
-        );
+        let has_metadata = snapshot.has_metadata();
+
+        // When the player is active but metadata is momentarily empty (e.g. during
+        // a track switch), keep showing the previous track's info instead of
+        // flashing placeholder text. Controls and seek position still update so
+        // the play/pause state stays correct.
+        if has_metadata {
+            update_track_info(
+                &self.title_label,
+                &self.artist_label,
+                &self.album_label,
+                snapshot,
+            );
+            load_album_art(
+                snapshot.metadata.art_url.as_deref(),
+                &self.art_picture,
+                &self.art_placeholder_box,
+                &self.art_state,
+            );
+        }
+
         update_playback_controls(
             &self.play_pause_icon,
             &self.play_pause_btn,
@@ -80,11 +89,21 @@ impl MediaViewController {
 // Art State
 // ============================================================================
 
+/// Grace period (ms) before loading new album art.
+///
+/// Chromium creates multiple temporary image files during a track switch — the
+/// first is typically the player's own icon, followed by the real album art
+/// ~150-200ms later.  By waiting for the URL to settle we avoid briefly
+/// displaying the intermediate (wrong) image.
+pub const ART_DEBOUNCE_MS: u64 = 200;
+
 /// State for tracking album art loading with cancellation support.
 pub struct ArtState {
     pub current_url: Option<String>,
     pub generation: u64,
     pub cancellable: gio::Cancellable,
+    /// Pending debounce timer (see [`ART_DEBOUNCE_MS`]).
+    pub debounce_source: Option<glib::SourceId>,
 }
 
 impl ArtState {
@@ -93,13 +112,111 @@ impl ArtState {
             current_url: None,
             generation: 0,
             cancellable: gio::Cancellable::new(),
+            debounce_source: None,
         }
+    }
+
+    pub fn cancel_debounce(&mut self) {
+        if let Some(source_id) = self.debounce_source.take() {
+            source_id.remove();
+        }
+    }
+
+    /// Decide whether a new art URL warrants a fresh load, and if so prepare
+    /// the state (cancel previous load/debounce, record the new URL).
+    ///
+    /// Returns `false` when the URL is unchanged or when it momentarily became
+    /// `None` (e.g. during a track switch) — in that case we keep showing the
+    /// previous album art to avoid flashing a placeholder/fallback.
+    ///
+    /// **Tradeoff:** if a track genuinely has no album art, the previous track's
+    /// art will remain visible until a new URL arrives.  This is an acceptable
+    /// compromise since the alternative (briefly flashing a fallback icon on
+    /// every track switch) is more visually disruptive.
+    pub fn prepare_art_load(&mut self, new_url: Option<&str>) -> bool {
+        if self.current_url.as_deref() == new_url {
+            return false;
+        }
+        if new_url.is_none() && self.current_url.is_some() {
+            return false;
+        }
+        self.cancellable.cancel();
+        self.cancellable = gio::Cancellable::new();
+        self.cancel_debounce();
+        self.current_url = new_url.map(String::from);
+        true
+    }
+
+    /// Schedule a debounced album art load.
+    ///
+    /// Calls [`prepare_art_load`](Self::prepare_art_load) and, if a load is
+    /// needed, starts a [`ART_DEBOUNCE_MS`] timer.  When the timer fires the
+    /// generation is bumped and [`load_art_from_url`] is called with the
+    /// supplied `on_success` / `on_failure` callbacks.
+    ///
+    /// Both call sites (bar widget and popover/window) delegate here so the
+    /// debounce + generation logic lives in one place.
+    pub fn debounced_load<S, F>(
+        art_state: &Rc<RefCell<Self>>,
+        url: Option<&str>,
+        picture: RoundedPicture,
+        on_success: S,
+        on_failure: F,
+    ) where
+        S: Fn() + Clone + 'static,
+        F: Fn() + Clone + 'static,
+    {
+        {
+            let mut state = art_state.borrow_mut();
+            if !state.prepare_art_load(url) {
+                return;
+            }
+        }
+
+        let art_state_for_closure = Rc::clone(art_state);
+        let url_owned = url.map(String::from);
+
+        let source_id = glib::timeout_add_local_once(
+            std::time::Duration::from_millis(ART_DEBOUNCE_MS),
+            move || {
+                {
+                    let mut st = art_state_for_closure.borrow_mut();
+                    st.debounce_source = None;
+                    st.generation += 1;
+                }
+
+                let generation = art_state_for_closure.borrow().generation;
+                let cancellable = art_state_for_closure.borrow().cancellable.clone();
+
+                match url_owned {
+                    Some(ref url) => load_art_from_url(
+                        url,
+                        picture,
+                        &art_state_for_closure,
+                        generation,
+                        &cancellable,
+                        on_success,
+                        on_failure,
+                    ),
+                    None => on_failure(),
+                }
+            },
+        );
+
+        art_state.borrow_mut().debounce_source = Some(source_id);
     }
 }
 
 impl Default for ArtState {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl Drop for ArtState {
+    fn drop(&mut self) {
+        self.cancel_debounce();
+        self.cancellable.cancel();
     }
 }
 
@@ -454,51 +571,27 @@ pub fn update_seek_position(
 /// Load album art, handling URL changes and cancellation.
 ///
 /// Shows placeholder box on failure, hides it on success.
+/// Delegates to [`ArtState::debounced_load`] for the debounce + generation
+/// logic shared with the bar widget.
 pub fn load_album_art(
     art_url: Option<&str>,
     picture: &RoundedPicture,
     placeholder_box: &GtkBox,
     art_state: &Rc<RefCell<ArtState>>,
 ) {
-    let mut state = art_state.borrow_mut();
-
-    if state.current_url.as_deref() == art_url {
-        return;
-    }
-
-    state.cancellable.cancel();
-    state.cancellable = gio::Cancellable::new();
-    state.generation += 1;
-    state.current_url = art_url.map(String::from);
-
-    let generation = state.generation;
-    let cancellable = state.cancellable.clone();
-    drop(state);
-
     let placeholder_for_success = placeholder_box.clone();
     let on_success = move || {
         placeholder_for_success.set_visible(false);
     };
 
     let picture_for_failure = picture.clone();
-    let placeholder_box = placeholder_box.clone();
+    let placeholder_for_failure = placeholder_box.clone();
     let on_failure = move || {
         picture_for_failure.set_visible(false);
-        placeholder_box.set_visible(true);
+        placeholder_for_failure.set_visible(true);
     };
 
-    match art_url {
-        Some(url) => load_art_from_url(
-            url,
-            picture.clone(),
-            art_state,
-            generation,
-            &cancellable,
-            on_success,
-            on_failure,
-        ),
-        None => on_failure(),
-    }
+    ArtState::debounced_load(art_state, art_url, picture.clone(), on_success, on_failure);
 }
 
 /// Load album art from URL, calling `on_success` or `on_failure` callbacks.
@@ -530,7 +623,8 @@ pub fn load_art_from_url<S, F>(
             glib::Priority::DEFAULT,
             Some(&cancellable.clone()),
             move |result| {
-                if art_state.borrow().generation != generation {
+                let current_gen = art_state.borrow().generation;
+                if current_gen != generation {
                     return;
                 }
                 match result {
@@ -545,8 +639,10 @@ pub fn load_art_from_url<S, F>(
                         on_failure_clone,
                     ),
                     Err(e) => {
-                        if !e.matches(gio::IOErrorEnum::Cancelled) {
-                            debug!("Failed to load album art from {}: {}", url_string, e);
+                        if e.matches(gio::IOErrorEnum::Cancelled) {
+                            // Cancelled means a newer load superseded us — don't
+                            // call on_failure which would flash a fallback icon.
+                            return;
                         }
                         on_failure_clone();
                     }
@@ -569,7 +665,8 @@ pub fn load_art_from_url<S, F>(
             .await;
 
             // Check if still relevant after async work
-            if art_state.borrow().generation != generation {
+            let current_gen = art_state.borrow().generation;
+            if current_gen != generation {
                 return;
             }
 
@@ -584,17 +681,16 @@ pub fn load_art_from_url<S, F>(
                     );
                 }
                 Ok(None) => {
-                    debug!("Failed to fetch album art from {}", url_string);
                     on_failure();
                 }
                 Err(e) => {
-                    debug!("Failed to fetch album art from {}: {:?}", url_string, e);
+                    debug!("Failed to fetch album art: {:?}", e);
                     on_failure();
                 }
             }
         });
     } else {
-        debug!("Unknown album art URL scheme: {}", url);
+        warn!("Unknown album art URL scheme: {}", url);
         on_failure();
     }
 }
@@ -626,12 +722,14 @@ fn load_texture_from_stream<S, F>(
                 picture.set_paintable(Some(&gtk4::gdk::Texture::for_pixbuf(&pixbuf)));
                 picture.set_visible(true);
                 on_success();
-                debug!("Loaded album art from {}", url);
             }
             Err(e) => {
-                if !e.matches(gio::IOErrorEnum::Cancelled) {
-                    debug!("Failed to decode album art from {}: {}", url, e);
+                if e.matches(gio::IOErrorEnum::Cancelled) {
+                    // Cancelled means a newer load superseded us — don't
+                    // call on_failure which would flash a fallback/placeholder.
+                    return;
                 }
+                debug!("Failed to decode album art from {}: {}", url, e);
                 on_failure();
             }
         }
@@ -657,11 +755,73 @@ fn load_texture_from_bytes<S, F>(
             picture.set_paintable(Some(&gtk4::gdk::Texture::for_pixbuf(&pixbuf)));
             picture.set_visible(true);
             on_success();
-            debug!("Loaded album art from {}", url);
         }
         Err(e) => {
             debug!("Failed to decode album art from {}: {}", url, e);
             on_failure();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_prepare_art_load_same_url_is_noop() {
+        let mut state = ArtState::new();
+        state.current_url = Some("http://example.com/art.jpg".into());
+        assert!(!state.prepare_art_load(Some("http://example.com/art.jpg")));
+    }
+
+    #[test]
+    fn test_prepare_art_load_none_to_none_is_noop() {
+        let mut state = ArtState::new();
+        assert!(!state.prepare_art_load(None));
+    }
+
+    #[test]
+    fn test_prepare_art_load_ignores_none_transition() {
+        let mut state = ArtState::new();
+        state.current_url = Some("http://example.com/art.jpg".into());
+        assert!(!state.prepare_art_load(None));
+        assert_eq!(
+            state.current_url.as_deref(),
+            Some("http://example.com/art.jpg"),
+            "stale art URL should be preserved"
+        );
+    }
+
+    #[test]
+    fn test_prepare_art_load_none_to_some() {
+        let mut state = ArtState::new();
+        assert!(state.prepare_art_load(Some("http://example.com/art.jpg")));
+        assert_eq!(
+            state.current_url.as_deref(),
+            Some("http://example.com/art.jpg")
+        );
+    }
+
+    #[test]
+    fn test_prepare_art_load_different_url() {
+        let mut state = ArtState::new();
+        state.current_url = Some("http://example.com/old.jpg".into());
+        assert!(state.prepare_art_load(Some("http://example.com/new.jpg")));
+        assert_eq!(
+            state.current_url.as_deref(),
+            Some("http://example.com/new.jpg")
+        );
+    }
+
+    #[test]
+    fn test_prepare_art_load_cancels_previous() {
+        let mut state = ArtState::new();
+        state.current_url = Some("http://example.com/old.jpg".into());
+        let old_cancellable = state.cancellable.clone();
+
+        state.prepare_art_load(Some("http://example.com/new.jpg"));
+
+        assert!(old_cancellable.is_cancelled());
+        assert!(!state.cancellable.is_cancelled());
     }
 }

@@ -7,11 +7,12 @@
 //! - Pop-out button to open a standalone draggable window
 
 use gtk4::Image;
-use gtk4::gio;
+use gtk4::glib;
 use gtk4::prelude::*;
 use std::cell::RefCell;
 use std::rc::Rc;
-use tracing::{debug, warn};
+use std::time::Duration;
+use tracing::{debug, trace, warn};
 use vibepanel_core::config::WidgetEntry;
 
 use crate::services::callbacks::CallbackId;
@@ -23,7 +24,7 @@ use crate::services::tooltip::TooltipManager;
 use crate::styles::media;
 use crate::widgets::base::{BaseWidget, MenuHandle};
 use crate::widgets::marquee_label::MarqueeLabel;
-use crate::widgets::media_components::{ArtState, load_art_from_url};
+use crate::widgets::media_components::ArtState;
 use crate::widgets::media_popover::{MediaPopoverController, build_media_popover_with_controller};
 use crate::widgets::media_window::{MediaWindowHandle, create_media_window};
 use crate::widgets::rounded_picture::RoundedPicture;
@@ -346,6 +347,10 @@ pub struct MediaWidget {
     base: BaseWidget,
     media_callback_id: CallbackId,
     theme_callback_id: Option<CallbackId>,
+    /// Pending hide timer — cancelled on drop to avoid operating on stale widgets.
+    pending_hide: Rc<RefCell<Option<glib::SourceId>>>,
+    /// Album art state — held so that `ArtState::Drop` cancels timers and in-flight loads.
+    _art_state: Rc<RefCell<ArtState>>,
 }
 
 #[derive(Clone)]
@@ -365,6 +370,7 @@ struct WidgetUpdateContext<'a> {
     template_elements: &'a [TemplateElement],
     empty_text: &'a str,
     art_state: &'a Rc<RefCell<ArtState>>,
+    pending_hide: &'a Rc<RefCell<Option<glib::SourceId>>>,
 }
 
 /// Owned version of widget references for use in callbacks.
@@ -379,6 +385,7 @@ struct CallbackWidgetRefs {
     template_elements: Vec<TemplateElement>,
     empty_text: String,
     art_state: Rc<RefCell<ArtState>>,
+    pending_hide: Rc<RefCell<Option<glib::SourceId>>>,
 }
 
 impl CallbackWidgetRefs {
@@ -393,6 +400,7 @@ impl CallbackWidgetRefs {
             template_elements: &self.template_elements,
             empty_text: &self.empty_text,
             art_state: &self.art_state,
+            pending_hide: &self.pending_hide,
         }
     }
 }
@@ -708,6 +716,8 @@ impl MediaWidget {
         let template_elements = template_elements.clone();
         let art_state = Rc::new(RefCell::new(ArtState::default()));
 
+        let pending_hide: Rc<RefCell<Option<glib::SourceId>>> = Rc::new(RefCell::new(None));
+
         let widget_refs = CallbackWidgetRefs {
             container: base.widget().clone(),
             status_icon: status_icon.clone(),
@@ -718,9 +728,24 @@ impl MediaWidget {
             template_elements,
             empty_text: config.empty_text.clone(),
             art_state: art_state.clone(),
+            pending_hide,
         };
 
-        update_widgets_from_snapshot_impl(&widget_refs.as_context(), &MediaSnapshot::empty());
+        // Start hidden — the media callback will show the widget once a player is active.
+        // We call perform directly instead of update_widgets_from_snapshot_impl
+        // to avoid the grace period delay at startup.
+        perform_hide(
+            &widget_refs.container,
+            &widget_refs.text_labels,
+            &widget_refs.empty_text,
+            widget_refs.status_icon.as_ref(),
+            widget_refs.player_icon.as_ref(),
+            widget_refs.art_picture.as_ref(),
+            widget_refs.controls.as_ref(),
+        );
+
+        let pending_hide_for_drop = widget_refs.pending_hide.clone();
+        let art_state_for_drop = widget_refs.art_state.clone();
 
         let controller_for_cb = controller_cell.clone();
         let media_callback_id = media_service.connect(move |snapshot: &MediaSnapshot| {
@@ -749,6 +774,8 @@ impl MediaWidget {
             base,
             media_callback_id,
             theme_callback_id,
+            pending_hide: pending_hide_for_drop,
+            _art_state: art_state_for_drop,
         }
     }
 
@@ -763,23 +790,72 @@ impl Drop for MediaWidget {
         if let Some(id) = self.theme_callback_id {
             ConfigManager::global().disconnect_theme_callback(id);
         }
+        if let Some(source_id) = self.pending_hide.borrow_mut().take() {
+            source_id.remove();
+        }
     }
 }
 
+/// Actually hide the media bar widget (called from timeout or startup).
+fn perform_hide(
+    container: &gtk4::Box,
+    text_labels: &[Rc<MarqueeLabel>],
+    empty_text: &str,
+    status_icon: Option<&IconHandle>,
+    player_icon: Option<&Image>,
+    art_picture: Option<&RoundedPicture>,
+    controls: Option<&ControlsHandle>,
+) {
+    if empty_text.is_empty() {
+        container.set_visible(false);
+    } else {
+        container.set_visible(true);
+        for marquee in text_labels {
+            marquee.set_text("");
+            marquee.set_visible(false);
+        }
+        if let Some(first) = text_labels.first() {
+            first.set_text(empty_text);
+            first.set_visible(true);
+        }
+        if let Some(icon) = status_icon {
+            icon.widget().set_visible(false);
+        }
+        if let Some(image) = player_icon {
+            image.set_visible(false);
+        }
+        if let Some(image) = art_picture {
+            image.set_visible(false);
+        }
+        if let Some(ctrl) = controls {
+            ctrl.container.set_visible(false);
+        }
+        container.remove_css_class(media::PLAYING);
+        container.remove_css_class(media::PAUSED);
+        container.add_css_class(media::STOPPED);
+
+        let tooltip_manager = TooltipManager::global();
+        tooltip_manager.set_styled_tooltip(container, "No media playing");
+    }
+}
+
+/// Grace period before hiding the media widget (ms).
+///
+/// When switching tracks, some MPRIS players briefly report an intermediate
+/// state (e.g. Stopped with no metadata) before the new track info arrives.
+/// This delay prevents the widget from flickering off and on during transitions.
+const HIDE_GRACE_PERIOD_MS: u64 = 500;
+
 /// Update widget state from a media snapshot.
 fn update_widgets_from_snapshot_impl(ctx: &WidgetUpdateContext<'_>, snapshot: &MediaSnapshot) {
-    let has_metadata = snapshot
-        .metadata
-        .title
-        .as_ref()
-        .is_some_and(|t| !t.trim().is_empty());
+    let has_metadata = snapshot.has_metadata();
     let should_hide = !snapshot.available
         || (snapshot.playback_status == PlaybackStatus::Stopped && !has_metadata);
 
     if should_hide {
-        debug!(
-            "media widget hidden: available={}, status={:?}, has_metadata={}, empty_text='{}'",
-            snapshot.available, snapshot.playback_status, has_metadata, ctx.empty_text
+        trace!(
+            "media widget hide requested: available={}, status={:?}, has_metadata={}",
+            snapshot.available, snapshot.playback_status, has_metadata,
         );
 
         // Don't change visibility if popped out - the pop-out window handles display
@@ -787,41 +863,49 @@ fn update_widgets_from_snapshot_impl(ctx: &WidgetUpdateContext<'_>, snapshot: &M
             return;
         }
 
-        if ctx.empty_text.is_empty() {
-            ctx.container.set_visible(false);
-        } else {
-            ctx.container.set_visible(true);
-            for marquee in ctx.text_labels {
-                marquee.set_text("");
-                marquee.set_visible(false);
-            }
-            if let Some(first) = ctx.text_labels.first() {
-                first.set_text(ctx.empty_text);
-                first.set_visible(true);
-            }
-            if let Some(icon) = ctx.status_icon {
-                icon.widget().set_visible(false);
-            }
-            if let Some(image) = ctx.player_icon {
-                image.set_visible(false);
-            }
-            if let Some(image) = ctx.art_picture {
-                image.set_visible(false);
-            }
-            if let Some(ctrl) = ctx.controls {
-                ctrl.container.set_visible(false);
-            }
-            ctx.container.remove_css_class(media::PLAYING);
-            ctx.container.remove_css_class(media::PAUSED);
-            ctx.container.add_css_class(media::STOPPED);
-
-            let tooltip_manager = TooltipManager::global();
-            tooltip_manager.set_styled_tooltip(ctx.container, "No media playing");
+        if ctx.pending_hide.borrow().is_some() {
+            return;
         }
+
+        let pending_hide = Rc::clone(ctx.pending_hide);
+        let container = ctx.container.clone();
+        let text_labels = ctx.text_labels.clone();
+        let empty_text = ctx.empty_text.to_string();
+        let status_icon = ctx.status_icon.clone();
+        let player_icon = ctx.player_icon.clone();
+        let art_picture = ctx.art_picture.clone();
+        let controls = ctx.controls.clone();
+
+        let source_id =
+            glib::timeout_add_local_once(Duration::from_millis(HIDE_GRACE_PERIOD_MS), move || {
+                *pending_hide.borrow_mut() = None;
+
+                // Re-check: don't hide if a pop-out opened in the meantime
+                if is_popout_open() {
+                    return;
+                }
+
+                perform_hide(
+                    &container,
+                    &text_labels,
+                    &empty_text,
+                    status_icon.as_ref(),
+                    player_icon.as_ref(),
+                    art_picture.as_ref(),
+                    controls.as_ref(),
+                );
+            });
+
+        ctx.pending_hide.borrow_mut().replace(source_id);
         return;
     }
 
-    debug!(
+    // Cancel pending hide
+    if let Some(source_id) = ctx.pending_hide.borrow_mut().take() {
+        source_id.remove();
+    }
+
+    trace!(
         "media widget visible: player={:?} status={:?} title={:?} artist={:?}",
         snapshot.player_name,
         snapshot.playback_status,
@@ -867,6 +951,22 @@ fn update_widgets_from_snapshot_impl(ctx: &WidgetUpdateContext<'_>, snapshot: &M
         ctrl.container.set_visible(true);
     }
 
+    // When the player is active but metadata is momentarily empty (e.g. during a
+    // track switch), keep showing the previous track's info instead of flashing
+    // empty placeholders. We still update playback status / controls above so
+    // the play/pause icon stays correct.
+    //
+    // This intentionally skips player icon, album art, text labels, and tooltip
+    // updates below — stale-but-recent track info is preferable to blank content
+    // during the brief transition window.
+    //
+    // Note: this also prevents art_url=None from reaching `prepare_art_load`,
+    // which has its own None-refusal logic as a second layer of defense against
+    // flashing fallback art during track switches.
+    if !has_metadata {
+        return;
+    }
+
     if let Some(image) = ctx.player_icon {
         if let Some(player_id) = &snapshot.player_id {
             set_image_from_app_id(image, player_id);
@@ -880,55 +980,34 @@ fn update_widgets_from_snapshot_impl(ctx: &WidgetUpdateContext<'_>, snapshot: &M
     if let Some(picture) = ctx.art_picture {
         let art_url = snapshot.metadata.art_url.as_deref();
 
-        let load_info = {
-            let mut state = ctx.art_state.borrow_mut();
-            if state.current_url.as_deref() == art_url {
-                None
-            } else {
-                state.cancellable.cancel();
-                state.current_url = art_url.map(String::from);
-                state.generation += 1;
-                state.cancellable = gio::Cancellable::new();
-                Some((state.generation, state.cancellable.clone()))
-            }
+        let on_success = || {};
+
+        let picture_for_failure = picture.clone();
+        let player_id = snapshot.player_id.clone();
+        let art_state_for_failure = ctx.art_state.clone();
+        let on_failure = move || {
+            // Read generation at call time (not capture time) so
+            // show_player_icon_in_art checks against the current generation.
+            let generation = art_state_for_failure.borrow().generation;
+            show_player_icon_in_art(
+                &picture_for_failure,
+                player_id.as_deref(),
+                &art_state_for_failure,
+                generation,
+            );
         };
 
-        if let Some((generation, cancellable)) = load_info {
-            let art_state = ctx.art_state.clone();
-            let player_id = snapshot.player_id.clone();
-            let picture_clone = picture.clone();
-
-            // Bar widget doesn't have a placeholder - on_success is a no-op
-            let on_success = || {};
-
-            let on_failure = move || {
-                show_player_icon_in_art(
-                    &picture_clone,
-                    player_id.as_deref(),
-                    &art_state,
-                    generation,
-                );
-            };
-
-            if let Some(url) = art_url {
-                load_art_from_url(
-                    url,
-                    picture.clone(),
-                    ctx.art_state,
-                    generation,
-                    &cancellable,
-                    on_success,
-                    on_failure,
-                );
-            } else {
-                on_failure();
-            }
-        }
+        ArtState::debounced_load(
+            ctx.art_state,
+            art_url,
+            picture.clone(),
+            on_success,
+            on_failure,
+        );
     }
 
     if !ctx.text_labels.is_empty() {
         let runs = compute_text_runs(ctx.template_elements);
-        debug!("media widget template runs={}", runs.len());
 
         for (run_idx, element_range) in runs.iter().cloned().enumerate() {
             if let Some(marquee) = ctx.text_labels.get(run_idx) {
@@ -1048,7 +1127,7 @@ mod tests {
 
     #[test]
     fn test_build_tooltip_empty() {
-        let snapshot = MediaSnapshot::empty();
+        let snapshot = MediaSnapshot::default();
         assert_eq!(build_tooltip(&snapshot), "No media playing");
     }
 

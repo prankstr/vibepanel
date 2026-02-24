@@ -173,9 +173,12 @@ impl Default for MediaSnapshot {
 }
 
 impl MediaSnapshot {
-    /// Create an empty snapshot (no player available).
-    pub fn empty() -> Self {
-        Self::default()
+    /// Whether the snapshot contains meaningful track metadata (i.e. a non-empty title).
+    pub fn has_metadata(&self) -> bool {
+        self.metadata
+            .title
+            .as_ref()
+            .is_some_and(|t| !t.trim().is_empty())
     }
 }
 
