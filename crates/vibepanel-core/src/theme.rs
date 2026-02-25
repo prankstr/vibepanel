@@ -306,6 +306,13 @@ impl ThemePalette {
             _ => (self.accent_primary.clone(), self.accent_subtle.clone()),
         };
 
+        let edge_pad = self.bar_padding;
+        let center_pad = if self.bar_opacity > 0.0 {
+            self.bar_padding
+        } else {
+            0
+        };
+
         format!(
             r#"
 :root {{
@@ -458,34 +465,18 @@ impl ThemePalette {
             radius_pill = self.radius_pill,
             radius_factor = (self.widget_radius_percent as f64 / 50.0).min(1.0),
             bar_height = self.sizes.bar_height,
-            // Visual padding always applies (widgets offset from edge),
-            // but exclusive zone only includes it when bar is visible (handled in bar.rs).
-            // When bar is at the bottom, the roles of top/bottom padding swap:
-            // - bar_padding_y is the padding on the screen-edge side of the bar
-            // - bar_padding_y_bottom is the padding on the screen-center side
-            // In islands mode (opacity=0), the screen-center side gets 0 padding
-            // to keep the exclusive zone tight.
+            // Screen-edge padding always applies; screen-center padding is 0
+            // in islands mode (opacity=0) to keep the exclusive zone tight.
+            // When bar is bottom, CSS top/bottom roles swap.
             bar_padding_y = if self.bar_is_bottom {
-                // Bottom bar: "top" in CSS means toward screen center
-                if self.bar_opacity > 0.0 {
-                    self.bar_padding
-                } else {
-                    0
-                }
+                center_pad
             } else {
-                // Top bar: "top" is toward screen edge (always has padding)
-                self.bar_padding
+                edge_pad
             },
             bar_padding_y_bottom = if self.bar_is_bottom {
-                // Bottom bar: "bottom" is toward screen edge (always has padding)
-                self.bar_padding
+                edge_pad
             } else {
-                // Top bar: "bottom" is toward screen center (0 in islands mode)
-                if self.bar_opacity > 0.0 {
-                    self.bar_padding
-                } else {
-                    0
-                }
+                center_pad
             },
             widget_height = self.sizes.widget_height,
             widget_padding_x = self.sizes.widget_padding_x,
