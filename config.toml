@@ -12,6 +12,7 @@
 # =============================================================================
 
 [bar]
+position = "top" # "top" or "bottom"
 size = 32
 border_radius = 30
 background_opacity = 0.0 # 0.0 = transparent (islands), 1.0 = solid

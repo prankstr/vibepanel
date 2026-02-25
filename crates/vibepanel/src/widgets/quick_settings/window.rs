@@ -29,8 +29,9 @@ use crate::services::updates::UpdatesService;
 use crate::services::vpn::VpnService;
 use crate::styles::{qs, state, surface};
 use crate::widgets::layer_shell_popover::{
-    Dismissible, calculate_bar_exclusive_zone, calculate_popover_right_margin,
-    calculate_popover_top_margin, create_click_catcher, popover_keyboard_mode, setup_esc_handler,
+    Dismissible, calculate_bar_exclusive_zone, calculate_popover_bar_margin,
+    calculate_popover_right_margin, create_click_catcher, popover_bar_edge, popover_keyboard_mode,
+    setup_esc_handler,
 };
 
 use super::audio_card::{
@@ -104,7 +105,7 @@ const QUICK_SETTINGS_CONTENT_WIDTH: i32 = 320;
 /// Estimated total width including margins (content + padding).
 const QUICK_SETTINGS_WIDTH_ESTIMATE: i32 = 336;
 const QUICK_SETTINGS_OUTER_MARGIN: i32 = 4;
-const QUICK_SETTINGS_BOTTOM_MARGIN: i32 = 8;
+const QUICK_SETTINGS_FAR_EDGE_MARGIN: i32 = 8;
 /// Container padding (surface padding + margins) for height calculation.
 const QUICK_SETTINGS_CONTAINER_PADDING: i32 = 24;
 const QUICK_SETTINGS_MIN_HEIGHT_THRESHOLD: i32 = 100;
@@ -165,11 +166,12 @@ impl QuickSettingsWindow {
         window.init_layer_shell();
         window.set_layer(Layer::Top);
         window.set_exclusive_zone(0);
-        window.set_anchor(Edge::Top, true);
+        let is_bottom = ConfigManager::global().bar_is_bottom();
+        window.set_anchor(Edge::Top, !is_bottom);
         window.set_anchor(Edge::Right, true);
-        window.set_anchor(Edge::Bottom, false);
+        window.set_anchor(Edge::Bottom, is_bottom);
         window.set_anchor(Edge::Left, false);
-        window.set_margin(Edge::Top, 0);
+        window.set_margin(popover_bar_edge(), 0);
         window.set_margin(Edge::Right, 8);
         window.set_keyboard_mode(popover_keyboard_mode());
 
@@ -336,8 +338,15 @@ impl QuickSettingsWindow {
         let outer = GtkBox::new(Orientation::Vertical, 0);
         outer.add_css_class(qs::WINDOW_CONTAINER);
         outer.add_css_class(surface::NO_FOCUS);
-        outer.set_margin_top(0);
-        outer.set_margin_bottom(QUICK_SETTINGS_OUTER_MARGIN);
+        // Shadow margin: 0 on bar-adjacent side, margin on opposite side
+        let is_bottom = ConfigManager::global().bar_is_bottom();
+        if is_bottom {
+            outer.set_margin_top(QUICK_SETTINGS_OUTER_MARGIN);
+            outer.set_margin_bottom(0);
+        } else {
+            outer.set_margin_top(0);
+            outer.set_margin_bottom(QUICK_SETTINGS_OUTER_MARGIN);
+        }
         outer.set_margin_start(QUICK_SETTINGS_OUTER_MARGIN);
         outer.set_margin_end(QUICK_SETTINGS_OUTER_MARGIN);
 
@@ -1151,16 +1160,16 @@ impl QuickSettingsWindow {
             bar_size + 2 * screen_margin + popover_offset
         };
 
-        // Set top margin using shared helper
-        let top_margin = calculate_popover_top_margin();
-        self.window.set_margin(Edge::Top, top_margin);
+        // Set bar-edge margin using shared helper
+        let bar_margin = calculate_popover_bar_margin();
+        self.window.set_margin(popover_bar_edge(), bar_margin);
 
         // Max height: screen minus bar zone, margins, and container padding
         let max_height = geom.height()
             - bar_exclusive_zone
-            - top_margin
+            - bar_margin
             - QUICK_SETTINGS_CONTAINER_PADDING
-            - QUICK_SETTINGS_BOTTOM_MARGIN;
+            - QUICK_SETTINGS_FAR_EDGE_MARGIN;
 
         if max_height > QUICK_SETTINGS_MIN_HEIGHT_THRESHOLD {
             self.scroll_container.set_max_content_height(max_height);

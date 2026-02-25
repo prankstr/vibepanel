@@ -281,6 +281,7 @@ pub struct ThemePalette {
     widget_radius_percent: u32,
     bar_size: u32,
     bar_padding: u32,
+    bar_is_bottom: bool,
 }
 
 impl ThemePalette {
@@ -458,13 +459,33 @@ impl ThemePalette {
             radius_factor = (self.widget_radius_percent as f64 / 50.0).min(1.0),
             bar_height = self.sizes.bar_height,
             // Visual padding always applies (widgets offset from edge),
-            // but exclusive zone only includes it when bar is visible (handled in bar.rs)
-            bar_padding_y = self.bar_padding,
-            // Bottom padding is 0 in islands mode (opacity=0) to keep exclusive zone tight
-            bar_padding_y_bottom = if self.bar_opacity > 0.0 {
+            // but exclusive zone only includes it when bar is visible (handled in bar.rs).
+            // When bar is at the bottom, the roles of top/bottom padding swap:
+            // - bar_padding_y is the padding on the screen-edge side of the bar
+            // - bar_padding_y_bottom is the padding on the screen-center side
+            // In islands mode (opacity=0), the screen-center side gets 0 padding
+            // to keep the exclusive zone tight.
+            bar_padding_y = if self.bar_is_bottom {
+                // Bottom bar: "top" in CSS means toward screen center
+                if self.bar_opacity > 0.0 {
+                    self.bar_padding
+                } else {
+                    0
+                }
+            } else {
+                // Top bar: "top" is toward screen edge (always has padding)
+                self.bar_padding
+            },
+            bar_padding_y_bottom = if self.bar_is_bottom {
+                // Bottom bar: "bottom" is toward screen edge (always has padding)
                 self.bar_padding
             } else {
-                0
+                // Top bar: "bottom" is toward screen center (0 in islands mode)
+                if self.bar_opacity > 0.0 {
+                    self.bar_padding
+                } else {
+                    0
+                }
             },
             widget_height = self.sizes.widget_height,
             widget_padding_x = self.sizes.widget_padding_x,
@@ -661,6 +682,7 @@ impl ThemePalette {
         // Bar size
         self.bar_size = config.bar.size;
         self.bar_padding = config.bar.padding;
+        self.bar_is_bottom = config.bar.is_bottom();
     }
 
     fn compute_derived_values(&mut self) {
@@ -896,6 +918,7 @@ impl Default for ThemePalette {
             widget_radius_percent: 40,
             bar_size: 32,
             bar_padding: 4,
+            bar_is_bottom: false,
         }
     }
 }

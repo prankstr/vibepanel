@@ -1,8 +1,9 @@
 //! Notification toast windows for displaying new notifications.
 //!
 //! This module handles floating toast windows that appear when new notifications
-//! arrive. Toasts stack vertically in the top-right corner and auto-dismiss
-//! after a timeout (except for critical notifications).
+//! arrive. Toasts stack vertically on the bar-adjacent edge (top-right when bar
+//! is at top, bottom-right when bar is at bottom) and auto-dismiss after a
+//! timeout (except for critical notifications).
 
 use gtk4::glib::{self, SourceId};
 use gtk4::prelude::*;
@@ -19,11 +20,12 @@ use crate::services::notification::{Notification, URGENCY_CRITICAL, URGENCY_LOW}
 type ToastCallback = Rc<dyn Fn(u32)>;
 /// Type alias for toast action callbacks.
 type ToastActionCallback = Rc<dyn Fn(u32, &str)>;
+use crate::services::config_manager::ConfigManager;
 use crate::services::surfaces::SurfaceStyleManager;
 use crate::styles::{button, color, notification as notif};
 
 use super::notifications_common::{
-    POPOVER_WIDTH, TOAST_ESTIMATED_HEIGHT, TOAST_GAP, TOAST_MARGIN_RIGHT, TOAST_MARGIN_TOP,
+    POPOVER_WIDTH, TOAST_BAR_MARGIN, TOAST_ESTIMATED_HEIGHT, TOAST_GAP, TOAST_MARGIN_RIGHT,
     TOAST_TIMEOUT_CRITICAL_MS, TOAST_TIMEOUT_MS, create_notification_image_widget,
     sanitize_body_markup,
 };
@@ -33,8 +35,9 @@ pub(super) struct NotificationToast {
     window: Window,
     notification_id: u32,
     timeout_source: RefCell<Option<SourceId>>,
-    current_margin_top: Cell<i32>,
+    current_bar_margin: Cell<i32>,
     animation_source: RefCell<Option<SourceId>>,
+    bar_edge: Edge,
     /// Actual rendered height, measured after window is mapped
     height: Cell<i32>,
 }
@@ -50,7 +53,7 @@ impl NotificationToast {
         on_action: ToastActionCallback,
         on_timeout: ToastCallback,
         on_height_measured: ToastCallback,
-        initial_margin_top: i32,
+        initial_margin: i32,
     ) -> Rc<Self> {
         let window = Window::builder()
             .application(app)
@@ -61,19 +64,25 @@ impl NotificationToast {
 
         window.add_css_class(notif::TOAST);
 
+        // Determine bar position for toast anchoring
+        let is_bottom = ConfigManager::global().bar_is_bottom();
+        let bar_edge = if is_bottom { Edge::Bottom } else { Edge::Top };
+
         // Initialize layer shell
         window.init_layer_shell();
         window.set_layer(Layer::Overlay);
         window.set_exclusive_zone(0);
         window.set_keyboard_mode(KeyboardMode::None);
 
-        // Anchor to top-right
-        window.set_anchor(Edge::Top, true);
+        // Anchor to bar-edge + right
+        window.set_anchor(bar_edge, true);
         window.set_anchor(Edge::Right, true);
-        window.set_anchor(Edge::Bottom, false);
         window.set_anchor(Edge::Left, false);
+        // Ensure opposite edge is unanchored
+        let opposite_edge = if is_bottom { Edge::Top } else { Edge::Bottom };
+        window.set_anchor(opposite_edge, false);
 
-        window.set_margin(Edge::Top, initial_margin_top);
+        window.set_margin(bar_edge, initial_margin);
         window.set_margin(Edge::Right, TOAST_MARGIN_RIGHT);
 
         let notification_id = notification.id;
@@ -81,8 +90,9 @@ impl NotificationToast {
             window,
             notification_id,
             timeout_source: RefCell::new(None),
-            current_margin_top: Cell::new(initial_margin_top),
+            current_bar_margin: Cell::new(initial_margin),
             animation_source: RefCell::new(None),
+            bar_edge,
             height: Cell::new(TOAST_ESTIMATED_HEIGHT),
         });
 
@@ -333,12 +343,12 @@ impl NotificationToast {
         }
     }
 
-    pub fn update_margin_top(self: &Rc<Self>, target_margin: i32, animate: bool) {
-        let current = self.current_margin_top.get();
+    pub fn update_bar_margin(self: &Rc<Self>, target_margin: i32, animate: bool) {
+        let current = self.current_bar_margin.get();
 
         if !animate || current == target_margin {
-            self.current_margin_top.set(target_margin);
-            self.window.set_margin(Edge::Top, target_margin);
+            self.current_bar_margin.set(target_margin);
+            self.window.set_margin(self.bar_edge, target_margin);
             return;
         }
 
@@ -367,8 +377,8 @@ impl NotificationToast {
 
                 let new_margin =
                     start_margin + ((target_margin - start_margin) as f32 * eased) as i32;
-                toast.current_margin_top.set(new_margin);
-                toast.window.set_margin(Edge::Top, new_margin);
+                toast.current_bar_margin.set(new_margin);
+                toast.window.set_margin(toast.bar_edge, new_margin);
 
                 if progress >= 1.0 {
                     *toast.animation_source.borrow_mut() = None;
@@ -426,7 +436,7 @@ impl NotificationToastManager {
         let initial_margin = {
             let order = self.toast_order.borrow();
             let toasts = self.toasts.borrow();
-            let mut y_offset = TOAST_MARGIN_TOP;
+            let mut y_offset = TOAST_BAR_MARGIN;
             for &id in order.iter() {
                 if let Some(toast) = toasts.get(&id) {
                     y_offset += toast.height() + TOAST_GAP;
@@ -490,10 +500,10 @@ impl NotificationToastManager {
     fn reposition_toasts(&self) {
         let order = self.toast_order.borrow();
         let toasts = self.toasts.borrow();
-        let mut y_offset = TOAST_MARGIN_TOP;
+        let mut y_offset = TOAST_BAR_MARGIN;
         for &id in order.iter() {
             if let Some(toast) = toasts.get(&id) {
-                toast.update_margin_top(y_offset, true);
+                toast.update_bar_margin(y_offset, true);
                 y_offset += toast.height() + TOAST_GAP;
             }
         }

@@ -185,6 +185,11 @@ impl ConfigManager {
         self.config.borrow().bar.background_opacity
     }
 
+    /// Check if the bar is positioned at the bottom of the screen.
+    pub fn bar_is_bottom(&self) -> bool {
+        self.config.borrow().bar.is_bottom()
+    }
+
     /// Get a widget option value from the current configuration.
     ///
     /// Returns `None` if the widget has no config section or the option doesn't exist.
@@ -515,6 +520,14 @@ fn config_structure_changed(old: &Config, new: &Config) -> bool {
         debug!(
             "bar.padding changed ({} -> {})",
             old.bar.padding, new.bar.padding
+        );
+        return true;
+    }
+
+    if old.bar.position != new.bar.position {
+        debug!(
+            "bar.position changed ({} -> {})",
+            old.bar.position, new.bar.position
         );
         return true;
     }

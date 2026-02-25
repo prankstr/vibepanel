@@ -18,6 +18,7 @@ use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use tracing::debug;
 use vibepanel_core::SurfaceStyles;
 
+use crate::services::config_manager::ConfigManager;
 use crate::services::surfaces::SurfaceStyleManager;
 use crate::styles::tooltip;
 
@@ -64,9 +65,9 @@ struct TooltipWindow {
 /// Positioning mode for tooltips.
 #[derive(Clone, Copy)]
 enum TooltipAnchor {
-    /// Anchor from top-left, use left margin for X position
+    /// Anchor from bar-edge + left, use left margin for X position
     Left,
-    /// Anchor from top-right, use right margin for X position
+    /// Anchor from bar-edge + right, use right margin for X position
     Right,
 }
 
@@ -82,11 +83,12 @@ impl TooltipWindow {
         window.set_exclusive_zone(0);
         window.set_keyboard_mode(KeyboardMode::None);
 
-        // Initial anchors - will be adjusted in show_at
-        window.set_anchor(Edge::Top, true);
+        // Anchor to bar-adjacent edge - will be adjusted horizontally in show_at
+        let is_bottom = ConfigManager::global().bar_is_bottom();
+        window.set_anchor(Edge::Top, !is_bottom);
         window.set_anchor(Edge::Left, true);
         window.set_anchor(Edge::Right, false);
-        window.set_anchor(Edge::Bottom, false);
+        window.set_anchor(Edge::Bottom, is_bottom);
 
         // Create label
         let label = Label::new(None);
@@ -163,7 +165,16 @@ impl TooltipWindow {
             self.window.set_monitor(Some(monitor));
         }
 
-        // Set anchors based on positioning mode
+        // Determine vertical edge based on bar position
+        let is_bottom = ConfigManager::global().bar_is_bottom();
+        let bar_edge = if is_bottom { Edge::Bottom } else { Edge::Top };
+        let opposite_edge = if is_bottom { Edge::Top } else { Edge::Bottom };
+
+        // Set vertical anchors
+        self.window.set_anchor(bar_edge, true);
+        self.window.set_anchor(opposite_edge, false);
+
+        // Set anchors based on horizontal positioning mode
         match anchor {
             TooltipAnchor::Left => {
                 self.window.set_anchor(Edge::Left, true);
@@ -179,7 +190,7 @@ impl TooltipWindow {
             }
         }
 
-        self.window.set_margin(Edge::Top, y);
+        self.window.set_margin(bar_edge, y);
         self.window.present();
     }
 
@@ -413,8 +424,8 @@ impl TooltipManager {
             .get_cursor_screen_x(&widget, cursor_rel_x, monitor_width)
             .unwrap_or(cursor_rel_x);
 
-        // For Y position: layer-shell exclusive zone means the tooltip's "top" anchor
-        // starts BELOW the bar's exclusive zone, so we only need a small offset
+        // For Y position: layer-shell exclusive zone means the tooltip's bar-edge anchor
+        // starts past the bar's exclusive zone, so we only need a small offset
         let tooltip_y = TOOLTIP_CURSOR_OFFSET_Y;
 
         // Ensure tooltip window exists
@@ -429,7 +440,7 @@ impl TooltipManager {
                 FALLBACK_TOOLTIP_WIDTH
             };
 
-            // Position tooltip below bar and near cursor X
+            // Position tooltip near bar and near cursor X
             let tooltip_x = cursor_screen_x + TOOLTIP_CURSOR_OFFSET_X;
 
             // Check right edge overflow using actual measured width

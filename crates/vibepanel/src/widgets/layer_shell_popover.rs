@@ -36,14 +36,16 @@ const POPOVER_DEFAULT_WIDTH_ESTIMATE: i32 = 320;
 
 const POPOVER_MIN_VALID_WIDTH: i32 = 20;
 
-/// Calculate the top margin for a popover based on bar configuration.
+/// Calculate the margin for a popover on the bar-adjacent edge.
 ///
 /// When the bar has a visible background (opacity > 0), the popover needs to
 /// account for bar padding in its positioning. This ensures consistent visual
 /// spacing regardless of bar transparency settings.
 ///
 /// Used by both `LayerShellPopover` and Quick Settings for consistent positioning.
-pub fn calculate_popover_top_margin() -> i32 {
+/// The returned value should be applied to `Edge::Top` when bar is top,
+/// or `Edge::Bottom` when bar is bottom.
+pub fn calculate_popover_bar_margin() -> i32 {
     let config_mgr = ConfigManager::global();
     let bar_padding = config_mgr.bar_padding() as i32;
     let bar_opacity = config_mgr.bar_background_opacity();
@@ -53,6 +55,18 @@ pub fn calculate_popover_top_margin() -> i32 {
         popover_offset - bar_padding
     } else {
         popover_offset
+    }
+}
+
+/// Get the edge that popovers should anchor to (same side as the bar).
+///
+/// When bar is at the top, popovers anchor to `Edge::Top` and open downward.
+/// When bar is at the bottom, popovers anchor to `Edge::Bottom` and open upward.
+pub fn popover_bar_edge() -> Edge {
+    if ConfigManager::global().bar_is_bottom() {
+        Edge::Bottom
+    } else {
+        Edge::Top
     }
 }
 
@@ -133,13 +147,14 @@ pub fn calculate_bar_exclusive_zone() -> i32 {
 /// Create a click-catcher layer-shell surface.
 ///
 /// The click-catcher is a fullscreen transparent surface that sits behind popovers
-/// and captures clicks outside the popover to dismiss it. It has a top margin
-/// equal to the bar's exclusive zone so clicks on the bar pass through.
+/// and captures clicks outside the popover to dismiss it. It has a margin on the
+/// bar-adjacent edge equal to the bar's exclusive zone so clicks on the bar pass
+/// through.
 ///
 /// # Arguments
 ///
 /// * `app` - The GTK application
-/// * `bar_zone` - Height of the bar's exclusive zone (margin at top to leave bar uncovered)
+/// * `bar_zone` - Height of the bar's exclusive zone (margin on bar edge to leave bar uncovered)
 /// * `on_dismiss` - Callback invoked when the catcher is clicked
 ///
 /// # Returns
@@ -173,7 +188,8 @@ where
     catcher.set_keyboard_mode(KeyboardMode::None);
 
     // Leave the bar area uncovered so clicks/hovers pass through to bar widgets.
-    catcher.set_margin(Edge::Top, bar_zone);
+    let bar_edge = popover_bar_edge();
+    catcher.set_margin(bar_edge, bar_zone);
 
     // Content - add CSS class to the child widget for background styling
     let overlay = GtkBox::new(Orientation::Vertical, 0);
@@ -353,9 +369,10 @@ impl LayerShellPopover {
         window.init_layer_shell();
         window.set_layer(Layer::Top);
         window.set_exclusive_zone(0);
-        window.set_anchor(Edge::Top, true);
+        let is_bottom = ConfigManager::global().bar_is_bottom();
+        window.set_anchor(Edge::Top, !is_bottom);
         window.set_anchor(Edge::Right, true);
-        window.set_anchor(Edge::Bottom, false);
+        window.set_anchor(Edge::Bottom, is_bottom);
         window.set_anchor(Edge::Left, false);
         window.set_keyboard_mode(popover_keyboard_mode());
 
@@ -365,12 +382,19 @@ impl LayerShellPopover {
         let popover_class = format!("{}-popover", self.widget_name);
         content.add_css_class(&popover_class);
 
-        // Wrap in container with margins for shadow space
+        // Wrap in container with margins for shadow space.
+        // The bar-adjacent side gets 0 margin (tight against bar),
+        // the opposite side gets shadow margin for drop shadow rendering.
         let outer = GtkBox::new(Orientation::Vertical, 0);
         outer.add_css_class(surface::WIDGET_MENU);
         outer.add_css_class(surface::NO_FOCUS);
-        outer.set_margin_top(0);
-        outer.set_margin_bottom(POPOVER_SHADOW_MARGIN);
+        if is_bottom {
+            outer.set_margin_top(POPOVER_SHADOW_MARGIN);
+            outer.set_margin_bottom(0);
+        } else {
+            outer.set_margin_top(0);
+            outer.set_margin_bottom(POPOVER_SHADOW_MARGIN);
+        }
         outer.set_margin_start(POPOVER_SHADOW_MARGIN);
         outer.set_margin_end(POPOVER_SHADOW_MARGIN);
         outer.append(&content);
@@ -420,8 +444,9 @@ impl LayerShellPopover {
 
         let geom = monitor.geometry();
 
-        // Set top margin
-        window.set_margin(Edge::Top, calculate_popover_top_margin());
+        // Set margin on the bar-adjacent edge
+        let bar_edge = popover_bar_edge();
+        window.set_margin(bar_edge, calculate_popover_bar_margin());
 
         // Calculate horizontal position (center on anchor_x)
         if anchor_x > 0 {

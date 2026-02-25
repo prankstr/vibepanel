@@ -10,8 +10,7 @@ window.quick-settings-window {
     background: transparent;
 }
 
-/* QS window container - extra top padding to compensate for 0 top margin
-   (top margin must be 0 for correct popover_offset positioning) */
+/* QS window container - internal padding between container edge and content */
 .qs-window-container {
     padding-top: 4px;
 }

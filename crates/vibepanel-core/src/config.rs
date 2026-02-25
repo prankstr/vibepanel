@@ -19,6 +19,9 @@ const VALID_COMPOSITORS: &[&str] = &["auto", "mango", "hyprland", "niri"];
 /// Known valid values for theme.mode.
 const VALID_THEME_MODES: &[&str] = &["auto", "dark", "light", "gtk"];
 
+/// Known valid values for bar.position.
+const VALID_BAR_POSITIONS: &[&str] = &["top", "bottom"];
+
 /// Known valid values for osd.position.
 const VALID_OSD_POSITIONS: &[&str] = &["bottom", "left", "right", "top"];
 
@@ -192,6 +195,15 @@ impl Config {
     pub fn validate(&self) -> Result<()> {
         let mut errors = Vec::new();
 
+        // Validate bar.position
+        if !VALID_BAR_POSITIONS.contains(&self.bar.position.as_str()) {
+            errors.push(format!(
+                "bar.position: invalid value '{}', expected one of: {}",
+                self.bar.position,
+                VALID_BAR_POSITIONS.join(", ")
+            ));
+        }
+
         // Validate advanced.compositor
         if !VALID_COMPOSITORS.contains(&self.advanced.compositor.as_str()) {
             errors.push(format!(
@@ -307,6 +319,7 @@ impl Config {
         let mut lines = Vec::new();
 
         lines.push("Bar Configuration:".to_string());
+        lines.push(format!("  position: {}", self.bar.position));
         lines.push(format!("  size: {}px", self.bar.size));
         lines.push(format!("  spacing: {}px", self.bar.spacing));
         lines.push(format!("  screen_margin: {}px", self.bar.screen_margin));
@@ -402,6 +415,10 @@ fn deep_merge_toml(base: &mut Table, overlay: Table) {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct BarConfig {
+    /// Bar position on screen: "top" or "bottom".
+    /// Default: "top"
+    pub position: String,
+
     /// Base height of the bar in pixels.
     pub size: u32,
 
@@ -422,7 +439,8 @@ pub struct BarConfig {
     pub border_radius: u32,
 
     /// Vertical offset between widgets and their popovers/quick settings (in pixels).
-    /// This creates a gap between the bar and any popover or panel that opens below it.
+    /// This creates a gap between the bar and any popover or panel that opens
+    /// adjacent to it.
     /// Default: 1
     pub popover_offset: u32,
 
@@ -443,6 +461,7 @@ pub struct BarConfig {
 impl Default for BarConfig {
     fn default() -> Self {
         Self {
+            position: "top".to_string(),
             size: 32,
             spacing: 8,
             screen_margin: 0,
@@ -454,6 +473,13 @@ impl Default for BarConfig {
             background_color: None,
             background_opacity: 0.0,
         }
+    }
+}
+
+impl BarConfig {
+    /// Returns true if the bar is positioned at the bottom of the screen.
+    pub fn is_bottom(&self) -> bool {
+        self.position == "bottom"
     }
 }
 
@@ -1386,6 +1412,42 @@ mod tests {
         let err = result.unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("osd.position"));
+    }
+
+    #[test]
+    fn test_validate_bar_position_top() {
+        let mut config = Config::default();
+        config.bar.position = "top".to_string();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_bar_position_bottom() {
+        let mut config = Config::default();
+        config.bar.position = "bottom".to_string();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_invalid_bar_position() {
+        let mut config = Config::default();
+        config.bar.position = "left".to_string();
+
+        let result = config.validate();
+        assert!(result.is_err());
+
+        let err = result.unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("bar.position"));
+    }
+
+    #[test]
+    fn test_bar_is_bottom() {
+        let mut config = BarConfig::default();
+        assert!(!config.is_bottom());
+
+        config.position = "bottom".to_string();
+        assert!(config.is_bottom());
     }
 
     #[test]

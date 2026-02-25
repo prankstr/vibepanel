@@ -29,7 +29,7 @@ pub fn create_bar_window(
     // Window height determines the exclusive zone (via auto_exclusive_zone_enable).
     // - When bar is visible (opacity > 0): include padding on both sides
     // - When bar is transparent (opacity = 0): exclusive zone = size only
-    //   The top padding offsets widgets visually but bottom padding is 0 via CSS
+    //   The screen-edge padding offsets widgets visually but the inner padding is 0 via CSS
     let bar_height = if config.bar.background_opacity > 0.0 {
         config.bar.size as i32 + 2 * config.bar.padding as i32
     } else {
@@ -55,11 +55,12 @@ pub fn create_bar_window(
     window.set_monitor(Some(monitor));
     debug!("Bar bound to monitor: {:?}", monitor.connector());
 
-    // Anchor to top edge, stretch horizontally
-    window.set_anchor(Edge::Top, true);
+    // Anchor to the configured edge, stretch horizontally
+    let is_bottom = config.bar.is_bottom();
+    window.set_anchor(Edge::Top, !is_bottom);
     window.set_anchor(Edge::Left, true);
     window.set_anchor(Edge::Right, true);
-    window.set_anchor(Edge::Bottom, false);
+    window.set_anchor(Edge::Bottom, is_bottom);
 
     // Reserve space (exclusive zone) so other windows don't overlap
     window.auto_exclusive_zone_enable();
@@ -72,9 +73,6 @@ pub fn create_bar_window(
     // fills the monitor width; screen_margin is applied inside the
     // bar content instead.
     let margin = config.bar.screen_margin as i32;
-    window.set_margin(Edge::Top, 0);
-    window.set_margin(Edge::Left, 0);
-    window.set_margin(Edge::Right, 0);
 
     // Create the bar container using SectionedBar for proper left/center/right layout
     let bar_box = SectionedBar::new(
@@ -88,19 +86,27 @@ pub fn create_bar_window(
     bar_box.set_vexpand(true);
 
     // Wrap bar_box in an outer container so we can inset the
-    // visible bar from the top, left, and right edges while
+    // visible bar from the anchored edge and sides while
     // keeping the window and exclusive zone full-width.
     let outer_box = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
     outer_box.add_css_class(class::BAR_SHELL);
     outer_box.set_hexpand(true);
     outer_box.set_vexpand(true);
 
-    // Top spacer: empty area above the bar content.
-    if margin > 0 {
-        let spacer = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
-        spacer.set_size_request(-1, margin);
-        spacer.add_css_class(class::BAR_MARGIN_SPACER);
-        outer_box.append(&spacer);
+    // Spacer: empty area between bar content and screen edge.
+    // For top bar, spacer goes above (pushes bar down from top edge).
+    // For bottom bar, spacer goes below (pushes bar up from bottom edge).
+    let spacer = if margin > 0 {
+        let s = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+        s.set_size_request(-1, margin);
+        s.add_css_class(class::BAR_MARGIN_SPACER);
+        Some(s)
+    } else {
+        None
+    };
+
+    if !is_bottom && let Some(ref spacer) = spacer {
+        outer_box.append(spacer);
     }
 
     // Inner horizontal box adds left/right padding via CSS.
@@ -111,6 +117,10 @@ pub fn create_bar_window(
     inner_box.append(&bar_box);
 
     outer_box.append(&inner_box);
+
+    if is_bottom && let Some(ref spacer) = spacer {
+        outer_box.append(spacer);
+    }
 
     // Find quick_settings config from widget entries to configure the window.
     // Get options from [widgets.quick_settings] if defined.
