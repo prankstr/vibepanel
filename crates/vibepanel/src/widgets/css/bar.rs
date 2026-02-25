@@ -126,6 +126,10 @@ sectioned-bar.bar {{
     min-width: calc(var(--widget-height) * {active_mult});
 }}
 
+.workspace-indicator-long {{
+    padding: 0 6px;
+}}
+
 /* Grow-in: forces zero width + no transition so container animation handles it.
    Loaded at USER+200 priority by load_transient_css() so user CSS can't defeat it. */
 

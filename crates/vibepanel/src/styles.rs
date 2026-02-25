@@ -435,6 +435,10 @@ pub mod widget {
     /// Workspace indicator minimal style (`.workspace-indicator-minimal`).
     pub const WORKSPACE_INDICATOR_MINIMAL: &str = "workspace-indicator-minimal";
 
+    /// Workspace indicator with a long label (`.workspace-indicator-long`).
+    /// Adds horizontal padding for labels longer than 2 characters.
+    pub const WORKSPACE_INDICATOR_LONG: &str = "workspace-indicator-long";
+
     /// Workspace indicator grow-in: forces zero width (`.workspace-grow-in`).
     /// Registered at transient CSS priority (above user CSS) to ensure
     /// user style.css cannot accidentally defeat the min-width: 0 reset.

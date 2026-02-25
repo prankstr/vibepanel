@@ -881,6 +881,9 @@ fn create_single_indicator(label_type: LabelType, workspace: &Workspace) -> Widg
         let label = Label::new(Some(label_text));
         label.add_css_class(widget::WORKSPACE_INDICATOR);
         label.add_css_class(state::CLICKABLE);
+        if label_text.len() > 2 {
+            label.add_css_class(widget::WORKSPACE_INDICATOR_LONG);
+        }
         label.set_valign(Align::Center);
         // Optical centering: glyphs ●/○/◆ appear left-heavy at 0.5;
         // 0.55 nudges them to look visually centered in the pill.
@@ -1333,7 +1336,14 @@ fn update_indicators(
                         label.set_text(ICON_EMPTY);
                     }
                 }
-                LabelType::Numbers => label.set_text(&workspace.name),
+                LabelType::Numbers => {
+                    label.set_text(&workspace.name);
+                    if workspace.name.len() > 2 {
+                        label.add_css_class(widget::WORKSPACE_INDICATOR_LONG);
+                    } else {
+                        label.remove_css_class(widget::WORKSPACE_INDICATOR_LONG);
+                    }
+                }
                 LabelType::None => unreachable!(),
             }
         }

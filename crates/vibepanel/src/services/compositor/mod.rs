@@ -4,6 +4,7 @@
 //! - MangoWC / DWL (via `mmsg` CLI tool)
 //! - Niri (via socket IPC with JSON protocol)
 //! - Hyprland (via socket IPC with JSON protocol)
+//! - Sway / Miracle WM / Scroll (via i3 IPC binary protocol over Unix socket)
 //!
 //! The backend trait feeds both:
 //! - `WorkspaceService` (workspace/tag state)
@@ -20,6 +21,7 @@ mod hyprland;
 mod manager;
 mod mango;
 mod niri;
+mod sway;
 pub mod types;
 
 pub use factory::BackendKind;
@@ -27,4 +29,5 @@ pub use hyprland::HyprlandBackend;
 pub use manager::CompositorManager;
 pub use mango::MangoBackend;
 pub use niri::NiriBackend;
+pub use sway::SwayBackend;
 pub use types::*;

@@ -14,7 +14,9 @@ use toml::Table;
 use crate::error::{Error, Result};
 
 /// Known valid values for advanced.compositor.
-const VALID_COMPOSITORS: &[&str] = &["auto", "mango", "hyprland", "niri"];
+const VALID_COMPOSITORS: &[&str] = &[
+    "auto", "mango", "hyprland", "niri", "sway", "miracle", "scroll",
+];
 
 /// Known valid values for theme.mode.
 const VALID_THEME_MODES: &[&str] = &["auto", "dark", "light", "gtk"];
@@ -1043,7 +1045,7 @@ impl Default for OsdConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AdvancedConfig {
-    /// Compositor to connect to: "auto", "mango", "hyprland", "niri".
+    /// Compositor to connect to: "auto", "mango", "hyprland", "niri", "sway".
     ///
     /// In most cases, "auto" will correctly detect your compositor.
     /// Only change this if auto-detection fails or you want to force
@@ -1377,7 +1379,7 @@ mod tests {
     #[test]
     fn test_validate_invalid_compositor() {
         let mut config = Config::default();
-        config.advanced.compositor = "sway".to_string();
+        config.advanced.compositor = "kwin".to_string();
 
         let result = config.validate();
         assert!(result.is_err());
@@ -1385,7 +1387,7 @@ mod tests {
         let err = result.unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("advanced.compositor"));
-        assert!(msg.contains("sway"));
+        assert!(msg.contains("kwin"));
     }
 
     #[test]
