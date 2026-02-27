@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0](https://github.com/prankstr/vibepanel/compare/v0.9.0...v0.10.0) (2026-02-27)
+
+
+### Features
+
+* **bar:** configurable bottom or top(default) position ([#55](https://github.com/prankstr/vibepanel/issues/55)) ([2699625](https://github.com/prankstr/vibepanel/commit/26996259c4cb63bfd6921810cf326d63033bbd02))
+* **compositors:** add Sway support for workspaces and window title ([#56](https://github.com/prankstr/vibepanel/issues/56)) ([d3e50c2](https://github.com/prankstr/vibepanel/commit/d3e50c2d01c8bb93b70e4e6fdcfec995d3ac2d61))
+* **vpn:** implement NM SecretAgent for VPN password prompts ([#52](https://github.com/prankstr/vibepanel/issues/52)) ([24a1e31](https://github.com/prankstr/vibepanel/commit/24a1e31fb3aac2af8726eb20c6b0db04e3f6db63))
+* **workspaces:** support custom CSS for animated workspace indicators ([f4a6423](https://github.com/prankstr/vibepanel/commit/f4a6423030bc6137608058dd1d0b535aef572754))
+
+
+### Bug Fixes
+
+* **media:** debounce hide and album art to prevent flicker ([#54](https://github.com/prankstr/vibepanel/issues/54)) ([ad5b78d](https://github.com/prankstr/vibepanel/commit/ad5b78d16ac4d0c54e6a2a78031264457dc1a5e3))
+* **media:** freeze the scrolling title when music pauses ([923c8e3](https://github.com/prankstr/vibepanel/commit/923c8e3e1dfc90e0a98c9fac7a54d4bd36924b44))
+* **network:** prevent permanent WiFi spinner on disconnected startup ([8150e0c](https://github.com/prankstr/vibepanel/commit/8150e0cf077055ab9f9f9dc1636c1d3edf4cb260))
+* **niri:** correct workspace indicator removal animation ([a604a57](https://github.com/prankstr/vibepanel/commit/a604a5728a4dbbc787cdc2348fbce39efa09bb8f))
+* **updates:** dont attempt to check for updates when offline ([93cb430](https://github.com/prankstr/vibepanel/commit/93cb430d60eb6ec4c228ccb2c80d3f247d48957a))
+* **vpn:** use logical icon name for auth dialog expand arrow ([402926b](https://github.com/prankstr/vibepanel/commit/402926b411f9344ea8f3a233ef9f76fb7615c751))
+* **workspaces:** update niri workspace re-order immediately ([#53](https://github.com/prankstr/vibepanel/issues/53)) ([acaf6ae](https://github.com/prankstr/vibepanel/commit/acaf6aeae6b99f96a1284a19aa09bba139c6ea20))
+
+
+### Performance Improvements
+
+* subset Material Symbols font to used icons only ([03ff5dd](https://github.com/prankstr/vibepanel/commit/03ff5dde1ec7ae3a7a57b1b09fb4798ab9fce3a5))
+
 ## [0.9.0](https://github.com/prankstr/vibepanel/compare/v0.8.0...v0.9.0) (2026-02-18)
 
 
