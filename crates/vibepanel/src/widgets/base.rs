@@ -223,8 +223,27 @@ impl Dismissible for MenuHandle {
     }
 }
 
+/// Describe a process exit status in human-readable form.
+///
+/// Translates well-known shell exit codes (127 = command not found,
+/// 126 = permission denied) into actionable messages.
+pub(super) fn describe_exit_status(status: std::process::ExitStatus) -> String {
+    match status.code() {
+        Some(127) => "command not found".to_string(),
+        Some(126) => "permission denied (not executable)".to_string(),
+        Some(code) => format!("exit code {code}"),
+        None => {
+            use std::os::unix::process::ExitStatusExt;
+            match status.signal() {
+                Some(sig) => format!("killed by signal {sig}"),
+                None => "unknown exit status".to_string(),
+            }
+        }
+    }
+}
+
 /// Spawn a shell command, reaping the child process in a background thread.
-fn spawn_click_command(cmd: &str) {
+fn spawn_click_command(widget_name: &str, cmd: &str) {
     match Command::new("sh")
         .args(["-c", cmd])
         .stdin(Stdio::null())
@@ -233,13 +252,36 @@ fn spawn_click_command(cmd: &str) {
         .spawn()
     {
         Ok(mut child) => {
+            let widget_name = widget_name.to_string();
+            let cmd = cmd.to_string();
             // Reap the child in a background thread to avoid zombie processes
-            std::thread::spawn(move || {
-                let _ = child.wait();
+            std::thread::spawn(move || match child.wait() {
+                Ok(status) if !status.success() => {
+                    tracing::warn!(
+                        "'{}' click command '{}' failed: {}",
+                        widget_name,
+                        cmd,
+                        describe_exit_status(status)
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "'{}' click command '{}' wait failed: {}",
+                        widget_name,
+                        cmd,
+                        e
+                    );
+                }
+                _ => {}
             });
         }
         Err(e) => {
-            tracing::warn!("Failed to spawn click command '{}': {}", cmd, e);
+            tracing::warn!(
+                "'{}' failed to spawn click command '{}': {}",
+                widget_name,
+                cmd,
+                e
+            );
         }
     }
 }
@@ -314,6 +356,7 @@ impl BaseWidget {
         gesture_click.set_button(0);
         {
             let menu_for_cb = menu.clone();
+            let widget_name_for_cb = widget_name.clone();
             // Use connect_released for immediate response without double-click detection delay
             gesture_click.connect_released(move |gesture, n_press, x, y| {
                 debug!(
@@ -374,13 +417,13 @@ impl BaseWidget {
                     gdk::BUTTON_MIDDLE => {
                         if let Some(ref cmd) = on_click_middle {
                             debug!("BaseWidget middle-click: sh -c {}", cmd);
-                            spawn_click_command(cmd);
+                            spawn_click_command(&widget_name_for_cb, cmd);
                         }
                     }
                     gdk::BUTTON_SECONDARY => {
                         if let Some(ref cmd) = on_click_right {
                             debug!("BaseWidget right-click: sh -c {}", cmd);
-                            spawn_click_command(cmd);
+                            spawn_click_command(&widget_name_for_cb, cmd);
                         }
                     }
                     _ => {}
@@ -529,6 +572,16 @@ impl BaseWidget {
         Some(source_id)
     }
 
+    /// Cancel the periodic `show_if` timer, if any.
+    ///
+    /// Used by widgets that handle `show_if` themselves (e.g., custom widgets
+    /// piggyback on their exec polling cycle instead of running a separate timer).
+    pub(super) fn cancel_show_if_timer(&mut self) {
+        if let Some(source_id) = self._show_if_timer.take() {
+            source_id.remove();
+        }
+    }
+
     /// Run a `show_if` shell command synchronously with a timeout.
     /// Returns `(visible, stderr)` where visible = exit 0.
     /// Commands exceeding `SHOW_IF_TIMEOUT_SECS` are killed and treated as hidden.
@@ -579,6 +632,21 @@ impl BaseWidget {
             }
             Err(_) => (false, String::new()),
         }
+    }
+
+    /// Run a `show_if` shell command synchronously (no timeout).
+    /// Returns `(visible, stderr)` where visible = exit 0.
+    pub(super) fn run_show_if_command(cmd: &str) -> (bool, String) {
+        Command::new("sh")
+            .args(["-c", cmd])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .output()
+            .map(|o| {
+                let stderr = String::from_utf8_lossy(&o.stderr).into_owned();
+                (o.status.success(), stderr)
+            })
+            .unwrap_or((false, String::new()))
     }
 
     /// Get the root GTK container for this widget.

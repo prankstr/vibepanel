@@ -19,6 +19,7 @@ mod battery_popover;
 mod calendar_popover;
 mod clock;
 mod cpu;
+mod custom;
 pub mod layer_shell_popover;
 mod marquee_label;
 mod media;
@@ -59,6 +60,7 @@ pub use window_title::{WindowTitleConfig, WindowTitleWidget};
 pub use workspaces::{WorkspacesConfig, WorkspacesWidget};
 
 pub use cpu::{CpuConfig, CpuWidget};
+pub use custom::{CustomConfig, CustomWidget};
 pub use memory::{MemoryConfig, MemoryWidget};
 
 use gtk4::Widget;
@@ -279,6 +281,22 @@ impl WidgetFactory {
                 Some(BuiltWidget {
                     widget: root,
                     handle: Box::new(spacer),
+                })
+            }
+            name if name.starts_with("custom-") => {
+                let custom_id = &name["custom-".len()..];
+                if custom_id.is_empty() {
+                    warn!(
+                        "Custom widget name must have an ID after 'custom-', e.g., 'custom-power'"
+                    );
+                    return None;
+                }
+                let cfg = CustomConfig::from_entry(entry);
+                let widget = CustomWidget::new(custom_id, cfg);
+                let root = widget.widget().clone().upcast::<Widget>();
+                Some(BuiltWidget {
+                    widget: root,
+                    handle: Box::new(widget),
                 })
             }
             name => {

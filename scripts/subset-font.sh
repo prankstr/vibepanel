@@ -26,9 +26,9 @@ FONT_URL="https://raw.githubusercontent.com/google/material-design-icons/master/
 PYTHON="${PYTHON:-python3}"
 
 # Extract unique Material Symbol glyph names from the RHS of match arms
-# in material_symbol_name().
+# in material_symbol_lookup() (the inner lookup table used by material_symbol_name).
 extract_glyphs() {
-    sed -n '/^pub fn material_symbol_name/,/^}/p' "$ICONS_RS" \
+    sed -n '/^fn material_symbol_lookup/,/^}/p' "$ICONS_RS" \
         | sed -n 's/.*=> "\([a-z_0-9]*\)".*/\1/p' \
         | sort -u
 }

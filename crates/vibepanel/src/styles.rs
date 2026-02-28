@@ -561,6 +561,11 @@ pub mod widget {
 
     /// Memory high usage state (`.memory-high`).
     pub const MEMORY_HIGH: &str = "memory-high";
+
+    // Custom
+    /// Custom widget prefix (`.custom-<name>`).
+    /// Each instance gets a dynamic `custom-{id}` class built from this prefix.
+    pub const CUSTOM_PREFIX: &str = "custom-";
 }
 
 /// Surface and popover classes.

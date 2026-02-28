@@ -2084,4 +2084,48 @@ mod tests {
             warnings
         );
     }
+
+    // --- Custom widget show_if config tests ---
+
+    #[test]
+    fn test_show_if_on_custom_widget_parsed() {
+        let toml = r#"
+            [widgets]
+            right = ["custom-power"]
+
+            [widgets.custom-power]
+            icon = "system-shutdown-symbolic"
+            show_if = "command -v wlogout"
+        "#;
+
+        let config: Config = toml::from_str(toml).unwrap();
+        let opts = config.widgets.get_options("custom-power").unwrap();
+        assert_eq!(opts.show_if, Some("command -v wlogout".to_string()));
+    }
+
+    #[test]
+    fn test_show_if_with_interval_on_custom_widget() {
+        let toml = r#"
+            [widgets]
+            right = ["custom-weather"]
+
+            [widgets.custom-weather]
+            exec = "curl -s wttr.in"
+            interval = 600
+            show_if = "ping -c1 -W1 1.1.1.1"
+            show_if_interval = 60
+        "#;
+
+        let config: Config = toml::from_str(toml).unwrap();
+        let opts = config.widgets.get_options("custom-weather").unwrap();
+        assert_eq!(opts.show_if, Some("ping -c1 -W1 1.1.1.1".to_string()));
+        assert_eq!(opts.show_if_interval, Some(60));
+        // show_if_interval without show_if warning should NOT fire here
+        let warnings = config.warnings();
+        assert!(
+            !warnings.iter().any(|w| w.contains("show_if_interval")),
+            "unexpected warning: {:?}",
+            warnings
+        );
+    }
 }

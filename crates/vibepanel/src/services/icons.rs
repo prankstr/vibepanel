@@ -99,8 +99,9 @@ fn register_font_with_pango(font_path: &std::path::Path) -> bool {
 
 /// Maps logical icon names to Material Symbols glyph names.
 ///
-/// `scripts/subset-font.sh` extracts glyph names from match arms in this
-/// function. Keep the structure as flat `"key" => "value"` arms.
+/// Delegates to `material_symbol_lookup()` for the actual mapping table.
+/// `scripts/subset-font.sh` extracts glyph names from match arms in
+/// `material_symbol_lookup()`. Keep the structure as flat `"key" => "value"` arms.
 ///
 /// Material Symbols uses ligatures: setting the label text to "battery_full"
 /// renders the battery_full glyph. This mapping converts our canonical names
@@ -112,7 +113,24 @@ fn register_font_with_pango(font_path: &std::path::Path) -> bool {
 ///   - Plus "-charging" variants for each level
 ///   - battery-missing for unknown state
 pub fn material_symbol_name(icon_name: &str) -> &str {
-    match icon_name {
+    if let Some(mapped) = material_symbol_lookup(icon_name) {
+        return mapped;
+    }
+
+    // Fallback: pass through unchanged (warns since unmapped names won't render in subset font)
+    warn!("No Material Symbol mapping for '{icon_name}'; icon may not render (font is subset)");
+    icon_name
+}
+
+/// Look up the Material Symbol glyph name for a logical icon name.
+///
+/// Returns `Some(glyph_name)` if a mapping exists, `None` if the icon name
+/// has no known Material Symbol equivalent.
+///
+/// This is the single source of truth for the icon mapping table.
+/// `material_symbol_name()` wraps this with a fallback + warning for unmapped names.
+fn material_symbol_lookup(icon_name: &str) -> Option<&'static str> {
+    let result = match icon_name {
         // Battery (discharging) - 8 levels for granular display
         "battery-full" => "battery_full",
         "battery-high" => "battery_6_bar",
@@ -294,14 +312,16 @@ pub fn material_symbol_name(icon_name: &str) -> &str {
         // Loading / progress spinner
         "process-working-symbolic" => "progress_activity",
 
-        // Fallback: pass through unchanged (warns since unmapped names won't render in subset font)
-        _ => {
-            warn!(
-                "No Material Symbol mapping for '{icon_name}'; icon may not render (font is subset)"
-            );
-            icon_name
-        }
-    }
+        // No mapping found
+        _ => return None,
+    };
+    Some(result)
+}
+
+/// Returns whether `icon_name` has a Material Symbol mapping.
+/// Unlike `material_symbol_name()`, does not log a warning for unmapped names.
+pub(crate) fn has_material_mapping(icon_name: &str) -> bool {
+    material_symbol_lookup(icon_name).is_some()
 }
 
 /// Maps logical icon names to a list of GTK icon name candidates.

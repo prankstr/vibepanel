@@ -40,6 +40,24 @@ background_opacity = 1.0
 #   [widgets.battery]
 #   disabled = true
 #
+# Custom widgets use the "custom-" prefix for user-defined buttons:
+#   right = ["custom-power", "tray", "clock"]
+#
+#   [widgets.custom-power]
+#   icon = "system-shutdown-symbolic"
+#   label = "Power"
+#   tooltip = "Power menu"
+#   on_click = "wlogout"
+#   on_click_right = "systemctl suspend"
+#
+#   [widgets.custom-weather]
+#   exec = "curl -s 'wttr.in/?format=1'"
+#   template = " {output}"
+#   interval = 600
+#   on_click = "xdg-open https://wttr.in"
+#   tooltip = "Weather"
+#   max_chars = 30
+#
 # See documentation for all widget options.
 
 [theme]
