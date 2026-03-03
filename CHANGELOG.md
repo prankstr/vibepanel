@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0](https://github.com/prankstr/vibepanel/compare/v0.10.0...v0.11.0) (2026-03-03)
+
+
+### Features
+
+* **widgets:** add configurable right-click and middle-click handlers ([d051846](https://github.com/prankstr/vibepanel/commit/d051846682ffe2921742f04b954604a8aa9ea3b0))
+* **widgets:** add custom widget ([#58](https://github.com/prankstr/vibepanel/issues/58)) ([1673ac3](https://github.com/prankstr/vibepanel/commit/1673ac39afa35bc74ab19ff775ee8b5cfb708de6))
+* **widgets:** add show_if conditional visibility with optional polling ([275d895](https://github.com/prankstr/vibepanel/commit/275d89513f331ab08402d2d3eeb72a5c96d080b4))
+
+
+### Bug Fixes
+
+* **icons:** material icons no longer turn to text after font updates ([571fe36](https://github.com/prankstr/vibepanel/commit/571fe368dce267b13c9286dbd77d35739be6cfc3))
+* **widgets:** make show_if fully async and debounce monitor hotplug ([125dc3d](https://github.com/prankstr/vibepanel/commit/125dc3d9e0cfdd1d3a2a778fedc41cec8379b3ff))
+
 ## [0.10.0](https://github.com/prankstr/vibepanel/compare/v0.9.0...v0.10.0) (2026-02-27)
 
 
