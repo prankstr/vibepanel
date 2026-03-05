@@ -222,11 +222,11 @@ window.quick-settings-window {
     font-size: var(--font-size-sm);
     min-width: var(--font-size-sm);
     min-height: var(--font-size-sm);
+    border-radius: var(--radius-widget);
 }
 
 .qs-row-action-label:hover {
     background: var(--color-card-overlay-hover);
-    border-radius: var(--radius-widget);
 }
 
 /* Subtitles - secondary info, color via vp-muted */

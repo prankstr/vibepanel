@@ -322,6 +322,7 @@ impl ThemePalette {
      * To override in user CSS, use: --widget-background-opacity: 50%; */
     --widget-background-color: {widget_bg_color};
     --widget-background-opacity: {widget_bg_opacity}%;
+    --widget-hover-tint: {widget_hover_tint};
 
     /* ===== Background Colors ===== */
     /* Bar background with opacity applied via color-mix */
@@ -432,6 +433,7 @@ impl ThemePalette {
             bar_bg_with_opacity = self.bar_background_with_opacity(),
             widget_bg_color = self.widget_background,
             widget_bg_opacity = (self.widget_opacity * 100.0).round() as u32,
+            widget_hover_tint = if self.is_dark_mode { "white" } else { "black" },
             fg_primary = self.foreground_primary,
             fg_muted = self.foreground_muted,
             fg_disabled = self.foreground_disabled,

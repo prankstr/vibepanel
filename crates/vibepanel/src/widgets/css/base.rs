@@ -159,6 +159,49 @@ popover.widget-menu.background > contents {{
 /* ===== COMPONENT CLASSES ===== */
 /* Reusable component patterns for cards, rows, sliders */
 
+/* ===== HOVER TRANSITIONS ===== */
+/* Centralized 100ms transitions for all interactive elements.
+   GTK4 needs transition on BOTH base and :hover for bidirectional animation.
+   Property name must match the property being changed (background vs background-color). */
+
+/* Elements that hover via `background:` */
+button,
+.vp-card,
+.qs-row,
+.qs-toggle-more,
+.qs-row-menu-button,
+.qs-row-menu-item,
+.qs-scan-button,
+.qs-row-action-label,
+.tray-menu-button,
+.system-expander-header,
+label link {{
+    transition: background 100ms ease;
+}}
+button:hover,
+.vp-card:hover,
+.qs-row:hover,
+.qs-toggle-more:hover,
+.qs-row-menu-button:hover,
+.qs-row-menu-item:hover,
+.qs-scan-button:hover,
+.qs-row-action-label:hover,
+.tray-menu-button:hover,
+.system-expander-header:hover,
+label link:hover {{
+    transition: background 100ms ease;
+}}
+
+/* Elements that hover via `background-color:` */
+.widget,
+.widget-item {{
+    transition: background-color 100ms ease;
+}}
+.widget:hover,
+.widget-item:hover {{
+    transition: background-color 100ms ease;
+}}
+
 /* Slider row - horizontal layout with icon + slider + optional trailing widget */
 .slider-row {{
     padding: 4px 8px;
@@ -173,7 +216,6 @@ popover.widget-menu.background > contents {{
     min-height: 32px;
     padding: 0;
     border-radius: var(--radius-widget);
-    transition: background 150ms ease-out;
     font-size: calc(var(--icon-size) * 1.15);
 }}
 .slider-row .slider-icon-btn:hover {{

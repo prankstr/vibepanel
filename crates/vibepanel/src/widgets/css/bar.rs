@@ -3,7 +3,7 @@
 //! Note: This module requires config values for screen_margin and spacing,
 //! so it returns a formatted String rather than a static str.
 
-use super::WIDGET_BG_WITH_OPACITY;
+use super::{WIDGET_BG_HOVER, WIDGET_BG_WITH_OPACITY};
 use crate::widgets::workspaces::{
     INDICATOR_ACTIVE_MULT, INDICATOR_HEIGHT_MULT, INDICATOR_INACTIVE_MULT,
 };
@@ -11,6 +11,7 @@ use crate::widgets::workspaces::{
 /// Return bar CSS with config values interpolated.
 pub fn css(screen_margin: u32, spacing: u32) -> String {
     let widget_bg = WIDGET_BG_WITH_OPACITY;
+    let widget_bg_hover = WIDGET_BG_HOVER;
     let inactive_mult = INDICATOR_INACTIVE_MULT;
     let active_mult = INDICATOR_ACTIVE_MULT;
     let height_mult = INDICATOR_HEIGHT_MULT;
@@ -63,7 +64,7 @@ sectioned-bar.bar {{
 
 /* Widget hover state - standalone clickable widgets */
 .widget.clickable:not(.widget-group):hover {{
-    background-image: linear-gradient(var(--color-card-overlay-hover), var(--color-card-overlay-hover));
+    background-color: {widget_bg_hover};
 }}
 
 /* Widget items inside groups - symmetric padding for hover area */
@@ -78,7 +79,7 @@ sectioned-bar.bar {{
 
 /* Widget items inside groups - individual clickable hover targets */
 .widget-group > .content > .widget-item.clickable:hover {{
-    background-image: linear-gradient(var(--color-card-overlay-hover), var(--color-card-overlay-hover));
+    background-color: {widget_bg_hover};
     border-radius: var(--radius-widget);
 }}
 

@@ -42,7 +42,7 @@ pub fn css() -> &'static str {
 
 .qs-row-menu-item:hover,
 .tray-menu-button:hover {
-    background-color: var(--color-card-overlay-hover);
+    background: var(--color-card-overlay-hover);
 }
 
 .tray-menu-button:disabled {
