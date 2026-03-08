@@ -68,7 +68,7 @@ impl OsdWidget {
         root.add_css_class(osd::WIDGET);
 
         // === Normal content: icon + slider ===
-        let normal_content = GtkBox::new(orientation, 12);
+        let normal_content = GtkBox::new(orientation, 4);
         normal_content.add_css_class(osd::NORMAL);
 
         let icon_image = Image::from_icon_name("audio-volume-medium-symbolic");
@@ -229,7 +229,7 @@ impl OsdOverlay {
         // Apply theme surface styles with larger widget radius for pill shape at max radius.
         SurfaceStyleManager::global().apply_surface_styles_with_radius(
             &container,
-            true,
+            false,
             "var(--radius-widget-lg)",
         );
 

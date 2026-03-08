@@ -13,7 +13,12 @@ pub fn css() -> &'static str {
 /* Container - tight padding for compact appearance */
 /* Note: border-radius set via apply_surface_styles_with_radius() */
 .osd-container {
-    padding: 12px 16px;
+    padding: 10px 16px;
+}
+
+.osd-icon {
+    -gtk-icon-size: calc(var(--icon-size) * 1.5);
+    font-size: calc(var(--icon-size) * 1.5);
 }
 
 /* Slider styling - slightly thicker for better visual weight */
