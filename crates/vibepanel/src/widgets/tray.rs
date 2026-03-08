@@ -892,7 +892,7 @@ fn render_menu_level(state: &Rc<RefCell<WidgetState>>) {
             continue;
         }
 
-        let button = Button::new();
+        let button = crate::widgets::base::vp_button();
         button.set_sensitive(entry.enabled);
         button.set_focusable(false);
         button.set_focus_on_click(false);

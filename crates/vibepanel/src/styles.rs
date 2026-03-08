@@ -207,6 +207,20 @@ pub mod state {
 
     /// Urgent workspace state (`.urgent`).
     pub const URGENT: &str = "urgent";
+
+    /// Ripple overlay element (`.vp-ripple-overlay`).
+    pub const RIPPLE_OVERLAY: &str = "vp-ripple-overlay";
+
+    /// Row with ripple overlay — padding is on the content, not the row (`.vp-has-ripple`).
+    pub const HAS_RIPPLE: &str = "vp-has-ripple";
+
+    /// Overlay wrapper created by `wrap_with_ripple()` (`.vp-ripple-wrap`).
+    ///
+    /// Carries `border-radius: var(--radius-widget)` so `overflow: hidden`
+    /// clips the ripple to rounded corners. When inside a button or row,
+    /// a more specific CSS rule overrides this with `border-radius: inherit`
+    /// to match the parent's actual radius.
+    pub const RIPPLE_WRAP: &str = "vp-ripple-wrap";
 }
 
 /// Quick Settings specific component classes.
@@ -639,9 +653,6 @@ pub mod notification {
     /// Header icon (`.notification-header-icon`) - for icon sizing.
     pub const HEADER_ICON: &str = "notification-header-icon";
 
-    /// Clear all button (`.notification-clear-btn`).
-    pub const CLEAR_BTN: &str = "notification-clear-btn";
-
     /// Clear label (`.notification-clear-label`).
     pub const CLEAR_LABEL: &str = "notification-clear-label";
 
@@ -939,12 +950,6 @@ pub mod media {
 
     /// Window drag handle (`.media-window-drag`).
     pub const WINDOW_DRAG: &str = "media-window-drag";
-
-    /// Window close button (`.media-window-close`).
-    pub const WINDOW_CLOSE: &str = "media-window-close";
-
-    /// Window dock button (return to popover) (`.media-window-dock`).
-    pub const WINDOW_DOCK: &str = "media-window-dock";
 
     /// Window control button - smaller than popover (`.media-window-control-btn`).
     pub const WINDOW_CONTROL_BTN: &str = "media-window-control-btn";

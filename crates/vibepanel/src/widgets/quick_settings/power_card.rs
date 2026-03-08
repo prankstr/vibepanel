@@ -437,7 +437,7 @@ impl ExpandableCard for PowerCardExpanderState {
 }
 
 /// Build power card with popover menu (hold-to-open).
-pub fn build_power_card_popover() -> (GtkBox, Rc<PowerCardState>) {
+pub fn build_power_card_popover() -> (gtk4::Widget, Rc<PowerCardState>) {
     let state = Rc::new(PowerCardState::new());
 
     // Create the card wrapper box
@@ -462,7 +462,7 @@ pub fn build_power_card_popover() -> (GtkBox, Rc<PowerCardState>) {
     });
 
     card_box.append(&overlay);
-    (card_box, state)
+    (card_box.upcast(), state)
 }
 
 /// Show the power actions popover.
@@ -549,8 +549,12 @@ fn create_power_popover_action(action: &'static PowerAction) -> Overlay {
 /// setting up the expander button click handler via `AccordionManager::setup_expander_with_callback`,
 /// which handles accordion behavior, revealer toggling, and arrow CSS updates.
 /// The caller can provide an `on_toggle` callback to update the subtitle text.
-pub fn build_power_card_expander() -> (GtkBox, Revealer, Rc<PowerCardExpanderState>, Option<Button>)
-{
+pub fn build_power_card_expander() -> (
+    gtk4::Widget,
+    Revealer,
+    Rc<PowerCardExpanderState>,
+    Option<Button>,
+) {
     let state = Rc::new(PowerCardExpanderState::new());
 
     // Build the card using ToggleCard pattern
@@ -562,6 +566,7 @@ pub fn build_power_card_expander() -> (GtkBox, Revealer, Rc<PowerCardExpanderSta
         .sensitive(true)
         .icon_active(false)
         .with_expander(true)
+        .with_ripple(false)
         .build();
 
     // Store base references
@@ -615,7 +620,7 @@ pub fn build_power_card_expander() -> (GtkBox, Revealer, Rc<PowerCardExpanderSta
     wrapper.append(&card_overlay);
     // Don't hexpand the wrapper - let it size from the card content
 
-    (wrapper, revealer, state, card.expander_button)
+    (wrapper.upcast(), revealer, state, card.expander_button)
 }
 
 /// Result of building power details section.
@@ -704,12 +709,12 @@ fn build_power_action_row(action: &'static PowerAction) -> ListBoxRow {
 pub enum PowerCardBuildResult {
     /// Popover variant result.
     Popover {
-        card: GtkBox,
+        card: gtk4::Widget,
         state: Rc<PowerCardState>,
     },
     /// Expander variant result.
     Expander {
-        card: GtkBox,
+        card: gtk4::Widget,
         revealer: Revealer,
         state: Rc<PowerCardExpanderState>,
         /// Expander button for accordion registration (if caller wants to add accordion behavior)

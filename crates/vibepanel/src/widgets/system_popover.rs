@@ -271,7 +271,7 @@ pub fn build_system_popover_with_controller() -> (Widget, SystemPopoverControlle
         icons.create_icon("pan-down-symbolic", &[icon::TEXT, color::MUTED]);
     expander_row.append(&cores_expander_chevron.widget());
 
-    let expander_btn = gtk4::Button::new();
+    let expander_btn = crate::widgets::base::vp_button();
     expander_btn.set_child(Some(&expander_row));
     expander_btn.add_css_class(button::COMPACT);
     expander_btn.add_css_class(sp::EXPANDER_HEADER);

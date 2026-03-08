@@ -32,6 +32,7 @@ mod notifications_common;
 mod notifications_popover;
 mod notifications_toast;
 mod osd;
+pub(crate) mod ripple;
 mod rounded_picture;
 mod spacer;
 mod system_popover;

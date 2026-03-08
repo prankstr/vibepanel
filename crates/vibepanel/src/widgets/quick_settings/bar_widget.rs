@@ -24,6 +24,7 @@ use crate::services::vpn::{VpnService, VpnSnapshot};
 use crate::styles::{icon, qs, state, widget};
 use crate::widgets::BaseWidget;
 use crate::widgets::WidgetConfig;
+use crate::widgets::base::trigger_ripple_from_gesture;
 use crate::widgets::warn_unknown_options;
 use vibepanel_core::config::WidgetEntry;
 
@@ -534,6 +535,16 @@ impl QuickSettingsWidget {
         gesture.set_button(BUTTON_PRIMARY);
         // Run in capture phase to handle click before BaseWidget's gesture
         gesture.set_propagation_phase(gtk4::PropagationPhase::Capture);
+
+        // Ripple on press (mouse-down) for immediate visual feedback.
+        // Must be wired here because this gesture runs in Capture phase and
+        // claims the sequence, so BaseWidget's connect_pressed never fires.
+        {
+            let ripple = base.ripple_handle().clone();
+            gesture.connect_pressed(move |gesture, _n_press, x, y| {
+                trigger_ripple_from_gesture(gesture, x, y, &ripple);
+            });
+        }
 
         {
             let qs_window_handle = qs_window.clone();

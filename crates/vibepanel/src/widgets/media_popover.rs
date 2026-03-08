@@ -53,7 +53,7 @@ where
     buttons_row.add_css_class(media::HEADER);
 
     // Player selector button
-    let player_btn = Button::new();
+    let player_btn = crate::widgets::base::vp_button();
     player_btn.set_has_frame(false);
     player_btn.set_focusable(false);
     player_btn.set_focus_on_click(false);
@@ -73,7 +73,7 @@ where
     buttons_row.append(&player_btn);
 
     // Pop-out button
-    let popout_btn = Button::new();
+    let popout_btn = crate::widgets::base::vp_button();
     popout_btn.set_has_frame(false);
     popout_btn.set_focusable(false);
     popout_btn.set_focus_on_click(false);
@@ -219,15 +219,14 @@ fn show_player_menu(parent: &Button) {
 
 /// Create a player menu item button.
 fn create_player_menu_item(name: &str, subtitle: Option<&str>, is_active: bool) -> Button {
-    let btn = Button::new();
+    let btn = crate::widgets::base::vp_button();
     btn.set_has_frame(false);
     btn.add_css_class(qs::ROW_MENU_ITEM);
     btn.add_css_class(media::PLAYER_MENU_ITEM);
     btn.add_css_class(button::GHOST);
 
     let hbox = GtkBox::new(Orientation::Horizontal, 8);
-    hbox.set_margin_start(4);
-    hbox.set_margin_end(8);
+    // Horizontal spacing handled by `.qs-row-menu-item > overlay > *` CSS margin
 
     // Check icon for active item (accent colored, bold)
     let icons = IconsService::global();

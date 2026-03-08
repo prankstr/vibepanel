@@ -33,8 +33,11 @@ pub fn css() -> &'static str {
     font-size: var(--font-size-sm);
     border-radius: var(--radius-widget);
     min-width: 0;
-    min-height: 0;
-    padding: 8px 8px;
+    min-height: 32px;
+}
+
+.battery-popover-profile-button label {
+    margin: 0 8px;
 }
 
 .battery-popover-profile-button:hover {

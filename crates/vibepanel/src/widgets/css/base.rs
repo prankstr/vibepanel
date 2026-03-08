@@ -89,9 +89,8 @@ label link:active {{
     background: transparent;
     border: none;
     box-shadow: none;
-    min-width: 28px;
-    min-height: 28px;
-    padding: 4px;
+    min-width: 36px;
+    min-height: 36px;
     margin-top: -8px;
     border-radius: var(--radius-widget);
     color: var(--color-foreground-primary);
@@ -100,10 +99,6 @@ label link:active {{
 
 .vp-popover-icon-btn:hover {{
     background: var(--color-card-overlay-hover);
-}}
-
-.vp-popover-icon-btn:active {{
-    opacity: 0.7;
 }}
 
 /* Popover title - consistent styling for popover headers */
@@ -159,40 +154,44 @@ popover.widget-menu.background > contents {{
 /* ===== COMPONENT CLASSES ===== */
 /* Reusable component patterns for cards, rows, sliders */
 
+/* ===== RIPPLE ANIMATION ===== */
+/* Press feedback is rendered by Cairo via DrawingArea (click-origin
+   expanding circle). The .vp-ripple-overlay class is kept for the DrawingArea
+   element that sits in the gtk4::Overlay. */
+
+/* Ripple overlay — transparent background so DrawingArea is invisible when idle */
+.vp-ripple-overlay {{
+    background: transparent;
+}}
+
+/* The Overlay wrapper inside .widget needs to inherit border-radius
+   so overflow:hidden clips the ripple to the widget's rounded shape */
+.widget overlay {{
+    border-radius: inherit;
+}}
+
+/* Ripple wrapper overlay — fallback border-radius for standalone use
+   (e.g. toggle cards where the overlay wraps the card) */
+overlay.vp-ripple-wrap {{
+    border-radius: var(--radius-widget);
+}}
+
+/* When inside a button or row, inherit the parent's actual radius
+   (may differ from --radius-widget, e.g. --radius-pill on compact buttons) */
+button.vp-has-ripple > overlay,
+row.vp-has-ripple > overlay {{
+    border-radius: inherit;
+}}
+
 /* ===== HOVER TRANSITIONS ===== */
-/* Centralized 100ms transitions for all interactive elements.
-   GTK4 needs transition on BOTH base and :hover for bidirectional animation.
-   Property name must match the property being changed (background vs background-color). */
-
-/* Elements that hover via `background:` */
-button,
-.vp-card,
-.qs-row,
-.qs-toggle-more,
-.qs-row-menu-button,
-.qs-row-menu-item,
-.qs-scan-button,
-.qs-row-action-label,
-.tray-menu-button,
-.system-expander-header,
-label link {{
-    transition: background 100ms ease;
+/* GTK4 needs transition on BOTH base and :hover for bidirectional animation. */
+button {{
+    transition: background-color 100ms ease;
 }}
-button:hover,
-.vp-card:hover,
-.qs-row:hover,
-.qs-toggle-more:hover,
-.qs-row-menu-button:hover,
-.qs-row-menu-item:hover,
-.qs-scan-button:hover,
-.qs-row-action-label:hover,
-.tray-menu-button:hover,
-.system-expander-header:hover,
-label link:hover {{
-    transition: background 100ms ease;
+button:hover {{
+    transition: background-color 100ms ease;
 }}
 
-/* Elements that hover via `background-color:` */
 .widget,
 .widget-item {{
     transition: background-color 100ms ease;

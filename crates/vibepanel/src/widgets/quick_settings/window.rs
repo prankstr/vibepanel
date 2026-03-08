@@ -372,7 +372,7 @@ impl QuickSettingsWindow {
         // registration. Cards that need custom expand/collapse behavior (e.g.,
         // Power card updating its subtitle) provide an on_toggle callback.
         struct ToggleCardInfo {
-            card: GtkBox,
+            card: gtk4::Widget,
             revealer: Option<Revealer>,
             expander_button: Option<Button>,
             /// Expandable card state (if this card supports accordion behavior).
@@ -559,7 +559,7 @@ impl QuickSettingsWindow {
     ///
     /// Returns `(card, revealer, expander_button)` - caller is responsible for
     /// accordion registration via `AccordionManager::setup_expander`.
-    fn build_network_card(qs: &Rc<Self>) -> (GtkBox, Revealer, Option<Button>) {
+    fn build_network_card(qs: &Rc<Self>) -> (gtk4::Widget, Revealer, Option<Button>) {
         let network_service = NetworkService::global();
         let snapshot = network_service.snapshot();
 
@@ -680,7 +680,7 @@ impl QuickSettingsWindow {
     ///
     /// Returns `(card, revealer, expander_button)` - caller is responsible for
     /// accordion registration via `AccordionManager::setup_expander`.
-    fn build_bluetooth_card(qs: &Rc<Self>) -> (GtkBox, Revealer, Option<Button>) {
+    fn build_bluetooth_card(qs: &Rc<Self>) -> (gtk4::Widget, Revealer, Option<Button>) {
         let bt_service = BluetoothService::global();
         let bt_snapshot = bt_service.snapshot();
 
@@ -768,7 +768,7 @@ impl QuickSettingsWindow {
     ///
     /// Returns `(card, revealer, expander_button)` - caller is responsible for
     /// accordion registration via `AccordionManager::setup_expander`.
-    fn build_vpn_card(qs: &Rc<Self>) -> (GtkBox, Revealer, Option<Button>) {
+    fn build_vpn_card(qs: &Rc<Self>) -> (gtk4::Widget, Revealer, Option<Button>) {
         let vpn_service = VpnService::global();
         let vpn_snapshot = vpn_service.snapshot();
 
@@ -844,7 +844,7 @@ impl QuickSettingsWindow {
     }
 
     /// Build the Idle Inhibitor card (no revealer needed).
-    fn build_idle_inhibitor_card(qs: &Rc<Self>) -> GtkBox {
+    fn build_idle_inhibitor_card(qs: &Rc<Self>) -> gtk4::Widget {
         let idle_service = IdleInhibitorService::global();
         let idle_snapshot = idle_service.snapshot();
 

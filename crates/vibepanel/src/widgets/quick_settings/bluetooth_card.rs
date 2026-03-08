@@ -12,7 +12,7 @@ use std::rc::Rc;
 
 use gtk4::prelude::*;
 use gtk4::{
-    Box as GtkBox, Button, Entry, Label, ListBox, ListBoxRow, Orientation, Popover, ScrolledWindow,
+    Box as GtkBox, Entry, Label, ListBox, ListBoxRow, Orientation, Popover, ScrolledWindow,
 };
 use tracing::debug;
 
@@ -459,7 +459,7 @@ fn build_auth_row(auth_request: &BluetoothAuthRequest, state: &BluetoothCardStat
     btn_spacer.set_hexpand(true);
     btn_row.append(&btn_spacer);
 
-    let btn_cancel = Button::with_label("Cancel");
+    let btn_cancel = crate::widgets::base::vp_button_with_label("Cancel");
     btn_cancel.add_css_class(button::CARD);
     btn_cancel.connect_clicked(|_| {
         debug!("Auth cancelled by user");
@@ -472,7 +472,11 @@ fn build_auth_row(auth_request: &BluetoothAuthRequest, state: &BluetoothCardStat
         BluetoothAuthRequest::RequestConfirmation { .. }
     );
 
-    let btn_confirm = Button::with_label(if is_confirmation { "Confirm" } else { "Pair" });
+    let btn_confirm = crate::widgets::base::vp_button_with_label(if is_confirmation {
+        "Confirm"
+    } else {
+        "Pair"
+    });
     btn_confirm.add_css_class(button::ACCENT);
 
     if is_display_mode {

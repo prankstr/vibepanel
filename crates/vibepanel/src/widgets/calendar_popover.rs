@@ -3,7 +3,7 @@ use std::rc::Rc;
 
 use chrono::{Datelike, Local, NaiveDate};
 use gtk4::prelude::*;
-use gtk4::{Align, Box as GtkBox, Button, Calendar, Label, Orientation, Overlay, Widget};
+use gtk4::{Align, Box as GtkBox, Calendar, Label, Orientation, Overlay, Widget};
 
 use crate::styles::{calendar as cal, surface};
 
@@ -123,13 +123,9 @@ pub fn build_clock_calendar_popover(show_week_numbers: bool) -> Widget {
 
     // Navigation buttons (prev/next) ----------------------------------------
 
-    let prev_button = Button::from_icon_name("go-previous-symbolic");
+    let prev_button = crate::widgets::base::vp_button_from_icon_name("go-previous-symbolic");
     prev_button.add_css_class(surface::POPOVER_ICON_BTN);
     prev_button.set_valign(Align::Start);
-    if let Some(child) = prev_button.child() {
-        child.set_halign(gtk4::Align::Center);
-        child.set_valign(gtk4::Align::Center);
-    }
 
     {
         let current_date = current_date.clone();
@@ -156,13 +152,9 @@ pub fn build_clock_calendar_popover(show_week_numbers: bool) -> Widget {
         });
     }
 
-    let next_button = Button::from_icon_name("go-next-symbolic");
+    let next_button = crate::widgets::base::vp_button_from_icon_name("go-next-symbolic");
     next_button.add_css_class(surface::POPOVER_ICON_BTN);
     next_button.set_valign(Align::Start);
-    if let Some(child) = next_button.child() {
-        child.set_halign(gtk4::Align::Center);
-        child.set_valign(gtk4::Align::Center);
-    }
 
     {
         let current_date = current_date.clone();

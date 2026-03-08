@@ -239,7 +239,7 @@ where
     F: Fn() + 'static,
 {
     let icon_handle = icons.create_icon(icon_name, &[icon::ICON]);
-    let btn = Button::new();
+    let btn = crate::widgets::base::vp_button();
     btn.set_has_frame(false);
     btn.set_valign(Align::Center);
     btn.set_child(Some(&icon_handle.widget()));
@@ -270,7 +270,7 @@ pub fn build_media_controls(
     let prev_icon = icons.create_icon("media-skip-backward", &[icon::ICON]);
     prev_icon.widget().set_halign(Align::Center);
     prev_icon.widget().set_valign(Align::Center);
-    let prev_btn = Button::new();
+    let prev_btn = crate::widgets::base::vp_button();
     prev_btn.set_child(Some(&prev_icon.widget()));
     prev_btn.add_css_class(media::CONTROL_BTN);
     prev_btn.add_css_class(button::COMPACT);
@@ -287,7 +287,7 @@ pub fn build_media_controls(
         icons.create_icon("media-playback-start", &[icon::ICON, media::PRIMARY_ICON]);
     play_pause_icon.widget().set_halign(Align::Center);
     play_pause_icon.widget().set_valign(Align::Center);
-    let play_pause_btn = Button::new();
+    let play_pause_btn = crate::widgets::base::vp_button();
     play_pause_btn.set_child(Some(&play_pause_icon.widget()));
     play_pause_btn.add_css_class(media::CONTROL_BTN);
     play_pause_btn.add_css_class(media::CONTROL_BTN_PRIMARY);
@@ -304,7 +304,7 @@ pub fn build_media_controls(
     let next_icon = icons.create_icon("media-skip-forward", &[icon::ICON]);
     next_icon.widget().set_halign(Align::Center);
     next_icon.widget().set_valign(Align::Center);
-    let next_btn = Button::new();
+    let next_btn = crate::widgets::base::vp_button();
     next_btn.set_child(Some(&next_icon.widget()));
     next_btn.add_css_class(media::CONTROL_BTN);
     next_btn.add_css_class(button::COMPACT);

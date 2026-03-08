@@ -115,20 +115,6 @@ pub fn css() -> &'static str {
     font-size: calc(var(--icon-size) * 1.15);
 }
 
-.notification-clear-btn {
-    padding: 4px 8px;
-    min-height: 0;
-    border-radius: var(--radius-widget);
-}
-
-.notification-clear-btn:hover {
-    background: var(--color-card-overlay-hover);
-}
-
-.notification-clear-btn:active {
-    opacity: 0.7;
-}
-
 .notification-clear-label {
     font-size: var(--font-size-sm);
 }

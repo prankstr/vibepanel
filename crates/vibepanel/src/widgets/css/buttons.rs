@@ -84,5 +84,12 @@ button.vp-btn-ghost {
 button.vp-btn-ghost:hover {
     background: var(--color-card-overlay-hover);
 }
+
+/* Ripple buttons - zero padding so the Cairo ripple overlay fills the
+   full hover/background area.  Individual button classes should use
+   min-width / min-height to maintain their intended hit-target size. */
+button.vp-has-ripple {
+    padding: 0;
+}
 "#
 }

@@ -53,8 +53,13 @@ sectioned-bar.bar {{
 .widget {{
     background-color: {widget_bg};
     border-radius: var(--radius-widget);
-    padding: var(--widget-padding-y) 10px;
     min-height: var(--widget-height);
+}}
+
+/* Padding on the content box (not the container) so the ripple overlay
+   can fill the entire widget background area edge-to-edge */
+.widget .content {{
+    padding: var(--widget-padding-y) 10px;
 }}
 
 /* Widget groups - remove padding so hover can extend to edges */
@@ -84,7 +89,7 @@ sectioned-bar.bar {{
 }}
 
 /* Spacing between items inside widgets */
-.widget > .content > *:not(:last-child),
+.widget .content > *:not(:last-child),
 .widget-group > .content .content > *:not(:last-child) {{
     margin-right: var(--spacing-widget-gap);
 }}
@@ -108,7 +113,10 @@ sectioned-bar.bar {{
     min-height: calc(var(--widget-height) * {height_mult});
     border-radius: calc(var(--radius-pill) * 1.2);
     color: var(--color-foreground-faint);
-    transition: min-width 200ms linear, background-color 200ms ease;
+    background-size: 0% 0%;
+    background-position: center;
+    background-repeat: no-repeat;
+    transition: min-width 200ms linear, background-color 200ms ease, background-size 300ms ease-out;
     /* Duration must match INDICATOR_ANIM_DURATION_US in workspaces.rs */
 }}
 

@@ -109,7 +109,7 @@ impl IconButton {
 
     /// Build the icon button.
     pub fn build(self) -> IconButtonResult {
-        let button = Button::new();
+        let button = crate::widgets::base::vp_button();
         button.set_has_frame(false);
         button.add_css_class(CSS_SLIDER_ICON_BTN);
         // Prevent vertical stretching in horizontal boxes
@@ -248,7 +248,7 @@ impl ExpanderButton {
 
     /// Build the expander button.
     pub fn build(self) -> ExpanderButtonResult {
-        let button = Button::new();
+        let button = crate::widgets::base::vp_button();
         button.set_has_frame(false);
         button.add_css_class(crate::styles::qs::TOGGLE_MORE);
         // Prevent vertical stretching in horizontal boxes
@@ -624,8 +624,8 @@ impl SliderRow {
 
 /// Result of building a toggle card.
 pub struct ToggleCardResult {
-    /// The outer card container box.
-    pub card: GtkBox,
+    /// The outer card container (Overlay with ripple layer).
+    pub card: gtk4::Widget,
     /// The main toggle button (power on/off).
     pub toggle: ToggleButton,
     /// Handle to the icon for dynamic updates.
@@ -664,6 +664,7 @@ pub struct ToggleCard {
     sensitive: bool,
     icon_active: bool,
     with_expander: bool,
+    with_ripple: bool,
 }
 
 impl ToggleCard {
@@ -678,6 +679,7 @@ impl ToggleCard {
             sensitive: true,
             icon_active: false,
             with_expander: true,
+            with_ripple: true,
         }
     }
 
@@ -729,9 +731,19 @@ impl ToggleCard {
         self
     }
 
+    /// Enable or disable the card-level ripple overlay.
+    ///
+    /// Defaults to `true`. Set to `false` for cards that provide their own
+    /// press feedback (e.g. power card's hold-to-confirm progress).
+    pub fn with_ripple(mut self, with_ripple: bool) -> Self {
+        self.with_ripple = with_ripple;
+        self
+    }
+
     /// Build the toggle card.
     pub fn build(self) -> ToggleCardResult {
         use crate::styles::{button, card, color, icon, qs};
+        use crate::widgets::base::trigger_ripple_from_gesture;
         use gtk4::{Align, ToggleButton};
 
         let card_box = GtkBox::new(Orientation::Horizontal, 4);
@@ -739,7 +751,7 @@ impl ToggleCard {
         card_box.add_css_class(card::BASE);
         card_box.set_hexpand(true);
 
-        // Main toggle button
+        // Main toggle button (plain ToggleButton — ripple is on the card overlay)
         let toggle = ToggleButton::new();
         toggle.set_active(self.active);
         toggle.set_hexpand(true);
@@ -798,8 +810,28 @@ impl ToggleCard {
             (None, None)
         };
 
+        // Card-level ripple overlay: covers the entire card (toggle + chevron)
+        // triggered by clicks on the toggle button area.
+        // Skipped for cards with their own press feedback (e.g. power card).
+        let card_widget: gtk4::Widget = if self.with_ripple {
+            let (card_overlay, ripple_handle) = crate::widgets::base::wrap_with_ripple(&card_box);
+
+            // Trigger card-wide ripple from toggle press
+            let gesture = gtk4::GestureClick::new();
+            gesture.set_propagation_phase(gtk4::PropagationPhase::Capture);
+            let rh = ripple_handle;
+            gesture.connect_pressed(move |gesture, _n_press, x, y| {
+                trigger_ripple_from_gesture(gesture, x, y, &rh);
+            });
+            toggle.add_controller(gesture);
+
+            card_overlay.upcast()
+        } else {
+            card_box.upcast()
+        };
+
         ToggleCardResult {
-            card: card_box,
+            card: card_widget,
             toggle,
             icon_handle,
             title: label_result.title,

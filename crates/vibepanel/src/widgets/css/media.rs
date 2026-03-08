@@ -71,8 +71,8 @@ pub fn css() -> &'static str {
 /* Override base popover icon button size for denser media layout */
 .media-popout-btn,
 .media-player-selector-btn {
-    min-width: 20px;
-    min-height: 20px;
+    min-width: 28px;
+    min-height: 28px;
     margin-top: 0;
 }
 
@@ -264,23 +264,6 @@ pub fn css() -> &'static str {
 
 .media-volume-slider slider:active {
     transform: scale(1.15);
-}
-
-/* Window header buttons (dock/close) */
-button.media-window-dock,
-button.media-window-close {
-    min-width: 28px;
-    min-height: 28px;
-    padding: 0;
-    border-radius: var(--radius-widget);
-    background: transparent;
-    border: none;
-    box-shadow: none;
-}
-
-button.media-window-dock:hover,
-button.media-window-close:hover {
-    background: var(--color-card-overlay-hover);
 }
 
 /* Window-specific smaller controls */

@@ -107,7 +107,7 @@ impl BatteryPopoverController {
 
         for profile in profiles {
             let label_text = title_case(&profile.replace('-', " "));
-            let btn = Button::with_label(&label_text);
+            let btn = crate::widgets::base::vp_button_with_label(&label_text);
             btn.add_css_class(bat::POPOVER_PROFILE_BUTTON);
             btn.set_hexpand(true);
 

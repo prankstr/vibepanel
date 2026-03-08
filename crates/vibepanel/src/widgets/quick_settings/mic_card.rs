@@ -21,6 +21,7 @@ use crate::services::audio::{AudioService, AudioSnapshot, SourceInfoSnapshot};
 use crate::services::icons::{IconHandle, IconsService};
 use crate::services::surfaces::SurfaceStyleManager;
 use crate::styles::{color, qs, row, state};
+use crate::widgets::base::add_ripple_to_row;
 
 /// Get the appropriate mic icon name based on volume level and mute state.
 pub fn mic_icon_name(volume: u32, muted: bool) -> &'static str {
@@ -233,7 +234,21 @@ pub fn create_source_row(
         hbox.append(&indicator);
     }
 
-    list_row.set_child(Some(&hbox));
+    // Add ripple overlay for press feedback on activatable rows.
+    // Move padding from the row CSS to content margins so the ripple
+    // DrawingArea fills the full row background.
+    if is_unavailable {
+        list_row.set_child(Some(&hbox));
+    } else {
+        // Transfer .qs-row padding to content margins; the CSS rule
+        // `.qs-row.vp-has-ripple { padding: 0 }` zeros the row padding.
+        hbox.set_margin_top(6);
+        hbox.set_margin_bottom(6);
+        hbox.set_margin_start(10);
+        hbox.set_margin_end(10);
+
+        add_ripple_to_row(&list_row, &hbox);
+    }
 
     // If port is unavailable, gray out the row and make it non-activatable
     if is_unavailable {

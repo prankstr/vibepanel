@@ -11,7 +11,7 @@ use std::collections::HashSet;
 use std::rc::{Rc, Weak};
 
 use gtk4::prelude::*;
-use gtk4::{Box as GtkBox, Button, Entry, Label, ListBox, ListBoxRow, Orientation, ScrolledWindow};
+use gtk4::{Box as GtkBox, Entry, Label, ListBox, ListBoxRow, Orientation, ScrolledWindow};
 use tracing::debug;
 
 use super::components::ListRow;
@@ -569,9 +569,9 @@ fn build_vpn_auth_box(state: &Rc<VpnCardState>) {
     status_label.set_hexpand(true);
     btn_row.append(&status_label);
 
-    let btn_cancel = Button::with_label("Cancel");
+    let btn_cancel = crate::widgets::base::vp_button_with_label("Cancel");
     btn_cancel.add_css_class(button::CARD);
-    let btn_ok = Button::with_label("Connect");
+    let btn_ok = crate::widgets::base::vp_button_with_label("Connect");
     btn_ok.add_css_class(button::ACCENT);
 
     // Apply Pango font attrs to fix text clipping on layer-shell surfaces

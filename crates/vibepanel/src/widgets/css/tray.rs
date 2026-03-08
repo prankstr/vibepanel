@@ -5,13 +5,16 @@ pub fn css() -> &'static str {
     r#"
 /* ===== SYSTEM TRAY ===== */
 
-/* Tray item hover - subtle scale up */
+/* Tray item hover - subtle scale up, press-back on active */
 .tray-item {
     transition: transform 100ms ease-out;
 }
 .tray-item:hover,
 .tray-item.tray-item-menu-open {
     transform: scale(1.15);
+}
+.tray-item:active {
+    transform: scale(1.05);
 }
 
 /* Ensure tray item images have no visual artifacts during updates */
@@ -36,8 +39,17 @@ pub fn css() -> &'static str {
     background: transparent;
     border: none;
     box-shadow: none;
-    padding: 4px 8px;
     border-radius: var(--radius-widget);
+}
+
+/* Padding moves to content margin inside the ripple overlay so the
+   DrawingArea (and ripple animation) fills the button edge-to-edge.
+   The `> overlay > *` path reaches the label/box through add_ripple()'s
+   Overlay wrapper.  Exclude the ripple DrawingArea itself so it stays
+   edge-to-edge inside the Overlay. */
+.qs-row-menu-item > overlay > *:not(.vp-ripple-overlay),
+.tray-menu-button > overlay > *:not(.vp-ripple-overlay) {
+    margin: 4px 8px;
 }
 
 .qs-row-menu-item:hover,

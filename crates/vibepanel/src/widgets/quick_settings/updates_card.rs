@@ -30,7 +30,7 @@ use crate::widgets::updates_common::{
 /// State for the Updates card in the Quick Settings panel.
 pub struct UpdatesCardState {
     pub base: ExpandableCardBase,
-    pub card_box: RefCell<Option<GtkBox>>,
+    pub card_box: RefCell<Option<gtk4::Widget>>,
     /// Refresh button (self-contained with animation).
     pub refresh_button: RefCell<Option<Rc<ScanButton>>>,
     /// Last check label in the details.
@@ -64,7 +64,9 @@ impl ExpandableCard for UpdatesCardState {
 ///
 /// Returns `(card, revealer, expander_button)` - caller is responsible for
 /// accordion registration via `AccordionManager::setup_expander`.
-pub fn build_updates_card(state: &Rc<UpdatesCardState>) -> (GtkBox, Revealer, Option<Button>) {
+pub fn build_updates_card(
+    state: &Rc<UpdatesCardState>,
+) -> (gtk4::Widget, Revealer, Option<Button>) {
     let snapshot = UpdatesService::global().snapshot();
 
     let subtitle_text = format_repo_summary(&snapshot);

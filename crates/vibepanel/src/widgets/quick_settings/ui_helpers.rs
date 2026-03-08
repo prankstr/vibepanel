@@ -277,7 +277,7 @@ pub fn add_placeholder_row(list_box: &ListBox, text: &str) {
 /// - `.qs-row-menu-button` and `.vp-btn-reset` on the button
 /// - `.qs-row-menu-icon` on the menu icon
 pub fn create_row_menu_button() -> Button {
-    let menu_btn = Button::new();
+    let menu_btn = crate::widgets::base::vp_button();
     menu_btn.set_has_frame(false);
     menu_btn.add_css_class(row::QS_MENU_BUTTON);
     menu_btn.add_css_class(button::RESET);
@@ -304,10 +304,12 @@ pub fn create_row_menu_button() -> Button {
 ///
 /// - `.qs-row-action-label` on the button
 pub fn create_row_action_label(label_text: &str) -> Button {
-    let btn = Button::with_label(label_text);
+    let btn = crate::widgets::base::vp_button_with_label(label_text);
     btn.set_has_frame(false);
+    btn.set_valign(gtk4::Align::Center);
     btn.add_css_class(row::QS_ACTION_LABEL);
     btn.add_css_class(color::ACCENT);
+
     btn
 }
 
@@ -324,7 +326,7 @@ pub fn create_row_menu_action<F>(label_text: &str, on_click: F) -> Button
 where
     F: Fn() + 'static,
 {
-    let btn = Button::new();
+    let btn = crate::widgets::base::vp_button();
     btn.set_has_frame(false);
     btn.set_focusable(false);
     btn.set_focus_on_click(false);
@@ -462,7 +464,7 @@ impl ScanButton {
     where
         F: Fn() + 'static,
     {
-        let button = Button::new();
+        let button = crate::widgets::base::vp_button();
         button.add_css_class(qs::SCAN_BUTTON);
         button.set_has_frame(false);
         button.set_halign(Align::Start);
@@ -481,6 +483,7 @@ impl ScanButton {
 
         content.append(spinner.widget());
         button.set_child(Some(&content));
+
         button.connect_clicked(move |_| on_click());
 
         Rc::new(Self {

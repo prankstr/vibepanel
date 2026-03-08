@@ -4,7 +4,9 @@
 //! common CSS classes and helpers for labels, icons, and tooltips.
 
 use gtk4::prelude::*;
-use gtk4::{Align, Box as GtkBox, GestureClick, Label, Orientation, Popover, PositionType, gdk};
+use gtk4::{
+    Align, Box as GtkBox, GestureClick, Label, Orientation, Overlay, Popover, PositionType, gdk,
+};
 use std::cell::{Cell, RefCell};
 use std::process::{Command, Stdio};
 use std::rc::Rc;
@@ -14,11 +16,18 @@ use crate::popover_tracker::{PopoverId, PopoverTracker};
 use crate::services::config_manager::ConfigManager;
 use crate::services::icons::{IconHandle, IconsService};
 use crate::services::tooltip::TooltipManager;
-use crate::styles::{class, state, surface};
+use crate::styles::{class, state, surface, widget};
 use crate::widgets::layer_shell_popover::{Dismissible, LayerShellPopover};
 use gtk4::gio;
 use gtk4::glib;
 use tracing::{debug, info, warn};
+
+// Re-export ripple API so existing `use crate::widgets::base::{...}` imports
+// continue to work without changes across the codebase.
+pub use crate::widgets::ripple::{RippleHandle, trigger_ripple_from_gesture};
+pub(crate) use crate::widgets::ripple::{
+    add_ripple_to_row, vp_button, vp_button_from_icon_name, vp_button_with_label, wrap_with_ripple,
+};
 
 /// Timeout for `show_if` commands in seconds.
 const SHOW_IF_TIMEOUT_SECS: u64 = 5;
@@ -286,6 +295,31 @@ fn spawn_click_command(widget_name: &str, cmd: &str) {
     }
 }
 
+/// Check if the click target at `(x, y)` is inside a widget matching `predicate`.
+///
+/// Walks from the picked widget up to the root, returning `true` if any
+/// ancestor satisfies `predicate`. Used to skip click/ripple handling when
+/// the target is an interactive child (e.g., a Button or workspace indicator).
+fn click_target_matches(
+    gesture: &GestureClick,
+    x: f64,
+    y: f64,
+    predicate: impl Fn(&gtk4::Widget) -> bool,
+) -> bool {
+    if let Some(w) = gesture.widget()
+        && let Some(target) = w.pick(x, y, gtk4::PickFlags::DEFAULT)
+    {
+        let mut current: Option<gtk4::Widget> = Some(target);
+        while let Some(ancestor) = current {
+            if predicate(&ancestor) {
+                return true;
+            }
+            current = ancestor.parent();
+        }
+    }
+    false
+}
+
 /// Shared base widget container.
 ///
 /// Each widget owns a `BaseWidget` instance and exposes the underlying
@@ -297,6 +331,10 @@ fn spawn_click_command(widget_name: &str, cmd: &str) {
 pub struct BaseWidget {
     container: GtkBox,
     content: GtkBox,
+    /// Cairo-based ripple overlay for click-origin Material Design ripple.
+    /// Sits on top of content inside an `Overlay`, draws a flat-opacity
+    /// circle expanding from the click point.
+    ripple_handle: RippleHandle,
     /// The widget's menu popover, if any. Each BaseWidget supports at most one menu.
     menu: Rc<RefCell<Option<Rc<MenuHandle>>>>,
     /// Widget name for CSS class-based styling of popovers (e.g., "clock")
@@ -339,7 +377,23 @@ impl BaseWidget {
         content.set_valign(Align::Fill);
         // Disable baseline alignment - it can cause vertical offset issues with text
         content.set_baseline_position(gtk4::BaselinePosition::Center);
-        container.append(&content);
+
+        // Wrap content in an Overlay so the ripple effect can sit on top
+        // without affecting the widget background or content opacity.
+        let overlay = Overlay::new();
+        overlay.set_child(Some(&content));
+        overlay.set_hexpand(true);
+        overlay.set_vexpand(true);
+        // Clip the ripple overlay to the widget's border-radius
+        overlay.set_overflow(gtk4::Overflow::Hidden);
+
+        // Create Cairo-based ripple overlay for click-origin ripple effect
+        let ripple_handle = RippleHandle::new();
+        overlay.add_overlay(ripple_handle.widget());
+        // Tell the Overlay to measure this overlay so it fills the full area
+        overlay.set_measure_overlay(ripple_handle.widget(), true);
+
+        container.append(&overlay);
 
         let menu: Rc<RefCell<Option<Rc<MenuHandle>>>> = Rc::new(RefCell::new(None));
 
@@ -365,21 +419,12 @@ impl BaseWidget {
                     gesture.current_button()
                 );
 
-                // Check if the click target is inside an interactive widget that should
-                // handle its own clicks. Currently only checks for Button; if bar widgets
-                // gain other interactive children (Switch, Entry, etc.), add them here.
-                if let Some(widget) = gesture.widget()
-                    && let Some(target) = widget.pick(x, y, gtk4::PickFlags::DEFAULT)
-                {
-                    // Walk up from target to find if it's inside a button
-                    let mut current: Option<gtk4::Widget> = Some(target);
-                    while let Some(w) = current {
-                        if w.downcast_ref::<gtk4::Button>().is_some() {
-                            debug!("BaseWidget click: target is a Button, skipping");
-                            return;
-                        }
-                        current = w.parent();
-                    }
+                // Skip if target is an interactive child (e.g., a Button)
+                if click_target_matches(gesture, x, y, |w| {
+                    w.downcast_ref::<gtk4::Button>().is_some()
+                }) {
+                    debug!("BaseWidget click: target is a Button, skipping");
+                    return;
                 }
 
                 let button = gesture.current_button();
@@ -431,6 +476,27 @@ impl BaseWidget {
             });
         }
 
+        // Ripple on press — triggers on mouse-down for responsive feedback.
+        {
+            let container_for_ripple = container.clone();
+            let ripple_for_press = ripple_handle.clone();
+            gesture_click.connect_pressed(move |gesture, _n_press, x, y| {
+                if !container_for_ripple.has_css_class(state::CLICKABLE) {
+                    return;
+                }
+
+                // Skip ripple if click target is a Button or workspace indicator
+                if click_target_matches(gesture, x, y, |w| {
+                    w.downcast_ref::<gtk4::Button>().is_some()
+                        || w.has_css_class(widget::WORKSPACE_INDICATOR)
+                }) {
+                    return;
+                }
+
+                trigger_ripple_from_gesture(gesture, x, y, &ripple_for_press);
+            });
+        }
+
         container.add_controller(gesture_click.clone());
 
         let show_if_timer = Self::setup_show_if_timer(&widget_name, &container);
@@ -438,6 +504,7 @@ impl BaseWidget {
         Self {
             container,
             content,
+            ripple_handle,
             menu,
             widget_name,
             _gesture_click: gesture_click,
@@ -657,11 +724,12 @@ impl BaseWidget {
         &self.container
     }
 
-    /// Get the inner content box for adding widget children.
-    ///
-    /// This box has the `content` CSS class and receives consistent
-    /// padding/margins via CSS rules like `.widget > .content`.
-    /// Widgets should add their labels, icons, etc. to this box.
+    /// Get the ripple handle for triggering ripple animations.
+    pub fn ripple_handle(&self) -> &RippleHandle {
+        &self.ripple_handle
+    }
+
+    /// Get the inner `.content` box for adding widget children.
     pub fn content(&self) -> &GtkBox {
         &self.content
     }

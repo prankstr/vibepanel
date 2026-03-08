@@ -182,6 +182,12 @@ window.quick-settings-window {
     margin: 3px 0;
 }
 
+/* Rows with ripple overlay: padding moves to content margins so the
+   DrawingArea fills the full row background. */
+.qs-row.vp-has-ripple {
+    padding: 0;
+}
+
 /* Updates list rows use smaller radius for larger card surfaces */
 .qs-updates-list .qs-row {
     border-radius: var(--radius-pill);
@@ -220,9 +226,15 @@ window.quick-settings-window {
 /* Row action labels - color via vp-accent */
 .qs-row-action-label {
     font-size: var(--font-size-sm);
-    min-width: var(--font-size-sm);
-    min-height: var(--font-size-sm);
+    min-width: 0;
+    min-height: 0;
+    padding: 0;
     border-radius: var(--radius-widget);
+}
+
+/* Content margin inside ripple overlay for breathing room around label */
+.qs-row-action-label label {
+    padding: 6px 8px;
 }
 
 .qs-row-action-label:hover {
@@ -267,11 +279,17 @@ window.quick-settings-window {
 }
 
 .qs-scan-button {
-    padding: 2px 8px;
     margin-bottom: 4px;
     min-height: 0;
     /* Extra-round pill shape for small action button */
     border-radius: calc(var(--radius-pill) * 1.3);
+}
+
+/* Padding moves to content margin inside the ripple overlay so the
+   DrawingArea fills the button edge-to-edge.  Exclude the ripple
+   DrawingArea itself so it stays edge-to-edge inside the Overlay. */
+.qs-scan-button > overlay > *:not(.vp-ripple-overlay) {
+    margin: 2px 8px;
 }
 
 .qs-scan-button:hover {

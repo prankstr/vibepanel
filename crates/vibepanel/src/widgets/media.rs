@@ -410,7 +410,6 @@ fn create_controls(_parent_widget: &gtk4::Box) -> ControlsHandle {
     use crate::services::tooltip::TooltipManager;
     use crate::styles::{button, icon};
     use crate::widgets::media_components::create_media_control_button;
-    use gtk4::Button;
 
     let icons = IconsService::global();
 
@@ -437,7 +436,7 @@ fn create_controls(_parent_widget: &gtk4::Box) -> ControlsHandle {
     container.append(&prev_btn);
 
     let play_pause_icon = icons.create_icon("media-playback-start", &[icon::ICON]);
-    let play_pause_btn = Button::new();
+    let play_pause_btn = crate::widgets::base::vp_button();
     play_pause_btn.set_has_frame(false);
     play_pause_btn.set_valign(gtk4::Align::Center);
     play_pause_btn.set_child(Some(&play_pause_icon.widget()));
