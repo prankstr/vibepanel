@@ -33,6 +33,8 @@ pub fn build_clock_calendar_popover(show_week_numbers: bool) -> Widget {
     let header_label = Label::new(None);
     header_label.add_css_class(surface::POPOVER_TITLE);
     header_label.set_valign(Align::Start);
+    header_label.set_width_chars(15);
+    header_label.set_xalign(0.5);
 
     header_box.append(&header_label);
     container.append(&header_box);

@@ -89,12 +89,12 @@ label link:active {{
     background: transparent;
     border: none;
     box-shadow: none;
-    min-width: 36px;
-    min-height: 36px;
-    margin-top: -8px;
+    min-width: 28px;
+    min-height: 28px;
+    padding: 0;
     border-radius: var(--radius-widget);
     color: var(--color-foreground-primary);
-    font-size: calc(var(--icon-size) * 1.15);
+    -gtk-icon-size: calc(var(--icon-size) * 0.85);
 }}
 
 .vp-popover-icon-btn:hover {{

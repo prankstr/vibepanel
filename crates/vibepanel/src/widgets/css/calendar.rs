@@ -6,7 +6,10 @@ pub fn css() -> &'static str {
 /* ===== CALENDAR ===== */
 
 /* Note: padding comes from apply_surface_styles() in base.rs */
-.calendar-popover {
+.calendar-popover .vp-popover-icon-btn {
+    margin-top: -4px;
+    margin-left: -8px;
+    margin-right: -8px;
 }
 
 calendar.view {
