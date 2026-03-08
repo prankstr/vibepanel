@@ -61,6 +61,7 @@ impl MediaViewController {
             );
             load_album_art(
                 snapshot.metadata.art_url.as_deref(),
+                snapshot.player_id.as_deref(),
                 &self.art_picture,
                 &self.art_placeholder_box,
                 &self.art_state,
@@ -103,6 +104,7 @@ pub const ART_DEBOUNCE_MS: u64 = 200;
 /// State for tracking album art loading with cancellation support.
 pub struct ArtState {
     pub current_url: Option<String>,
+    pub current_player_id: Option<String>,
     pub generation: u64,
     pub cancellable: gio::Cancellable,
     /// Pending debounce timer (see [`ART_DEBOUNCE_MS`]).
@@ -113,6 +115,7 @@ impl ArtState {
     pub fn new() -> Self {
         Self {
             current_url: None,
+            current_player_id: None,
             generation: 0,
             cancellable: gio::Cancellable::new(),
             debounce_source: None,
@@ -128,15 +131,25 @@ impl ArtState {
     /// Decide whether a new art URL warrants a fresh load, and if so prepare
     /// the state (cancel previous load/debounce, record the new URL).
     ///
-    /// Returns `false` when the URL is unchanged or when it momentarily became
-    /// `None` (e.g. during a track switch) — in that case we keep showing the
-    /// previous album art to avoid flashing a placeholder/fallback.
+    /// `player_id` identifies the current MPRIS player. When the player changes,
+    /// any cached URL is invalidated so that a `None` art URL correctly clears
+    /// stale art from the previous player.
     ///
-    /// **Tradeoff:** if a track genuinely has no album art, the previous track's
-    /// art will remain visible until a new URL arrives.  This is an acceptable
-    /// compromise since the alternative (briefly flashing a fallback icon on
-    /// every track switch) is more visually disruptive.
-    pub fn prepare_art_load(&mut self, new_url: Option<&str>) -> bool {
+    /// Within the same player, returns `false` when the URL is unchanged or when
+    /// it momentarily became `None` (e.g. during a track switch) — in that case
+    /// we keep showing the previous album art to avoid flashing a placeholder.
+    pub fn prepare_art_load(&mut self, new_url: Option<&str>, player_id: Option<&str>) -> bool {
+        let player_changed = self.current_player_id.as_deref() != player_id;
+        if player_changed {
+            self.current_player_id = player_id.map(String::from);
+            // Force reset so the new player's art (or lack thereof) takes effect.
+            self.cancellable.cancel();
+            self.cancellable = gio::Cancellable::new();
+            self.cancel_debounce();
+            self.current_url = new_url.map(String::from);
+            return true;
+        }
+
         if self.current_url.as_deref() == new_url {
             return false;
         }
@@ -162,6 +175,7 @@ impl ArtState {
     pub fn debounced_load<S, F>(
         art_state: &Rc<RefCell<Self>>,
         url: Option<&str>,
+        player_id: Option<&str>,
         picture: RoundedPicture,
         on_success: S,
         on_failure: F,
@@ -171,7 +185,7 @@ impl ArtState {
     {
         {
             let mut state = art_state.borrow_mut();
-            if !state.prepare_art_load(url) {
+            if !state.prepare_art_load(url, player_id) {
                 return;
             }
         }
@@ -578,6 +592,7 @@ pub fn update_seek_position(
 /// logic shared with the bar widget.
 pub fn load_album_art(
     art_url: Option<&str>,
+    player_id: Option<&str>,
     picture: &RoundedPicture,
     placeholder_box: &GtkBox,
     art_state: &Rc<RefCell<ArtState>>,
@@ -594,7 +609,14 @@ pub fn load_album_art(
         placeholder_for_failure.set_visible(true);
     };
 
-    ArtState::debounced_load(art_state, art_url, picture.clone(), on_success, on_failure);
+    ArtState::debounced_load(
+        art_state,
+        art_url,
+        player_id,
+        picture.clone(),
+        on_success,
+        on_failure,
+    );
 }
 
 /// Load album art from URL, calling `on_success` or `on_failure` callbacks.
@@ -774,20 +796,20 @@ mod tests {
     fn test_prepare_art_load_same_url_is_noop() {
         let mut state = ArtState::new();
         state.current_url = Some("http://example.com/art.jpg".into());
-        assert!(!state.prepare_art_load(Some("http://example.com/art.jpg")));
+        assert!(!state.prepare_art_load(Some("http://example.com/art.jpg"), None));
     }
 
     #[test]
     fn test_prepare_art_load_none_to_none_is_noop() {
         let mut state = ArtState::new();
-        assert!(!state.prepare_art_load(None));
+        assert!(!state.prepare_art_load(None, None));
     }
 
     #[test]
     fn test_prepare_art_load_ignores_none_transition() {
         let mut state = ArtState::new();
         state.current_url = Some("http://example.com/art.jpg".into());
-        assert!(!state.prepare_art_load(None));
+        assert!(!state.prepare_art_load(None, None));
         assert_eq!(
             state.current_url.as_deref(),
             Some("http://example.com/art.jpg"),
@@ -798,7 +820,7 @@ mod tests {
     #[test]
     fn test_prepare_art_load_none_to_some() {
         let mut state = ArtState::new();
-        assert!(state.prepare_art_load(Some("http://example.com/art.jpg")));
+        assert!(state.prepare_art_load(Some("http://example.com/art.jpg"), None));
         assert_eq!(
             state.current_url.as_deref(),
             Some("http://example.com/art.jpg")
@@ -809,7 +831,7 @@ mod tests {
     fn test_prepare_art_load_different_url() {
         let mut state = ArtState::new();
         state.current_url = Some("http://example.com/old.jpg".into());
-        assert!(state.prepare_art_load(Some("http://example.com/new.jpg")));
+        assert!(state.prepare_art_load(Some("http://example.com/new.jpg"), None));
         assert_eq!(
             state.current_url.as_deref(),
             Some("http://example.com/new.jpg")
@@ -822,9 +844,35 @@ mod tests {
         state.current_url = Some("http://example.com/old.jpg".into());
         let old_cancellable = state.cancellable.clone();
 
-        state.prepare_art_load(Some("http://example.com/new.jpg"));
+        state.prepare_art_load(Some("http://example.com/new.jpg"), None);
 
         assert!(old_cancellable.is_cancelled());
         assert!(!state.cancellable.is_cancelled());
+    }
+
+    #[test]
+    fn test_prepare_art_load_player_change_clears_art() {
+        let mut state = ArtState::new();
+        state.current_url = Some("http://example.com/art.jpg".into());
+        state.current_player_id = Some("spotify".into());
+
+        // Switching to a player with no art should trigger a load (clear).
+        assert!(state.prepare_art_load(None, Some("firefox")));
+        assert_eq!(state.current_url, None);
+        assert_eq!(state.current_player_id.as_deref(), Some("firefox"));
+    }
+
+    #[test]
+    fn test_prepare_art_load_same_player_ignores_none() {
+        let mut state = ArtState::new();
+        state.current_url = Some("http://example.com/art.jpg".into());
+        state.current_player_id = Some("spotify".into());
+
+        // Same player, art momentarily None — should keep stale art.
+        assert!(!state.prepare_art_load(None, Some("spotify")));
+        assert_eq!(
+            state.current_url.as_deref(),
+            Some("http://example.com/art.jpg"),
+        );
     }
 }

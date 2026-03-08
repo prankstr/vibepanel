@@ -1014,6 +1014,7 @@ fn update_widgets_from_snapshot_impl(ctx: &WidgetUpdateContext<'_>, snapshot: &M
         ArtState::debounced_load(
             ctx.art_state,
             art_url,
+            snapshot.player_id.as_deref(),
             picture.clone(),
             on_success,
             on_failure,
