@@ -187,8 +187,7 @@ pub fn css() -> &'static str {
 
 .media-popover .media-control-btn.media-control-btn-primary:hover,
 .media-window .media-control-btn.media-control-btn-primary:hover {
-    opacity: 0.85;
-    background: var(--color-accent-primary);
+    background: var(--color-accent-hover-bg);
 }
 
 /* Seek bar */

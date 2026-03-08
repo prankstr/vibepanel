@@ -40,7 +40,7 @@ button.vp-btn-accent {
 }
 
 button.vp-btn-accent:hover {
-    opacity: 0.85;
+    background: var(--color-accent-hover-bg);
 }
 
 button.vp-btn-card {
