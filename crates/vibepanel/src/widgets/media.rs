@@ -356,6 +356,9 @@ pub struct MediaWidget {
 #[derive(Clone)]
 struct ControlsHandle {
     container: gtk4::Box,
+    prev_btn: gtk4::Button,
+    next_btn: gtk4::Button,
+    play_pause_btn: gtk4::Button,
     play_pause_icon: IconHandle,
 }
 
@@ -460,6 +463,9 @@ fn create_controls(_parent_widget: &gtk4::Box) -> ControlsHandle {
 
     ControlsHandle {
         container,
+        prev_btn,
+        next_btn,
+        play_pause_btn,
         play_pause_icon,
     }
 }
@@ -952,6 +958,10 @@ fn update_widgets_from_snapshot_impl(ctx: &WidgetUpdateContext<'_>, snapshot: &M
             PlaybackStatus::Paused | PlaybackStatus::Stopped => media::ICON_PLAY,
         };
         ctrl.play_pause_icon.set_icon(icon_name);
+        ctrl.play_pause_btn
+            .set_sensitive(snapshot.can_play || snapshot.can_pause);
+        ctrl.prev_btn.set_sensitive(snapshot.can_go_previous);
+        ctrl.next_btn.set_sensitive(snapshot.can_go_next);
         ctrl.container.set_visible(true);
     }
 

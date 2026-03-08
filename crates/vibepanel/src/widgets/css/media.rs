@@ -50,6 +50,10 @@ pub fn css() -> &'static str {
     background: var(--color-card-overlay-hover);
 }
 
+.media-control-btn:disabled {
+    color: var(--color-foreground-disabled);
+}
+
 .media-label,
 .media-title {
     font-size: var(--font-size);
@@ -165,6 +169,11 @@ pub fn css() -> &'static str {
 .media-popover .media-control-btn:hover,
 .media-window .media-control-btn:hover {
     background: var(--color-card-overlay-hover);
+}
+
+.media-popover .media-control-btn:disabled,
+.media-window .media-control-btn:disabled {
+    color: var(--color-foreground-disabled);
 }
 
 /* Primary button (play/pause) - slightly larger with accent background */
