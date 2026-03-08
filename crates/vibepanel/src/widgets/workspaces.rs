@@ -105,7 +105,7 @@ use gtk4::glib;
 use gtk4::pango::EllipsizeMode;
 use gtk4::prelude::*;
 use gtk4::subclass::prelude::*;
-use gtk4::{Align, Box as GtkBox, GestureClick, Label, Widget};
+use gtk4::{Align, Box as GtkBox, GestureClick, Label, Overlay, Widget};
 use tracing::{debug, trace};
 use vibepanel_core::config::WidgetEntry;
 
@@ -116,6 +116,7 @@ use crate::services::workspace::{Workspace, WorkspaceService, WorkspaceServiceSn
 use crate::styles::{state, widget};
 use crate::widgets::WidgetConfig;
 use crate::widgets::base::BaseWidget;
+use crate::widgets::ripple::{trigger_ripple_from_gesture, wrap_with_ripple};
 use crate::widgets::warn_unknown_options;
 
 // ---------------------------------------------------------------------------
@@ -851,27 +852,19 @@ fn clear_indicators(
 }
 
 /// Create a single workspace indicator widget.
+///
+/// Returns an `Overlay` wrapping the inner dot/label with a ripple effect.
+/// CSS classes for sizing and state go on the overlay so that
+/// `WorkspaceContainer::size_allocate` can detect the active indicator
+/// and `measure()` sees the correct min-width.
 fn create_single_indicator(label_type: LabelType, workspace: &Workspace) -> Widget {
     let workspace_id = workspace.id;
-    let gesture = GestureClick::new();
-    gesture.set_button(BUTTON_PRIMARY);
-    gesture.connect_released(move |gesture, _n_press, _x, _y| {
-        if gesture.current_button() != BUTTON_PRIMARY {
-            return;
-        }
-        debug!("Switching to workspace {}", workspace_id);
-        WorkspaceService::global().switch_workspace(workspace_id);
-    });
 
-    if label_type == LabelType::None {
+    let (overlay, ripple_handle, is_long) = if label_type == LabelType::None {
         // GtkBox avoids font-metric intrinsic sizing; CSS controls dimensions.
         let dot = GtkBox::new(gtk4::Orientation::Horizontal, 0);
-        dot.add_css_class(widget::WORKSPACE_INDICATOR);
-        dot.add_css_class(widget::WORKSPACE_INDICATOR_MINIMAL);
-        dot.add_css_class(state::CLICKABLE);
-        dot.set_valign(Align::Center);
-        dot.add_controller(gesture);
-        dot.upcast()
+        let (o, rh) = wrap_with_ripple(&dot);
+        (o, rh, false)
     } else {
         let label_text = match label_type {
             LabelType::Icons => ICON_EMPTY,
@@ -879,20 +872,45 @@ fn create_single_indicator(label_type: LabelType, workspace: &Workspace) -> Widg
             LabelType::None => unreachable!(),
         };
         let label = Label::new(Some(label_text));
-        label.add_css_class(widget::WORKSPACE_INDICATOR);
-        label.add_css_class(state::CLICKABLE);
-        if label_text.len() > 2 {
-            label.add_css_class(widget::WORKSPACE_INDICATOR_LONG);
-        }
-        label.set_valign(Align::Center);
         // Optical centering: glyphs ●/○/◆ appear left-heavy at 0.5;
         // 0.55 nudges them to look visually centered in the pill.
         label.set_xalign(0.55);
         label.set_ellipsize(EllipsizeMode::End);
         label.set_single_line_mode(true);
-        label.add_controller(gesture);
-        label.upcast()
+        let (o, rh) = wrap_with_ripple(&label);
+        (o, rh, label_text.len() > 2)
+    };
+
+    // Sizing, state, and visual classes go on the overlay — it is the
+    // widget that WorkspaceContainer measures and lays out.
+    overlay.add_css_class(widget::WORKSPACE_INDICATOR);
+    overlay.add_css_class(state::CLICKABLE);
+    if label_type == LabelType::None {
+        overlay.add_css_class(widget::WORKSPACE_INDICATOR_MINIMAL);
     }
+    if is_long {
+        overlay.add_css_class(widget::WORKSPACE_INDICATOR_LONG);
+    }
+    overlay.set_valign(Align::Center);
+
+    let gesture = GestureClick::new();
+    gesture.set_button(BUTTON_PRIMARY);
+    gesture.connect_pressed({
+        let rh = ripple_handle;
+        move |gesture, _n_press, x, y| {
+            trigger_ripple_from_gesture(gesture, x, y, &rh);
+        }
+    });
+    gesture.connect_released(move |gesture, _n_press, _x, _y| {
+        if gesture.current_button() != BUTTON_PRIMARY {
+            return;
+        }
+        debug!("Switching to workspace {}", workspace_id);
+        WorkspaceService::global().switch_workspace(workspace_id);
+    });
+    overlay.add_controller(gesture);
+
+    overlay.upcast()
 }
 
 /// Create workspace indicator widgets for the given workspaces.
@@ -1322,8 +1340,14 @@ fn update_indicators(
         }
 
         // Update icon text (Icons/Numbers mode only).
+        // The indicator is an Overlay wrapping the inner label.
         if let Some(label) = (label_type != LabelType::None)
-            .then(|| indicator.downcast_ref::<Label>())
+            .then(|| {
+                indicator
+                    .downcast_ref::<Overlay>()
+                    .and_then(|o| o.child())
+                    .and_then(|w| w.downcast::<Label>().ok())
+            })
             .flatten()
         {
             match label_type {
@@ -1339,9 +1363,11 @@ fn update_indicators(
                 LabelType::Numbers => {
                     label.set_text(&workspace.name);
                     if workspace.name.len() > 2 {
-                        label.add_css_class(widget::WORKSPACE_INDICATOR_LONG);
+                        if !indicator.has_css_class(widget::WORKSPACE_INDICATOR_LONG) {
+                            indicator.add_css_class(widget::WORKSPACE_INDICATOR_LONG);
+                        }
                     } else {
-                        label.remove_css_class(widget::WORKSPACE_INDICATOR_LONG);
+                        indicator.remove_css_class(widget::WORKSPACE_INDICATOR_LONG);
                     }
                 }
                 LabelType::None => unreachable!(),

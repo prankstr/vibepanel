@@ -113,16 +113,28 @@ sectioned-bar.bar {{
     min-height: calc(var(--widget-height) * {height_mult});
     border-radius: calc(var(--radius-pill) * 1.2);
     color: var(--color-foreground-faint);
-    background-size: 0% 0%;
-    background-position: center;
-    background-repeat: no-repeat;
-    transition: min-width 200ms linear, background-color 200ms ease, background-size 300ms ease-out;
-    /* Duration must match INDICATOR_ANIM_DURATION_US in workspaces.rs */
+    transition: min-width 200ms linear, background-color 100ms ease;
+    /* min-width duration must match INDICATOR_ANIM_DURATION_US in workspaces.rs */
 }}
 
-/* Workspace indicator hover state - clickable indicators */
+/* Override ripple overlay fallback radius (overlay.vp-ripple-wrap uses --radius-widget) */
+overlay.workspace-indicator {{
+    border-radius: calc(var(--radius-pill) * 1.2);
+}}
+
+/* Workspace indicator hover — background-color fades via the 100ms ease
+   transition above.  Accent state uses --color-accent-hover-bg (pre-computed in
+   the theme with luminance-aware tint direction and ratio). */
 .workspace-indicator.clickable:hover {{
-    background-image: linear-gradient(var(--color-card-overlay-hover), var(--color-card-overlay-hover));
+    background-color: var(--color-card-overlay-hover);
+}}
+
+.workspace-indicator-minimal.clickable:hover {{
+    background-color: color-mix(in srgb, var(--color-foreground-faint) 80%, var(--widget-hover-tint));
+}}
+
+.workspace-indicator.active.clickable:hover {{
+    background-color: var(--color-accent-hover-bg);
 }}
 
 .workspace-indicator-minimal {{
