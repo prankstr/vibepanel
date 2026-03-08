@@ -27,8 +27,7 @@ use crate::services::vpn_secret_agent::VpnAuthRequest;
 use crate::styles::{button, color, icon, qs, row, state};
 
 // Global state for VPN keyboard grab management.
-// This needs to be global because QuickSettingsWindow is recreated each time it opens,
-// but we need to track pending connects across those recreations.
+// Thread-local so it survives QS window hide/show cycles and bar teardown.
 
 /// Manages keyboard grab state during VPN authentication and tracks pending actions.
 ///
@@ -43,7 +42,8 @@ struct VpnKeyboardState {
     /// Whether we've temporarily released keyboard grab.
     keyboard_released: bool,
     /// Weak reference to the QuickSettingsWindow for keyboard grab management.
-    /// This is set when the QS window is created and cleared when it closes.
+    /// Set once when the QS window is created; survives hide/show cycles since
+    /// the window is kept alive. Degrades gracefully if the window is destroyed.
     qs_window: Option<Weak<QuickSettingsWindow>>,
 }
 
@@ -60,11 +60,6 @@ impl VpnKeyboardState {
     /// Set the QuickSettingsWindow reference for keyboard grab management.
     fn set_qs_window(&mut self, qs: Weak<QuickSettingsWindow>) {
         self.qs_window = Some(qs);
-    }
-
-    /// Clear the QuickSettingsWindow reference (called when QS closes).
-    fn clear_qs_window(&mut self) {
-        self.qs_window = None;
     }
 
     /// Add a pending connect. Keyboard grab release for legacy auth-dialogs
@@ -92,11 +87,16 @@ impl VpnKeyboardState {
     }
 
     /// Clear all state (called when panel closes).
+    ///
+    /// Note: we intentionally do NOT clear the `qs_window` Weak reference here.
+    /// The QS window is kept alive across hide/show cycles, so the reference
+    /// must survive. If the window is truly destroyed (bar teardown), the Weak
+    /// fails to upgrade gracefully (already handled in `restore_if_released`
+    /// and `on_vpn_changed`).
     fn clear(&mut self) {
         self.restore_if_released();
         self.pending_connects.clear();
         self.pending_disconnects.clear();
-        self.clear_qs_window();
     }
 
     /// Check and resolve pending connections based on VPN snapshot.
@@ -176,10 +176,10 @@ impl VpnKeyboardState {
 thread_local! {
     /// Global state for VPN keyboard grab management.
     ///
-    /// This is thread-local (not per-QS-window) because QuickSettingsWindow is
-    /// recreated on each open, but pending connect/disconnect tracking must
-    /// survive those recreations. State is cleared when the panel closes via
-    /// `restore_keyboard_if_released()`.
+    /// This is thread-local (not per-QS-window) because the QS window is kept
+    /// alive across hide/show cycles, and pending connect/disconnect tracking
+    /// must survive those cycles. State (except the Weak window reference) is
+    /// cleared when the panel closes via `restore_keyboard_if_released()`.
     static VPN_KEYBOARD_STATE: RefCell<VpnKeyboardState> = RefCell::new(VpnKeyboardState::new());
 }
 
@@ -723,7 +723,7 @@ fn show_vpn_auth_dialog(state: &Rc<VpnCardState>, request: &VpnAuthRequest) {
 }
 
 /// Hide the VPN auth dialog and reset its state.
-fn hide_vpn_auth_dialog(state: &Rc<VpnCardState>) {
+pub(super) fn hide_vpn_auth_dialog(state: &Rc<VpnCardState>) {
     // Clear entries
     for (_key, entry) in state.auth_entries.borrow().iter() {
         entry.set_text("");

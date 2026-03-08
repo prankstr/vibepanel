@@ -83,7 +83,7 @@ impl BluetoothCardState {
     }
 
     /// Clear cached auth input (called when auth request changes).
-    fn clear_auth_input(&self) {
+    pub(super) fn clear_auth_input(&self) {
         self.auth_input.borrow_mut().clear();
     }
 

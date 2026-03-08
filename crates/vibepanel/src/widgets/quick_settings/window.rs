@@ -1,12 +1,13 @@
 //! Quick Settings window - global control center panel.
 //!
 //! Each bar creates its own QuickSettingsWindow instance via the
-//! QuickSettingsWindowHandle. The window is created on each open and
-//! destroyed on close. Layer-shell surfaces don't reliably re-show
-//! after being hidden, so we always create fresh windows.
+//! QuickSettingsWindowHandle. The window is lazily created on first open
+//! and kept alive across close/re-open cycles using `set_visible(false)`
+//! / `set_visible(true)` toggling. Service subscriptions stay alive
+//! while hidden. UI state is reset on close so it opens fresh.
 
 use gtk4::gdk::{self, Monitor};
-use gtk4::glib::{self, ControlFlow};
+use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4::{
     Application, ApplicationWindow, Box as GtkBox, Button, Label, Orientation, PolicyType,
@@ -47,8 +48,8 @@ use super::network_card::{
     self, NetworkCardState, build_network_subtitle, build_wifi_details, is_material_unified,
     resolve_material_network_icon,
 };
-use super::power_card::{self, PowerCardBuildResult};
-use super::ui_helpers::{AccordionManager, ExpandableCard};
+use super::power_card::{self, PowerCardBuildResult, PowerCardExpanderState};
+use super::ui_helpers::{AccordionManager, ExpandableCard, collapse_revealer_instant};
 use super::updates_card::{self, UpdatesCardState, build_updates_card};
 use super::vpn_card::{self, VpnCardState, build_vpn_details, vpn_icon_name};
 
@@ -57,9 +58,6 @@ thread_local! {
 }
 
 /// Get the currently active QuickSettingsWindow, if any.
-///
-/// Returns `Some(Rc<QuickSettingsWindow>)` if a QS window is currently open,
-/// `None` otherwise. Used by cards that need to interact with the window.
 pub(super) fn current_quick_settings_window() -> Option<Rc<QuickSettingsWindow>> {
     CURRENT_QS_WINDOW.with(|cell| cell.borrow().as_ref().and_then(|weak| weak.upgrade()))
 }
@@ -124,6 +122,9 @@ pub struct QuickSettingsWindow {
     /// Anchor X position in monitor coordinates.
     anchor_x: Cell<i32>,
     anchor_monitor: RefCell<Option<Monitor>>,
+    /// Whether the window has been mapped at least once (used to skip
+    /// the opacity fade-in trick on subsequent shows).
+    has_been_mapped: Cell<bool>,
     cards_config: QuickSettingsCardsConfig,
     audio_scroll_percentage: i32,
     scroll_container: ScrolledWindow,
@@ -146,6 +147,9 @@ pub struct QuickSettingsWindow {
     pub mic: Rc<MicCardState>,
     pub brightness: Rc<BrightnessCardState>,
     pub updates: Rc<UpdatesCardState>,
+    /// Power card state (expander variant only). Stored here so
+    /// `reset_ui_state()` can collapse it without walking the widget tree.
+    pub power: RefCell<Option<Rc<PowerCardExpanderState>>>,
 }
 
 impl QuickSettingsWindow {
@@ -189,6 +193,7 @@ impl QuickSettingsWindow {
             click_catcher: RefCell::new(None),
             anchor_x: Cell::new(0),
             anchor_monitor: RefCell::new(None),
+            has_been_mapped: Cell::new(false),
             cards_config: config.cards,
             audio_scroll_percentage: config.audio_scroll_percentage,
             scroll_container,
@@ -208,6 +213,7 @@ impl QuickSettingsWindow {
             mic: Rc::new(MicCardState::new()),
             brightness: Rc::new(BrightnessCardState::new()),
             updates: Rc::new(UpdatesCardState::new()),
+            power: RefCell::new(None),
         });
 
         // Build the control center content (uses qs.scroll_container internally)
@@ -237,9 +243,6 @@ impl QuickSettingsWindow {
 
         // Set VPN keyboard state's reference to this QS window for keyboard grab management
         vpn_card::set_quick_settings_window(Rc::downgrade(&qs));
-
-        // Set the global current QS window reference for other cards
-        set_current_qs_window(&qs);
 
         qs
     }
@@ -450,6 +453,9 @@ impl QuickSettingsWindow {
                     state,
                     expander_button,
                 } => {
+                    // Store the power card state on the QS window for reset_ui_state()
+                    *qs.power.borrow_mut() = Some(Rc::clone(&state));
+
                     // Power card needs custom subtitle behavior on expand/collapse.
                     // Capture state and borrow inside callback to handle cases where
                     // subtitle might be set after callback creation.
@@ -1115,6 +1121,65 @@ impl QuickSettingsWindow {
         network_card::show_password_dialog(&self.network, ssid);
     }
 
+    /// Reset all UI state to its initial (collapsed) appearance.
+    ///
+    /// Called when hiding the panel so it opens fresh next time. This
+    /// collapses all revealers, removes expanded arrow indicators, hides
+    /// auth dialogs, and scrolls back to the top.
+    fn reset_ui_state(&self) {
+        // --- Collapse all toggle card revealers (network, bluetooth, vpn, updates, power) ---
+
+        // Helper: collapse a revealer and remove the EXPANDED class from its arrow
+        let collapse = |base: &super::ui_helpers::ExpandableCardBase| {
+            if let Some(revealer) = base.revealer.borrow().as_ref() {
+                collapse_revealer_instant(revealer);
+            }
+            if let Some(arrow) = base.arrow.borrow().as_ref() {
+                arrow.widget().remove_css_class(state::EXPANDED);
+            }
+        };
+
+        collapse(&self.network.base);
+        collapse(&self.bluetooth.base);
+        collapse(&self.vpn.base);
+        collapse(&self.updates.base);
+
+        // Power card (expander variant)
+        if let Some(ref power_state) = *self.power.borrow() {
+            collapse(&power_state.base);
+            // Reset subtitle back to default
+            if let Some(ref subtitle) = *power_state.base.subtitle.borrow() {
+                subtitle.set_label("Hold to shutdown");
+            }
+        }
+
+        // --- Collapse audio and mic revealers ---
+        if let Some(revealer) = self.audio.revealer.borrow().as_ref() {
+            collapse_revealer_instant(revealer);
+        }
+        if let Some(arrow) = self.audio.arrow.borrow().as_ref() {
+            arrow.widget().remove_css_class(state::EXPANDED);
+        }
+
+        if let Some(revealer) = self.mic.revealer.borrow().as_ref() {
+            collapse_revealer_instant(revealer);
+        }
+        if let Some(arrow) = self.mic.arrow.borrow().as_ref() {
+            arrow.widget().remove_css_class(state::EXPANDED);
+        }
+
+        // --- Hide auth dialogs ---
+        network_card::hide_password_dialog(&self.network);
+        vpn_card::hide_vpn_auth_dialog(&self.vpn);
+        self.bluetooth.clear_auth_input();
+
+        // --- Scroll to top ---
+        self.scroll_container.vadjustment().set_value(0.0);
+
+        // --- Clear focus from any focused widget ---
+        gtk4::prelude::RootExt::set_focus(&self.window, None::<&gtk4::Widget>);
+    }
+
     // Position and visibility management
 
     /// Set the anchor position for the window (horizontal positioning).
@@ -1199,12 +1264,16 @@ impl QuickSettingsWindow {
     }
 
     /// Show the panel and associated click-catcher.
+    ///
+    /// Handles both the first show (new window) and re-shows (hidden window
+    /// being made visible again). On re-show, the window is already mapped so
+    /// we skip the opacity fade-in trick and go straight to positioning.
     fn show_panel(self: &Rc<Self>) {
         if let Some(monitor) = self.anchor_monitor.borrow().as_ref() {
             self.window.set_monitor(Some(monitor));
         }
 
-        // Create click-catcher
+        // Create click-catcher (fresh each time — trivial cost)
         let app = self
             .window
             .application()
@@ -1228,36 +1297,61 @@ impl QuickSettingsWindow {
         catcher.set_visible(true);
         *self.click_catcher.borrow_mut() = Some(catcher.clone());
 
-        // Start with opacity 0 to avoid flicker while positioning
-        self.window.set_opacity(0.0);
-        self.window.set_visible(true);
-        self.window.present();
+        // Restore keyboard mode
+        self.window.set_keyboard_mode(popover_keyboard_mode());
 
-        // After the window is mapped and has its real size, update position and fade in.
-        // Also re-check for pending IWD auth requests: subscribe_to_services() fires
-        // on_network_changed before the window is mapped, so the is_mapped() gate in
-        // network_card defers the password dialog. This re-check catches that case.
-        let window_weak = self.window.downgrade();
-        glib::idle_add_local(move || {
-            if let Some(window) = window_weak.upgrade()
-                && let Some(qs) = get_qs_window_data(&window)
-            {
-                qs.update_position();
-                qs.window.set_opacity(1.0);
+        // Set the global current QS window reference
+        set_current_qs_window(self);
 
-                // Re-deliver current snapshot now that the window is mapped,
-                // so any deferred auth prompt is shown.
-                let snapshot = NetworkService::global().snapshot();
-                network_card::on_network_changed(&qs.network, &snapshot, &qs.window);
-            }
-            ControlFlow::Break
-        });
+        if self.has_been_mapped.get() {
+            // Re-show: window was previously mapped and hidden. The surface
+            // already exists so we can position and show immediately without
+            // the opacity fade-in trick.
+            self.update_position();
+            self.window.set_visible(true);
+            self.window.present();
+
+            // Re-deliver current service snapshots so the UI reflects the latest
+            // state. Network auth prompts are gated on is_mapped() so this
+            // re-check is needed.
+            let window_weak = self.window.downgrade();
+            glib::idle_add_local_once(move || {
+                if let Some(window) = window_weak.upgrade()
+                    && let Some(qs) = get_qs_window_data(&window)
+                {
+                    let snapshot = NetworkService::global().snapshot();
+                    network_card::on_network_changed(&qs.network, &snapshot, &qs.window);
+                }
+            });
+        } else {
+            // First show: window hasn't been mapped yet. Use the opacity trick
+            // to avoid flicker while GTK4 determines the real window size.
+            self.has_been_mapped.set(true);
+            self.window.set_opacity(0.0);
+            self.window.set_visible(true);
+            self.window.present();
+
+            let window_weak = self.window.downgrade();
+            glib::idle_add_local_once(move || {
+                if let Some(window) = window_weak.upgrade()
+                    && let Some(qs) = get_qs_window_data(&window)
+                {
+                    qs.update_position();
+                    qs.window.set_opacity(1.0);
+
+                    // Re-deliver current snapshot now that the window is mapped,
+                    // so any deferred auth prompt is shown.
+                    let snapshot = NetworkService::global().snapshot();
+                    network_card::on_network_changed(&qs.network, &snapshot, &qs.window);
+                }
+            });
+        }
     }
 
-    /// Hide and destroy the panel and associated click-catcher.
+    /// Hide the panel, keeping the window alive for instant re-show.
     ///
-    /// Note: This does NOT clear from PopoverTracker - the caller is responsible
-    /// for that (QuickSettingsWindowHandle or QuickSettingsDismissible).
+    /// Resets UI state, releases keyboard grab, and destroys the click-catcher.
+    /// Does NOT clear PopoverTracker — the caller is responsible for that.
     pub(super) fn hide_panel(&self) {
         // Restore keyboard mode if it was released for VPN password dialogs
         vpn_card::restore_keyboard_if_released();
@@ -1265,48 +1359,23 @@ impl QuickSettingsWindow {
         // Don't cancel IWD auth on close — the agent callback may arrive after panel closes.
         // AUTH_TIMEOUT_SECS handles cleanup.
 
-        // Disconnect from network service to clean up the dead callback
-        if let Some(id) = self.network_callback_id.take() {
-            NetworkService::global().unsubscribe(id);
-        }
+        // Reset all UI state (collapse revealers, clear auth dialogs, scroll to top)
+        self.reset_ui_state();
 
-        // Disconnect from all other services
-        if let Some(id) = self.bluetooth_callback_id.take() {
-            BluetoothService::global().disconnect(id);
-        }
-        if let Some(id) = self.vpn_callback_id.take() {
-            VpnService::global().disconnect(id);
-        }
-        if let Some(id) = self.idle_inhibitor_callback_id.take() {
-            IdleInhibitorService::global().disconnect(id);
-        }
-        if let Some(id) = self.audio_output_callback_id.take() {
-            AudioService::global().disconnect(id);
-        }
-        if let Some(id) = self.audio_mic_callback_id.take() {
-            AudioService::global().disconnect(id);
-        }
-        if let Some(id) = self.brightness_callback_id.take() {
-            BrightnessService::global().disconnect(id);
-        }
-        if let Some(id) = self.updates_callback_id.take() {
-            UpdatesService::global().disconnect(id);
-        }
-
-        // Clear focus from any focused widget (e.g., password Entry) before closing.
-        // This prevents GTK "did not receive focus-out event" warnings.
-        gtk4::prelude::RootExt::set_focus(&self.window, None::<&gtk4::Widget>);
-
-        // Clear the global QS window reference
+        // Clear the global QS window reference so card-level actions
+        // (e.g., show_wifi_password_dialog) don't fire while hidden.
         clear_current_qs_window();
 
-        // Destroy click-catcher
+        // Release keyboard grab while hidden
+        self.window.set_keyboard_mode(KeyboardMode::None);
+
+        // Hide the main window (keep alive for instant re-show)
+        self.window.set_visible(false);
+
+        // Destroy click-catcher (cheap to recreate)
         if let Some(catcher) = self.click_catcher.borrow_mut().take() {
             catcher.close();
         }
-
-        // Destroy the main window
-        self.window.close();
     }
 
     /// Temporarily release exclusive keyboard grab to allow external dialogs
@@ -1335,16 +1404,56 @@ impl QuickSettingsWindow {
     }
 }
 
-/// Handle passed to bar widgets so they can toggle the Quick Settings window.
+impl Drop for QuickSettingsWindow {
+    fn drop(&mut self) {
+        // Unsubscribe from all services on final cleanup
+        if let Some(id) = self.network_callback_id.take() {
+            NetworkService::global().unsubscribe(id);
+        }
+        if let Some(id) = self.bluetooth_callback_id.take() {
+            BluetoothService::global().disconnect(id);
+        }
+        if let Some(id) = self.vpn_callback_id.take() {
+            VpnService::global().disconnect(id);
+        }
+        if let Some(id) = self.idle_inhibitor_callback_id.take() {
+            IdleInhibitorService::global().disconnect(id);
+        }
+        if let Some(id) = self.audio_output_callback_id.take() {
+            AudioService::global().disconnect(id);
+        }
+        if let Some(id) = self.audio_mic_callback_id.take() {
+            AudioService::global().disconnect(id);
+        }
+        if let Some(id) = self.brightness_callback_id.take() {
+            BrightnessService::global().disconnect(id);
+        }
+        if let Some(id) = self.updates_callback_id.take() {
+            UpdatesService::global().disconnect(id);
+        }
+
+        clear_current_qs_window();
+
+        // Destroy click-catcher if still alive
+        if let Some(catcher) = self.click_catcher.borrow_mut().take() {
+            catcher.close();
+        }
+
+        // Destroy the GTK window
+        self.window.close();
+    }
+}
+
+/// Handle for toggling the keep-alive Quick Settings window from bar widgets.
 ///
-/// The handle manages the window lifecycle: the window is created on each open
-/// and destroyed on close. Layer-shell surfaces don't reliably re-show after
-/// being hidden with set_visible(false), so we always create fresh windows.
+/// Lazily creates the window on first open, then hides/re-shows on
+/// subsequent toggles to avoid the rebuild cost.
 #[derive(Clone)]
 pub struct QuickSettingsWindowHandle {
     app: Application,
     config: QuickSettingsConfig,
-    /// The current window instance. Shared across clones via Rc.
+    /// The keep-alive window instance. Created once on first open, kept
+    /// alive across close/re-open cycles. Shared across clones via Rc.
     window: Rc<RefCell<Option<Rc<QuickSettingsWindow>>>>,
     /// ID returned from PopoverTracker when QS is active.
     ///
@@ -1364,6 +1473,21 @@ impl QuickSettingsWindowHandle {
         }
     }
 
+    /// Explicitly tear down the keep-alive window and clear PopoverTracker.
+    ///
+    /// Called during bar teardown to ensure the window and its service
+    /// subscriptions are cleaned up even if a `QuickSettingsDismissible`
+    /// still holds a reference to the shared `Rc<RefCell<Option<...>>>`.
+    pub fn destroy(&self) {
+        // Clear from PopoverTracker first
+        if let Some(id) = self.tracker_id.take() {
+            PopoverTracker::global().clear_if_active(id);
+        }
+        // Drop the window — triggers QuickSettingsWindow::drop which
+        // unsubscribes all services and closes the GTK window.
+        *self.window.borrow_mut() = None;
+    }
+
     pub fn toggle_at(&self, x: i32, monitor: Option<Monitor>) {
         // Check if window exists and is visible
         let is_visible = self
@@ -1373,8 +1497,8 @@ impl QuickSettingsWindowHandle {
             .is_some_and(|w| w.window.is_visible());
 
         if is_visible {
-            // Window is visible - close and destroy it
-            if let Some(qs) = self.window.borrow_mut().take() {
+            // Window is visible — hide it (keep alive for instant re-show)
+            if let Some(qs) = self.window.borrow().as_ref() {
                 qs.hide_panel();
             }
             // Clear from tracker using our stored ID
@@ -1387,13 +1511,18 @@ impl QuickSettingsWindowHandle {
         // Dismiss any other active popup before opening QS
         PopoverTracker::global().dismiss_active();
 
-        // Window not visible - create a new one
-        // (Layer-shell surfaces don't reliably re-show after being hidden,
-        // so we always create fresh)
-        let qs = QuickSettingsWindow::new(&self.app, self.config.clone());
-        qs.set_anchor_position(x, monitor);
-        qs.show_panel();
-        *self.window.borrow_mut() = Some(qs);
+        // Lazy-create: build window on first open, re-use on subsequent opens
+        let needs_create = self.window.borrow().is_none();
+        if needs_create {
+            let qs = QuickSettingsWindow::new(&self.app, self.config.clone());
+            *self.window.borrow_mut() = Some(qs);
+        }
+
+        // Update position and show
+        if let Some(qs) = self.window.borrow().as_ref() {
+            qs.set_anchor_position(x, monitor);
+            qs.show_panel();
+        }
 
         // Register with popup tracker for seamless transitions and store the ID
         let dismissible = QuickSettingsDismissible {
@@ -1408,7 +1537,8 @@ impl QuickSettingsWindowHandle {
 /// Adapter to make QuickSettingsWindowHandle work with PopoverTracker.
 ///
 /// This wraps the shared window reference and implements `Dismissible` so that
-/// other popups can dismiss Quick Settings when opening.
+/// other popups can dismiss Quick Settings when opening. The window is hidden
+/// (not destroyed) — it stays alive for instant re-show.
 struct QuickSettingsDismissible {
     window: Rc<RefCell<Option<Rc<QuickSettingsWindow>>>>,
     tracker_id: Rc<Cell<Option<PopoverId>>>,
@@ -1416,7 +1546,7 @@ struct QuickSettingsDismissible {
 
 impl Dismissible for QuickSettingsDismissible {
     fn dismiss(&self) {
-        if let Some(qs) = self.window.borrow_mut().take() {
+        if let Some(qs) = self.window.borrow().as_ref() {
             qs.hide_panel();
         }
         // Clear our tracker ID since we've been dismissed

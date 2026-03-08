@@ -134,7 +134,7 @@ pub fn create_bar_window(
         .unwrap_or_default();
 
     // Create handle for this bar's Quick Settings window.
-    // The window itself is created lazily on first open and destroyed on close.
+    // The window is created lazily on first open and kept alive for instant re-show.
     let qs_handle = crate::widgets::QuickSettingsWindowHandle::new(app.clone(), qs_config.clone());
 
     // Create left section

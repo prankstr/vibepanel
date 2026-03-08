@@ -1,9 +1,8 @@
 //! Quick Settings bar widget - slim indicator that toggles the
 //! global Quick Settings window.
 //!
-//! For Phase 1 this widget only renders a basic icon and toggles the
-//! window when clicked. Wi-Fi status and other indicators will be
-//! wired up in later phases.
+//! Renders status icons (audio, bluetooth, network, VPN) and toggles
+//! the keep-alive QS window on click.
 
 use gtk4::gdk::BUTTON_PRIMARY;
 use gtk4::prelude::*;
@@ -166,6 +165,9 @@ impl QuickSettingsConfig {
 /// Bar-side Quick Settings indicator.
 pub struct QuickSettingsWidget {
     base: BaseWidget,
+    /// Handle to the keep-alive QS window. Stored so we can call `destroy()`
+    /// on bar teardown, ensuring the window and PopoverTracker are cleaned up.
+    qs_window_handle: QuickSettingsWindowHandle,
     audio_callback_id: Option<CallbackId>,
     bluetooth_callback_id: Option<CallbackId>,
     network_wifi_callback_id: Option<CallbackId>,
@@ -586,6 +588,7 @@ impl QuickSettingsWidget {
 
         Self {
             base,
+            qs_window_handle: qs_window,
             audio_callback_id,
             bluetooth_callback_id,
             network_wifi_callback_id,
@@ -602,6 +605,8 @@ impl QuickSettingsWidget {
 
 impl Drop for QuickSettingsWidget {
     fn drop(&mut self) {
+        self.qs_window_handle.destroy();
+
         if let Some(id) = self.audio_callback_id.take() {
             AudioService::global().disconnect(id);
         }

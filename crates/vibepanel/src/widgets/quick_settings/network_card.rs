@@ -1445,7 +1445,7 @@ fn schedule_failed_clear<F: FnOnce() + 'static>(
 }
 
 /// Hide the password dialog and reset its state.
-fn hide_password_dialog(state: &NetworkCardState) {
+pub(super) fn hide_password_dialog(state: &NetworkCardState) {
     if let Some(entry) = state.password_entry.borrow().as_ref() {
         entry.set_text("");
     }
