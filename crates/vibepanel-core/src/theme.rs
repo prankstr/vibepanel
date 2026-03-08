@@ -232,6 +232,8 @@ pub struct ThemePalette {
     pub accent_primary: String,
     pub accent_subtle: String,
     pub accent_text: String,
+    /// Pre-computed accent hover background (color-mix with luminance-aware tint and ratio).
+    pub accent_hover_bg: String,
     // NOTE: accent_icon and accent_slider were removed - they always equaled accent_primary.
     // CSS vars --color-accent-icon and --color-accent-slider now alias to --color-accent-primary.
 
@@ -340,6 +342,7 @@ impl ThemePalette {
     /* Slider accent - alias for user CSS overrides */
     --color-accent-slider: var(--color-accent-primary);
     --color-accent-text: {accent_text};
+    --color-accent-hover-bg: {accent_hover_bg};
 
     /* ===== State Colors ===== */
     --color-state-success: {state_success};
@@ -441,6 +444,7 @@ impl ThemePalette {
             accent_primary = accent_primary_css,
             accent_subtle = accent_subtle_css,
             accent_text = self.accent_text,
+            accent_hover_bg = self.accent_hover_bg,
             state_success = self.state_success,
             state_warning = self.state_warning,
             state_urgent = self.state_urgent,
@@ -717,6 +721,12 @@ impl ThemePalette {
             AccentSource::Custom(color) => {
                 self.accent_subtle = format!("color-mix(in srgb, {} 20%, transparent)", color);
                 self.accent_text = accent_text_color;
+                // Bright accent → darken on hover (80/20); dark accent → lighten (90/10, subtler)
+                self.accent_hover_bg = if is_dark_color(color) {
+                    format!("color-mix(in srgb, {} 90%, white)", color)
+                } else {
+                    format!("color-mix(in srgb, {} 80%, black)", color)
+                };
             }
             AccentSource::Gtk => {
                 // GTK accent - use @accent_color references
@@ -724,6 +734,8 @@ impl ThemePalette {
                 self.accent_subtle =
                     "color-mix(in srgb, @accent_color 20%, transparent)".to_string();
                 self.accent_text = accent_text_color;
+                // GTK accents are almost always bright → darken on hover
+                self.accent_hover_bg = "color-mix(in srgb, @accent_color 80%, black)".to_string();
             }
             AccentSource::None => {
                 // Monochrome mode - adapt to dark/light theme
@@ -734,6 +746,13 @@ impl ThemePalette {
                     self.accent_subtle = "rgba(0, 0, 0, 0.06)".to_string();
                     self.accent_text = self.foreground_primary.clone();
                 }
+                // Monochrome accent follows theme direction (same as --widget-hover-tint)
+                let tint = if self.is_dark_mode { "white" } else { "black" };
+                let ratio = if self.is_dark_mode { 90 } else { 80 };
+                self.accent_hover_bg = format!(
+                    "color-mix(in srgb, {} {}%, {})",
+                    self.accent_primary, ratio, tint
+                );
             }
         }
     }
@@ -884,6 +903,7 @@ impl Default for ThemePalette {
             accent_primary: "@accent_color".to_string(),
             accent_subtle: String::new(),
             accent_text: String::new(),
+            accent_hover_bg: "color-mix(in srgb, @accent_color 80%, black)".to_string(),
             state_success: DEFAULT_STATE_SUCCESS.to_string(),
             state_warning: DEFAULT_STATE_WARNING.to_string(),
             state_urgent: DEFAULT_STATE_URGENT.to_string(),
