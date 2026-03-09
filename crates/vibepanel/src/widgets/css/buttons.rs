@@ -39,6 +39,10 @@ button.vp-btn-accent {
     border-radius: var(--radius-widget);
 }
 
+button.vp-btn-accent label {
+    margin: 0 8px;
+}
+
 button.vp-btn-accent:hover {
     background: var(--color-accent-hover-bg);
 }
@@ -49,6 +53,10 @@ button.vp-btn-card {
     border: none;
     box-shadow: none;
     border-radius: var(--radius-widget);
+}
+
+button.vp-btn-card label {
+    margin: 0 8px;
 }
 
 button.vp-btn-card:hover {
