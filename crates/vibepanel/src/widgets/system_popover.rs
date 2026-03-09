@@ -269,6 +269,7 @@ pub fn build_system_popover_with_controller() -> (Widget, SystemPopoverControlle
 
     let cores_expander_chevron =
         icons.create_icon("pan-down-symbolic", &[icon::TEXT, color::MUTED]);
+    cores_expander_chevron.widget().set_margin_top(2);
     expander_row.append(&cores_expander_chevron.widget());
 
     let expander_btn = crate::widgets::base::vp_button();

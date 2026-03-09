@@ -52,8 +52,14 @@ pub fn css() -> &'static str {
     border-radius: var(--radius-card);
 }
 
-.system-expander-header {
-    margin-top: 4px;
+button.system-expander-header {
+    margin-top: -4px;
+    margin-left: -6px;
+    margin-right: -6px;
+}
+
+button.system-expander-header > overlay > box {
+    padding: 0 6px;
 }
 
 .system-expander-header:hover {
