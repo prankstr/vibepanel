@@ -1280,7 +1280,7 @@ fn create_network_action_widget(net: &WifiNetwork) -> gtk4::Widget {
     }
 
     // Known or active networks: hamburger menu with multiple actions.
-    let menu_btn = create_row_menu_button();
+    let (menu_btn, menu_icon) = create_row_menu_button();
 
     let is_active_clone = is_active;
     let is_known_clone = is_known;
@@ -1288,6 +1288,7 @@ fn create_network_action_widget(net: &WifiNetwork) -> gtk4::Widget {
     let path_for_actions = net.path.clone();
     let path_for_forget = net.known_network_path.clone();
 
+    let menu_icon_widget = menu_icon.widget();
     menu_btn.connect_clicked(move |btn| {
         let popover = Popover::new();
         configure_popover(&popover);
@@ -1353,13 +1354,15 @@ fn create_network_action_widget(net: &WifiNetwork) -> gtk4::Widget {
 
         popover.set_child(Some(&panel));
         popover.set_parent(btn);
-        popover.popup();
 
-        // Unparent popover when closed to avoid "still has children" warning
-        // when the button is destroyed during list refresh
-        popover.connect_closed(|p| {
+        menu_icon_widget.add_css_class(state::EXPANDED);
+        let icon_for_close = menu_icon_widget.clone();
+        popover.connect_closed(move |p| {
+            icon_for_close.remove_css_class(state::EXPANDED);
             p.unparent();
         });
+
+        popover.popup();
     });
 
     menu_btn.upcast()

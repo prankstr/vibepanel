@@ -27,7 +27,7 @@ use crate::services::bluetooth::{
 };
 use crate::services::icons::IconsService;
 use crate::services::surfaces::SurfaceStyleManager;
-use crate::styles::{button, color, icon, qs, row, surface};
+use crate::styles::{button, color, icon, qs, row, state, surface};
 use crate::widgets::base::configure_popover;
 
 /// Identity of an auth request for cache invalidation.
@@ -335,10 +335,11 @@ fn create_bluetooth_action_widget(dev: &BluetoothDevice, is_pairing: bool) -> gt
     }
 
     // Paired or trusted devices: hamburger menu (Connect/Disconnect/Forget)
-    let menu_btn = create_row_menu_button();
+    let (menu_btn, menu_icon) = create_row_menu_button();
 
     let path_for_menu = path.clone();
 
+    let menu_icon_widget = menu_icon.widget();
     menu_btn.connect_clicked(move |btn| {
         // Query fresh snapshot at click time to get current connected state
         let bt = BluetoothService::global();
@@ -390,6 +391,14 @@ fn create_bluetooth_action_widget(dev: &BluetoothDevice, is_pairing: bool) -> gt
 
         popover.set_child(Some(&panel));
         popover.set_parent(btn);
+
+        menu_icon_widget.add_css_class(state::EXPANDED);
+        let icon_for_close = menu_icon_widget.clone();
+        popover.connect_closed(move |p| {
+            icon_for_close.remove_css_class(state::EXPANDED);
+            p.unparent();
+        });
+
         popover.popup();
     });
 

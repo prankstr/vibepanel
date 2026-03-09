@@ -212,6 +212,14 @@ window.quick-settings-window {
     background: var(--color-card-overlay-hover);
 }
 
+.qs-row-menu-icon {
+    transition: transform 200ms ease;
+}
+
+.qs-row-menu-icon.expanded {
+    transform: rotate(90deg);
+}
+
 /* Accent colors - state override for active icons/toggles */
 .qs-icon-active {
     color: var(--color-accent-primary);

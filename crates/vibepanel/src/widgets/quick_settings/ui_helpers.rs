@@ -272,11 +272,15 @@ pub fn add_placeholder_row(list_box: &ListBox, text: &str) {
 
 /// Create a hamburger menu button for list rows with multiple actions.
 ///
+/// Returns the button and its icon handle. The icon handle can be used to
+/// toggle the `expanded` CSS class for rotation animation when the popover
+/// opens and closes.
+///
 /// # CSS Classes Applied
 ///
 /// - `.qs-row-menu-button` and `.vp-btn-reset` on the button
 /// - `.qs-row-menu-icon` on the menu icon
-pub fn create_row_menu_button() -> Button {
+pub fn create_row_menu_button() -> (Button, IconHandle) {
     let menu_btn = crate::widgets::base::vp_button();
     menu_btn.set_has_frame(false);
     menu_btn.add_css_class(row::QS_MENU_BUTTON);
@@ -292,7 +296,7 @@ pub fn create_row_menu_button() -> Button {
     icon_widget.set_valign(gtk4::Align::Center);
     menu_btn.set_child(Some(&icon_widget));
 
-    menu_btn
+    (menu_btn, icon_handle)
 }
 
 /// Create a single inline action as accent-colored text (no background).
