@@ -299,9 +299,9 @@ impl NotificationToast {
             actions_box.set_halign(Align::End);
 
             for (action_id, action_label) in non_default_actions {
-                let action_btn = Button::with_label(action_label);
+                let action_btn = crate::widgets::base::vp_button_with_label(action_label);
                 action_btn.add_css_class(notif::TOAST_ACTION);
-                action_btn.add_css_class(button::LINK);
+                action_btn.add_css_class(button::GHOST);
 
                 let on_action_clone = on_action.clone();
                 let on_dismiss_clone = on_dismiss.clone();

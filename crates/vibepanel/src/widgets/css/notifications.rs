@@ -152,18 +152,15 @@ pub fn css() -> &'static str {
     margin-top: 6px;
 }
 
-.notification-action-btn {
+button.notification-action-btn {
     padding: 0;
     min-height: 0;
     min-width: 0;
     border-radius: var(--radius-widget);
+    color: var(--color-accent-primary);
 }
 
-.notification-action-btn:hover {
-    background: var(--color-card-overlay-hover);
-}
-
-.notification-action-btn > label {
+button.notification-action-btn label {
     font-size: var(--font-size-sm);
     padding: 2px 6px;
 }
@@ -185,15 +182,15 @@ window.notification-toast,
     padding-top: 8px;
 }
 
-.notification-toast-action {
-    font-size: var(--font-size-sm);
-    padding: 4px 8px;
+button.notification-toast-action {
     min-height: 0;
     border-radius: var(--radius-widget);
+    color: var(--color-accent-primary);
 }
 
-.notification-toast-action:hover {
-    background: var(--color-card-overlay-hover);
+button.notification-toast-action label {
+    font-size: var(--font-size-sm);
+    padding: 4px 8px;
 }
 "#
 }

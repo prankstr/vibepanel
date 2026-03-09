@@ -423,10 +423,9 @@ fn build_notification_row(
 
         // Optional expand button on the left
         if let Some(body_label) = body_label_opt {
-            let expand_btn = Button::with_label("Show more");
-            expand_btn.set_has_frame(false);
+            let expand_btn = crate::widgets::base::vp_button_with_label("Show more");
             expand_btn.add_css_class(notif::ACTION_BTN);
-            expand_btn.add_css_class(button::LINK);
+            expand_btn.add_css_class(button::GHOST);
 
             // Store expanded state in a Cell
             let is_expanded = Rc::new(Cell::new(false));
@@ -467,10 +466,9 @@ fn build_notification_row(
 
         // Primary "Open" action button, if available
         if let Some(primary_id) = primary_action {
-            let open_btn = Button::with_label("Open");
-            open_btn.set_has_frame(false);
+            let open_btn = crate::widgets::base::vp_button_with_label("Open");
             open_btn.add_css_class(notif::ACTION_BTN);
-            open_btn.add_css_class(button::LINK);
+            open_btn.add_css_class(button::GHOST);
 
             let notification_id = notification.id;
             let on_close_for_open = on_close.clone();
@@ -488,9 +486,9 @@ fn build_notification_row(
         // Action buttons on the right (non-default actions like "Mark as Read", "Reply", etc.)
         // These do NOT close the popover - user may be processing multiple notifications
         for (action_id, action_label) in non_default_actions {
-            let action_btn = Button::with_label(action_label);
+            let action_btn = crate::widgets::base::vp_button_with_label(action_label);
             action_btn.add_css_class(notif::ACTION_BTN);
-            action_btn.add_css_class(button::LINK);
+            action_btn.add_css_class(button::GHOST);
 
             let notification_id = notification.id;
             let action_id = action_id.clone();
