@@ -25,6 +25,7 @@ mod marquee_label;
 mod media;
 mod media_components;
 mod media_popover;
+mod media_visualizer;
 mod media_window;
 mod memory;
 mod notifications;

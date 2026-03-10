@@ -331,6 +331,7 @@ fn click_target_matches(
 pub struct BaseWidget {
     container: GtkBox,
     content: GtkBox,
+    overlay: Overlay,
     /// Cairo-based ripple overlay for click-origin Material Design ripple.
     /// Sits on top of content inside an `Overlay`, draws a flat-opacity
     /// circle expanding from the click point.
@@ -504,6 +505,7 @@ impl BaseWidget {
         Self {
             container,
             content,
+            overlay,
             ripple_handle,
             menu,
             widget_name,
@@ -732,6 +734,11 @@ impl BaseWidget {
     /// Get the inner `.content` box for adding widget children.
     pub fn content(&self) -> &GtkBox {
         &self.content
+    }
+
+    /// Get the overlay wrapping the content box.
+    pub fn overlay(&self) -> &Overlay {
+        &self.overlay
     }
 
     /// Create an icon using `IconsService`, apply CSS classes, pack it into the

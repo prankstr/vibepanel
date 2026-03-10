@@ -1952,11 +1952,6 @@ impl IconsService {
     font-variation-settings: 'wght' {};
     font-size: inherit;
 }}
-
-/* Larger icon for media primary (play/pause) button */
-.material-symbol.media-primary-icon {{
-    font-size: calc(var(--icon-size) * 1.35);
-}}
 "#,
             MATERIAL_FONT_FAMILY, weight
         );

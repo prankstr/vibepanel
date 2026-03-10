@@ -26,6 +26,7 @@ use crate::widgets::base::{BaseWidget, MenuHandle};
 use crate::widgets::marquee_label::MarqueeLabel;
 use crate::widgets::media_components::ArtState;
 use crate::widgets::media_popover::{MediaPopoverController, build_media_popover_with_controller};
+use crate::widgets::media_visualizer::BarVisualizer;
 use crate::widgets::media_window::{MediaWindowHandle, create_media_window};
 use crate::widgets::rounded_picture::RoundedPicture;
 use crate::widgets::{WidgetConfig, warn_unknown_options};
@@ -351,6 +352,8 @@ pub struct MediaWidget {
     pending_hide: Rc<RefCell<Option<glib::SourceId>>>,
     /// Album art state — held so that `ArtState::Drop` cancels timers and in-flight loads.
     _art_state: Rc<RefCell<ArtState>>,
+    /// Bar waveform visualizer — held so `Drop` disconnects from cava.
+    _bar_visualizer: BarVisualizer,
 }
 
 #[derive(Clone)]
@@ -374,6 +377,7 @@ struct WidgetUpdateContext<'a> {
     empty_text: &'a str,
     art_state: &'a Rc<RefCell<ArtState>>,
     pending_hide: &'a Rc<RefCell<Option<glib::SourceId>>>,
+    bar_visualizer: &'a BarVisualizer,
 }
 
 /// Owned version of widget references for use in callbacks.
@@ -389,6 +393,7 @@ struct CallbackWidgetRefs {
     empty_text: String,
     art_state: Rc<RefCell<ArtState>>,
     pending_hide: Rc<RefCell<Option<glib::SourceId>>>,
+    bar_visualizer: BarVisualizer,
 }
 
 impl CallbackWidgetRefs {
@@ -404,6 +409,7 @@ impl CallbackWidgetRefs {
             empty_text: &self.empty_text,
             art_state: &self.art_state,
             pending_hide: &self.pending_hide,
+            bar_visualizer: &self.bar_visualizer,
         }
     }
 }
@@ -700,6 +706,10 @@ impl MediaWidget {
         };
 
         let menu_handle = base.create_menu(move || {
+            // Drop old controller before building the new one so stale
+            // callbacks are cleaned up before new ones are registered.
+            controller_for_builder.borrow_mut().take();
+
             let on_popout_clone = on_popout.clone();
             let (widget, controller) = build_media_popover_with_controller(move || {
                 on_popout_clone();
@@ -723,6 +733,16 @@ impl MediaWidget {
 
         let pending_hide: Rc<RefCell<Option<glib::SourceId>>> = Rc::new(RefCell::new(None));
 
+        // Create the bar waveform visualizer as an overlay on the base widget.
+        // Use insert_before to place it behind the content box in paint order.
+        let bar_visualizer = BarVisualizer::new();
+        base.overlay().add_overlay(bar_visualizer.widget());
+        base.overlay()
+            .set_measure_overlay(bar_visualizer.widget(), false);
+        bar_visualizer
+            .widget()
+            .insert_before(base.overlay(), Some(base.content()));
+
         let widget_refs = CallbackWidgetRefs {
             container: base.widget().clone(),
             status_icon: status_icon.clone(),
@@ -734,6 +754,7 @@ impl MediaWidget {
             empty_text: config.empty_text.clone(),
             art_state: art_state.clone(),
             pending_hide,
+            bar_visualizer: bar_visualizer.clone(),
         };
 
         // Start hidden — the media callback will show the widget once a player is active.
@@ -781,6 +802,7 @@ impl MediaWidget {
             theme_callback_id,
             pending_hide: pending_hide_for_drop,
             _art_state: art_state_for_drop,
+            _bar_visualizer: bar_visualizer,
         }
     }
 
@@ -880,6 +902,7 @@ fn update_widgets_from_snapshot_impl(ctx: &WidgetUpdateContext<'_>, snapshot: &M
         let player_icon = ctx.player_icon.clone();
         let art_picture = ctx.art_picture.clone();
         let controls = ctx.controls.clone();
+        let bar_viz = ctx.bar_visualizer.clone();
 
         let source_id =
             glib::timeout_add_local_once(Duration::from_millis(HIDE_GRACE_PERIOD_MS), move || {
@@ -889,6 +912,8 @@ fn update_widgets_from_snapshot_impl(ctx: &WidgetUpdateContext<'_>, snapshot: &M
                 if is_popout_open() {
                     return;
                 }
+
+                bar_viz.stop();
 
                 perform_hide(
                     &container,
@@ -929,12 +954,15 @@ fn update_widgets_from_snapshot_impl(ctx: &WidgetUpdateContext<'_>, snapshot: &M
     match snapshot.playback_status {
         PlaybackStatus::Playing => {
             ctx.container.add_css_class(media::PLAYING);
+            ctx.bar_visualizer.start();
         }
         PlaybackStatus::Paused => {
             ctx.container.add_css_class(media::PAUSED);
+            ctx.bar_visualizer.pause();
         }
         PlaybackStatus::Stopped => {
             ctx.container.add_css_class(media::STOPPED);
+            ctx.bar_visualizer.pause();
         }
     }
 

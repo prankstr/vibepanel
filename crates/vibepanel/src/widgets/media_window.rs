@@ -17,7 +17,12 @@ use crate::widgets::media_components::{
     build_track_info,
 };
 
-const WINDOW_ART_SIZE: i32 = 100;
+const WINDOW_ART_SIZE: i32 = 75;
+
+const WINDOW_BLOB_MARGIN: i32 = 12;
+
+/// Smaller blob displacement for the compact window layout.
+const WINDOW_BLOB_MAX_DISPLACEMENT: f64 = 8.0;
 
 /// Handle to the media pop-out window. Drop this to close the window.
 pub struct MediaWindowHandle {
@@ -53,7 +58,6 @@ where
     G: Fn() + 'static,
 {
     let media_service = MediaService::global();
-    let snapshot = media_service.snapshot();
 
     let window = if let Some(app) = app {
         ApplicationWindow::builder()
@@ -73,7 +77,7 @@ where
 
     window.add_css_class(media::WINDOW);
     window.set_title(Some("Media Player"));
-    window.set_default_size(280, 150);
+    window.set_default_size(260, 150);
 
     // Make the window itself transparent so only main_box background shows
     let window_css =
@@ -87,7 +91,7 @@ where
 
     let main_box = GtkBox::new(Orientation::Vertical, 0);
     main_box.add_css_class(media::CONTENT);
-    main_box.set_size_request(280, 150);
+    main_box.set_size_request(260, 150);
 
     // Apply surface styles for consistent theming
     SurfaceStyleManager::global().apply_surface_styles(&main_box, true);
@@ -127,28 +131,32 @@ where
     ));
     main_box.add_controller(gesture);
 
-    let content = GtkBox::new(Orientation::Vertical, 4);
+    let content = GtkBox::new(Orientation::Vertical, 2);
     content.set_margin_top(0);
-    content.set_margin_bottom(4);
-    content.set_margin_start(8);
-    content.set_margin_end(8);
+    content.set_margin_bottom(2);
+    content.set_margin_start(4);
+    content.set_margin_end(6);
 
-    let content_row = GtkBox::new(Orientation::Horizontal, 12);
+    let content_row = GtkBox::new(Orientation::Horizontal, 8);
     content_row.add_css_class(media::CONTENT);
     content_row.set_size_request(-1, WINDOW_ART_SIZE);
 
     // Album art
-    let (art_container, art_picture, art_placeholder_box, art_state) =
-        build_album_art(WINDOW_ART_SIZE);
+    let (art_container, art_picture, art_placeholder_box, art_state, visualizer) = build_album_art(
+        WINDOW_ART_SIZE,
+        WINDOW_BLOB_MARGIN,
+        WINDOW_BLOB_MAX_DISPLACEMENT,
+    );
     content_row.append(&art_container);
 
     // Info section
     let info_section = GtkBox::new(Orientation::Vertical, 0);
     info_section.set_valign(Align::End);
-    info_section.set_size_request(160, -1);
+    info_section.set_halign(Align::End);
+    info_section.set_hexpand(true);
 
     let (track_info_container, title_label, artist_label, album_label) = build_track_info(15, 2);
-    track_info_container.set_margin_bottom(4);
+    track_info_container.set_margin_bottom(2);
     info_section.append(&track_info_container);
 
     let (controls_container, prev_btn, play_pause_btn, play_pause_icon, next_btn) =
@@ -181,13 +189,12 @@ where
         position_label,
         duration_label,
         is_seeking,
+        visualizer,
     };
 
-    controller.update_from_snapshot(&snapshot);
-
+    // connect() fires immediately, so the first update_from_snapshot runs here.
     let callback_id_cell: Rc<RefCell<Option<CallbackId>>> = Rc::new(RefCell::new(None));
     {
-        let controller = controller.clone();
         let callback_id = media_service.connect(move |snapshot| {
             controller.update_from_snapshot(snapshot);
         });

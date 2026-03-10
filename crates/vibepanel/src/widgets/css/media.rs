@@ -60,16 +60,16 @@ pub fn css() -> &'static str {
 }
 
 /* Popover styling */
-.media-popover {
-    padding: 16px;
+.media-popover.vp-surface-popover {
+    padding: 28px;
     min-width: 340px;
 }
 
 /* Popover header buttons row */
 .media-popover-header {
-    margin-top: -8px;
-    margin-right: -8px;
-    margin-bottom: 8px;
+    margin-top: -12px;
+    margin-right: -12px;
+    margin-bottom: 2px;
 }
 
 /* Override base popover icon button size for denser media layout */
@@ -147,11 +147,11 @@ pub fn css() -> &'static str {
 
 /* Window base styling */
 .media-window {
-    min-width: 280px;
+    min-width: 260px;
 }
 
 .media-window .media-controls {
-    padding: 8px 0;
+    padding: 4px 0;
 }
 
 .media-popover .media-control-btn,
@@ -164,6 +164,11 @@ pub fn css() -> &'static str {
     padding: 0;
     border-radius: var(--radius-widget);
     color: var(--color-foreground-primary);
+}
+
+.media-popover .media-control-btn .icon-root,
+.media-window .media-control-btn .icon-root {
+    font-size: calc(var(--icon-size) * 1.25);
 }
 
 .media-popover .media-control-btn:hover,
@@ -183,6 +188,11 @@ pub fn css() -> &'static str {
     min-height: 40px;
     background: var(--color-accent-primary);
     color: var(--color-accent-text, #fff);
+}
+
+.media-popover .media-control-btn.media-control-btn-primary .icon-root,
+.media-window .media-control-btn.media-control-btn-primary .icon-root {
+    font-size: calc(var(--icon-size) * 1.35);
 }
 
 .media-popover .media-control-btn.media-control-btn-primary:hover,

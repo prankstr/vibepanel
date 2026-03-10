@@ -7,7 +7,9 @@ use gtk4::gdk_pixbuf::Pixbuf;
 use gtk4::gio;
 use gtk4::glib;
 use gtk4::prelude::*;
-use gtk4::{Align, Box as GtkBox, Button, EventControllerLegacy, Label, Orientation, Scale};
+use gtk4::{
+    Align, Box as GtkBox, Button, EventControllerLegacy, Label, Orientation, Overlay, Scale,
+};
 use tracing::{debug, warn};
 
 use crate::services::config_manager::ConfigManager;
@@ -15,6 +17,7 @@ use crate::services::icons::{IconHandle, IconsService};
 use crate::services::media::{MediaService, MediaSnapshot, PlaybackStatus, format_duration};
 use crate::styles::{button, color, icon, media};
 use crate::widgets::marquee_label::MarqueeLabel;
+use crate::widgets::media_visualizer::MediaVisualizer;
 use crate::widgets::rounded_picture::RoundedPicture;
 
 // ============================================================================
@@ -41,6 +44,7 @@ pub struct MediaViewController {
     pub position_label: Label,
     pub duration_label: Label,
     pub is_seeking: Rc<RefCell<bool>>,
+    pub visualizer: MediaVisualizer,
 }
 
 impl MediaViewController {
@@ -86,6 +90,20 @@ impl MediaViewController {
 
         self.title_label
             .set_paused(snapshot.playback_status != PlaybackStatus::Playing);
+
+        // Paused and Stopped both decay to a static border rather than
+        // hiding, to avoid blink during track switches.
+        // Stop cava entirely only when the bar widget would hide.
+        let should_stop = !snapshot.available
+            || (snapshot.playback_status == PlaybackStatus::Stopped && !has_metadata);
+        if should_stop {
+            self.visualizer.stop();
+        } else {
+            match snapshot.playback_status {
+                PlaybackStatus::Playing => self.visualizer.start(),
+                PlaybackStatus::Paused | PlaybackStatus::Stopped => self.visualizer.pause(),
+            }
+        }
     }
 }
 
@@ -429,12 +447,24 @@ pub fn build_seek_section(
     (container, scale, position_label, duration_label, is_seeking)
 }
 
-/// Build album art container with placeholder.
-/// Returns (container, picture, placeholder_box, art_state)
-pub fn build_album_art(size: i32) -> (GtkBox, RoundedPicture, GtkBox, Rc<RefCell<ArtState>>) {
+/// Build album art container with placeholder and audio-reactive visualizer.
+pub fn build_album_art(
+    size: i32,
+    overflow_margin: i32,
+    blob_max_displacement: f64,
+) -> (
+    Overlay,
+    RoundedPicture,
+    GtkBox,
+    Rc<RefCell<ArtState>>,
+    MediaVisualizer,
+) {
     let icons = IconsService::global();
     let config_mgr = ConfigManager::global();
-    let corner_radius = config_mgr.widget_border_radius() as f32;
+
+    // Corner radius proportional to art size.
+    let radius_percent = (config_mgr.widget_radius_percent() as f32 / 100.0).min(0.5);
+    let corner_radius = size as f32 * radius_percent;
 
     let container = GtkBox::new(Orientation::Vertical, 0);
     container.set_size_request(size, size);
@@ -450,6 +480,16 @@ pub fn build_album_art(size: i32) -> (GtkBox, RoundedPicture, GtkBox, Rc<RefCell
     placeholder_box.add_css_class(media::ART);
     placeholder_box.add_css_class(media::ART_PLACEHOLDER);
     placeholder_box.set_size_request(size, size);
+    // Override CSS border-radius to match the RoundedPicture radius.
+    let radius_provider = gtk4::CssProvider::new();
+    radius_provider.load_from_string(&format!(
+        ".media-art-placeholder {{ border-radius: {}px; }}",
+        corner_radius.round() as u32
+    ));
+    #[allow(deprecated)]
+    placeholder_box
+        .style_context()
+        .add_provider(&radius_provider, gtk4::STYLE_PROVIDER_PRIORITY_USER + 10);
 
     let art_icon = icons.create_icon("media-album", &[media::EMPTY_ICON]);
     art_icon.widget().set_valign(Align::Center);
@@ -461,7 +501,22 @@ pub fn build_album_art(size: i32) -> (GtkBox, RoundedPicture, GtkBox, Rc<RefCell
 
     let art_state = Rc::new(RefCell::new(ArtState::new()));
 
-    (container, picture, placeholder_box, art_state)
+    let visualizer = MediaVisualizer::new(
+        size,
+        overflow_margin,
+        corner_radius as f64,
+        blob_max_displacement,
+    );
+    visualizer.widget().set_visible(false);
+
+    let overlay = Overlay::new();
+    overlay.set_child(Some(&container));
+    overlay.add_overlay(visualizer.widget());
+    overlay.set_measure_overlay(visualizer.widget(), false);
+    overlay.set_halign(Align::Center);
+    overlay.set_valign(Align::Center);
+
+    (overlay, picture, placeholder_box, art_state, visualizer)
 }
 
 /// Build track info labels (title, artist, album).

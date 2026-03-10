@@ -26,6 +26,7 @@ pub mod battery;
 pub mod bluetooth;
 pub mod brightness;
 pub mod callbacks;
+pub mod cava;
 pub mod compositor;
 pub mod config_manager;
 pub mod icons;

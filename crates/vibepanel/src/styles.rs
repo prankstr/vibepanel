@@ -998,6 +998,12 @@ pub mod media {
     /// Empty state label (`.media-empty-label`).
     pub const EMPTY_LABEL: &str = "media-empty-label";
 
+    /// Audio visualizer overlay (`.media-visualizer`).
+    pub const VISUALIZER: &str = "media-visualizer";
+
+    /// Bar waveform visualizer underline (`.media-bar-visualizer`).
+    pub const BAR_VISUALIZER: &str = "media-bar-visualizer";
+
     // Icon names (freedesktop naming convention)
     // These are used with IconHandle and BaseWidget.add_icon(), which map
     // freedesktop names to Material Symbols font glyphs internally.

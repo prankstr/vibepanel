@@ -13,8 +13,11 @@ use crate::widgets::media_components::{
     MediaViewController, build_album_art, build_media_controls, build_seek_section,
     build_track_info,
 };
+use crate::widgets::media_visualizer::BLOB_MAX_DISPLACEMENT;
 
-const POPOVER_ART_SIZE: i32 = 140;
+const POPOVER_ART_SIZE: i32 = 120;
+
+const POPOVER_BLOB_MARGIN: i32 = 38;
 
 /// Type alias for the shared media view controller.
 pub type MediaPopoverController = MediaViewController;
@@ -29,22 +32,25 @@ where
     let snapshot = media_service.snapshot();
     let icons = IconsService::global();
 
-    // Root container
     let root = GtkBox::new(Orientation::Vertical, 8);
     root.add_css_class(media::POPOVER);
 
-    // Main row: album art | info section
     let main_row = GtkBox::new(Orientation::Horizontal, 12);
+    main_row.set_hexpand(true);
+    main_row.set_size_request(-1, 130);
 
     // Album art
-    let (art_container, art_picture, art_placeholder_box, art_state) =
-        build_album_art(POPOVER_ART_SIZE);
-    art_container.set_valign(Align::Start);
+    let (art_container, art_picture, art_placeholder_box, art_state, visualizer) =
+        build_album_art(POPOVER_ART_SIZE, POPOVER_BLOB_MARGIN, BLOB_MAX_DISPLACEMENT);
+    art_container.set_valign(Align::End);
+    art_container.set_halign(Align::Center);
+    art_container.set_size_request(140, -1);
     main_row.append(&art_container);
 
-    // Info section - stretches to album art height
+    // Fixed width prevents layout shifts when title length changes.
     let info_section = GtkBox::new(Orientation::Vertical, 0);
     info_section.set_hexpand(true);
+    info_section.set_size_request(140, -1);
 
     // Buttons row at the top, right-aligned
     let buttons_row = GtkBox::new(Orientation::Horizontal, 4);
@@ -128,6 +134,7 @@ where
         position_label,
         duration_label,
         is_seeking,
+        visualizer,
     };
 
     controller.update_from_snapshot(&snapshot);
