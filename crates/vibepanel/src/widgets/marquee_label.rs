@@ -80,6 +80,8 @@ mod imp {
         pub(super) max_width_chars: Cell<i32>,
         /// Animation state.
         pub(super) state: Rc<RefCell<MarqueeState>>,
+        /// When true, the next size_allocate will run a scroll check.
+        pub(super) pending_scroll_check: Cell<bool>,
     }
 
     #[glib::object_subclass]
@@ -146,11 +148,9 @@ mod imp {
                         nat_base,
                     );
                 } else {
-                    // max_chars == 0: Report small minimum but full natural width.
-                    // This allows the widget to shrink if needed (min=0) but requests
-                    // its full text width as natural size. Combined with hexpand=true,
-                    // the widget will expand to fill available space.
-                    return (0, nat, min_base, nat_base);
+                    // max_chars == 0: Report zero so the widget never drives
+                    // parent width — hexpand=true fills available space instead.
+                    return (0, 0, min_base, nat_base);
                 }
             }
 
@@ -158,37 +158,40 @@ mod imp {
         }
 
         fn size_allocate(&self, width: i32, height: i32, baseline: i32) {
-            let label = self.label.borrow();
-            let Some(label) = label.as_ref() else {
-                return;
-            };
+            let text_width;
 
-            // Skip allocation if dimensions are invalid
-            if width <= 0 || height <= 0 {
-                return;
+            {
+                let label = self.label.borrow();
+                let Some(label) = label.as_ref() else {
+                    return;
+                };
+
+                if width <= 0 || height <= 0 {
+                    return;
+                }
+
+                let (_, nat_req) = label.preferred_size();
+                text_width = nat_req.width();
+
+                let offset = self.state.borrow().offset as i32;
+
+                let transform = gtk4::gsk::Transform::new()
+                    .translate(&gtk4::graphene::Point::new(-offset as f32, 0.0));
+                label.allocate(text_width.max(width), height, baseline, Some(transform));
+
+                if let Some(label2) = self.label2.borrow().as_ref() {
+                    let label2_x = text_width as f32 + SCROLL_GAP as f32 - offset as f32;
+                    let transform2 = gtk4::gsk::Transform::new()
+                        .translate(&gtk4::graphene::Point::new(label2_x, 0.0));
+                    label2.allocate(text_width.max(width), height, baseline, Some(transform2));
+                }
             }
-
-            // Get the label's natural width (full text width)
-            let (_, nat_req) = label.preferred_size();
-            let text_width = nat_req.width();
-
-            let state = self.state.borrow();
-            let offset = state.offset as i32;
-
-            // Position primary label (negative offset scrolls left)
-            let transform = gtk4::gsk::Transform::new()
-                .translate(&gtk4::graphene::Point::new(-offset as f32, 0.0));
-            label.allocate(text_width.max(width), height, baseline, Some(transform));
-
-            // Position secondary label for seamless loop
-            // Second label appears at: text_width + gap - offset
-            // When offset = 0, label2 is off-screen to the right
-            // As offset increases, label2 slides in from the right
-            if let Some(label2) = self.label2.borrow().as_ref() {
-                let label2_x = text_width as f32 + SCROLL_GAP as f32 - offset as f32;
-                let transform2 = gtk4::gsk::Transform::new()
-                    .translate(&gtk4::graphene::Point::new(label2_x, 0.0));
-                label2.allocate(text_width.max(width), height, baseline, Some(transform2));
+            // All RefCell borrows dropped — safe to call check which may
+            // re-enter (e.g. start_animation → queue_allocate).
+            if self.pending_scroll_check.replace(false) {
+                let state = self.state.clone();
+                let container = self.obj().clone();
+                check_and_start_scroll(&state, &container, width as f64, text_width as f64);
             }
         }
     }
@@ -351,24 +354,16 @@ impl MarqueeLabel {
     fn reset_and_check_scroll(&self) {
         self.stop_animation();
 
-        // Reset offset
         {
             let state = self.container.state();
             let mut s = state.borrow_mut();
             s.offset = 0.0;
         }
-        if self.container.is_mapped() {
-            self.container.queue_allocate();
-        }
 
-        // Schedule check after layout
-        let state = self.container.state();
-        let label = self.label.clone();
-        let container = self.container.clone();
-
-        glib::idle_add_local_once(move || {
-            check_and_start_scroll(&state, &label, &container);
-        });
+        // Flag a scroll check for the next size_allocate, which
+        // guarantees container dimensions reflect the new text.
+        self.container.imp().pending_scroll_check.set(true);
+        self.container.queue_allocate();
     }
 
     /// Stop the animation timer.
@@ -400,29 +395,18 @@ impl Default for MarqueeLabel {
 }
 
 /// Check if scrolling is needed and start animation if so.
+///
+/// Called from `size_allocate` with the freshly-allocated dimensions,
+/// so `container_width` and `text_width` are guaranteed to be current.
 fn check_and_start_scroll(
     state: &Rc<RefCell<MarqueeState>>,
-    label: &Label,
     container: &MarqueeContainer,
+    container_width: f64,
+    text_width: f64,
 ) {
-    let container_width = container.width() as f64;
     if container_width <= 0.0 {
-        // Not yet allocated - only retry if widget is still in the visible hierarchy.
-        // This prevents infinite retries if the widget is hidden or removed.
-        if container.is_mapped() {
-            let state = state.clone();
-            let label = label.clone();
-            let container = container.clone();
-            glib::idle_add_local_once(move || {
-                check_and_start_scroll(&state, &label, &container);
-            });
-        }
         return;
     }
-
-    // Get text width from label's natural size
-    let (_, nat_req) = label.preferred_size();
-    let text_width = nat_req.width() as f64;
 
     debug!(
         "Marquee check: container_width={}, text_width={}",
@@ -436,7 +420,6 @@ fn check_and_start_scroll(
     let needs_scroll = text_width > container_width;
 
     if needs_scroll {
-        // Scroll full text width + gap for seamless loop
         s.scroll_distance = text_width + SCROLL_GAP;
         s.scrolling = true;
         s.offset = 0.0;
