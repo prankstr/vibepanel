@@ -342,6 +342,10 @@ window.quick-settings-window {
     border-radius: var(--radius-widget);
 }
 
+.qs-power-card:hover {
+    background: var(--color-card-overlay-hover);
+}
+
 /* Card inside power overlay - always transparent, parent has background */
 .qs-power-card > .vp-card {
     background: transparent;
