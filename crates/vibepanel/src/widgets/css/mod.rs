@@ -24,6 +24,13 @@ pub const WIDGET_BG_WITH_OPACITY: &str = "color-mix(in srgb, var(--widget-backgr
 /// Uses nested `color-mix()` so per-widget `--widget-background-color` overrides cascade automatically.
 pub const WIDGET_BG_HOVER: &str = "color-mix(in srgb, color-mix(in srgb, var(--widget-background-color) var(--widget-background-opacity), transparent) 92%, var(--widget-hover-tint))";
 
+/// Popover open/close animation duration in milliseconds.
+///
+/// Single source of truth for both CSS transitions and Rust timeout durations.
+/// Used by `base.rs` for the `.popover-animate` CSS rule and by
+/// `layer_shell_popover.rs` / `quick_settings/window.rs` for close-animation timeouts.
+pub const POPOVER_ANIMATION_MS: u64 = 150;
+
 mod bar;
 mod base;
 mod battery;

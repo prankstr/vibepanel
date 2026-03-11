@@ -3,7 +3,7 @@
 //! These are truly shared styles that apply across multiple surfaces
 //! (bar, popovers, quick settings, etc).
 
-use super::WIDGET_BG_WITH_OPACITY;
+use super::{POPOVER_ANIMATION_MS, WIDGET_BG_WITH_OPACITY};
 
 /// Return shared utility CSS.
 pub fn css() -> String {
@@ -280,6 +280,20 @@ button:hover {{
 }}
 .slider-row .qs-toggle-more:hover {{
     background: var(--color-card-overlay-hover);
+}}
+
+/* ===== POPOVER OPEN/CLOSE ANIMATION ===== */
+
+.popover-animate {{
+    transition: opacity {POPOVER_ANIMATION_MS}ms cubic-bezier(0.2, 0, 0, 1),
+                transform {POPOVER_ANIMATION_MS}ms cubic-bezier(0.2, 0, 0, 1);
+    opacity: 1;
+    transform: scale(1);
+}}
+
+.popover-animate.popover-hidden {{
+    opacity: 0;
+    transform: scale(0.95);
 }}
 "#
     )

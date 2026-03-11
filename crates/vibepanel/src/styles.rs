@@ -611,6 +611,17 @@ pub mod surface {
     ///
     /// Transparent fullscreen overlay for click-outside-to-close behavior.
     pub const LAYER_SHELL_CLICK_CATCHER: &str = "layer-shell-click-catcher";
+
+    /// Popover content with open/close animation (`.popover-animate`).
+    ///
+    /// Enables CSS transition-based scale + fade on the popover content widget.
+    pub const POPOVER_ANIMATE: &str = "popover-animate";
+
+    /// Popover hidden state for animation (`.popover-hidden`).
+    ///
+    /// Combined with `POPOVER_ANIMATE`, sets the scaled-down + transparent state.
+    /// Removing this class triggers the open animation; adding it triggers close.
+    pub const POPOVER_HIDDEN: &str = "popover-hidden";
 }
 
 /// Icon-related classes.

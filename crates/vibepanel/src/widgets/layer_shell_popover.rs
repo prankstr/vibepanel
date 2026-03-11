@@ -16,6 +16,7 @@ use gtk4::{
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::time::Duration;
 
 use crate::services::compositor::CompositorManager;
 use crate::services::config_manager::ConfigManager;
@@ -35,6 +36,11 @@ const POPOVER_MIN_EDGE_MARGIN: i32 = 4;
 const POPOVER_DEFAULT_WIDTH_ESTIMATE: i32 = 320;
 
 const POPOVER_MIN_VALID_WIDTH: i32 = 20;
+
+/// Duration of the popover open/close CSS transition.
+/// Derived from the single source of truth in `css::POPOVER_ANIMATION_MS`.
+pub const POPOVER_ANIMATION_DURATION: Duration =
+    Duration::from_millis(super::css::POPOVER_ANIMATION_MS);
 
 /// Calculate the margin for a popover on the bar-adjacent edge.
 ///
@@ -238,12 +244,19 @@ where
 ///
 /// Creates fresh windows on each `show()` call and destroys them on `hide()`,
 /// ensuring clean state without remembered scroll positions or expanded sections.
+///
+/// Supports animated open/close via CSS transitions (scale + fade). On hide,
+/// the window is taken out of the struct (so `is_visible()` returns false
+/// immediately) and the close animation plays on the orphaned window before
+/// it is destroyed.
 pub struct LayerShellPopover {
     app: Application,
     widget_name: String,
     builder: Rc<dyn Fn() -> gtk4::Widget>,
     window: RefCell<Option<ApplicationWindow>>,
     click_catcher: RefCell<Option<ApplicationWindow>>,
+    /// Reference to the popover content widget for animation class toggling.
+    content_widget: RefCell<Option<gtk4::Widget>>,
     /// Anchor X coordinate (widget center) in monitor coordinates.
     anchor_x: Cell<i32>,
     anchor_monitor: RefCell<Option<Monitor>>,
@@ -267,6 +280,7 @@ impl LayerShellPopover {
             builder: Rc::new(builder),
             window: RefCell::new(None),
             click_catcher: RefCell::new(None),
+            content_widget: RefCell::new(None),
             anchor_x: Cell::new(0),
             anchor_monitor: RefCell::new(None),
         })
@@ -289,17 +303,38 @@ impl LayerShellPopover {
         self.show_internal();
     }
 
-    /// Hide the popover and destroy windows.
+    /// Hide the popover with a close animation.
+    ///
+    /// The click-catcher is destroyed immediately so the bar is interactive
+    /// during the animation. The window is taken out of the struct (making
+    /// `is_visible()` return false) and moved into a timeout closure that
+    /// closes it after the CSS transition completes.
     pub fn hide(&self) {
-        // Destroy click-catcher
+        // Destroy click-catcher immediately
         if let Some(catcher) = self.click_catcher.borrow_mut().take() {
             catcher.close();
         }
 
-        // Destroy main window
-        if let Some(window) = self.window.borrow_mut().take() {
-            window.close();
+        let content = self.content_widget.borrow_mut().take();
+        let window = self.window.borrow_mut().take();
+
+        let Some(window) = window else {
+            return;
+        };
+
+        // Start close animation on the content widget
+        if let Some(ref content) = content {
+            content.add_css_class(surface::POPOVER_HIDDEN);
         }
+
+        // The orphaned window closes itself after the animation duration.
+        // If show_at() is called during this window, a new window is created
+        // independently — Rust ownership prevents conflicts.
+        glib::timeout_add_local_once(POPOVER_ANIMATION_DURATION, move || {
+            // `window` and `content` are moved here and dropped after close
+            let _ = &content;
+            window.close();
+        });
     }
 
     fn show_internal(self: &Rc<Self>) {
@@ -340,13 +375,16 @@ impl LayerShellPopover {
 
         *self.window.borrow_mut() = Some(window.clone());
 
-        // After window is mapped, update position and fade in
+        // After window is mapped, update position and reveal with animation
         let weak_self = Rc::downgrade(self);
         glib::idle_add_local(move || {
             if let Some(popover) = weak_self.upgrade() {
                 popover.update_position();
                 if let Some(ref window) = *popover.window.borrow() {
                     window.set_opacity(1.0);
+                }
+                if let Some(ref content) = *popover.content_widget.borrow() {
+                    content.remove_css_class(surface::POPOVER_HIDDEN);
                 }
             }
             ControlFlow::Break
@@ -381,6 +419,12 @@ impl LayerShellPopover {
         content.add_css_class(surface::POPOVER);
         let popover_class = format!("{}-popover", self.widget_name);
         content.add_css_class(&popover_class);
+
+        // Start in hidden state for the open animation
+        content.add_css_class(surface::POPOVER_ANIMATE);
+        content.add_css_class(surface::POPOVER_HIDDEN);
+
+        *self.content_widget.borrow_mut() = Some(content.clone().upcast());
 
         // Wrap in container with margins for shadow space.
         // The bar-adjacent side gets 0 margin (tight against bar),

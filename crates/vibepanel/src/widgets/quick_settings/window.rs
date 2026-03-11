@@ -30,9 +30,9 @@ use crate::services::updates::UpdatesService;
 use crate::services::vpn::VpnService;
 use crate::styles::{qs, state, surface};
 use crate::widgets::layer_shell_popover::{
-    Dismissible, calculate_bar_exclusive_zone, calculate_popover_bar_margin,
-    calculate_popover_right_margin, create_click_catcher, popover_bar_edge, popover_keyboard_mode,
-    setup_esc_handler,
+    Dismissible, POPOVER_ANIMATION_DURATION, calculate_bar_exclusive_zone,
+    calculate_popover_bar_margin, calculate_popover_right_margin, create_click_catcher,
+    popover_bar_edge, popover_keyboard_mode, setup_esc_handler,
 };
 
 use super::audio_card::{
@@ -119,12 +119,16 @@ const AUDIO_SECTION_TOP_MARGIN: i32 = 12;
 pub struct QuickSettingsWindow {
     window: ApplicationWindow,
     click_catcher: RefCell<Option<ApplicationWindow>>,
+    /// Outer container with animation classes, target for open/close animation.
+    outer_container: RefCell<Option<GtkBox>>,
     /// Anchor X position in monitor coordinates.
     anchor_x: Cell<i32>,
     anchor_monitor: RefCell<Option<Monitor>>,
     /// Whether the window has been mapped at least once (used to skip
     /// the opacity fade-in trick on subsequent shows).
     has_been_mapped: Cell<bool>,
+    /// Whether a close animation is currently playing.
+    is_animating_out: Cell<bool>,
     cards_config: QuickSettingsCardsConfig,
     audio_scroll_percentage: i32,
     scroll_container: ScrolledWindow,
@@ -191,9 +195,11 @@ impl QuickSettingsWindow {
         let qs = Rc::new(Self {
             window: window.clone(),
             click_catcher: RefCell::new(None),
+            outer_container: RefCell::new(None),
             anchor_x: Cell::new(0),
             anchor_monitor: RefCell::new(None),
             has_been_mapped: Cell::new(false),
+            is_animating_out: Cell::new(false),
             cards_config: config.cards,
             audio_scroll_percentage: config.audio_scroll_percentage,
             scroll_container,
@@ -219,6 +225,9 @@ impl QuickSettingsWindow {
         // Build the control center content (uses qs.scroll_container internally)
         let outer = Self::build_content(&qs);
         window.set_child(Some(&outer));
+
+        // Store outer container for animation class toggling
+        *qs.outer_container.borrow_mut() = Some(outer.clone());
 
         // Apply Pango font attributes to all labels if enabled in config.
         // This is the central hook for quick settings - widgets create standard
@@ -356,6 +365,7 @@ impl QuickSettingsWindow {
         // Apply surface styles - background now controlled via CSS variables
         outer.add_css_class("quick-settings-popover");
         outer.add_css_class(surface::POPOVER);
+        outer.add_css_class(surface::POPOVER_ANIMATE);
         SurfaceStyleManager::global().apply_surface_styles(&outer, true);
 
         let content = GtkBox::new(Orientation::Vertical, 0);
@@ -1269,6 +1279,9 @@ impl QuickSettingsWindow {
     /// being made visible again). On re-show, the window is already mapped so
     /// we skip the opacity fade-in trick and go straight to positioning.
     fn show_panel(self: &Rc<Self>) {
+        // Cancel any in-progress close animation
+        self.is_animating_out.set(false);
+
         if let Some(monitor) = self.anchor_monitor.borrow().as_ref() {
             self.window.set_monitor(Some(monitor));
         }
@@ -1303,6 +1316,11 @@ impl QuickSettingsWindow {
         // Set the global current QS window reference
         set_current_qs_window(self);
 
+        // Start with content hidden for open animation
+        if let Some(ref outer) = *self.outer_container.borrow() {
+            outer.add_css_class(surface::POPOVER_HIDDEN);
+        }
+
         if self.has_been_mapped.get() {
             // Re-show: window was previously mapped and hidden. The surface
             // already exists so we can position and show immediately without
@@ -1311,14 +1329,15 @@ impl QuickSettingsWindow {
             self.window.set_visible(true);
             self.window.present();
 
-            // Re-deliver current service snapshots so the UI reflects the latest
-            // state. Network auth prompts are gated on is_mapped() so this
-            // re-check is needed.
+            // Trigger open animation + re-deliver service snapshots
             let window_weak = self.window.downgrade();
             glib::idle_add_local_once(move || {
                 if let Some(window) = window_weak.upgrade()
                     && let Some(qs) = get_qs_window_data(&window)
                 {
+                    if let Some(ref outer) = *qs.outer_container.borrow() {
+                        outer.remove_css_class(surface::POPOVER_HIDDEN);
+                    }
                     let snapshot = NetworkService::global().snapshot();
                     network_card::on_network_changed(&qs.network, &snapshot, &qs.window);
                 }
@@ -1339,8 +1358,11 @@ impl QuickSettingsWindow {
                     qs.update_position();
                     qs.window.set_opacity(1.0);
 
-                    // Re-deliver current snapshot now that the window is mapped,
-                    // so any deferred auth prompt is shown.
+                    // Trigger open animation
+                    if let Some(ref outer) = *qs.outer_container.borrow() {
+                        outer.remove_css_class(surface::POPOVER_HIDDEN);
+                    }
+
                     let snapshot = NetworkService::global().snapshot();
                     network_card::on_network_changed(&qs.network, &snapshot, &qs.window);
                 }
@@ -1348,19 +1370,19 @@ impl QuickSettingsWindow {
         }
     }
 
-    /// Hide the panel, keeping the window alive for instant re-show.
+    /// Hide the panel with a close animation, keeping the window alive.
     ///
-    /// Resets UI state, releases keyboard grab, and destroys the click-catcher.
+    /// The click-catcher is destroyed and keyboard grab released immediately
+    /// so the bar is interactive during the animation. UI state is reset and
+    /// the window hidden after the CSS transition completes.
     /// Does NOT clear PopoverTracker — the caller is responsible for that.
     pub(super) fn hide_panel(&self) {
+        if self.is_animating_out.get() {
+            return;
+        }
+
         // Restore keyboard mode if it was released for VPN password dialogs
         vpn_card::restore_keyboard_if_released();
-
-        // Don't cancel IWD auth on close — the agent callback may arrive after panel closes.
-        // AUTH_TIMEOUT_SECS handles cleanup.
-
-        // Reset all UI state (collapse revealers, clear auth dialogs, scroll to top)
-        self.reset_ui_state();
 
         // Clear the global QS window reference so card-level actions
         // (e.g., show_wifi_password_dialog) don't fire while hidden.
@@ -1369,13 +1391,37 @@ impl QuickSettingsWindow {
         // Release keyboard grab while hidden
         self.window.set_keyboard_mode(KeyboardMode::None);
 
-        // Hide the main window (keep alive for instant re-show)
-        self.window.set_visible(false);
-
-        // Destroy click-catcher (cheap to recreate)
+        // Destroy click-catcher immediately so bar is interactive
         if let Some(catcher) = self.click_catcher.borrow_mut().take() {
             catcher.close();
         }
+
+        // Start close animation
+        if let Some(ref outer) = *self.outer_container.borrow() {
+            outer.add_css_class(surface::POPOVER_HIDDEN);
+        }
+
+        self.is_animating_out.set(true);
+
+        // After animation completes, reset UI state and hide the window.
+        // If show_panel() was called during the animation, is_animating_out
+        // will have been cleared — the stale timeout becomes a no-op.
+        let window_weak = self.window.downgrade();
+        glib::timeout_add_local_once(POPOVER_ANIMATION_DURATION, move || {
+            let Some(window) = window_weak.upgrade() else {
+                return;
+            };
+            let Some(qs) = get_qs_window_data(&window) else {
+                return;
+            };
+            if !qs.is_animating_out.get() {
+                return;
+            }
+
+            qs.is_animating_out.set(false);
+            qs.reset_ui_state();
+            qs.window.set_visible(false);
+        });
     }
 
     /// Temporarily release exclusive keyboard grab to allow external dialogs
