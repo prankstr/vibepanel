@@ -527,45 +527,28 @@ impl QuickSettingsWidget {
             }));
         }
 
-        // Ensure the root box is clickable.
         base.widget().add_css_class(state::CLICKABLE);
 
-        // Gesture to toggle the Quick Settings window when clicked.
         let gesture = GestureClick::new();
         gesture.set_button(BUTTON_PRIMARY);
-        // Run in capture phase to handle click before BaseWidget's gesture
+        // Capture phase so this fires before BaseWidget's gesture
         gesture.set_propagation_phase(gtk4::PropagationPhase::Capture);
 
-        // Ripple on press (mouse-down) for immediate visual feedback.
-        // Must be wired here because this gesture runs in Capture phase and
-        // claims the sequence, so BaseWidget's connect_pressed never fires.
         {
             let ripple = base.ripple_handle().clone();
-            gesture.connect_pressed(move |gesture, _n_press, x, y| {
-                trigger_ripple_from_gesture(gesture, x, y, &ripple);
-            });
-        }
-
-        {
             let qs_window_handle = qs_window.clone();
             let root = base.widget().clone();
-            // Use connect_released for immediate response without double-click delay
-            gesture.connect_released(move |gesture, _n_press, _x, _y| {
+            gesture.connect_pressed(move |gesture, _n_press, x, y| {
+                trigger_ripple_from_gesture(gesture, x, y, &ripple);
+
                 debug!(
-                    "QuickSettingsWidget click: n_press={}, button={}",
-                    _n_press,
+                    "QuickSettingsWidget press: button={}",
                     gesture.current_button()
                 );
 
-                if gesture.current_button() != BUTTON_PRIMARY {
-                    return;
-                }
-
-                // Cancel any pending or visible tooltips to prevent them from
-                // appearing after the click
                 TooltipManager::global().cancel_and_hide();
 
-                // Claim the gesture sequence to prevent BaseWidget's handler from firing
+                // Claim the sequence to prevent BaseWidget's handler from firing
                 gesture.set_state(gtk4::EventSequenceState::Claimed);
 
                 if let Some(native) = root.native() {
@@ -575,10 +558,7 @@ impl QuickSettingsWidget {
                         display.monitor_at_surface(s)
                     });
 
-                    // Compute widget bounds relative to the native window
                     if let Some(bounds) = root.compute_bounds(&native) {
-                        // Widget bounds are relative to the bar window's (0,0).
-                        // Only anchor_x is used for horizontal positioning of QS window.
                         let screen_margin = ConfigManager::global().screen_margin() as i32;
                         let widget_center_x =
                             (bounds.x() + bounds.width() / 2.0) as i32 + screen_margin;
@@ -586,7 +566,6 @@ impl QuickSettingsWidget {
                         let monitor = monitor.flatten();
                         qs_window_handle.toggle_at(widget_center_x, monitor);
                     } else {
-                        // Fallback: toggle without positioning
                         qs_window_handle.toggle_at(0, None);
                     }
                 } else {

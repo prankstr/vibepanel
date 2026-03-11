@@ -407,59 +407,64 @@ impl BaseWidget {
         }
 
         let gesture_click = GestureClick::new();
-        // Receive all mouse buttons so we can handle right-click and middle-click
         gesture_click.set_button(0);
+
         {
             let menu_for_cb = menu.clone();
-            let widget_name_for_cb = widget_name.clone();
-            // Use connect_released for immediate response without double-click detection delay
-            gesture_click.connect_released(move |gesture, n_press, x, y| {
-                debug!(
-                    "BaseWidget click: n_press={}, button={}",
-                    n_press,
-                    gesture.current_button()
-                );
-
-                // Skip if target is an interactive child (e.g., a Button)
-                if click_target_matches(gesture, x, y, |w| {
-                    w.downcast_ref::<gtk4::Button>().is_some()
-                }) {
-                    debug!("BaseWidget click: target is a Button, skipping");
-                    return;
-                }
-
+            let container_for_ripple = container.clone();
+            let ripple_for_press = ripple_handle.clone();
+            gesture_click.connect_pressed(move |gesture, _n_press, x, y| {
                 let button = gesture.current_button();
 
-                // Process every click regardless of n_press count
-                // (we don't use double-click, so treat them all as single clicks)
-                match button {
-                    gdk::BUTTON_PRIMARY => {
-                        let my_menu_was_visible = menu_for_cb
-                            .borrow()
-                            .as_ref()
-                            .map(|m| m.is_visible())
-                            .unwrap_or(false);
-
-                        // Cancel any pending or visible tooltips to prevent them from
-                        // appearing after the click
-                        TooltipManager::global().cancel_and_hide();
-
-                        // Dismiss any active popup (enables seamless transitions)
-                        PopoverTracker::global().dismiss_active();
-
-                        if let Some(ref menu) = *menu_for_cb.borrow() {
-                            // If our menu was already open, we just closed it - don't re-open
-                            // If it wasn't open, open it now
-                            if !my_menu_was_visible {
-                                debug!("Opening menu from BaseWidget click");
-                                menu.show();
-                            } else {
-                                debug!("Closed own menu from BaseWidget click");
-                            }
-                        } else {
-                            debug!("BaseWidget click: no menu registered");
-                        }
+                if button == gdk::BUTTON_PRIMARY {
+                    // Skip if target is an interactive child (e.g., a Button)
+                    if click_target_matches(gesture, x, y, |w| {
+                        w.downcast_ref::<gtk4::Button>().is_some()
+                    }) {
+                        debug!("BaseWidget press: target is a Button, skipping");
+                        return;
                     }
+
+                    let my_menu_was_visible = menu_for_cb
+                        .borrow()
+                        .as_ref()
+                        .map(|m| m.is_visible())
+                        .unwrap_or(false);
+
+                    TooltipManager::global().cancel_and_hide();
+
+                    // Dismiss active popover for seamless transitions
+                    PopoverTracker::global().dismiss_active();
+
+                    if let Some(ref menu) = *menu_for_cb.borrow() {
+                        if !my_menu_was_visible {
+                            debug!("Opening menu from BaseWidget press");
+                            menu.show();
+                        } else {
+                            debug!("Closed own menu from BaseWidget press");
+                        }
+                    } else {
+                        debug!("BaseWidget press: no menu registered");
+                    }
+                }
+
+                // Buttons and workspace indicators handle their own ripple
+                if container_for_ripple.has_css_class(state::CLICKABLE)
+                    && !click_target_matches(gesture, x, y, |w| {
+                        w.downcast_ref::<gtk4::Button>().is_some()
+                            || w.has_css_class(widget::WORKSPACE_INDICATOR)
+                    })
+                {
+                    trigger_ripple_from_gesture(gesture, x, y, &ripple_for_press);
+                }
+            });
+        }
+
+        {
+            let widget_name_for_cb = widget_name.clone();
+            gesture_click.connect_released(move |gesture, _n_press, _x, _y| {
+                let button = gesture.current_button();
+                match button {
                     gdk::BUTTON_MIDDLE => {
                         if let Some(ref cmd) = on_click_middle {
                             debug!("BaseWidget middle-click: sh -c {}", cmd);
@@ -474,27 +479,6 @@ impl BaseWidget {
                     }
                     _ => {}
                 }
-            });
-        }
-
-        // Ripple on press — triggers on mouse-down for responsive feedback.
-        {
-            let container_for_ripple = container.clone();
-            let ripple_for_press = ripple_handle.clone();
-            gesture_click.connect_pressed(move |gesture, _n_press, x, y| {
-                if !container_for_ripple.has_css_class(state::CLICKABLE) {
-                    return;
-                }
-
-                // Skip ripple if click target is a Button or workspace indicator
-                if click_target_matches(gesture, x, y, |w| {
-                    w.downcast_ref::<gtk4::Button>().is_some()
-                        || w.has_css_class(widget::WORKSPACE_INDICATOR)
-                }) {
-                    return;
-                }
-
-                trigger_ripple_from_gesture(gesture, x, y, &ripple_for_press);
             });
         }
 
