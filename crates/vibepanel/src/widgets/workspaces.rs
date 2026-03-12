@@ -158,8 +158,8 @@ mod ws_container_imp {
         /// When this reaches CONVERGENCE_STABLE_FRAMES, transitions have
         /// settled and suppress_reconcile can be cleared.
         pub(super) convergence_stable_frames: Cell<u32>,
-        /// Frame time (microseconds) when convergence detection started.
-        /// Used for the safety cap timeout.
+        /// Frame time (µs) when the CSS transition started (phase 1).
+        /// Gates the transition-elapsed minimum and the 2s safety cap.
         pub(super) convergence_start_time: Cell<Option<i64>>,
         /// Generation counter for convergence tick callbacks. Incremented
         /// each time a new grow-in starts; stale callbacks compare their
@@ -610,6 +610,10 @@ impl WorkspaceContainer {
                 for ind in grow_in_indicators.iter() {
                     ind.remove_css_class(widget::WORKSPACE_GROW_IN);
                 }
+                // Record the time the CSS transition starts so we can
+                // enforce a minimum wait before accepting convergence.
+                imp.convergence_start_time
+                    .set(Some(frame_clock.frame_time()));
                 phase.set(2);
                 return glib::ControlFlow::Continue;
             }
@@ -619,6 +623,7 @@ impl WorkspaceContainer {
             let start = match imp.convergence_start_time.get() {
                 Some(t) => t,
                 None => {
+                    // Should not happen (set in phase 1), but handle gracefully.
                     imp.convergence_start_time.set(Some(now));
                     now
                 }
@@ -633,7 +638,12 @@ impl WorkspaceContainer {
             let current = sum_children_widths(&imp.children.borrow(), imp.gap.get()) as f64;
             let prev = imp.convergence_prev_width.get();
 
-            if prev >= 0.0 && (current - prev).abs() < 1.0 {
+            // Wait for the CSS transition to finish before accepting
+            // convergence. Label widgets have intrinsic text width that
+            // can look "stable" before min-width has actually transitioned.
+            let transition_elapsed = now - start >= INDICATOR_ANIM_DURATION_US;
+
+            if transition_elapsed && prev >= 0.0 && (current - prev).abs() < 1.0 {
                 let frames = imp.convergence_stable_frames.get() + 1;
                 if frames >= CONVERGENCE_STABLE_FRAMES {
                     // Converged — clear suppress and animate residual mismatch.
