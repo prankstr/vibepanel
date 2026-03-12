@@ -827,9 +827,6 @@ pub mod battery {
     /// Profile button (`.battery-popover-profile-button`).
     pub const POPOVER_PROFILE_BUTTON: &str = "battery-popover-profile-button";
 
-    /// No profiles available label (`.battery-popover-no-profiles`).
-    pub const POPOVER_NO_PROFILES: &str = "battery-popover-no-profiles";
-
     /// Popover separator (`.battery-popover-separator`).
     pub const POPOVER_SEPARATOR: &str = "battery-popover-separator";
 }

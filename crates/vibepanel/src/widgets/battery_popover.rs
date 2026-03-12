@@ -95,10 +95,7 @@ impl BatteryPopoverController {
         self.profile_buttons.borrow_mut().clear();
 
         if profiles.is_empty() {
-            let no_profiles = Label::new(Some("Power profiles not available"));
-            no_profiles.add_css_class(bat::POPOVER_NO_PROFILES);
-            no_profiles.add_css_class(color::MUTED);
-            section.append(&no_profiles);
+            section.set_visible(false);
             return section;
         }
 
@@ -261,7 +258,7 @@ pub fn build_battery_popover_with_controller() -> (Widget, BatteryPopoverControl
 
     container.append(&info_section);
 
-    // Separator
+    // Separator + power profile section (hidden when profiles unavailable)
     let separator = Separator::new(Orientation::Horizontal);
     separator.add_css_class(bat::POPOVER_SEPARATOR);
     container.append(&separator);
@@ -271,6 +268,9 @@ pub fn build_battery_popover_with_controller() -> (Widget, BatteryPopoverControl
         BatteryPopoverController::new(&percent_label, &state_label, &time_label, &power_label);
 
     let profile_section = controller.build_profile_section(&power_snapshot);
+    if !profile_section.is_visible() {
+        separator.set_visible(false);
+    }
     container.append(&profile_section);
 
     // Initial content update from current snapshots
