@@ -105,7 +105,7 @@ use gtk4::glib;
 use gtk4::pango::EllipsizeMode;
 use gtk4::prelude::*;
 use gtk4::subclass::prelude::*;
-use gtk4::{Align, Box as GtkBox, GestureClick, Label, Overlay, Widget};
+use gtk4::{Align, Box as GtkBox, CssProvider, GestureClick, Label, Overlay, Widget};
 use tracing::{debug, trace};
 use vibepanel_core::config::WidgetEntry;
 
@@ -166,6 +166,14 @@ mod ws_container_imp {
         /// captured generation against this and self-terminate if it has
         /// advanced.
         pub(super) convergence_generation: Cell<u32>,
+        /// Timeout source for clearing `frozen_left_count` after a pure
+        /// switch. Cancelled and re-armed on rapid switches.
+        pub(super) switch_freeze_timeout: RefCell<Option<glib::SourceId>>,
+        /// Per-instance CSS provider for long-indicator min-width rules.
+        /// Owned per-instance for lifecycle management (add/remove on
+        /// the display). Display-scoped CSS is safe because workspace
+        /// IDs are globally unique across all outputs.
+        pub(super) long_mw_css_provider: RefCell<Option<CssProvider>>,
     }
 
     #[glib::object_subclass]
@@ -186,6 +194,8 @@ mod ws_container_imp {
         }
 
         fn dispose(&self) {
+            self.obj().cancel_switch_freeze_timeout();
+            self.obj().remove_long_mw_provider();
             for child in self.children.borrow_mut().drain(..) {
                 child.unparent();
             }
@@ -248,8 +258,8 @@ mod ws_container_imp {
             let active_idx = children.iter().position(|c| c.has_css_class(active_css));
 
             let left_count = if let Some(frozen) = self.frozen_left_count.get() {
-                // During removal animations, use the frozen split to keep
-                // surviving indicators in their original groups.
+                // During removal/switch animations, use the frozen split to
+                // keep indicators in their original groups.
                 frozen.min(n)
             } else {
                 compute_left_count(n, active_idx)
@@ -378,11 +388,6 @@ impl WorkspaceContainer {
                 }
 
                 if elapsed >= INDICATOR_ANIM_DURATION_US {
-                    // Animation complete and CSS is settled. Snap to
-                    // children's live width (rather than the possibly-stale
-                    // target) so that the left-group and right-group
-                    // positions are pixel-perfect when frozen_left_count
-                    // is cleared.
                     imp.current_width.set(children_width as f64);
                     imp.target_width.set(children_width);
                     imp.animating.set(false);
@@ -421,8 +426,24 @@ impl WorkspaceContainer {
 
     fn clear_children(&self) {
         self.imp().frozen_left_count.set(None);
+        self.cancel_switch_freeze_timeout();
+        self.remove_long_mw_provider();
         for child in self.imp().children.borrow_mut().drain(..) {
             child.unparent();
+        }
+    }
+
+    fn cancel_switch_freeze_timeout(&self) {
+        if let Some(id) = self.imp().switch_freeze_timeout.borrow_mut().take() {
+            id.remove();
+        }
+    }
+
+    fn remove_long_mw_provider(&self) {
+        if let Some(provider) = self.imp().long_mw_css_provider.borrow_mut().take()
+            && let Some(display) = gtk4::gdk::Display::default()
+        {
+            gtk4::style_context_remove_provider_for_display(&display, &provider);
         }
     }
 
@@ -435,24 +456,6 @@ impl WorkspaceContainer {
         }
     }
 
-    /// Freeze the left-group size based on where the removed workspace(s)
-    /// were in the old layout. The split is placed at the leftmost removal
-    /// index so that:
-    ///   - indicators to the LEFT of the gap stay left-anchored
-    ///   - indicators to the RIGHT of the gap stay right-anchored
-    ///   - the container width shrinks, closing the gap where the removed
-    ///     workspace was
-    ///
-    /// `leftmost_removed_idx` is the position in the old children list of
-    /// the first workspace being removed.
-    fn freeze_left_count_at(&self, leftmost_removed_idx: usize) -> usize {
-        let children = self.imp().children.borrow();
-        let n = children.len();
-        let left_count = leftmost_removed_idx.min(n);
-        self.imp().frozen_left_count.set(Some(left_count));
-        left_count
-    }
-
     /// Adjust frozen_left_count by subtracting removals (saturating to 0).
     fn adjust_frozen_left_count(&self, removed_from_left: usize) {
         if removed_from_left == 0 {
@@ -463,6 +466,57 @@ impl WorkspaceContainer {
                 .frozen_left_count
                 .set(Some(frozen.saturating_sub(removed_from_left)));
         }
+    }
+
+    /// Load per-instance, display-level CSS with computed `min-width` rules
+    /// for each long indicator (active/inactive delta matches short indicators).
+    fn update_long_indicator_css(&self, labels: &HashMap<i32, Widget>) {
+        use std::fmt::Write;
+
+        let sizes = ConfigManager::global().theme_sizes();
+        let wh = sizes.widget_height as f64;
+        let delta = (wh * (INDICATOR_ACTIVE_MULT - INDICATOR_INACTIVE_MULT)).round();
+
+        let mut css = String::new();
+        for (&id, indicator) in labels {
+            if !indicator.has_css_class(widget::WORKSPACE_INDICATOR_LONG) {
+                continue;
+            }
+
+            // Measure the label's natural width (content box, excludes padding).
+            // The indicator is an Overlay wrapping the label.
+            let label_width = indicator
+                .downcast_ref::<Overlay>()
+                .and_then(|o| o.child())
+                .map(|child| {
+                    let (_, nat, _, _) = child.measure(gtk4::Orientation::Horizontal, -1);
+                    nat
+                })
+                .unwrap_or(0);
+
+            let short_inactive = (wh * INDICATOR_INACTIVE_MULT).round() as i32;
+            let inactive_mw = label_width.max(short_inactive);
+            let active_mw = inactive_mw + delta as i32;
+
+            let cls = ws_mw_class(id);
+            let _ = writeln!(css, ".{cls} {{ min-width: {inactive_mw}px; }}");
+            let _ = writeln!(css, ".{cls}.active {{ min-width: {active_mw}px; }}");
+        }
+
+        self.remove_long_mw_provider();
+
+        if css.is_empty() {
+            return;
+        }
+
+        let Some(display) = gtk4::gdk::Display::default() else {
+            return;
+        };
+
+        let provider = CssProvider::new();
+        provider.load_from_string(&css);
+        gtk4::style_context_add_provider_for_display(&display, &provider, LONG_MW_CSS_PRIORITY);
+        *self.imp().long_mw_css_provider.borrow_mut() = Some(provider);
     }
 
     /// Compute the current total width of children from live CSS measurements.
@@ -673,6 +727,18 @@ pub(crate) const INDICATOR_INACTIVE_MULT: f64 = 0.7;
 /// Multiplier for active indicator width relative to widget_height.
 /// Used in CSS generation (bar.rs) for min-width on active indicators.
 pub(crate) const INDICATOR_ACTIVE_MULT: f64 = 1.0;
+/// Horizontal padding per side (px) for long (named) indicators.
+pub(crate) const LONG_INDICATOR_HPAD: i32 = 6;
+
+/// Priority for the long-indicator min-width CSS provider.
+/// Above theme CSS (USER=800) but below user CSS (USER+100=900).
+const LONG_MW_CSS_PRIORITY: u32 = gtk4::STYLE_PROVIDER_PRIORITY_USER + 10;
+
+/// CSS class for a workspace's per-indicator min-width rule.
+/// Negative IDs (Sway named workspaces) produce double hyphens, e.g. `ws-mw--3`.
+fn ws_mw_class(id: i32) -> String {
+    format!("ws-mw-{id}")
+}
 
 /// Configuration for the workspaces widget.
 #[derive(Debug, Clone)]
@@ -890,6 +956,7 @@ fn create_single_indicator(label_type: LabelType, workspace: &Workspace) -> Widg
     }
     if is_long {
         overlay.add_css_class(widget::WORKSPACE_INDICATOR_LONG);
+        overlay.add_css_class(&ws_mw_class(workspace_id));
     }
     overlay.set_valign(Align::Center);
 
@@ -1202,19 +1269,25 @@ fn update_indicators(
 
                     let pre_removal_width = wsc.compute_children_current_width();
 
-                    // Find the leftmost removed index BEFORE removing children.
-                    // This determines the freeze split: everything to the left
-                    // stays left-anchored, everything to the right stays
-                    // right-anchored, and the gap closes where the removed
-                    // workspace was.
-                    let ids = ids_cell.borrow();
-                    let leftmost_removed_idx = ids
-                        .iter()
-                        .position(|id| !new_ids_set.contains(id))
-                        .unwrap_or(ids.len());
-                    drop(ids);
+                    // Freeze the left-group split at the OLD active-based
+                    // split so surviving indicators stay in their original
+                    // groups while the container animates down.
+                    let children = wsc.imp().children.borrow();
+                    let n = children.len();
+                    let active_css = crate::styles::widget::ACTIVE;
+                    let active_idx = children.iter().position(|c| c.has_css_class(active_css));
+                    let frozen = if n >= 2 {
+                        compute_left_count(n, active_idx)
+                    } else {
+                        n
+                    };
+                    drop(children);
 
-                    let frozen = wsc.freeze_left_count_at(leftmost_removed_idx);
+                    // Cancel any pending switch-freeze timeout — the removal
+                    // freeze supersedes it.
+                    wsc.cancel_switch_freeze_timeout();
+
+                    wsc.imp().frozen_left_count.set(Some(frozen));
 
                     {
                         let mut labels = labels_cell.borrow_mut();
@@ -1309,8 +1382,39 @@ fn update_indicators(
         }
     }
 
+    // ── Freeze left-group split during pure switches ──
+    // Use max(old, new) left_count so indicators stay anchored while CSS
+    // min-width transitions resolve.
+    let mut did_switch_freeze = false;
+    if matches!(change_type, ChangeType::None)
+        && let Some(wsc) = ws_container
+    {
+        let already_frozen = wsc.imp().frozen_left_count.get().is_some();
+        let children = wsc.imp().children.borrow();
+        let n = children.len();
+        let old_active_idx = if n >= 2 && !already_frozen {
+            let active_css = crate::styles::widget::ACTIVE;
+            Some(children.iter().position(|c| c.has_css_class(active_css)))
+        } else {
+            None
+        };
+        drop(children);
+
+        if let Some(old_active_idx) = old_active_idx {
+            let new_active_idx = display_workspaces.iter().position(|ws| ws.active);
+            if old_active_idx != new_active_idx {
+                let old_lc = compute_left_count(n, old_active_idx);
+                let new_lc = compute_left_count(n, new_active_idx);
+                let frozen = old_lc.max(new_lc);
+                wsc.imp().frozen_left_count.set(Some(frozen));
+                did_switch_freeze = true;
+            }
+        }
+    }
+
     // ── Shared styling tail — update CSS before measuring (active changes min-width). ──
     let labels = labels_cell.borrow();
+    let mut long_indicator_changed = ids_changed; // If IDs changed, indicators were recreated.
     for workspace in &display_workspaces {
         let Some(indicator) = labels.get(&workspace.id) else {
             continue;
@@ -1362,12 +1466,17 @@ fn update_indicators(
                 }
                 LabelType::Numbers => {
                     label.set_text(&workspace.name);
-                    if workspace.name.len() > 2 {
-                        if !indicator.has_css_class(widget::WORKSPACE_INDICATOR_LONG) {
+                    let now_long = workspace.name.len() > 2;
+                    let was_long = indicator.has_css_class(widget::WORKSPACE_INDICATOR_LONG);
+                    if now_long != was_long {
+                        if now_long {
                             indicator.add_css_class(widget::WORKSPACE_INDICATOR_LONG);
+                            indicator.add_css_class(&ws_mw_class(workspace.id));
+                        } else {
+                            indicator.remove_css_class(widget::WORKSPACE_INDICATOR_LONG);
+                            indicator.remove_css_class(&ws_mw_class(workspace.id));
                         }
-                    } else {
-                        indicator.remove_css_class(widget::WORKSPACE_INDICATOR_LONG);
+                        long_indicator_changed = true;
                     }
                 }
                 LabelType::None => unreachable!(),
@@ -1378,6 +1487,10 @@ fn update_indicators(
         TooltipManager::global().set_styled_tooltip(indicator, &tooltip_text);
     }
     drop(labels);
+
+    if long_indicator_changed && let Some(wsc) = ws_container {
+        wsc.update_long_indicator_css(&labels_cell.borrow());
+    }
 
     // ── Container target width — may be stale; tick callback corrects per-frame. ──
     if let Some(wsc) = ws_container {
@@ -1437,8 +1550,27 @@ fn update_indicators(
                 wsc.begin_grow_in_animation(seed, seed.round() as i32, grow_in_indicators);
             }
             ChangeType::None => {
-                // Switch-only — skip if suppress_reconcile active (prior grow-in resolving).
-                if !wsc.imp().suppress_reconcile.get() {
+                // Switch-only — skip if suppress_reconcile active (prior grow-in resolving)
+                // or if we didn't actually set a switch freeze (removal freeze in progress).
+                if !wsc.imp().suppress_reconcile.get() && did_switch_freeze {
+                    // Cancel prior switch-freeze timeout (rapid switches).
+                    wsc.cancel_switch_freeze_timeout();
+                    // Clear freeze after CSS transitions complete
+                    // (duration must match CSS transition — see bar.rs).
+                    let wsc_ref = wsc.clone();
+                    let source_id = glib::timeout_add_local_once(
+                        std::time::Duration::from_micros(INDICATOR_ANIM_DURATION_US as u64),
+                        move || {
+                            wsc_ref.imp().switch_freeze_timeout.borrow_mut().take();
+                            wsc_ref.imp().frozen_left_count.set(None);
+                            wsc_ref.queue_resize();
+                        },
+                    );
+                    wsc.imp()
+                        .switch_freeze_timeout
+                        .borrow_mut()
+                        .replace(source_id);
+
                     let target = wsc.compute_children_current_width();
                     wsc.set_target_width(target);
                 }

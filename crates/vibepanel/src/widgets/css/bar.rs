@@ -5,7 +5,7 @@
 
 use super::{WIDGET_BG_HOVER, WIDGET_BG_WITH_OPACITY};
 use crate::widgets::workspaces::{
-    INDICATOR_ACTIVE_MULT, INDICATOR_HEIGHT_MULT, INDICATOR_INACTIVE_MULT,
+    INDICATOR_ACTIVE_MULT, INDICATOR_HEIGHT_MULT, INDICATOR_INACTIVE_MULT, LONG_INDICATOR_HPAD,
 };
 
 /// Return bar CSS with config values interpolated.
@@ -15,6 +15,7 @@ pub fn css(screen_margin: u32, spacing: u32) -> String {
     let inactive_mult = INDICATOR_INACTIVE_MULT;
     let active_mult = INDICATOR_ACTIVE_MULT;
     let height_mult = INDICATOR_HEIGHT_MULT;
+    let long_hpad = LONG_INDICATOR_HPAD;
     format!(
         r#"
 /* ===== BAR ===== */
@@ -148,7 +149,7 @@ overlay.workspace-indicator {{
 }}
 
 .workspace-indicator-long {{
-    padding: 0 6px;
+    padding: 0 {long_hpad}px;
 }}
 
 /* Grow-in: forces zero width + no transition so container animation handles it.
