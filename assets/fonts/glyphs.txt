@@ -23,12 +23,14 @@ bluetooth_disabled
 brightness_empty
 brightness_high
 brightness_medium
+calendar_today
 cell_wifi
 check
 close
 coffee
 computer
 delete
+devices
 download
 fast_forward
 fast_rewind
@@ -72,7 +74,6 @@ signal_cellular_4_bar
 signal_cellular_off
 skip_next
 skip_previous
-smartphone
 speaker
 speed
 sports_esports

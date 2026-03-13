@@ -5,13 +5,14 @@ use chrono::{Datelike, Local, NaiveDate};
 use gtk4::prelude::*;
 use gtk4::{Align, Box as GtkBox, Calendar, Label, Orientation, Overlay, Widget};
 
-use crate::styles::{calendar as cal, surface};
+use crate::services::icons::IconsService;
+use crate::styles::{calendar as cal, icon, surface};
 
 /// Build a calendar popover for the clock widget.
 ///
-/// Shows a month view calendar with custom previous/next navigation and a
-/// header label. Toggles a `show-today` CSS class when the currently viewed
-/// month matches the real current month.
+/// Shows a month view calendar with custom previous/next navigation, a
+/// "go to today" button, and a header label. Toggles a `show-today` CSS class
+/// when the currently viewed month matches the real current month.
 pub fn build_clock_calendar_popover(show_week_numbers: bool) -> Widget {
     // Today and tracked month/year (always using day = 1 so that
     // month arithmetic is simpler and avoids invalid dates like 31 Feb).
@@ -24,19 +25,51 @@ pub fn build_clock_calendar_popover(show_week_numbers: bool) -> Widget {
     let container = GtkBox::new(Orientation::Vertical, 0);
     container.add_css_class(cal::POPOVER);
 
-    // Header with navigation
-
+    // Header: left-aligned label + right-aligned navigation buttons
     let header_box = GtkBox::new(Orientation::Horizontal, 8);
-    header_box.set_halign(Align::Center);
 
-    // Month/year label - initial text is updated below via helper.
+    // Month/year label - left-aligned, expands to push nav buttons right
     let header_label = Label::new(None);
     header_label.add_css_class(surface::POPOVER_TITLE);
-    header_label.set_valign(Align::Start);
-    header_label.set_width_chars(15);
-    header_label.set_xalign(0.5);
+    header_label.set_valign(Align::Center);
+    header_label.set_hexpand(true);
+    header_label.set_xalign(0.0);
 
     header_box.append(&header_label);
+
+    // Navigation button group: [prev] [today] [next]
+    let nav_box = GtkBox::new(Orientation::Horizontal, 0);
+    nav_box.set_valign(Align::Start);
+
+    let prev_button = crate::widgets::base::vp_button_from_icon_name("go-previous-symbolic");
+    prev_button.add_css_class(surface::POPOVER_ICON_BTN);
+    prev_button.set_has_frame(false);
+    prev_button.set_focusable(false);
+    prev_button.set_focus_on_click(false);
+
+    let icons = IconsService::global();
+    let today_icon = icons.create_icon("calendar-today", &[icon::ICON]);
+    today_icon.widget().set_halign(Align::Center);
+    today_icon.widget().set_valign(Align::Center);
+    let today_button = crate::widgets::base::vp_button();
+    today_button.set_child(Some(&today_icon.widget()));
+    today_button.add_css_class(surface::POPOVER_ICON_BTN);
+    today_button.set_has_frame(false);
+    today_button.set_focusable(false);
+    today_button.set_focus_on_click(false);
+    today_button.set_tooltip_text(Some("Go to today"));
+
+    let next_button = crate::widgets::base::vp_button_from_icon_name("go-next-symbolic");
+    next_button.add_css_class(surface::POPOVER_ICON_BTN);
+    next_button.set_has_frame(false);
+    next_button.set_focusable(false);
+    next_button.set_focus_on_click(false);
+
+    nav_box.append(&prev_button);
+    nav_box.append(&today_button);
+    nav_box.append(&next_button);
+
+    header_box.append(&nav_box);
     container.append(&header_box);
 
     // Calendar widget
@@ -45,7 +78,7 @@ pub fn build_clock_calendar_popover(show_week_numbers: bool) -> Widget {
     calendar.set_show_week_numbers(show_week_numbers);
     calendar.add_css_class(cal::WIDGET);
     calendar.add_css_class(cal::GRID);
-    calendar.set_halign(Align::Fill); // Fill the wrapper so left alignment works relative to it
+    calendar.set_halign(Align::Fill);
     // Initially show today styling since we start in the current month
     calendar.add_css_class(cal::SHOW_TODAY);
 
@@ -123,11 +156,7 @@ pub fn build_clock_calendar_popover(show_week_numbers: bool) -> Widget {
         update_calendar(today, date);
     }
 
-    // Navigation buttons (prev/next) ----------------------------------------
-
-    let prev_button = crate::widgets::base::vp_button_from_icon_name("go-previous-symbolic");
-    prev_button.add_css_class(surface::POPOVER_ICON_BTN);
-    prev_button.set_valign(Align::Start);
+    // Navigation button handlers ---------------------------------------------
 
     {
         let current_date = current_date.clone();
@@ -154,9 +183,19 @@ pub fn build_clock_calendar_popover(show_week_numbers: bool) -> Widget {
         });
     }
 
-    let next_button = crate::widgets::base::vp_button_from_icon_name("go-next-symbolic");
-    next_button.add_css_class(surface::POPOVER_ICON_BTN);
-    next_button.set_valign(Align::Start);
+    {
+        let current_date = current_date.clone();
+        let update_header = update_header.clone();
+        let update_calendar = update_calendar.clone();
+        today_button.connect_clicked(move |_| {
+            let today_month = NaiveDate::from_ymd_opt(today.year(), today.month(), 1);
+            if let Some(new_date) = today_month {
+                *current_date.borrow_mut() = new_date;
+                update_header(new_date);
+                update_calendar(today, new_date);
+            }
+        });
+    }
 
     {
         let current_date = current_date.clone();
@@ -182,10 +221,6 @@ pub fn build_clock_calendar_popover(show_week_numbers: bool) -> Widget {
             }
         });
     }
-
-    // Insert buttons around the header label.
-    header_box.prepend(&prev_button);
-    header_box.append(&next_button);
 
     // Calendar internal navigation (e.g., selecting a day that moves between
     // months) should also keep `current_date` and the header / CSS in sync.

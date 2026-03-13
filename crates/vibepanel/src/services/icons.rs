@@ -239,8 +239,8 @@ fn material_symbol_lookup(icon_name: &str) -> Option<&'static str> {
         "input-mouse-symbolic" => "mouse",
         "input-gaming" => "sports_esports",
         "input-gaming-symbolic" => "sports_esports",
-        "phone" => "smartphone",
-        "phone-symbolic" => "smartphone",
+        "phone" => "devices",
+        "phone-symbolic" => "devices",
         "computer" => "computer",
         "computer-symbolic" => "computer",
 
@@ -254,6 +254,9 @@ fn material_symbol_lookup(icon_name: &str) -> Option<&'static str> {
         // Idle inhibitor / night light icons
         "night-light-symbolic" => "coffee",
         "preferences-system-time-symbolic" => "coffee",
+
+        // Calendar navigation
+        "calendar-today" => "calendar_today",
 
         // UI action icons (chevrons, menus, close buttons)
         "pan-down-symbolic" => "keyboard_arrow_down",
@@ -891,6 +894,15 @@ pub fn gtk_icon_candidates(logical: &str) -> &'static [&'static str] {
             "process-working-symbolic",
             "view-refresh-symbolic",
             "emblem-synchronizing-symbolic",
+        ],
+
+        // Calendar navigation
+        "calendar-today" => &[
+            "calendar-today-symbolic",
+            "x-office-calendar-symbolic",
+            "office-calendar-symbolic",
+            "view-calendar-day-symbolic",
+            "go-home-symbolic",
         ],
 
         // Unknown: treat as already-a-GTK-name, return as single-element slice

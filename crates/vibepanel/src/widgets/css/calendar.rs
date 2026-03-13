@@ -7,8 +7,11 @@ pub fn css() -> &'static str {
 
 /* Note: padding comes from apply_surface_styles() in base.rs */
 .calendar-popover .vp-popover-icon-btn {
-    margin-top: -4px;
-    margin-left: -8px;
+    margin-top: 0;
+}
+
+/* Pull last nav button flush with popover edge */
+.calendar-popover .vp-popover-icon-btn:last-child {
     margin-right: -8px;
 }
 
@@ -16,6 +19,8 @@ calendar.view {
     background: transparent;
     border: none;
     color: var(--color-foreground-primary);
+    margin-left: -10px;
+    margin-right: -4px;
 }
 
 calendar.view grid {
@@ -34,6 +39,14 @@ calendar.view grid label.today {
     box-shadow: none;
 }
 
+calendar.view grid label.day-number {
+    margin: 0 6px;
+    min-width: calc(var(--font-size) * 1.75);
+    min-height: calc(var(--font-size) * 1.75);
+    padding: 4px;
+    font-weight: 325;
+}
+
 calendar.view grid label.day-number:focus {
     outline: none;
     border: none;
@@ -46,16 +59,10 @@ calendar.view grid *:selected:not(.today) {
     box-shadow: none;
 }
 
-calendar.view grid label.day-number {
-    margin: 1px 2px;
-    min-width: calc(var(--font-size) * 1.5);
-    min-height: calc(var(--font-size) * 1.5);
-}
-
 .week-number-header {
     font-size: var(--font-size-xs);
     color: var(--color-foreground-muted);
-    margin-left: 20px; /* Align with week numbers column */
+    margin-left: 12px; /* Align with week numbers column */
     margin-top: 16px; /* Align vertically with day headers (M T W...) */
 }
 "#
