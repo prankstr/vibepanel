@@ -5,6 +5,41 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0](https://github.com/prankstr/vibepanel/compare/v0.11.0...v0.12.0) (2026-03-13)
+
+
+### Features
+
+* add config options for animations, ripple and media visualizer ([8a9f7a0](https://github.com/prankstr/vibepanel/commit/8a9f7a02265e0bac117f3282378c3694c0984d62))
+* **calendar:** New look with an additional today button ([74010e9](https://github.com/prankstr/vibepanel/commit/74010e9fb5d329b31ae1b47e71ce57c9e58f1e5d)), closes [#62](https://github.com/prankstr/vibepanel/issues/62)
+* **media:** add visualizer to popover and bar widget ([7bf0cfb](https://github.com/prankstr/vibepanel/commit/7bf0cfb1fad6ef097105055e5a25ef788a02762e))
+* **notifications:** add hover background and ripple to action buttons ([0158172](https://github.com/prankstr/vibepanel/commit/0158172e8733c34db7d7e27bcc332c56da89c113))
+* **quick-settings:** rotate hamburger icon when menu is open ([53769ab](https://github.com/prankstr/vibepanel/commit/53769ab3032b413637a1b9c19984c70fdc49edfd))
+* **theme:** adapt accent hover to bright and dark accent colors ([064c433](https://github.com/prankstr/vibepanel/commit/064c433b3cf1cd0a39d55f295c354915150e83fe))
+* **widgets:** add animations for popover open and close ([f3a6b76](https://github.com/prankstr/vibepanel/commit/f3a6b760d452fcdc232e3c696cdeaa66a2c35624))
+* **widgets:** add ripple effect and hover to workspace indicators ([18a0744](https://github.com/prankstr/vibepanel/commit/18a0744b9b5b7b8fc247bfe9f8f4d979bf3c09ef))
+* **widgets:** add ripple effect on button press ([0bddab1](https://github.com/prankstr/vibepanel/commit/0bddab1479ed5afc95d10940af78edca141c6a89))
+* **widgets:** subtly fade hover backgrounds in and out ([1932cbd](https://github.com/prankstr/vibepanel/commit/1932cbdaf9f1bd0fedadb92cae7536bbf4da282f))
+* **workspaces:** animate named workspaces and prevent widget resize ([2b7e476](https://github.com/prankstr/vibepanel/commit/2b7e476adc5a8201e847a10477d9c51c1ac09f97))
+
+
+### Bug Fixes
+
+* **battery:** hide power profile section when power-profiles-daemon is unavailable ([1e395fb](https://github.com/prankstr/vibepanel/commit/1e395fb81cf7d594fb97fde2d07d1463a4bfbbc3)), closes [#61](https://github.com/prankstr/vibepanel/issues/61)
+* **buttons:** restore label padding on accent and card buttons ([cfa7890](https://github.com/prankstr/vibepanel/commit/cfa7890f07f1e9b49037026e44207fe5a3a479de))
+* **calendar:** prevent nav buttons from jumping when switching months ([bd04a91](https://github.com/prankstr/vibepanel/commit/bd04a91ec08e96816fbbe10ade07b58e45e92f16))
+* **media:** clear stale album art when player change with no art ([2f1f7c1](https://github.com/prankstr/vibepanel/commit/2f1f7c1ffcf949945b6d724ab18ddce5565e36e2)), closes [#64](https://github.com/prankstr/vibepanel/issues/64)
+* **media:** gray out prev/next when player doesn't support it ([aea9d70](https://github.com/prankstr/vibepanel/commit/aea9d7099ec4b38162047b0a60c9931cde33b75d))
+* **media:** no scrolling label even when it fits, race condition fix ([684afa8](https://github.com/prankstr/vibepanel/commit/684afa81348418e52364091ba096bae772cff4d8))
+* **notifications:** smooth in-place dismiss animation and dynamic popover height ([982e9d9](https://github.com/prankstr/vibepanel/commit/982e9d9a94a80f462ba2871276f579e68713695c))
+* **osd:** improve proportions for container and icon size ([b7e9241](https://github.com/prankstr/vibepanel/commit/b7e92410f519de681cb9bb210f702b6e25bbd3fd))
+* **quick_settings:** add hover background to power card ([e40aeda](https://github.com/prankstr/vibepanel/commit/e40aedae750463240fd4d546818156ea760b9835))
+* **system:** adjust hover background and chevron position for core label ([55fc395](https://github.com/prankstr/vibepanel/commit/55fc395b097ba6bca54dbfc76732aa2376500db1))
+* **tooltip:** improve contrast when rendered over popover surfaces ([b1584e6](https://github.com/prankstr/vibepanel/commit/b1584e61f53ed05c186e64d3306f321b707fbe7b))
+* **tooltips:** cancel and hide non-gtk tooltips when clicking ([69cdc22](https://github.com/prankstr/vibepanel/commit/69cdc2256e72a9bbbc35269a6fe7966d59d855b2))
+* **widgets:** open popovers on press instead of release ([eda7558](https://github.com/prankstr/vibepanel/commit/eda75588bacf4ba276fe5e490c1daf9451d46cd2))
+* **workspaces:** no workspace widget jitter on switch with number labels ([2a734fc](https://github.com/prankstr/vibepanel/commit/2a734fca99526b650d2bfcc833f0c75242125ba6))
+
 ## [0.11.0](https://github.com/prankstr/vibepanel/compare/v0.10.0...v0.11.0) (2026-03-03)
 
 
