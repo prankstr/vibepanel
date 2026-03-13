@@ -83,6 +83,7 @@ where
 
     TooltipManager::global().set_styled_tooltip(&player_btn, "Select player");
     player_btn.connect_clicked(|btn| {
+        TooltipManager::global().cancel_and_hide();
         show_player_menu(btn);
     });
     buttons_row.append(&player_btn);

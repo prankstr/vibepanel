@@ -141,6 +141,8 @@ fn build_header(on_close: Option<ClosePopoverCallback>) -> GtkBox {
 
     mute_btn.connect_clicked(move |btn| {
         let service = NotificationService::global();
+        let tooltip_manager = TooltipManager::global();
+        tooltip_manager.cancel_and_hide();
         service.toggle_muted();
 
         // Update icon and tooltip
@@ -150,7 +152,7 @@ fn build_header(on_close: Option<ClosePopoverCallback>) -> GtkBox {
         } else {
             "notifications"
         });
-        TooltipManager::global().set_styled_tooltip(
+        tooltip_manager.set_styled_tooltip(
             btn,
             if is_muted {
                 "Unmute notifications"
@@ -182,6 +184,7 @@ fn build_header(on_close: Option<ClosePopoverCallback>) -> GtkBox {
         clear_btn.set_child(Some(&clear_icon_widget));
 
         clear_btn.connect_clicked(move |_| {
+            TooltipManager::global().cancel_and_hide();
             NotificationService::global().close_all();
             // Close popover after clearing all - user is done with notifications
             if let Some(ref close_cb) = on_close {

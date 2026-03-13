@@ -54,6 +54,8 @@ struct NotificationsWidgetInner {
     last_seen_timestamp: Cell<f64>,
     app: RefCell<Option<Application>>,
     menu_handle: RefCell<Option<Rc<MenuHandle>>>,
+    /// Last known notification IDs; used to skip popover rebuilds on mute-only changes.
+    last_notif_ids: RefCell<Vec<u32>>,
 }
 
 impl NotificationsWidgetInner {
@@ -127,8 +129,14 @@ impl NotificationsWidgetInner {
             }
         }
 
-        // Refresh popover content if visible
-        if let Some(menu_handle) = self.menu_handle.borrow().as_ref() {
+        // Only rebuild the popover when the notification list changed;
+        // mute-only updates are handled in-place by the popover button.
+        let mut current_ids: Vec<u32> = service.notifications().iter().map(|n| n.id).collect();
+        current_ids.sort_unstable();
+        let list_changed = *self.last_notif_ids.borrow() != current_ids;
+        *self.last_notif_ids.borrow_mut() = current_ids;
+
+        if list_changed && let Some(menu_handle) = self.menu_handle.borrow().as_ref() {
             menu_handle.refresh_if_visible();
         }
     }
@@ -304,6 +312,7 @@ impl NotificationsWidget {
             last_seen_timestamp: Cell::new(0.0),
             app: RefCell::new(None),
             menu_handle: RefCell::new(None),
+            last_notif_ids: RefCell::new(Vec::new()),
         });
 
         let widget = Self { base, inner };

@@ -983,6 +983,7 @@ fn create_single_indicator(label_type: LabelType, workspace: &Workspace) -> Widg
         if gesture.current_button() != BUTTON_PRIMARY {
             return;
         }
+        TooltipManager::global().cancel_and_hide();
         debug!("Switching to workspace {}", workspace_id);
         WorkspaceService::global().switch_workspace(workspace_id);
     });

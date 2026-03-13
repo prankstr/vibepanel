@@ -325,6 +325,7 @@ fn create_button(state: &Rc<RefCell<WidgetState>>, identifier: &str) -> Button {
     let identifier_owned = identifier.to_string();
     let state_for_click = state.clone();
     button.connect_clicked(move |btn| {
+        TooltipManager::global().cancel_and_hide();
         on_button_clicked(&state_for_click, btn, &identifier_owned);
     });
 
