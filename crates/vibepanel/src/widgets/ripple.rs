@@ -151,6 +151,11 @@ impl RippleHandle {
 /// farthest corner of the widget, using an aggressive deceleration curve.
 /// Opacity holds steady during expansion, then fades out.
 pub fn trigger_ripple(handle: &RippleHandle, x: f64, y: f64) {
+    // Respect the global ripple config toggle
+    if !crate::services::config_manager::ConfigManager::global().ripple_enabled() {
+        return;
+    }
+
     let da = &handle.drawing_area;
     let width = da.width() as f64;
     let height = da.height() as f64;

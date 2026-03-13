@@ -64,6 +64,8 @@ pub struct MediaConfig {
     /// `ConfigManager::get_widget_option()` at runtime to support live-reload.
     #[allow(dead_code)]
     pub popout_opacity: f64,
+    /// Enable the audio visualizer (requires cava). Default: true.
+    pub visualizer: bool,
 }
 
 impl WidgetConfig for MediaConfig {
@@ -71,7 +73,13 @@ impl WidgetConfig for MediaConfig {
         warn_unknown_options(
             "media",
             entry,
-            &["template", "empty_text", "max_chars", "popout_opacity"],
+            &[
+                "template",
+                "empty_text",
+                "max_chars",
+                "popout_opacity",
+                "visualizer",
+            ],
         );
 
         let template = entry
@@ -102,11 +110,18 @@ impl WidgetConfig for MediaConfig {
             .map(|v| v.clamp(0.0, 1.0))
             .unwrap_or(1.0);
 
+        let visualizer = entry
+            .options
+            .get("visualizer")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+
         Self {
             template,
             empty_text,
             max_chars,
             popout_opacity,
+            visualizer,
         }
     }
 }
@@ -118,6 +133,7 @@ impl Default for MediaConfig {
             empty_text: String::new(),
             max_chars: DEFAULT_MAX_CHARS,
             popout_opacity: 1.0,
+            visualizer: true,
         }
     }
 }
@@ -353,7 +369,8 @@ pub struct MediaWidget {
     /// Album art state — held so that `ArtState::Drop` cancels timers and in-flight loads.
     _art_state: Rc<RefCell<ArtState>>,
     /// Bar waveform visualizer — held so `Drop` disconnects from cava.
-    _bar_visualizer: BarVisualizer,
+    /// `None` when visualizer is disabled in config.
+    _bar_visualizer: Option<BarVisualizer>,
 }
 
 #[derive(Clone)]
@@ -377,7 +394,7 @@ struct WidgetUpdateContext<'a> {
     empty_text: &'a str,
     art_state: &'a Rc<RefCell<ArtState>>,
     pending_hide: &'a Rc<RefCell<Option<glib::SourceId>>>,
-    bar_visualizer: &'a BarVisualizer,
+    bar_visualizer: &'a Option<BarVisualizer>,
 }
 
 /// Owned version of widget references for use in callbacks.
@@ -393,7 +410,7 @@ struct CallbackWidgetRefs {
     empty_text: String,
     art_state: Rc<RefCell<ArtState>>,
     pending_hide: Rc<RefCell<Option<glib::SourceId>>>,
-    bar_visualizer: BarVisualizer,
+    bar_visualizer: Option<BarVisualizer>,
 }
 
 impl CallbackWidgetRefs {
@@ -735,13 +752,17 @@ impl MediaWidget {
 
         // Create the bar waveform visualizer as an overlay on the base widget.
         // Use insert_before to place it behind the content box in paint order.
-        let bar_visualizer = BarVisualizer::new();
-        base.overlay().add_overlay(bar_visualizer.widget());
-        base.overlay()
-            .set_measure_overlay(bar_visualizer.widget(), false);
-        bar_visualizer
-            .widget()
-            .insert_before(base.overlay(), Some(base.content()));
+        // When disabled in config, skip creation entirely to avoid spawning cava.
+        let bar_visualizer = if config.visualizer {
+            let viz = BarVisualizer::new();
+            base.overlay().add_overlay(viz.widget());
+            base.overlay().set_measure_overlay(viz.widget(), false);
+            viz.widget()
+                .insert_before(base.overlay(), Some(base.content()));
+            Some(viz)
+        } else {
+            None
+        };
 
         let widget_refs = CallbackWidgetRefs {
             container: base.widget().clone(),
@@ -913,7 +934,9 @@ fn update_widgets_from_snapshot_impl(ctx: &WidgetUpdateContext<'_>, snapshot: &M
                     return;
                 }
 
-                bar_viz.stop();
+                if let Some(v) = bar_viz.as_ref() {
+                    v.stop();
+                }
 
                 perform_hide(
                     &container,
@@ -954,15 +977,21 @@ fn update_widgets_from_snapshot_impl(ctx: &WidgetUpdateContext<'_>, snapshot: &M
     match snapshot.playback_status {
         PlaybackStatus::Playing => {
             ctx.container.add_css_class(media::PLAYING);
-            ctx.bar_visualizer.start();
+            if let Some(viz) = ctx.bar_visualizer {
+                viz.start();
+            }
         }
         PlaybackStatus::Paused => {
             ctx.container.add_css_class(media::PAUSED);
-            ctx.bar_visualizer.pause();
+            if let Some(viz) = ctx.bar_visualizer {
+                viz.pause();
+            }
         }
         PlaybackStatus::Stopped => {
             ctx.container.add_css_class(media::STOPPED);
-            ctx.bar_visualizer.pause();
+            if let Some(viz) = ctx.bar_visualizer {
+                viz.pause();
+            }
         }
     }
 

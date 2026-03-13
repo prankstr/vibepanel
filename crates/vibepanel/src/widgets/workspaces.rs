@@ -757,8 +757,9 @@ pub struct WorkspacesConfig {
     pub label_type: LabelType,
     /// Separator string between workspace indicators.
     pub separator: String,
-    /// Whether to animate circle↔pill transitions (default: true).
-    pub animate: bool,
+    /// Whether to animate circle↔pill transitions.
+    /// `None` = not explicitly set by user (inherits from global `theme.animations`).
+    pub animate: Option<bool>,
 }
 
 impl WidgetConfig for WorkspacesConfig {
@@ -779,11 +780,7 @@ impl WidgetConfig for WorkspacesConfig {
             .unwrap_or(DEFAULT_SEPARATOR)
             .to_string();
 
-        let animate = entry
-            .options
-            .get("animate")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
+        let animate = entry.options.get("animate").and_then(|v| v.as_bool());
 
         Self {
             label_type,
@@ -798,7 +795,7 @@ impl Default for WorkspacesConfig {
         Self {
             label_type: DEFAULT_LABEL_TYPE,
             separator: DEFAULT_SEPARATOR.to_string(),
-            animate: true,
+            animate: None,
         }
     }
 }
@@ -825,7 +822,11 @@ impl WorkspacesWidget {
         let base = BaseWidget::new(&[widget::WORKSPACES]);
 
         let label_type = config.label_type;
-        let animate = config.animate;
+        // Per-widget animate flag takes precedence when explicitly set.
+        // Falls back to the global theme.animations setting.
+        let animate = config
+            .animate
+            .unwrap_or_else(|| ConfigManager::global().animations_enabled());
 
         // Cache theme sizes at construction time. These values are derived
         // from bar.size/bar.padding, and any change to those triggers a full
@@ -1676,7 +1677,7 @@ mod tests {
     fn test_workspace_config_animate_default() {
         let entry = make_widget_entry("workspaces", HashMap::new());
         let config = WorkspacesConfig::from_entry(&entry);
-        assert!(config.animate);
+        assert!(config.animate.is_none());
     }
 
     #[test]
@@ -1685,7 +1686,7 @@ mod tests {
         options.insert("animate".to_string(), Value::Boolean(false));
         let entry = make_widget_entry("workspaces", options);
         let config = WorkspacesConfig::from_entry(&entry);
-        assert!(!config.animate);
+        assert_eq!(config.animate, Some(false));
     }
 
     // -- compute_left_count tests --

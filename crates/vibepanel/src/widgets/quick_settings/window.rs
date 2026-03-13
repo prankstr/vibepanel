@@ -1407,7 +1407,12 @@ impl QuickSettingsWindow {
         // If show_panel() was called during the animation, is_animating_out
         // will have been cleared — the stale timeout becomes a no-op.
         let window_weak = self.window.downgrade();
-        glib::timeout_add_local_once(POPOVER_ANIMATION_DURATION, move || {
+        let delay = if ConfigManager::global().animations_enabled() {
+            POPOVER_ANIMATION_DURATION
+        } else {
+            std::time::Duration::ZERO
+        };
+        glib::timeout_add_local_once(delay, move || {
             let Some(window) = window_weak.upgrade() else {
                 return;
             };

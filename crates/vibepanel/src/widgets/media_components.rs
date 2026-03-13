@@ -44,7 +44,7 @@ pub struct MediaViewController {
     pub position_label: Label,
     pub duration_label: Label,
     pub is_seeking: Rc<RefCell<bool>>,
-    pub visualizer: MediaVisualizer,
+    pub visualizer: Option<MediaVisualizer>,
 }
 
 impl MediaViewController {
@@ -97,11 +97,21 @@ impl MediaViewController {
         let should_stop = !snapshot.available
             || (snapshot.playback_status == PlaybackStatus::Stopped && !has_metadata);
         if should_stop {
-            self.visualizer.stop();
+            if let Some(ref viz) = self.visualizer {
+                viz.stop();
+            }
         } else {
             match snapshot.playback_status {
-                PlaybackStatus::Playing => self.visualizer.start(),
-                PlaybackStatus::Paused | PlaybackStatus::Stopped => self.visualizer.pause(),
+                PlaybackStatus::Playing => {
+                    if let Some(ref viz) = self.visualizer {
+                        viz.start();
+                    }
+                }
+                PlaybackStatus::Paused | PlaybackStatus::Stopped => {
+                    if let Some(ref viz) = self.visualizer {
+                        viz.pause();
+                    }
+                }
             }
         }
     }
@@ -447,17 +457,18 @@ pub fn build_seek_section(
     (container, scale, position_label, duration_label, is_seeking)
 }
 
-/// Build album art container with placeholder and audio-reactive visualizer.
+/// Build album art container with placeholder and optional audio-reactive visualizer.
 pub fn build_album_art(
     size: i32,
     overflow_margin: i32,
     blob_max_displacement: f64,
+    visualizer_enabled: bool,
 ) -> (
     Overlay,
     RoundedPicture,
     GtkBox,
     Rc<RefCell<ArtState>>,
-    MediaVisualizer,
+    Option<MediaVisualizer>,
 ) {
     let icons = IconsService::global();
     let config_mgr = ConfigManager::global();
@@ -501,18 +512,26 @@ pub fn build_album_art(
 
     let art_state = Rc::new(RefCell::new(ArtState::new()));
 
-    let visualizer = MediaVisualizer::new(
-        size,
-        overflow_margin,
-        corner_radius as f64,
-        blob_max_displacement,
-    );
-    visualizer.widget().set_visible(false);
+    // Only create the audio-reactive visualizer when enabled, to avoid spawning cava.
+    let visualizer = if visualizer_enabled {
+        let viz = MediaVisualizer::new(
+            size,
+            overflow_margin,
+            corner_radius as f64,
+            blob_max_displacement,
+        );
+        viz.widget().set_visible(false);
+        Some(viz)
+    } else {
+        None
+    };
 
     let overlay = Overlay::new();
     overlay.set_child(Some(&container));
-    overlay.add_overlay(visualizer.widget());
-    overlay.set_measure_overlay(visualizer.widget(), false);
+    if let Some(ref viz) = visualizer {
+        overlay.add_overlay(viz.widget());
+        overlay.set_measure_overlay(viz.widget(), false);
+    }
     overlay.set_halign(Align::Center);
     overlay.set_valign(Align::Center);
 

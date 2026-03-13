@@ -3,6 +3,7 @@
 use gtk4::prelude::*;
 use gtk4::{Align, Box as GtkBox, Button, Label, Orientation, Popover, Widget};
 
+use crate::services::config_manager::ConfigManager;
 use crate::services::icons::IconsService;
 use crate::services::media::{MediaService, PlaybackStatus};
 use crate::services::surfaces::SurfaceStyleManager;
@@ -40,8 +41,16 @@ where
     main_row.set_size_request(-1, 130);
 
     // Album art
-    let (art_container, art_picture, art_placeholder_box, art_state, visualizer) =
-        build_album_art(POPOVER_ART_SIZE, POPOVER_BLOB_MARGIN, BLOB_MAX_DISPLACEMENT);
+    let visualizer_enabled = ConfigManager::global()
+        .get_widget_option("media", "visualizer")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let (art_container, art_picture, art_placeholder_box, art_state, visualizer) = build_album_art(
+        POPOVER_ART_SIZE,
+        POPOVER_BLOB_MARGIN,
+        BLOB_MAX_DISPLACEMENT,
+        visualizer_enabled,
+    );
     art_container.set_valign(Align::End);
     art_container.set_halign(Align::Center);
     art_container.set_size_request(140, -1);

@@ -6,8 +6,26 @@
 use super::{POPOVER_ANIMATION_MS, WIDGET_BG_WITH_OPACITY};
 
 /// Return shared utility CSS.
-pub fn css() -> String {
+pub fn css(animations: bool) -> String {
     let widget_bg = WIDGET_BG_WITH_OPACITY;
+    let hover_transition = if animations {
+        "transition: background-color 100ms ease;"
+    } else {
+        "transition: none;"
+    };
+    let slider_transition = if animations {
+        "transition: transform 100ms ease-out;"
+    } else {
+        "transition: none;"
+    };
+    let popover_transition = if animations {
+        format!(
+            "transition: opacity {ms}ms cubic-bezier(0.2, 0, 0, 1),\n                transform {ms}ms cubic-bezier(0.2, 0, 0, 1);",
+            ms = POPOVER_ANIMATION_MS,
+        )
+    } else {
+        "transition: none;".to_string()
+    };
     format!(
         r#"
 /* ===== SHARED UTILITY CSS ===== */
@@ -186,19 +204,19 @@ row.vp-has-ripple > overlay {{
 /* ===== HOVER TRANSITIONS ===== */
 /* GTK4 needs transition on BOTH base and :hover for bidirectional animation. */
 button {{
-    transition: background-color 100ms ease;
+    {hover_transition}
 }}
 button:hover {{
-    transition: background-color 100ms ease;
+    {hover_transition}
 }}
 
 .widget,
 .widget-item {{
-    transition: background-color 100ms ease;
+    {hover_transition}
 }}
 .widget:hover,
 .widget-item:hover {{
-    transition: background-color 100ms ease;
+    {hover_transition}
 }}
 
 /* Slider row - horizontal layout with icon + slider + optional trailing widget */
@@ -250,7 +268,7 @@ button:hover {{
     border-radius: var(--slider-knob-radius);
     border: none;
     box-shadow: none;
-    transition: transform 100ms ease-out;
+    {slider_transition}
 }}
 .slider-row scale slider:active {{
     transform: scale(1.15);
@@ -285,8 +303,7 @@ button:hover {{
 /* ===== POPOVER OPEN/CLOSE ANIMATION ===== */
 
 .popover-animate {{
-    transition: opacity {POPOVER_ANIMATION_MS}ms cubic-bezier(0.2, 0, 0, 1),
-                transform {POPOVER_ANIMATION_MS}ms cubic-bezier(0.2, 0, 0, 1);
+    {popover_transition}
     opacity: 1;
     transform: scale(1);
 }}

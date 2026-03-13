@@ -7,8 +7,8 @@ use std::cell::{Cell, RefCell};
 use std::io::Read;
 use std::process::{Command, Stdio};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use gtk4::glib;
 use tracing::{debug, warn};

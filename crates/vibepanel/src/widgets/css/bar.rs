@@ -9,13 +9,24 @@ use crate::widgets::workspaces::{
 };
 
 /// Return bar CSS with config values interpolated.
-pub fn css(screen_margin: u32, spacing: u32) -> String {
+///
+/// `workspace_animations` is the resolved per-widget animation flag: it
+/// equals the explicit `[widgets.workspaces] animate` value when set,
+/// otherwise falls back to the global `theme.animations` setting.  This
+/// lets `workspaces.animate = true` keep workspace indicator CSS transitions
+/// alive even when `theme.animations = false`.
+pub fn css(screen_margin: u32, spacing: u32, workspace_animations: bool) -> String {
     let widget_bg = WIDGET_BG_WITH_OPACITY;
     let widget_bg_hover = WIDGET_BG_HOVER;
     let inactive_mult = INDICATOR_INACTIVE_MULT;
     let active_mult = INDICATOR_ACTIVE_MULT;
     let height_mult = INDICATOR_HEIGHT_MULT;
     let long_hpad = LONG_INDICATOR_HPAD;
+    let workspace_transition = if workspace_animations {
+        "transition: min-width 200ms linear, background-color 100ms ease;"
+    } else {
+        "transition: none;"
+    };
     format!(
         r#"
 /* ===== BAR ===== */
@@ -114,7 +125,7 @@ sectioned-bar.bar {{
     min-height: calc(var(--widget-height) * {height_mult});
     border-radius: calc(var(--radius-pill) * 1.2);
     color: var(--color-foreground-faint);
-    transition: min-width 200ms linear, background-color 100ms ease;
+    {workspace_transition}
     /* min-width duration must match INDICATOR_ANIM_DURATION_US in workspaces.rs */
 }}
 

@@ -40,6 +40,9 @@ background_opacity = 1.0
 #   [widgets.battery]
 #   disabled = true
 #
+#   [widgets.media]
+#   visualizer = true  # Enable/disable cava audio visualizer (default: true)
+#
 # Custom widgets use the "custom-" prefix for user-defined buttons:
 #   right = ["custom-power", "tray", "clock"]
 #
@@ -63,6 +66,8 @@ background_opacity = 1.0
 [theme]
 mode = "dark" # "auto", "dark", "light", "gtk"
 #accent = "#adabe0" # "gtk", "none", or hex color
+#animations = true  # Enable/disable all CSS transitions and animations
+#ripple = true      # Enable/disable Material Design ripple effect on click
 
 [theme.icons]
 theme = "material" # "material" or "gtk"

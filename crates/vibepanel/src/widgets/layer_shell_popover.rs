@@ -330,7 +330,12 @@ impl LayerShellPopover {
         // The orphaned window closes itself after the animation duration.
         // If show_at() is called during this window, a new window is created
         // independently — Rust ownership prevents conflicts.
-        glib::timeout_add_local_once(POPOVER_ANIMATION_DURATION, move || {
+        let delay = if ConfigManager::global().animations_enabled() {
+            POPOVER_ANIMATION_DURATION
+        } else {
+            Duration::ZERO
+        };
+        glib::timeout_add_local_once(delay, move || {
             // `window` and `content` are moved here and dropped after close
             let _ = &content;
             window.close();

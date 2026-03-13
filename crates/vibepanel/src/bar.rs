@@ -509,7 +509,7 @@ fn generate_css(config: &Config, palette: &ThemePalette) -> String {
     let per_widget_css = ThemePalette::generate_per_widget_css(config);
 
     // Utility CSS shared across widgets and surfaces
-    let utility_css = widgets::css::utility_css();
+    let utility_css = widgets::css::utility_css(config);
 
     // Widget-specific CSS
     let widget_css = widgets::css::widget_css(config);

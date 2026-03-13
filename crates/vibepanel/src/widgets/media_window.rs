@@ -9,6 +9,7 @@ use gtk4::prelude::*;
 use gtk4::{Align, ApplicationWindow, Box as GtkBox, GestureClick, Orientation, Window};
 
 use crate::services::callbacks::CallbackId;
+use crate::services::config_manager::ConfigManager;
 use crate::services::media::MediaService;
 use crate::services::surfaces::SurfaceStyleManager;
 use crate::styles::media;
@@ -142,10 +143,15 @@ where
     content_row.set_size_request(-1, WINDOW_ART_SIZE);
 
     // Album art
+    let visualizer_enabled = ConfigManager::global()
+        .get_widget_option("media", "visualizer")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
     let (art_container, art_picture, art_placeholder_box, art_state, visualizer) = build_album_art(
         WINDOW_ART_SIZE,
         WINDOW_BLOB_MARGIN,
         WINDOW_BLOB_MAX_DISPLACEMENT,
+        visualizer_enabled,
     );
     content_row.append(&art_container);
 

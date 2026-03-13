@@ -994,6 +994,20 @@ pub struct ThemeConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accent: Option<String>,
 
+    /// Enable or disable all CSS transitions and animations globally.
+    ///
+    /// When false, hover transitions, popover open/close animations,
+    /// workspace indicator animations, and other motion effects are disabled.
+    /// Default: true
+    pub animations: bool,
+
+    /// Enable or disable the ripple effect on button/widget press.
+    ///
+    /// When false, the Material Design-style ripple that expands from the
+    /// click point is suppressed entirely.
+    /// Default: true
+    pub ripple: bool,
+
     /// State colors (success, warning, urgent).
     pub states: ThemeStates,
 
@@ -1009,6 +1023,8 @@ impl Default for ThemeConfig {
         Self {
             mode: "auto".to_string(),
             accent: None,
+            animations: true,
+            ripple: true,
             states: ThemeStates::default(),
             typography: ThemeTypography::default(),
             icons: ThemeIconsConfig::default(),

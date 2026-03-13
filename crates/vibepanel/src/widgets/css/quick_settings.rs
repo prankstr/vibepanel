@@ -1,398 +1,404 @@
 //! Quick Settings CSS.
 
 /// Return quick settings CSS.
-pub fn css() -> &'static str {
-    r#"
+pub fn css(animations: bool) -> String {
+    let qs_transition = if animations {
+        "transition: transform 200ms ease;"
+    } else {
+        "transition: none;"
+    };
+    format!(
+        r#"
 /* ===== QUICK SETTINGS ===== */
 
 /* Window transparency */
-window.quick-settings-window {
+window.quick-settings-window {{
     background: transparent;
-}
+}}
 
 /* QS window container - internal padding between container edge and content */
-.qs-window-container {
+.qs-window-container {{
     padding-top: 4px;
-}
+}}
 
 /* Click catcher overlay */
-.vp-click-catcher {
+.vp-click-catcher {{
     background: var(--color-click-catcher-overlay);
-}
+}}
 
 /* Cards */
-.vp-card {
+.vp-card {{
     background: var(--color-card-overlay);
     border-radius: var(--radius-widget);
     /* No padding here - children handle their own padding for better click targets */
-}
+}}
 
 /* Card hover state */
 .vp-card:hover,
-.qs-row:hover {
+.qs-row:hover {{
     background: var(--color-card-overlay-hover);
-}
+}}
 
-.vp-card.qs-card-disabled:hover {
+.vp-card.qs-card-disabled:hover {{
     background: var(--color-card-overlay);
-}
+}}
 
 /* Toggle button fills card and provides its own padding */
-.vp-card > .vp-btn-reset {
+.vp-card > .vp-btn-reset {{
     padding: 8px 10px;
-}
+}}
 
 /* Expander chevron padding */
-.vp-card > .qs-toggle-more {
+.vp-card > .qs-toggle-more {{
     margin-right: 8px;
-}
+}}
 
 /* Toggle card icon spacing */
-.qs-toggle-icon {
+.qs-toggle-icon {{
     margin-left: 2px;
     margin-right: 4px;
     font-size: calc(var(--icon-size) * 1.15);
-}
+}}
 
 /* Row icon spacing */
-.qs-row-icon {
+.qs-row-icon {{
     margin-left: 1px;
     margin-right: 3px;
     font-size: calc(var(--icon-size) * 0.9);
-}
+}}
 
 /* Wi-Fi disabled state override */
-.qs-wifi-disabled-icon {
+.qs-wifi-disabled-icon {{
     color: var(--color-foreground-disabled);
-}
+}}
 
 /* Bluetooth disabled state override */
-.qs-bt-disabled-icon {
+.qs-bt-disabled-icon {{
     color: var(--color-foreground-disabled);
-}
+}}
 
 /* Mobile disabled state override */
-.qs-mobile-disabled-icon {
+.qs-mobile-disabled-icon {{
     color: var(--color-foreground-disabled);
-}
+}}
 
 /* Shared styling for network sections (Ethernet, Mobile) in expanded details */
-.qs-network-section {
+.qs-network-section {{
     padding-top: 6px;
-}
+}}
 
-.qs-network-section .qs-network-connection-row {
+.qs-network-section .qs-network-connection-row {{
     /* Override .qs-row margin, keep horizontal margin for alignment */
     margin-top: 8px;
     margin-bottom: 0;
     margin-left: 0;
     margin-right: 0;
-}
+}}
 
 /* Network section header row in expanded details */
-.qs-network-section-row {
+.qs-network-section-row {{
     padding: 0 8px;
     margin-top: 8px;
     margin-bottom: -4px;
-}
+}}
 
-.qs-network-section-label {
+.qs-network-section-label {{
     font-size: var(--font-size);
-}
+}}
 
 /* Network section switch styling - accent colored track when on */
-.qs-network-section-row switch {
+.qs-network-section-row switch {{
     /* Switch track: rounder than slider to contain it */
     border-radius: calc(var(--slider-radius-thick) * 2.5);
     margin-top: 2px;
-}
+}}
 
-.qs-network-section-row switch:checked {
+.qs-network-section-row switch:checked {{
     background-color: var(--color-accent-primary);
     background-image: none;
-}
+}}
 
-.qs-network-section-row switch:checked:backdrop {
+.qs-network-section-row switch:checked:backdrop {{
     background-color: var(--color-accent-primary);
-}
+}}
 
-.qs-network-section-row switch slider {
+.qs-network-section-row switch slider {{
     border-radius: calc(var(--slider-radius-thick) * 1.5);
     min-width: calc(var(--slider-height-thick) * 1.2);
     min-height: calc(var(--slider-height-thick) * 1.2);
-}
+}}
 
 /* Bluetooth controls row in expanded details */
-.qs-bt-controls-row {
+.qs-bt-controls-row {{
     padding: 0 8px;
     margin-top: 8px;
     margin-bottom: -4px;
-}
+}}
 
 /* Updates header row in expanded details (refresh button + last check) */
-.qs-updates-header-row {
+.qs-updates-header-row {{
     padding: 0 0 0 8px;
     margin-top: 8px;
     margin-bottom: -4px;
-}
+}}
 
 /* Generic disabled state placeholder (used by Bluetooth, Network, etc.) */
-.qs-disabled-state {
+.qs-disabled-state {{
     padding: 16px;
-}
+}}
 
-.qs-disabled-state-icon {
+.qs-disabled-state-icon {{
     font-size: 28px;
     color: var(--color-foreground-disabled);
-}
+}}
 
-.qs-disabled-state-label {
+.qs-disabled-state-label {{
     font-size: var(--font-size-sm);
-}
+}}
 
 /* Reset styling for QS buttons - extends vp-btn-reset */
 .qs-toggle-more,
-.qs-scan-button {
+.qs-scan-button {{
     background: transparent;
     border: none;
     box-shadow: none;
-}
+}}
 
 /* Expander chevron button */
-.qs-toggle-more {
+.qs-toggle-more {{
     min-width: calc(var(--icon-size) * 2);
     min-height: calc(var(--icon-size) * 2);
     padding: 0;
     border-radius: var(--radius-widget);
-}
+}}
 
-.qs-toggle-more:hover {
+.qs-toggle-more:hover {{
     background: var(--color-card-overlay-hover);
-}
+}}
 
 /* List items */
-.qs-list {
+.qs-list {{
     background: transparent;
-}
+}}
 
-.qs-row {
+.qs-row {{
     background: var(--color-card-overlay);
     border-radius: var(--radius-widget);
     padding: 6px 10px;
     margin: 3px 0;
-}
+}}
 
 /* Rows with ripple overlay: padding moves to content margins so the
    DrawingArea fills the full row background. */
-.qs-row.vp-has-ripple {
+.qs-row.vp-has-ripple {{
     padding: 0;
-}
+}}
 
 /* Updates list rows use smaller radius for larger card surfaces */
-.qs-updates-list .qs-row {
+.qs-updates-list .qs-row {{
     border-radius: var(--radius-pill);
-}
+}}
 
 /* Row menu content */
-.qs-row-menu-content {
+.qs-row-menu-content {{
     font-family: var(--font-family);
     font-size: var(--font-size);
     border-radius: var(--radius-surface);
-}
+}}
 
 /* Row hamburger menu button */
-.qs-row-menu-button {
+.qs-row-menu-button {{
     min-width: calc(var(--icon-size) * 2);
     min-height: calc(var(--icon-size) * 2);
     padding: 0;
     border-radius: var(--radius-widget);
-}
+}}
 
-.qs-row-menu-button:hover {
+.qs-row-menu-button:hover {{
     background: var(--color-card-overlay-hover);
-}
+}}
 
-.qs-row-menu-icon {
-    transition: transform 200ms ease;
-}
+.qs-row-menu-icon {{
+    {qs_transition}
+}}
 
-.qs-row-menu-icon.expanded {
+.qs-row-menu-icon.expanded {{
     transform: rotate(90deg);
-}
+}}
 
 /* Accent colors - state override for active icons/toggles */
-.qs-icon-active {
+.qs-icon-active {{
     color: var(--color-accent-primary);
-}
+}}
 
 /* Row titles - color via vp-primary */
-.qs-row-title {
+.qs-row-title {{
     font-size: var(--font-size-md);
     margin-top: 1px;
-}
+}}
 
 /* Row action labels - color via vp-accent */
-.qs-row-action-label {
+.qs-row-action-label {{
     font-size: var(--font-size-sm);
     min-width: 0;
     min-height: 0;
     padding: 0;
     border-radius: var(--radius-widget);
-}
+}}
 
 /* Content margin inside ripple overlay for breathing room around label */
-.qs-row-action-label label {
+.qs-row-action-label label {{
     padding: 6px 8px;
-}
+}}
 
-.qs-row-action-label:hover {
+.qs-row-action-label:hover {{
     background: var(--color-card-overlay-hover);
-}
+}}
 
 /* Subtitles - secondary info, color via vp-muted */
 .qs-toggle-subtitle,
-.qs-row-subtitle {
+.qs-row-subtitle {{
     font-size: var(--font-size-sm);
-}
+}}
 
 /* Accent color state override for active subtitles */
-.qs-subtitle-active {
+.qs-subtitle-active {{
     color: var(--color-accent-primary);
-}
+}}
 
 /* Radio indicator for unselected audio/mic device rows.
  * Replaces the radio-symbolic icon so the shape scales with --radius-factor
  * (square at border_radius: 0, circular at border_radius: 50). */
-.qs-radio-indicator {
+.qs-radio-indicator {{
     min-width: calc(var(--slider-height-thick) * 1.2);
     min-height: calc(var(--slider-height-thick) * 1.2);
     border: 1.5px solid var(--color-foreground-muted);
     /* Nearly-pill but subtly softer for visual distinction */
     border-radius: calc(var(--slider-radius-thick) * 1.1);
     margin: 2px 0;
-}
+}}
 
 /* Checkmark indicator background for selected audio/mic device rows */
-.qs-row-indicator-bg {
+.qs-row-indicator-bg {{
     border-radius: var(--slider-knob-radius);
     min-width: var(--slider-knob-size);
     min-height: var(--slider-knob-size);
-}
+}}
 
 /* Checkmark icon for selected state - floats above background */
-.qs-row-indicator {
+.qs-row-indicator {{
     color: var(--color-accent-primary);
     font-variation-settings: 'wght' 600;
     font-size: 20px;
-}
+}}
 
-.qs-scan-button {
+.qs-scan-button {{
     margin-bottom: 4px;
     min-height: 0;
     /* Extra-round pill shape for small action button */
     border-radius: calc(var(--radius-pill) * 1.3);
-}
+}}
 
 /* Padding moves to content margin inside the ripple overlay so the
    DrawingArea fills the button edge-to-edge.  Exclude the ripple
    DrawingArea itself so it stays edge-to-edge inside the Overlay. */
-.qs-scan-button > overlay > *:not(.vp-ripple-overlay) {
+.qs-scan-button > overlay > *:not(.vp-ripple-overlay) {{
     margin: 2px 8px;
-}
+}}
 
-.qs-scan-button:hover {
+.qs-scan-button:hover {{
     background: var(--color-card-overlay-hover);
-}
+}}
 
 /* Scan spinner - small inline spinner */
-.qs-scan-spinner {
+.qs-scan-spinner {{
     min-width: 12px;
     min-height: 12px;
     color: var(--color-accent-primary);
-}
+}}
 
 /* Chevron animation */
-.qs-toggle-more-icon {
-    transition: transform 200ms ease;
+.qs-toggle-more-icon {{
+    {qs_transition}
     font-size: calc(var(--icon-size) * 1.1);
     font-variation-settings: 'wght' 500;
     -gtk-icon-style: symbolic;
     margin-top: 2px;
-}
+}}
 
-.qs-toggle-more-icon.expanded {
+.qs-toggle-more-icon.expanded {{
     margin-top: -2px;
     transform: rotate(180deg);
-}
+}}
 
 /* Power card hold-to-confirm progress */
-.qs-power-progress {
+.qs-power-progress {{
     background-color: transparent;
     min-width: 0;
     border-radius: var(--radius-widget);
-}
+}}
 
-.qs-power-progress.qs-power-confirming {
+.qs-power-progress.qs-power-confirming {{
     background-color: var(--color-accent-primary);
-}
+}}
 
 /* Power card overlay - has background like .vp-card */
-.qs-power-card {
+.qs-power-card {{
     background: var(--color-card-overlay);
     border-radius: var(--radius-widget);
-}
+}}
 
-.qs-power-card:hover {
+.qs-power-card:hover {{
     background: var(--color-card-overlay-hover);
-}
+}}
 
 /* Card inside power overlay - always transparent, parent has background */
-.qs-power-card > .vp-card {
+.qs-power-card > .vp-card {{
     background: transparent;
-}
+}}
 
 /* Power action rows - remove padding since overlay content provides it */
-.qs-power-row {
+.qs-power-row {{
     padding: 0;
-}
+}}
 
 /* Power row content - needs padding since it's an overlay above progress */
-.qs-power-row-content {
+.qs-power-row-content {{
     padding: 6px 10px;
-}
+}}
 
 /* Power details container - add spacing from toggle card */
-.qs-power-details {
+.qs-power-details {{
     margin-top: 6px;
-}
+}}
 
 /* Progress bar inside power rows */
-.qs-power-row .qs-power-progress {
+.qs-power-row .qs-power-progress {{
     border-radius: var(--radius-widget);
-}
+}}
 
 /* ===== BLUETOOTH AUTH PROMPT ===== */
 
 /* Auth prompt container - inline under device row */
-.qs-bt-auth-prompt {
+.qs-bt-auth-prompt {{
     padding: 8px 10px;
     margin: 0;
-}
+}}
 
 /* Auth prompt instruction label (direct child only, not button labels) */
-.qs-bt-auth-prompt > label {
+.qs-bt-auth-prompt > label {{
     font-size: var(--font-size);
     margin-bottom: 8px;
     color: var(--color-foreground-primary);
-}
+}}
 
 /* Character box container - horizontal layout for PIN/passkey digits */
-.qs-bt-char-container {
+.qs-bt-char-container {{
     margin-bottom: 8px;
-}
+}}
 
 /* Individual character entry boxes - square with rounded corners */
-.qs-bt-char-box {
+.qs-bt-char-box {{
     min-width: 36px;
     min-height: 0;
     padding: 8px 0;
@@ -402,50 +408,51 @@ window.quick-settings-window {
     border: 1px solid var(--color-border, rgba(255,255,255,0.1));
     margin: 0 2px;
     color: var(--color-foreground-primary);
-}
+}}
 
-.qs-bt-char-box:focus {
+.qs-bt-char-box:focus {{
     border-color: var(--color-accent-primary);
     outline: none;
-}
+}}
 
 /* Read-only character boxes (for confirmation/display modes) */
-.qs-bt-char-box:disabled {
+.qs-bt-char-box:disabled {{
     background: var(--color-card-overlay);
     color: var(--color-foreground-primary);
     opacity: 1;
-}
+}}
 
 /* Auth prompt button row */
-.qs-bt-auth-buttons {
+.qs-bt-auth-buttons {{
     margin-top: 4px;
-}
+}}
 
 /* ===== QUICK SETTINGS AUDIO UNAVAILABLE ===== */
 
 /* Audio row disabled state - gray out everything */
-.qs-audio-row-disabled {
+.qs-audio-row-disabled {{
     color: var(--color-foreground-disabled);
-}
+}}
 
-.qs-audio-row-disabled .slider-icon-btn {
+.qs-audio-row-disabled .slider-icon-btn {{
     color: var(--color-foreground-muted);
-}
+}}
 
-.qs-audio-row-disabled scale trough highlight {
+.qs-audio-row-disabled scale trough highlight {{
     background-color: var(--color-foreground-muted);
-}
+}}
 
 /* Audio hint text - color via vp-muted */
-.qs-audio-hint {
+.qs-audio-hint {{
     font-size: var(--font-size-xs);
     font-style: italic;
     padding: 4px 0;
-}
+}}
 
 /* ===== MARQUEE LABEL ===== */
 
 /* Note: Overflow is handled by the GtkBox widget with set_overflow(Hidden),
    not CSS. Text wrapping is controlled via Label properties in Rust code. */
 "#
+    )
 }

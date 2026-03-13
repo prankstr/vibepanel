@@ -49,25 +49,35 @@ use vibepanel_core::Config;
 ///
 /// These are truly shared styles that apply across multiple surfaces
 /// (bar, popovers, quick settings, etc).
-pub fn utility_css() -> String {
-    base::css()
+pub fn utility_css(config: &Config) -> String {
+    base::css(config.theme.animations)
 }
 
 /// Generate all widget CSS.
 pub fn widget_css(config: &Config) -> String {
     let screen_margin = config.bar.screen_margin;
     let spacing = config.bar.spacing;
+    let animations = config.theme.animations;
+
+    // Resolve per-widget workspace animation flag: explicit `animate` in
+    // [widgets.workspaces] overrides the global `theme.animations` default.
+    let workspace_animations = config
+        .widgets
+        .get_options("workspaces")
+        .and_then(|opts| opts.options.get("animate"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(animations);
 
     // Collect all CSS from submodules
-    let bar_css = bar::css(screen_margin, spacing);
-    let tray_css = tray::css();
+    let bar_css = bar::css(screen_margin, spacing, workspace_animations);
+    let tray_css = tray::css(animations);
     let buttons_css = buttons::css();
     let calendar_css = calendar::css();
-    let quick_settings_css = quick_settings::css();
+    let quick_settings_css = quick_settings::css(animations);
     let battery_css = battery::css();
     let notifications_css = notifications::css();
     let osd_css = osd::css();
-    let media_css = media::css();
+    let media_css = media::css(animations);
     let system_css = system::css();
 
     format!(

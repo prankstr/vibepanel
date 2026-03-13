@@ -181,6 +181,22 @@ impl ConfigManager {
         self.config.borrow().bar.is_bottom()
     }
 
+    /// Check if animations are enabled globally.
+    ///
+    /// When false, CSS transitions, popover animations, workspace indicator
+    /// animations, and other motion effects are suppressed.
+    pub fn animations_enabled(&self) -> bool {
+        self.config.borrow().theme.animations
+    }
+
+    /// Check if the ripple effect is enabled.
+    ///
+    /// When false, the Material Design-style ripple on button/widget press
+    /// is suppressed.
+    pub fn ripple_enabled(&self) -> bool {
+        self.config.borrow().theme.ripple
+    }
+
     /// Get a widget option value from the current configuration.
     ///
     /// Returns `None` if the widget has no config section or the option doesn't exist.
@@ -489,6 +505,8 @@ fn per_widget_styles_changed(old: &Config, new: &Config) -> bool {
 fn config_theme_changed(old: &Config, new: &Config) -> bool {
     old.theme.mode != new.theme.mode
         || old.theme.accent != new.theme.accent
+        || old.theme.animations != new.theme.animations
+        || old.theme.ripple != new.theme.ripple
         || old.bar.background_color != new.bar.background_color
         || old.bar.background_opacity != new.bar.background_opacity
         || old.widgets.background_color != new.widgets.background_color
