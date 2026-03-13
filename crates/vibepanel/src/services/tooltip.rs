@@ -102,21 +102,17 @@ impl TooltipWindow {
     }
 
     fn apply_styles(window: &Window, label: &Label, styles: &SurfaceStyles) {
-        // Apply slight transparency to tooltip background
-        let bg = format!(
-            "color-mix(in srgb, {} 80%, transparent)",
-            styles.background_color
-        );
-
-        // Use CSS for font styling (native GTK behavior)
-        // Use var(--radius-surface) for border-radius to respect theme settings including 0
+        // Tooltip background: the popover base tinted 20% toward the hover-tint
+        // direction (white in dark mode, black in light mode) so that it is
+        // visibly elevated above any surface it appears over.
         let css = format!(
             r#"
 .vibepanel-tooltip {{
-    background-color: {bg};
+    background-color: color-mix(in srgb, color-mix(in srgb, var(--widget-background-color) var(--widget-background-opacity), transparent) 90%, var(--widget-hover-tint));
     border-radius: var(--radius-surface);
     border: none;
     padding: 6px 10px;
+    opacity: 0.90;
 }}
 
 .vibepanel-tooltip-label {{
@@ -125,7 +121,6 @@ impl TooltipWindow {
     color: {fg};
 }}
 "#,
-            bg = bg,
             font = styles.font_family,
             size = styles.font_size,
             fg = styles.text_color,

@@ -57,10 +57,11 @@ window.layer-shell-click-catcher {{
 /* Style GTK's native tooltips (used in popovers/windows where layer-shell tooltips don't work) */
 tooltip,
 tooltip.background {{
-    background-color: color-mix(in srgb, var(--widget-background-color) 90%, transparent);
+    background-color: color-mix(in srgb, color-mix(in srgb, var(--widget-background-color) var(--widget-background-opacity), transparent) 90%, var(--widget-hover-tint));
     border-radius: var(--radius-surface);
     border: none;
     padding: 0;
+    opacity: 0.90;
 }}
 
 tooltip > box,
