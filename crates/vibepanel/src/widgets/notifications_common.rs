@@ -22,8 +22,6 @@ pub const TOAST_MARGIN_RIGHT: i32 = 10;
 
 /// Popover dimensions
 pub const POPOVER_WIDTH: i32 = 400;
-pub const POPOVER_ROW_HEIGHT: i32 = 100;
-pub const POPOVER_MAX_VISIBLE_ROWS: i32 = 3;
 
 /// Threshold for body text length before we show the expand button.
 /// Bodies shorter than this are shown in full without expand/collapse UI.

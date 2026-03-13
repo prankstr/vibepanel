@@ -724,6 +724,9 @@ pub mod notification {
     /// Dismiss icon (`.notification-dismiss-icon`).
     pub const DISMISS_ICON: &str = "notification-dismiss-icon";
 
+    /// Row dismissing animation state (`.notification-row-dismissing`).
+    pub const ROW_DISMISSING: &str = "notification-row-dismissing";
+
     // Toast
     /// Toast window (`.notification-toast`).
     pub const TOAST: &str = "notification-toast";

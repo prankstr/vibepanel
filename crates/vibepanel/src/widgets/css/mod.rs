@@ -31,6 +31,11 @@ pub const WIDGET_BG_HOVER: &str = "color-mix(in srgb, color-mix(in srgb, var(--w
 /// `layer_shell_popover.rs` / `quick_settings/window.rs` for close-animation timeouts.
 pub const POPOVER_ANIMATION_MS: u64 = 150;
 
+/// Dismiss animation duration in milliseconds (matches quick settings revealers).
+///
+/// Used for notification row dismiss (CSS opacity fade + Revealer collapse).
+pub const DISMISS_ANIMATION_MS: u64 = 200;
+
 mod bar;
 mod base;
 mod battery;
@@ -75,7 +80,7 @@ pub fn widget_css(config: &Config) -> String {
     let calendar_css = calendar::css();
     let quick_settings_css = quick_settings::css(animations);
     let battery_css = battery::css();
-    let notifications_css = notifications::css();
+    let notifications_css = notifications::css(animations);
     let osd_css = osd::css();
     let media_css = media::css(animations);
     let system_css = system::css();

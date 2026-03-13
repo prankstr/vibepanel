@@ -3,13 +3,17 @@
 //! This module handles the popover that appears when clicking the notification
 //! bell icon, showing a scrollable list of notifications with dismiss controls.
 
+use gtk4::gdk::{self, Monitor};
 use gtk4::prelude::*;
 use gtk4::{
-    Align, Box as GtkBox, Button, Image, Label, Orientation, PolicyType, ScrolledWindow, glib,
+    Align, Box as GtkBox, Button, Image, Label, Orientation, PolicyType, Revealer,
+    RevealerTransitionType, ScrolledWindow, glib,
 };
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::time::Duration;
 
+use crate::services::config_manager::ConfigManager;
 use crate::services::icons::IconsService;
 use crate::services::notification::{
     Notification, NotificationService, URGENCY_CRITICAL, URGENCY_LOW,
@@ -17,33 +21,83 @@ use crate::services::notification::{
 use crate::services::tooltip::TooltipManager;
 use crate::styles::{button, card, color, notification as notif, surface};
 
+use super::css::DISMISS_ANIMATION_MS;
+use super::layer_shell_popover::calculate_popover_bar_margin;
 use super::notifications_common::{
-    BODY_TRUNCATE_THRESHOLD, POPOVER_MAX_VISIBLE_ROWS, POPOVER_ROW_HEIGHT, POPOVER_WIDTH,
-    create_notification_image_widget, format_timestamp, sanitize_body_markup,
+    BODY_TRUNCATE_THRESHOLD, POPOVER_WIDTH, create_notification_image_widget, format_timestamp,
+    sanitize_body_markup,
 };
 
 /// Callback type for closing the popover from within the content.
 pub type ClosePopoverCallback = Rc<dyn Fn()>;
 
-// Buffer values to account for CSS padding/margins not included in measure().
-// These mirror the rules in widgets/css.rs:
-//
-//   .notification-list { padding: 8px 0 0 0; }
-//   .notification-row  { padding: 6px 6px; margin-bottom: 4px; }
-//
-// If you change those CSS values, update these constants to match.
+/// Dismiss animation as a Duration for timeout callbacks.
+const DISMISS_ANIMATION_DURATION: Duration = Duration::from_millis(DISMISS_ANIMATION_MS);
 
-/// Top padding on .notification-list
-const LIST_PADDING_TOP: i32 = 8;
+/// Estimated header height (title + padding + separator space).
+const HEADER_HEIGHT_ESTIMATE: i32 = 48;
 
-/// Per-row: vertical padding (6px * 2) + margin-bottom (4px)
-const ROW_PADDING_AND_MARGIN: i32 = 16;
+/// Total vertical padding from surface styles, shadow margin, and list padding.
+/// Surface padding (16px top + 16px bottom) + shadow margin (8px top + 8px bottom)
+/// + notification-list top padding (8px).
+const CONTAINER_VERTICAL_OVERHEAD: i32 = 64;
 
-/// Extra slop per row for rounding / fractional scaling
-const ROW_SLOP: i32 = 4;
+/// Minimum margin from the far screen edge.
+const FAR_EDGE_MARGIN: i32 = 8;
 
-/// Base slop for the container
-const BASE_SLOP: i32 = 8;
+/// Below this height, don't bother constraining the scroll area.
+const MIN_HEIGHT_THRESHOLD: i32 = 100;
+
+/// Fallback max scroll height when monitor geometry is unavailable.
+const FALLBACK_MAX_HEIGHT: i32 = 500;
+
+/// Compute the maximum ScrolledWindow height based on monitor geometry.
+///
+/// Uses the same approach as quick settings: subtract the bar exclusive zone,
+/// bar margin, container overhead, and far edge margin from the monitor height.
+fn compute_max_scroll_height() -> i32 {
+    let monitor_opt = gdk::Display::default().and_then(|display| {
+        let monitors = display.monitors();
+        monitors
+            .item(0)
+            .and_then(|obj| obj.downcast::<Monitor>().ok())
+    });
+
+    let Some(monitor) = monitor_opt else {
+        return FALLBACK_MAX_HEIGHT;
+    };
+
+    let geom = monitor.geometry();
+
+    let config_mgr = ConfigManager::global();
+    let bar_size = config_mgr.bar_size() as i32;
+    let bar_padding = config_mgr.bar_padding() as i32;
+    let bar_opacity = config_mgr.bar_background_opacity();
+    let screen_margin = config_mgr.screen_margin() as i32;
+    let popover_offset = config_mgr.popover_offset() as i32;
+
+    // Bar exclusive zone including popover_offset (matches quick settings)
+    let bar_exclusive_zone = if bar_opacity > 0.0 {
+        bar_size + 2 * bar_padding + 2 * screen_margin + popover_offset
+    } else {
+        bar_size + 2 * screen_margin + popover_offset
+    };
+
+    let bar_margin = calculate_popover_bar_margin();
+
+    let max_height = geom.height()
+        - bar_exclusive_zone
+        - bar_margin
+        - HEADER_HEIGHT_ESTIMATE
+        - CONTAINER_VERTICAL_OVERHEAD
+        - FAR_EDGE_MARGIN;
+
+    if max_height > MIN_HEIGHT_THRESHOLD {
+        max_height
+    } else {
+        FALLBACK_MAX_HEIGHT
+    }
+}
 
 /// Build the full popover content widget.
 ///
@@ -51,7 +105,12 @@ const BASE_SLOP: i32 = 8;
 /// * `on_close` - Optional callback to close the popover. Called when user clicks
 ///   action buttons (like "Open") that should dismiss the popover. Dismissing a
 ///   single notification does NOT close the popover.
-pub(super) fn build_popover_content(on_close: Option<ClosePopoverCallback>) -> gtk4::Widget {
+/// * `suppress_rebuild` - Flag set by dismiss handlers to prevent the service
+///   update listener from rebuilding the popover (since the row was already removed).
+pub(super) fn build_popover_content(
+    on_close: Option<ClosePopoverCallback>,
+    suppress_rebuild: Rc<Cell<bool>>,
+) -> gtk4::Widget {
     let root = GtkBox::new(Orientation::Vertical, 0);
     root.add_css_class(notif::POPOVER);
     root.set_size_request(POPOVER_WIDTH, -1);
@@ -59,28 +118,16 @@ pub(super) fn build_popover_content(on_close: Option<ClosePopoverCallback>) -> g
     let header = build_header(on_close.clone());
     root.append(&header);
 
-    let notification_list = GtkBox::new(Orientation::Vertical, 0);
+    let notification_list = GtkBox::new(Orientation::Vertical, 4);
     notification_list.add_css_class(notif::LIST);
 
-    populate_notification_list(&notification_list, on_close);
+    populate_notification_list(&notification_list, on_close, &suppress_rebuild);
 
-    let max_height = POPOVER_MAX_VISIBLE_ROWS * POPOVER_ROW_HEIGHT;
-
-    // Measure the natural height of the notification list content.
-    // This captures variable row heights (actions, long bodies, etc.) but
-    // doesn't include CSS padding/margins, so we add a buffer derived from
-    // the known CSS rules (see constants at top of file).
-    let (_, natural_height, _, _) = notification_list.measure(Orientation::Vertical, -1);
-    let child_count = notification_list.observe_children().n_items() as i32;
-
-    let css_buffer =
-        LIST_PADDING_TOP + BASE_SLOP + child_count * (ROW_PADDING_AND_MARGIN + ROW_SLOP);
-
-    let content_height = (natural_height + css_buffer).min(max_height);
+    let max_height = compute_max_scroll_height();
 
     let scrolled = ScrolledWindow::new();
     scrolled.set_policy(PolicyType::Never, PolicyType::Automatic);
-    scrolled.set_min_content_height(content_height);
+    scrolled.set_propagate_natural_height(true);
     scrolled.set_max_content_height(max_height);
     scrolled.add_css_class(notif::SCROLL);
 
@@ -199,7 +246,11 @@ fn build_header(on_close: Option<ClosePopoverCallback>) -> GtkBox {
 }
 
 /// Populate the notification list with current notifications or empty state.
-fn populate_notification_list(list: &GtkBox, on_close: Option<ClosePopoverCallback>) {
+fn populate_notification_list(
+    list: &GtkBox,
+    on_close: Option<ClosePopoverCallback>,
+    suppress_rebuild: &Rc<Cell<bool>>,
+) {
     let service = NotificationService::global();
 
     if !service.backend_available() {
@@ -224,9 +275,27 @@ fn populate_notification_list(list: &GtkBox, on_close: Option<ClosePopoverCallba
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
+    let animations = ConfigManager::global().animations_enabled();
+
     for notification in &notifications {
-        let row = build_notification_row(notification, on_close.clone());
-        list.append(&row);
+        let revealer = Revealer::new();
+        revealer.set_transition_type(RevealerTransitionType::SlideDown);
+        if animations {
+            revealer.set_transition_duration(DISMISS_ANIMATION_MS as u32);
+        } else {
+            revealer.set_transition_duration(0);
+        }
+        revealer.set_reveal_child(true);
+
+        let row = build_notification_row(
+            notification,
+            on_close.clone(),
+            list,
+            &revealer,
+            suppress_rebuild,
+        );
+        revealer.set_child(Some(&row));
+        list.append(&revealer);
     }
 }
 
@@ -260,6 +329,9 @@ fn add_empty_state(list: &GtkBox, message: &str) {
 fn build_notification_row(
     notification: &Notification,
     on_close: Option<ClosePopoverCallback>,
+    list: &GtkBox,
+    revealer: &Revealer,
+    suppress_rebuild: &Rc<Cell<bool>>,
 ) -> GtkBox {
     let card = GtkBox::new(Orientation::Vertical, 0);
     card.add_css_class(notif::ROW);
@@ -391,8 +463,41 @@ fn build_notification_row(
     dismiss_btn.set_child(Some(&dismiss_icon));
 
     let notification_id = notification.id;
-    dismiss_btn.connect_clicked(move |_| {
+    let card_for_dismiss = card.clone();
+    let revealer_for_dismiss = revealer.clone();
+    let list_for_dismiss = list.clone();
+    let suppress = Rc::clone(suppress_rebuild);
+    let on_close_dismiss = on_close.clone();
+    dismiss_btn.connect_clicked(move |btn| {
+        // Prevent double-clicks from leaving suppress_rebuild stuck.
+        btn.set_sensitive(false);
+
+        suppress.set(true);
         NotificationService::global().close(notification_id);
+
+        // Fade out the row content and collapse height via the Revealer
+        card_for_dismiss.add_css_class(notif::ROW_DISMISSING);
+        revealer_for_dismiss.set_reveal_child(false);
+
+        // Remove immediately when animations are disabled.
+        let duration = if ConfigManager::global().animations_enabled() {
+            DISMISS_ANIMATION_DURATION
+        } else {
+            Duration::ZERO
+        };
+
+        let revealer = revealer_for_dismiss.clone();
+        let list = list_for_dismiss.clone();
+        let on_close = on_close_dismiss.clone();
+        glib::timeout_add_local_once(duration, move || {
+            list.remove(&revealer);
+            // Close the popover when the last notification is dismissed
+            if list.first_child().is_none()
+                && let Some(ref close_cb) = on_close
+            {
+                close_cb();
+            }
+        });
     });
 
     main_row.append(&dismiss_btn);

@@ -56,6 +56,9 @@ struct NotificationsWidgetInner {
     menu_handle: RefCell<Option<Rc<MenuHandle>>>,
     /// Last known notification IDs; used to skip popover rebuilds on mute-only changes.
     last_notif_ids: RefCell<Vec<u32>>,
+    /// When set, the popover dismiss handler already removed the row in-place,
+    /// so `on_service_update` should skip `refresh_if_visible`.
+    suppress_rebuild: Rc<Cell<bool>>,
 }
 
 impl NotificationsWidgetInner {
@@ -136,8 +139,15 @@ impl NotificationsWidgetInner {
         let list_changed = *self.last_notif_ids.borrow() != current_ids;
         *self.last_notif_ids.borrow_mut() = current_ids;
 
-        if list_changed && let Some(menu_handle) = self.menu_handle.borrow().as_ref() {
-            menu_handle.refresh_if_visible();
+        if list_changed {
+            // If the popover dismiss handler already removed the row in-place,
+            // it set suppress_rebuild so we skip the full window rebuild.
+            if self.suppress_rebuild.replace(false) {
+                return;
+            }
+            if let Some(menu_handle) = self.menu_handle.borrow().as_ref() {
+                menu_handle.refresh_if_visible();
+            }
         }
     }
 
@@ -313,6 +323,7 @@ impl NotificationsWidget {
             app: RefCell::new(None),
             menu_handle: RefCell::new(None),
             last_notif_ids: RefCell::new(Vec::new()),
+            suppress_rebuild: Rc::new(Cell::new(false)),
         });
 
         let widget = Self { base, inner };
@@ -332,6 +343,7 @@ impl NotificationsWidget {
 
     fn build_menu(&self) {
         let inner = Rc::clone(&self.inner);
+        let suppress_rebuild = Rc::clone(&self.inner.suppress_rebuild);
 
         // We need a reference to the menu handle inside the builder, but the handle
         // is created by create_menu. Use a RefCell to store it after creation.
@@ -349,7 +361,7 @@ impl NotificationsWidget {
                     Rc::new(move || handle_clone.hide()) as ClosePopoverCallback
                 });
 
-            build_popover_content(on_close)
+            build_popover_content(on_close, Rc::clone(&suppress_rebuild))
         });
 
         // Store the menu handle in both places
