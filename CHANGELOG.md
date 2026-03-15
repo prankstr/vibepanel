@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.1](https://github.com/prankstr/vibepanel/compare/v0.12.0...v0.12.1) (2026-03-15)
+
+
+### Features
+
+* **theme:** add config option to toggle shadows ([973808d](https://github.com/prankstr/vibepanel/commit/973808da2d3ba5e56056e37632b9c0b449041e69))
+
+
+### Bug Fixes
+
+* set layer shell names on all surfaces ([2661815](https://github.com/prankstr/vibepanel/commit/266181502b13fa8fed230fed092fbb3a126f42c3))
+* **widgets:** correct hover background color for widget groups ([ea59f78](https://github.com/prankstr/vibepanel/commit/ea59f786b913e26229901e2dff84e369687b0f94))
+* **widgets:** fix sharp-corner flash on widget-group hover transition ([01e8ad1](https://github.com/prankstr/vibepanel/commit/01e8ad119fc66cbe5285d8e80a03ce74204a8887))
+* **widgets:** make popovers follow highest opacity ([9d6e5af](https://github.com/prankstr/vibepanel/commit/9d6e5afa23c6a91eb0c74c7a6a495ab4a5cd0d9c))
+* **widgets:** restore correct padding for widget groups ([dc1dd67](https://github.com/prankstr/vibepanel/commit/dc1dd673e737d5d71eda13bd05109bbae611fbc9)), closes [#68](https://github.com/prankstr/vibepanel/issues/68)
+
+
+### Miscellaneous
+
+* **ci:** auto-update Cargo.lock on release PR ([d382609](https://github.com/prankstr/vibepanel/commit/d3826095704049bc7a777ba721dc4e6248cf1864))
+
 ## [0.12.0](https://github.com/prankstr/vibepanel/compare/v0.11.0...v0.12.0) (2026-03-13)
 
 
