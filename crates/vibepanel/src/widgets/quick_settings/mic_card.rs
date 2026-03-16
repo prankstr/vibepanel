@@ -18,6 +18,7 @@ use gtk4::{
 use super::components::SliderRow;
 use super::ui_helpers::{add_placeholder_row, clear_list_box, create_qs_list_box};
 use crate::services::audio::{AudioService, AudioSnapshot, SourceInfoSnapshot};
+use crate::services::config_manager::ConfigManager;
 use crate::services::icons::{IconHandle, IconsService};
 use crate::services::surfaces::SurfaceStyleManager;
 use crate::styles::{color, qs, row, state};
@@ -154,7 +155,7 @@ pub fn build_mic_details() -> MicDetailsWidgets {
     // Wrap in revealer
     let revealer = Revealer::new();
     revealer.set_transition_type(RevealerTransitionType::SlideDown);
-    revealer.set_transition_duration(200);
+    revealer.set_transition_duration(ConfigManager::global().animation_duration(200));
     revealer.set_reveal_child(false);
     revealer.set_child(Some(&container));
 

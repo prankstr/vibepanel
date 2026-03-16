@@ -57,12 +57,10 @@ thread_local! {
     static CURRENT_QS_WINDOW: RefCell<Option<Weak<QuickSettingsWindow>>> = const { RefCell::new(None) };
 }
 
-/// Get the currently active QuickSettingsWindow, if any.
 pub(super) fn current_quick_settings_window() -> Option<Rc<QuickSettingsWindow>> {
     CURRENT_QS_WINDOW.with(|cell| cell.borrow().as_ref().and_then(|weak| weak.upgrade()))
 }
 
-/// Set the current QuickSettingsWindow reference.
 fn set_current_qs_window(qs: &Rc<QuickSettingsWindow>) {
     CURRENT_QS_WINDOW.with(|cell| {
         *cell.borrow_mut() = Some(Rc::downgrade(qs));
@@ -141,6 +139,7 @@ pub struct QuickSettingsWindow {
     audio_mic_callback_id: Cell<Option<CallbackId>>,
     brightness_callback_id: Cell<Option<CallbackId>>,
     updates_callback_id: Cell<Option<CallbackId>>,
+    theme_callback_id: Cell<Option<CallbackId>>,
 
     // Card states
     pub network: Rc<NetworkCardState>,
@@ -192,7 +191,7 @@ impl QuickSettingsWindow {
         scroll_container.set_vscrollbar_policy(PolicyType::Automatic);
         scroll_container.set_propagate_natural_height(true);
 
-        // Create the QuickSettingsWindow struct first (without content)
+        // Content is built after construction.
         let qs = Rc::new(Self {
             window: window.clone(),
             click_catcher: RefCell::new(None),
@@ -212,6 +211,7 @@ impl QuickSettingsWindow {
             audio_mic_callback_id: Cell::new(None),
             brightness_callback_id: Cell::new(None),
             updates_callback_id: Cell::new(None),
+            theme_callback_id: Cell::new(None),
             network: Rc::new(NetworkCardState::new()),
             bluetooth: Rc::new(BluetoothCardState::new()),
             vpn: Rc::new(VpnCardState::new()),
@@ -223,7 +223,6 @@ impl QuickSettingsWindow {
             power: RefCell::new(None),
         });
 
-        // Build the control center content (uses qs.scroll_container internally)
         let outer = Self::build_content(&qs);
         window.set_child(Some(&outer));
 
@@ -250,6 +249,17 @@ impl QuickSettingsWindow {
 
         // Subscribe to services
         Self::subscribe_to_services(&qs);
+
+        // Update revealer durations when animations config is toggled at runtime.
+        {
+            let qs_weak = Rc::downgrade(&qs);
+            let id = ConfigManager::global().on_theme_change(move || {
+                if let Some(qs) = qs_weak.upgrade() {
+                    Self::update_revealer_durations(&qs);
+                }
+            });
+            qs.theme_callback_id.set(Some(id));
+        }
 
         // Set VPN keyboard state's reference to this QS window for keyboard grab management
         vpn_card::set_quick_settings_window(Rc::downgrade(&qs));
@@ -632,21 +642,16 @@ impl QuickSettingsWindow {
             });
         }
 
-        // Store references (use base fields)
         *qs.network.base.toggle.borrow_mut() = Some(network_card.toggle.clone());
         *qs.network.base.card_icon.borrow_mut() = Some(network_card.icon_handle.clone());
         *qs.network.base.arrow.borrow_mut() = network_card.expander_icon.clone();
-
-        // Store title label for dynamic updates
         *qs.network.title_label.borrow_mut() = Some(network_card.title.clone());
-
-        // Store subtitle label reference
         *qs.network.subtitle_label.borrow_mut() = Some(subtitle_result.label);
 
-        // Build revealer
         let network_revealer = Revealer::new();
         network_revealer.set_reveal_child(false);
         network_revealer.set_transition_type(RevealerTransitionType::SlideDown);
+        network_revealer.set_transition_duration(ConfigManager::global().animation_duration(250));
         let network_state = Rc::clone(&qs.network);
 
         let network_details = build_wifi_details(&network_state, qs.window.downgrade());
@@ -744,16 +749,15 @@ impl QuickSettingsWindow {
             });
         }
 
-        // Store references (use base fields)
         *qs.bluetooth.base.toggle.borrow_mut() = Some(bt_card.toggle.clone());
         *qs.bluetooth.base.card_icon.borrow_mut() = Some(bt_card.icon_handle.clone());
         *qs.bluetooth.base.subtitle.borrow_mut() = bt_card.subtitle.clone();
         *qs.bluetooth.base.arrow.borrow_mut() = bt_card.expander_icon.clone();
 
-        // Build revealer
         let bt_revealer = Revealer::new();
         bt_revealer.set_reveal_child(false);
         bt_revealer.set_transition_type(RevealerTransitionType::SlideDown);
+        bt_revealer.set_transition_duration(ConfigManager::global().animation_duration(250));
 
         let bt_state = Rc::clone(&qs.bluetooth);
         let bt_details = build_bluetooth_details(&bt_state);
@@ -824,16 +828,15 @@ impl QuickSettingsWindow {
             });
         }
 
-        // Store references (use base fields)
         *qs.vpn.base.toggle.borrow_mut() = Some(vpn_card.toggle.clone());
         *qs.vpn.base.card_icon.borrow_mut() = Some(vpn_card.icon_handle.clone());
         *qs.vpn.base.subtitle.borrow_mut() = vpn_card.subtitle.clone();
         *qs.vpn.base.arrow.borrow_mut() = vpn_card.expander_icon.clone();
 
-        // Build revealer
         let vpn_revealer = Revealer::new();
         vpn_revealer.set_reveal_child(false);
         vpn_revealer.set_transition_type(RevealerTransitionType::SlideDown);
+        vpn_revealer.set_transition_duration(ConfigManager::global().animation_duration(250));
 
         let vpn_state = Rc::clone(&qs.vpn);
         let vpn_details = build_vpn_details(&vpn_state);
@@ -879,7 +882,6 @@ impl QuickSettingsWindow {
             });
         }
 
-        // Store references
         *qs.idle_inhibitor.toggle.borrow_mut() = Some(idle_card.toggle.clone());
         *qs.idle_inhibitor.card_icon.borrow_mut() = Some(idle_card.icon_handle.clone());
         *qs.idle_inhibitor.subtitle.borrow_mut() = idle_card.subtitle.clone();
@@ -956,7 +958,6 @@ impl QuickSettingsWindow {
         }
         audio_hint_label.set_visible(audio_snapshot.available && !audio_snapshot.control_available);
 
-        // Store references
         *qs.audio.mute_button.borrow_mut() = Some(audio_widgets.mute_button.clone());
         *qs.audio.icon_handle.borrow_mut() = Some(audio_widgets.icon_handle.clone());
         *qs.audio.slider.borrow_mut() = Some(audio_widgets.slider.clone());
@@ -1053,7 +1054,6 @@ impl QuickSettingsWindow {
         mic_hint_label
             .set_visible(audio_snapshot.available && !audio_snapshot.mic_control_available);
 
-        // Store references
         *qs.mic.mute_button.borrow_mut() = Some(mic_widgets.mute_button.clone());
         *qs.mic.icon_handle.borrow_mut() = Some(mic_widgets.icon_handle.clone());
         *qs.mic.slider.borrow_mut() = Some(mic_widgets.slider.clone());
@@ -1111,7 +1111,6 @@ impl QuickSettingsWindow {
             });
         }
 
-        // Store references
         *qs.brightness.slider.borrow_mut() = Some(brightness_widgets.slider.clone());
         *qs.brightness.icon_handle.borrow_mut() = Some(brightness_widgets.icon_handle.clone());
 
@@ -1121,6 +1120,44 @@ impl QuickSettingsWindow {
     /// Show inline Wi-Fi password dialog for the given SSID.
     pub fn show_wifi_password_dialog(&self, ssid: &str) {
         network_card::show_password_dialog(&self.network, ssid);
+    }
+
+    /// Update all revealer transition durations based on the current
+    /// `theme.animations` config.
+    ///
+    /// Called from the `on_theme_change` callback so that toggling animations
+    /// at runtime takes effect without restarting.
+    fn update_revealer_durations(qs: &Rc<Self>) {
+        let cfg = ConfigManager::global();
+
+        // Toggle cards use the GTK default duration (250ms) when enabled.
+        let card_duration = cfg.animation_duration(250);
+        for revealer in [
+            qs.network.base.revealer.borrow(),
+            qs.bluetooth.base.revealer.borrow(),
+            qs.vpn.base.revealer.borrow(),
+            qs.updates.base.revealer.borrow(),
+        ] {
+            if let Some(r) = revealer.as_ref() {
+                r.set_transition_duration(card_duration);
+            }
+        }
+
+        // Power card (only present in expander variant).
+        if let Some(ref power) = *qs.power.borrow()
+            && let Some(r) = power.base.revealer.borrow().as_ref()
+        {
+            r.set_transition_duration(card_duration);
+        }
+
+        // Audio/mic use an explicit 200ms duration.
+        let audio_duration = cfg.animation_duration(200);
+        if let Some(r) = qs.audio.revealer.borrow().as_ref() {
+            r.set_transition_duration(audio_duration);
+        }
+        if let Some(r) = qs.mic.revealer.borrow().as_ref() {
+            r.set_transition_duration(audio_duration);
+        }
     }
 
     /// Reset all UI state to its initial (collapsed) appearance.
@@ -1478,6 +1515,9 @@ impl Drop for QuickSettingsWindow {
         }
         if let Some(id) = self.updates_callback_id.take() {
             UpdatesService::global().disconnect(id);
+        }
+        if let Some(id) = self.theme_callback_id.take() {
+            ConfigManager::global().disconnect_theme_callback(id);
         }
 
         clear_current_qs_window();

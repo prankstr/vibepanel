@@ -504,7 +504,7 @@ impl NotificationToastManager {
         let mut y_offset = TOAST_BAR_MARGIN;
         for &id in order.iter() {
             if let Some(toast) = toasts.get(&id) {
-                toast.update_bar_margin(y_offset, true);
+                toast.update_bar_margin(y_offset, ConfigManager::global().animations_enabled());
                 y_offset += toast.height() + TOAST_GAP;
             }
         }

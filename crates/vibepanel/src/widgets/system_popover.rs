@@ -26,6 +26,7 @@ use gtk4::{
     Align, Box as GtkBox, Label, Orientation, ProgressBar, Revealer, RevealerTransitionType, Widget,
 };
 
+use crate::services::config_manager::ConfigManager;
 use crate::services::icons::{IconHandle, IconsService};
 use crate::services::system::{SystemService, SystemSnapshot, format_bytes_long, format_speed};
 use crate::styles::{button, card, color, icon, surface, system_popover as sp};
@@ -306,7 +307,7 @@ pub fn build_system_popover_with_controller() -> (Widget, SystemPopoverControlle
 
     let cores_revealer = Revealer::new();
     cores_revealer.set_transition_type(RevealerTransitionType::SlideDown);
-    cores_revealer.set_transition_duration(200);
+    cores_revealer.set_transition_duration(ConfigManager::global().animation_duration(200));
     cores_revealer.set_reveal_child(false);
 
     let cpu_cores_box = GtkBox::new(Orientation::Vertical, 4);

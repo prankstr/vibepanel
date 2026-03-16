@@ -275,16 +275,12 @@ fn populate_notification_list(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    let animations = ConfigManager::global().animations_enabled();
-
     for notification in &notifications {
         let revealer = Revealer::new();
         revealer.set_transition_type(RevealerTransitionType::SlideDown);
-        if animations {
-            revealer.set_transition_duration(DISMISS_ANIMATION_MS as u32);
-        } else {
-            revealer.set_transition_duration(0);
-        }
+        revealer.set_transition_duration(
+            ConfigManager::global().animation_duration(DISMISS_ANIMATION_MS as u32),
+        );
         revealer.set_reveal_child(true);
 
         let row = build_notification_row(

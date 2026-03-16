@@ -20,6 +20,7 @@ use super::ui_helpers::{
     set_icon_active, set_subtitle_active,
 };
 use super::window::current_quick_settings_window;
+use crate::services::config_manager::ConfigManager;
 use crate::services::surfaces::SurfaceStyleManager;
 use crate::services::updates::{UpdatesService, UpdatesSnapshot};
 use crate::styles::{color, qs, row};
@@ -120,6 +121,7 @@ pub fn build_updates_card(
     let revealer = Revealer::new();
     revealer.set_reveal_child(false);
     revealer.set_transition_type(gtk4::RevealerTransitionType::SlideDown);
+    revealer.set_transition_duration(ConfigManager::global().animation_duration(250));
 
     let details = build_updates_details(state);
     revealer.set_child(Some(&details.container));

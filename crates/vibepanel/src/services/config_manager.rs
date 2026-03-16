@@ -86,7 +86,6 @@ thread_local! {
 }
 
 impl ConfigManager {
-    /// Create a new ConfigManager with the given initial config.
     fn new(config: Config, config_path: Option<PathBuf>) -> Rc<Self> {
         Rc::new(Self {
             config: RefCell::new(config),
@@ -151,42 +150,46 @@ impl ConfigManager {
         self.config.borrow().widgets.border_radius
     }
 
-    /// Get the bar size (height) from the current configuration.
     pub fn bar_size(&self) -> u32 {
         self.config.borrow().bar.size
     }
 
-    /// Get the bar padding (vertical padding inside bar) from the current configuration.
     pub fn bar_padding(&self) -> u32 {
         self.config.borrow().bar.padding
     }
 
-    /// Get the bar screen margin from the current configuration.
     pub fn screen_margin(&self) -> u32 {
         self.config.borrow().bar.screen_margin
     }
 
-    /// Get the popover offset (gap between widget and popover) from the current configuration.
     pub fn popover_offset(&self) -> u32 {
         self.config.borrow().bar.popover_offset
     }
 
-    /// Get the bar background opacity from the current configuration.
     pub fn bar_background_opacity(&self) -> f64 {
         self.config.borrow().bar.background_opacity
     }
 
-    /// Check if the bar is positioned at the bottom of the screen.
     pub fn bar_is_bottom(&self) -> bool {
         self.config.borrow().bar.is_bottom()
     }
 
-    /// Check if animations are enabled globally.
-    ///
-    /// When false, CSS transitions, popover animations, workspace indicator
-    /// animations, and other motion effects are suppressed.
+    /// Whether UI animations are enabled (CSS transitions, revealer
+    /// animations, workspace indicator transitions).
     pub fn animations_enabled(&self) -> bool {
         self.config.borrow().theme.animations
+    }
+
+    /// Return `default_ms` when animations are enabled, or `0` when disabled.
+    ///
+    /// Use this to set transition durations on GTK widgets (e.g. `Revealer`)
+    /// so a single call replaces the recurring if/else pattern.
+    pub fn animation_duration(&self, default_ms: u32) -> u32 {
+        if self.animations_enabled() {
+            default_ms
+        } else {
+            0
+        }
     }
 
     /// Check if the ripple effect is enabled.
@@ -250,7 +253,6 @@ impl ConfigManager {
         self.theme_callbacks.register(move |_: &()| callback())
     }
 
-    /// Unregister a theme change callback.
     pub fn disconnect_theme_callback(&self, id: CallbackId) -> bool {
         self.theme_callbacks.unregister(id)
     }

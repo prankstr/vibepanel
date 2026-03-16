@@ -25,6 +25,7 @@ use gtk4::{
 use tracing::{debug, warn};
 
 use crate::services::compositor::CompositorManager;
+use crate::services::config_manager::ConfigManager;
 use crate::services::icons::{IconHandle, IconsService};
 use crate::styles::{button, card, color, qs, row};
 use crate::widgets::base::configure_popover;
@@ -578,6 +579,7 @@ pub fn build_power_card_expander() -> (
     let revealer = Revealer::new();
     revealer.set_reveal_child(false);
     revealer.set_transition_type(RevealerTransitionType::SlideDown);
+    revealer.set_transition_duration(ConfigManager::global().animation_duration(250));
 
     let details = build_power_details();
     revealer.set_child(Some(&details.container));
