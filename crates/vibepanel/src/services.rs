@@ -29,6 +29,7 @@ pub mod callbacks;
 pub mod cava;
 pub mod compositor;
 pub mod config_manager;
+pub mod gpu;
 pub mod icons;
 pub mod idle_inhibitor;
 pub mod ipc;

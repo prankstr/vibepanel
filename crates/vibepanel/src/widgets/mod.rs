@@ -20,6 +20,7 @@ mod calendar_popover;
 mod clock;
 mod cpu;
 mod custom;
+mod gpu;
 pub mod layer_shell_popover;
 mod marquee_label;
 mod media;
@@ -63,6 +64,7 @@ pub use workspaces::{WorkspacesConfig, WorkspacesWidget};
 
 pub use cpu::{CpuConfig, CpuWidget};
 pub use custom::{CustomConfig, CustomWidget};
+pub use gpu::{GpuConfig, GpuWidget};
 pub use memory::{MemoryConfig, MemoryWidget};
 
 use gtk4::Widget;
@@ -72,6 +74,7 @@ use tracing::{debug, warn};
 use vibepanel_core::config::WidgetEntry;
 
 use crate::services::battery::BatteryService;
+use crate::services::gpu::GpuService;
 
 /// Trait for widget configuration types.
 ///
@@ -265,6 +268,19 @@ impl WidgetFactory {
                 Some(BuiltWidget {
                     widget: root,
                     handle: Box::new(memory),
+                })
+            }
+            "gpu" => {
+                if !GpuService::global().snapshot().available {
+                    debug!("Skipping gpu widget: no supported GPU detected");
+                    return None;
+                }
+                let cfg = GpuConfig::from_entry(entry);
+                let gpu = GpuWidget::new(cfg);
+                let root = gpu.widget().clone().upcast::<Widget>();
+                Some(BuiltWidget {
+                    widget: root,
+                    handle: Box::new(gpu),
                 })
             }
             "media" => {
