@@ -1,12 +1,14 @@
-//! GpuService - polling-based GPU resource monitoring via sysfs.
+//! GpuService - polling-based GPU resource monitoring.
 //!
 //! This service provides GPU utilization, VRAM usage, temperature, clock speed,
-//! and power draw for AMD GPUs by reading sysfs files directly.
+//! and power draw by reading vendor-specific interfaces:
 //!
-//! Currently supports AMD GPUs only (via the `amdgpu` kernel driver).
-//! NVIDIA support would require the `nvml-wrapper` crate and is deferred.
+//! - **AMD**: sysfs files under `/sys/class/drm/cardN/device/`
+//! - **NVIDIA**: NVML via the `nvml-wrapper` crate (runtime-loaded `libnvidia-ml.so`)
 //!
-//! ## Sysfs Files (under `/sys/class/drm/cardN/device/`)
+//! Only the first detected GPU is monitored (AMD checked first, then NVIDIA).
+//!
+//! ## AMD Sysfs Files (under `/sys/class/drm/cardN/device/`)
 //!
 //! | File                          | Metric              | Parse            |
 //! |-------------------------------|---------------------|------------------|
@@ -34,52 +36,43 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use gtk4::glib::{self, SourceId};
+use nvml_wrapper::Nvml;
+use nvml_wrapper::enum_wrappers::device::{Clock, TemperatureSensor};
 use tracing::{debug, trace, warn};
 
 use super::callbacks::{CallbackId, Callbacks};
 
-/// Default polling interval in seconds.
 const DEFAULT_POLL_INTERVAL_SECS: u32 = 3;
 
 /// Threshold above which GPU usage is considered "high".
 ///
 /// Set higher than CPU (80%) because sustained high GPU usage is normal
 /// during gaming, rendering, and compute workloads.
-pub const GPU_HIGH_USAGE_THRESHOLD: f32 = 90.0;
+pub(crate) const GPU_HIGH_USAGE_THRESHOLD: f32 = 90.0;
 
-/// Base path for DRM devices.
 const DRM_CLASS_PATH: &str = "/sys/class/drm";
 
-/// Canonical snapshot of GPU state.
 #[derive(Debug, Clone, Default)]
 pub struct GpuSnapshot {
-    /// Whether a supported GPU was detected.
     pub available: bool,
-
     /// GPU utilization percentage (0.0 - 100.0).
     pub gpu_usage: Option<f32>,
-
     /// Used VRAM in bytes.
     pub vram_used: Option<u64>,
-
     /// Total VRAM in bytes.
     pub vram_total: Option<u64>,
-
-    /// GPU temperature in Celsius.
+    /// GPU temperature in degrees Celsius.
     pub temperature: Option<f32>,
-
     /// GPU clock speed in MHz.
     pub clock_mhz: Option<u64>,
-
     /// GPU power draw in watts.
     pub power_watts: Option<f32>,
-
-    /// Device name / product string (e.g., "AMD Radeon RX 7900 XTX").
+    /// Device name (product name, or `vendor:device` PCI ID fallback).
     pub device_name: Option<String>,
 }
 
 impl GpuSnapshot {
-    /// Create an initial "unknown" snapshot before first poll.
+    /// Returns a snapshot representing an unknown/unavailable GPU.
     pub fn unknown() -> Self {
         Self::default()
     }
@@ -100,55 +93,54 @@ impl GpuSnapshot {
     }
 }
 
-/// Discovered AMD GPU device paths.
 struct AmdGpuDevice {
-    /// Path to the device directory (e.g., `/sys/class/drm/card1/device`).
+    /// e.g., `/sys/class/drm/card1/device`
     device_path: PathBuf,
 
     /// Cached hwmon directory path (e.g., `/sys/class/drm/card1/device/hwmon/hwmon3`).
     /// `None` if hwmon was not found (metrics like temp/clock/power won't be available).
     hwmon_path: Option<PathBuf>,
 
-    /// Device name read once at discovery time.
     device_name: Option<String>,
+}
+
+struct NvidiaGpuDevice {
+    /// Kept alive for the lifetime of the service; `Device` handles are
+    /// re-acquired each poll via `device_by_index` to avoid lifetime complexity.
+    nvml: Nvml,
+
+    device_index: u32,
+    device_name: Option<String>,
+}
+
+enum GpuDevice {
+    Amd(AmdGpuDevice),
+    Nvidia(Box<NvidiaGpuDevice>), // boxed to keep enum size small (Nvml is ~11KB)
 }
 
 /// Shared, process-wide GPU monitoring service.
 ///
-/// This service polls GPU metrics at regular intervals via sysfs and notifies
-/// registered callbacks whenever the snapshot updates.
+/// Polls GPU metrics at regular intervals via vendor-specific backends
+/// (AMD sysfs, NVIDIA NVML) and notifies registered callbacks whenever
+/// the snapshot updates.
 pub struct GpuService {
-    /// Current GPU snapshot.
     snapshot: RefCell<GpuSnapshot>,
-
-    /// Registered callbacks for snapshot updates.
     callbacks: Callbacks<GpuSnapshot>,
 
     /// Timer source for periodic polling.
     timer_source: RefCell<Option<SourceId>>,
 
-    /// Discovered GPU device, if any.
-    device: Option<AmdGpuDevice>,
+    device: Option<GpuDevice>,
 
     /// Polling interval in seconds.
     poll_interval: Cell<u32>,
 }
 
 impl GpuService {
-    /// Create a new GpuService instance.
     fn new() -> Rc<Self> {
         debug!("GpuService: initializing");
 
-        let device = Self::discover_amdgpu();
-
-        if let Some(ref dev) = device {
-            debug!(
-                "GpuService: found AMD GPU at {:?} (hwmon: {:?}, name: {:?})",
-                dev.device_path, dev.hwmon_path, dev.device_name
-            );
-        } else {
-            debug!("GpuService: no AMD GPU found");
-        }
+        let device = Self::discover_gpu();
 
         let initial_snapshot = if device.is_some() {
             GpuSnapshot {
@@ -174,7 +166,6 @@ impl GpuService {
         service
     }
 
-    /// Get the global GpuService singleton.
     pub fn global() -> Rc<Self> {
         thread_local! {
             static INSTANCE: Rc<GpuService> = GpuService::new();
@@ -191,24 +182,19 @@ impl GpuService {
         F: Fn(&GpuSnapshot) + 'static,
     {
         let id = self.callbacks.register(callback);
-        // Immediately send current snapshot so widgets can render
         self.callbacks.notify_single(id, &self.snapshot.borrow());
         id
     }
 
-    /// Unregister a callback by its ID.
     pub fn disconnect(&self, id: CallbackId) -> bool {
         self.callbacks.unregister(id)
     }
 
-    /// Return the current GPU snapshot.
     pub fn snapshot(&self) -> GpuSnapshot {
         self.snapshot.borrow().clone()
     }
 
-    /// Start the periodic polling timer.
     fn start_polling(this: &Rc<Self>) {
-        // Do an initial poll immediately
         this.poll();
 
         let this_weak = Rc::downgrade(this);
@@ -228,7 +214,6 @@ impl GpuService {
         *this.timer_source.borrow_mut() = Some(source_id);
     }
 
-    /// Poll GPU metrics from sysfs and update the snapshot.
     fn poll(&self) {
         let Some(device) = &self.device else {
             return;
@@ -236,6 +221,16 @@ impl GpuService {
 
         trace!("GpuService: polling GPU metrics");
 
+        let snapshot = match device {
+            GpuDevice::Amd(amd) => Self::poll_amd(amd),
+            GpuDevice::Nvidia(nvidia) => Self::poll_nvidia(nvidia),
+        };
+
+        *self.snapshot.borrow_mut() = snapshot;
+        self.callbacks.notify(&self.snapshot.borrow());
+    }
+
+    fn poll_amd(device: &AmdGpuDevice) -> GpuSnapshot {
         let gpu_usage =
             read_sysfs_u32(&device.device_path.join("gpu_busy_percent")).map(|v| v.min(100) as f32);
 
@@ -255,7 +250,7 @@ impl GpuService {
             (None, None, None)
         };
 
-        let snapshot = GpuSnapshot {
+        GpuSnapshot {
             available: true,
             gpu_usage,
             vram_used,
@@ -264,10 +259,73 @@ impl GpuService {
             clock_mhz,
             power_watts,
             device_name: device.device_name.clone(),
+        }
+    }
+
+    fn poll_nvidia(nvidia: &NvidiaGpuDevice) -> GpuSnapshot {
+        let device = match nvidia.nvml.device_by_index(nvidia.device_index) {
+            Ok(d) => d,
+            Err(e) => {
+                warn!("GpuService: failed to acquire NVIDIA device handle: {e}");
+                return GpuSnapshot {
+                    available: true,
+                    device_name: nvidia.device_name.clone(),
+                    ..Default::default()
+                };
+            }
         };
 
-        *self.snapshot.borrow_mut() = snapshot.clone();
-        self.callbacks.notify(&snapshot);
+        let gpu_usage = device
+            .utilization_rates()
+            .ok()
+            .map(|u| (u.gpu as f32).min(100.0));
+
+        let (vram_used, vram_total) = device
+            .memory_info()
+            .ok()
+            .map(|m| (Some(m.used), Some(m.total)))
+            .unwrap_or((None, None));
+
+        let temperature = device
+            .temperature(TemperatureSensor::Gpu)
+            .ok()
+            .map(|t| t as f32);
+
+        let clock_mhz = device.clock_info(Clock::Graphics).ok().map(|c| c as u64);
+
+        let power_watts = device.power_usage().ok().map(|mw| mw as f32 / 1000.0);
+
+        GpuSnapshot {
+            available: true,
+            gpu_usage,
+            vram_used,
+            vram_total,
+            temperature,
+            clock_mhz,
+            power_watts,
+            device_name: nvidia.device_name.clone(),
+        }
+    }
+
+    fn discover_gpu() -> Option<GpuDevice> {
+        if let Some(amd) = Self::discover_amdgpu() {
+            debug!(
+                "GpuService: found AMD GPU at {:?} (hwmon: {:?}, name: {:?})",
+                amd.device_path, amd.hwmon_path, amd.device_name
+            );
+            return Some(GpuDevice::Amd(amd));
+        }
+
+        if let Some(nvidia) = Self::discover_nvidia() {
+            debug!(
+                "GpuService: found NVIDIA GPU (index: {}, name: {:?})",
+                nvidia.device_index, nvidia.device_name
+            );
+            return Some(GpuDevice::Nvidia(Box::new(nvidia)));
+        }
+
+        debug!("GpuService: no supported GPU found");
+        None
     }
 
     /// Discover the first AMD GPU by scanning `/sys/class/drm/card*`.
@@ -289,7 +347,7 @@ impl GpuService {
             }
         };
 
-        // Collect card directories (card0, card1, ...) - skip render nodes
+        // Exclude connector nodes (e.g. card0-HDMI-A-1)
         let mut cards: Vec<PathBuf> = Vec::new();
         for entry in entries.flatten() {
             let name = entry.file_name();
@@ -308,7 +366,6 @@ impl GpuService {
                 continue;
             }
 
-            // Check if this card uses the amdgpu driver by resolving the driver symlink
             let driver_link = device_path.join("driver");
             if let Ok(driver_target) = fs::read_link(&driver_link) {
                 let driver_name = driver_target
@@ -330,6 +387,49 @@ impl GpuService {
         }
 
         None
+    }
+
+    /// Discover an NVIDIA GPU via NVML.
+    ///
+    /// `Nvml::init()` runtime-loads `libnvidia-ml.so`. If the library isn't
+    /// present (no NVIDIA driver installed), this returns `None` gracefully.
+    fn discover_nvidia() -> Option<NvidiaGpuDevice> {
+        let nvml = match Nvml::init() {
+            Ok(n) => n,
+            Err(e) => {
+                debug!("GpuService: NVML init failed (no NVIDIA driver?): {e}");
+                return None;
+            }
+        };
+
+        let count = match nvml.device_count() {
+            Ok(0) => {
+                debug!("GpuService: NVML reports 0 devices");
+                return None;
+            }
+            Ok(c) => c,
+            Err(e) => {
+                warn!("GpuService: NVML device_count failed: {e}");
+                return None;
+            }
+        };
+
+        let device_index = 0;
+        let device_name = match nvml.device_by_index(device_index) {
+            Ok(dev) => dev.name().ok(),
+            Err(e) => {
+                warn!("GpuService: NVML device_by_index({device_index}) failed: {e}");
+                return None;
+            }
+        };
+
+        debug!("GpuService: NVML found {count} device(s), using index {device_index}");
+
+        Some(NvidiaGpuDevice {
+            nvml,
+            device_index,
+            device_name,
+        })
     }
 }
 
@@ -367,19 +467,13 @@ fn discover_hwmon(device_path: &Path) -> Option<PathBuf> {
     None
 }
 
-/// Read a device name from sysfs.
-///
 /// Tries `product_name` first (available on some AMD GPUs), then falls back
 /// to reading `vendor` + `device` IDs.
 fn read_device_name(device_path: &Path) -> Option<String> {
-    // Try product_name first (not always available)
-    if let Some(name) = read_sysfs_string(&device_path.join("product_name"))
-        && !name.is_empty()
-    {
+    if let Some(name) = read_sysfs_string(&device_path.join("product_name")) {
         return Some(name);
     }
 
-    // Fallback: read vendor/device PCI IDs
     let vendor = read_sysfs_string(&device_path.join("vendor"))?;
     let device = read_sysfs_string(&device_path.join("device"))?;
     Some(format!(
@@ -389,19 +483,16 @@ fn read_device_name(device_path: &Path) -> Option<String> {
     ))
 }
 
-/// Read a sysfs file and parse as `u32`.
 fn read_sysfs_u32(path: &Path) -> Option<u32> {
     let content = fs::read_to_string(path).ok()?;
     content.trim().parse::<u32>().ok()
 }
 
-/// Read a sysfs file and parse as `u64`.
 fn read_sysfs_u64(path: &Path) -> Option<u64> {
     let content = fs::read_to_string(path).ok()?;
     content.trim().parse::<u64>().ok()
 }
 
-/// Read a sysfs file as a trimmed string.
 fn read_sysfs_string(path: &Path) -> Option<String> {
     let content = fs::read_to_string(path).ok()?;
     let trimmed = content.trim().to_string();
@@ -409,33 +500,6 @@ fn read_sysfs_string(path: &Path) -> Option<String> {
         None
     } else {
         Some(trimmed)
-    }
-}
-
-/// Format VRAM bytes to a short human-readable string (e.g., "4.2 GB").
-pub fn format_vram(bytes: u64) -> String {
-    const GB: f64 = 1_073_741_824.0;
-    const MB: f64 = 1_048_576.0;
-
-    let b = bytes as f64;
-    if b >= GB {
-        format!("{:.1} GB", b / GB)
-    } else {
-        format!("{:.0} MB", b / MB)
-    }
-}
-
-/// Format VRAM bytes to a short bar label (e.g., "4.2G").
-#[allow(dead_code)]
-pub fn format_vram_short(bytes: u64) -> String {
-    const GB: f64 = 1_073_741_824.0;
-    const MB: f64 = 1_048_576.0;
-
-    let b = bytes as f64;
-    if b >= GB {
-        format!("{:.1}G", b / GB)
-    } else {
-        format!("{:.0}M", b / MB)
     }
 }
 
@@ -483,15 +547,12 @@ mod tests {
     }
 
     #[test]
-    fn test_format_vram() {
-        assert_eq!(format_vram(8 * 1024 * 1024 * 1024), "8.0 GB");
-        assert_eq!(format_vram(512 * 1024 * 1024), "512 MB");
-        assert_eq!(format_vram(1536 * 1024 * 1024), "1.5 GB");
-    }
-
-    #[test]
-    fn test_format_vram_short() {
-        assert_eq!(format_vram_short(8 * 1024 * 1024 * 1024), "8.0G");
-        assert_eq!(format_vram_short(512 * 1024 * 1024), "512M");
+    fn test_vram_percent_zero_total() {
+        let snap = GpuSnapshot {
+            vram_used: Some(0),
+            vram_total: Some(0),
+            ..Default::default()
+        };
+        assert!(snap.vram_percent().is_none());
     }
 }

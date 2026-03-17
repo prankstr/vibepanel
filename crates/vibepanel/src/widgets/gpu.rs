@@ -1,40 +1,34 @@
 //! GPU widget - displays current GPU usage via the `GpuService`.
 //!
-//! The GpuService polls GPU metrics at regular intervals by reading sysfs files
-//! for AMD GPUs; this widget subscribes to those snapshots and renders
-//! icon/text/CSS/tooltip accordingly.
+//! The GpuService polls GPU metrics at regular intervals using vendor-specific
+//! backends (AMD sysfs, NVIDIA NVML); this widget subscribes to those snapshots
+//! and renders icon/text/CSS/tooltip accordingly.
 //!
 //! Uses:
 //! - `IconsService` (via BaseWidget) for themed GPU icon
 //! - `TooltipManager` for styled tooltips
 //! - Shared popover with CPU/Memory widgets for detailed system info
-//!
-//! Currently supports AMD GPUs only (via `amdgpu` kernel driver).
 
 use gtk4::Label;
 use gtk4::prelude::*;
 use vibepanel_core::config::WidgetEntry;
 
 use crate::services::callbacks::CallbackId;
-use crate::services::gpu::{GpuService, GpuSnapshot, format_vram};
+use crate::services::gpu::{GpuService, GpuSnapshot};
 use crate::services::icons::IconHandle;
-use crate::services::system::{SystemService, SystemSnapshot};
+use crate::services::system::{SystemService, SystemSnapshot, format_bytes_long};
 use crate::services::tooltip::TooltipManager;
 use crate::styles::{class, widget};
 use crate::widgets::base::BaseWidget;
 use crate::widgets::system_popover::SystemPopoverBinding;
 use crate::widgets::{WidgetConfig, warn_unknown_options};
 
-/// Default configuration values
 const DEFAULT_SHOW_ICON: bool = true;
 const DEFAULT_SHOW_PERCENTAGE: bool = true;
 
-/// Configuration for the GPU widget.
 #[derive(Debug, Clone)]
 pub struct GpuConfig {
-    /// Whether to show an icon.
     pub show_icon: bool,
-    /// Whether to show the GPU usage percentage.
     pub show_percentage: bool,
 }
 
@@ -73,16 +67,12 @@ impl Default for GpuConfig {
 /// GPU widget that displays icon, usage percentage, and opens a shared system
 /// popover on click.
 pub struct GpuWidget {
-    /// Shared base widget container.
     base: BaseWidget,
-    /// Callback ID for GpuService, used to disconnect on drop.
     gpu_callback_id: CallbackId,
-    /// Callback ID for SystemService (for shared popover updates).
     system_callback_id: CallbackId,
 }
 
 impl GpuWidget {
-    /// Create a new GPU widget with the given configuration.
     pub fn new(config: GpuConfig) -> Self {
         let base = BaseWidget::new(&[widget::GPU]);
 
@@ -97,7 +87,6 @@ impl GpuWidget {
         icon_handle.widget().set_visible(config.show_icon);
         percentage_label.set_visible(config.show_percentage);
 
-        // Subscribe to GpuService for GPU-specific updates
         let gpu_service = GpuService::global();
         let gpu_callback_id = {
             let container = base.widget().clone();
@@ -121,7 +110,7 @@ impl GpuWidget {
             })
         };
 
-        // Subscribe to SystemService for shared popover system updates
+        // Also subscribe to SystemService to keep the shared popover's CPU/memory data live.
         let system_service = SystemService::global();
         let system_callback_id = {
             let popover_binding = popover_binding.clone();
@@ -138,7 +127,6 @@ impl GpuWidget {
         }
     }
 
-    /// Get the root GTK widget for embedding in the bar.
     pub fn widget(&self) -> &gtk4::Box {
         self.base.widget()
     }
@@ -151,7 +139,7 @@ impl Drop for GpuWidget {
     }
 }
 
-/// Update the GPU widget visuals from a GPU snapshot.
+/// Update GPU widget visuals and tooltip from a snapshot.
 fn update_gpu_widget(
     container: &gtk4::Box,
     icon_handle: &IconHandle,
@@ -161,6 +149,9 @@ fn update_gpu_widget(
     snapshot: &GpuSnapshot,
 ) {
     if !snapshot.available {
+        container.remove_css_class(widget::GPU_HIGH);
+        icon_handle.remove_css_class(widget::GPU_HIGH);
+
         if show_icon {
             icon_handle.widget().set_visible(true);
         }
@@ -182,11 +173,7 @@ fn update_gpu_widget(
         icon_handle.remove_css_class(widget::GPU_HIGH);
     }
 
-    if show_icon {
-        icon_handle.widget().set_visible(true);
-    } else {
-        icon_handle.widget().set_visible(false);
-    }
+    icon_handle.widget().set_visible(show_icon);
 
     if show_percentage {
         let text = match snapshot.gpu_usage {
@@ -194,12 +181,9 @@ fn update_gpu_widget(
             None => "?".to_string(),
         };
         percentage_label.set_label(&text);
-        percentage_label.set_visible(true);
-    } else {
-        percentage_label.set_visible(false);
     }
+    percentage_label.set_visible(show_percentage);
 
-    // Build tooltip with available metrics
     let mut lines = Vec::new();
 
     if let Some(usage) = snapshot.gpu_usage {
@@ -215,8 +199,8 @@ fn update_gpu_widget(
     if let (Some(used), Some(total)) = (snapshot.vram_used, snapshot.vram_total) {
         lines.push(format!(
             "VRAM: {} / {}",
-            format_vram(used),
-            format_vram(total)
+            format_bytes_long(used),
+            format_bytes_long(total)
         ));
     }
 

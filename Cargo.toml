@@ -55,6 +55,7 @@ libpulse-binding = "2.28"
 libc = "0.2"
 udev = "0.9"
 sysinfo = { version = "0.33", default-features = false, features = ["system", "network", "component"] }
+nvml-wrapper = "0.12"
 
 # Synchronization
 parking_lot = "0.12"

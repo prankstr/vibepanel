@@ -7,7 +7,7 @@
 //! Uses:
 //! - `IconsService` (via BaseWidget) for themed CPU icon
 //! - `TooltipManager` for styled tooltips
-//! - Shared popover with Memory widget for detailed system info
+//! - Shared popover with Memory/GPU widgets for detailed system info
 
 use gtk4::Label;
 use gtk4::prelude::*;

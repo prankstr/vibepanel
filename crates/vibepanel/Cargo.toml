@@ -34,6 +34,7 @@ libc = { workspace = true }
 udev = { workspace = true }
 toml = { workspace = true }
 sysinfo = { workspace = true }
+nvml-wrapper = { workspace = true }
 parking_lot = { workspace = true }
 minreq = { workspace = true }
 

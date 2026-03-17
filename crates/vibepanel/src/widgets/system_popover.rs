@@ -31,7 +31,7 @@ use gtk4::{
 };
 
 use crate::services::config_manager::ConfigManager;
-use crate::services::gpu::{GpuService, GpuSnapshot, format_vram};
+use crate::services::gpu::{GpuService, GpuSnapshot};
 use crate::services::icons::{IconHandle, IconsService};
 use crate::services::system::{SystemService, SystemSnapshot, format_bytes_long, format_speed};
 use crate::styles::{button, card, color, icon, surface, system_popover as sp};
@@ -133,7 +133,6 @@ impl SystemPopoverController {
         }
         self.gpu_card.set_visible(true);
 
-        // Usage
         if let Some(usage) = snapshot.gpu_usage {
             self.gpu_usage_label.set_label(&format!("{:.1}%", usage));
             self.gpu_progress.set_fraction(usage as f64 / 100.0);
@@ -155,9 +154,14 @@ impl SystemPopoverController {
                     .vram_percent()
                     .map(|p| format!(" ({:.0}%)", p))
                     .unwrap_or_default();
-                format!("{} / {}{}", format_vram(used), format_vram(total), pct)
+                format!(
+                    "{} / {}{}",
+                    format_bytes_long(used),
+                    format_bytes_long(total),
+                    pct
+                )
             }
-            (Some(used), None) => format!("{} used", format_vram(used)),
+            (Some(used), None) => format!("{} used", format_bytes_long(used)),
             _ => "--".to_string(),
         };
         self.gpu_vram_label.set_label(&vram_text);
@@ -566,7 +570,6 @@ pub fn build_system_popover_with_controller() -> (Widget, SystemPopoverControlle
 
     controller.update_from_snapshot(&snapshot);
 
-    // Update GPU section with current GPU snapshot
     let gpu_snapshot = gpu_service.snapshot();
     controller.update_from_gpu_snapshot(&gpu_snapshot);
 
