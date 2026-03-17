@@ -30,6 +30,7 @@ close
 coffee
 computer
 delete
+developer_board
 devices
 download
 fast_forward
