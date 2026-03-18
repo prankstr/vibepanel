@@ -24,17 +24,40 @@ use crate::widgets::system_popover::SystemPopoverBinding;
 use crate::widgets::{WidgetConfig, warn_unknown_options};
 
 const DEFAULT_SHOW_ICON: bool = true;
-const DEFAULT_SHOW_PERCENTAGE: bool = true;
 
+/// GPU display format options.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub enum GpuFormat {
+    /// "76%"
+    #[default]
+    Percentage,
+    /// "72°C"
+    Temperature,
+    /// "76% 72°C"
+    Both,
+}
+
+impl GpuFormat {
+    fn from_str(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "temperature" | "temp" => Self::Temperature,
+            "both" => Self::Both,
+            _ => Self::Percentage,
+        }
+    }
+}
+
+/// Configuration for the GPU widget.
 #[derive(Debug, Clone)]
 pub struct GpuConfig {
     pub show_icon: bool,
-    pub show_percentage: bool,
+    /// Display format for GPU metrics.
+    pub format: GpuFormat,
 }
 
 impl WidgetConfig for GpuConfig {
     fn from_entry(entry: &WidgetEntry) -> Self {
-        warn_unknown_options("gpu", entry, &["show_icon", "show_percentage"]);
+        warn_unknown_options("gpu", entry, &["show_icon", "format"]);
 
         let show_icon = entry
             .options
@@ -42,16 +65,14 @@ impl WidgetConfig for GpuConfig {
             .and_then(|v| v.as_bool())
             .unwrap_or(DEFAULT_SHOW_ICON);
 
-        let show_percentage = entry
+        let format = entry
             .options
-            .get("show_percentage")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(DEFAULT_SHOW_PERCENTAGE);
+            .get("format")
+            .and_then(|v| v.as_str())
+            .map(GpuFormat::from_str)
+            .unwrap_or_default();
 
-        Self {
-            show_icon,
-            show_percentage,
-        }
+        Self { show_icon, format }
     }
 }
 
@@ -59,13 +80,11 @@ impl Default for GpuConfig {
     fn default() -> Self {
         Self {
             show_icon: DEFAULT_SHOW_ICON,
-            show_percentage: DEFAULT_SHOW_PERCENTAGE,
+            format: GpuFormat::default(),
         }
     }
 }
 
-/// GPU widget that displays icon, usage percentage, and opens a shared system
-/// popover on click.
 pub struct GpuWidget {
     base: BaseWidget,
     gpu_callback_id: CallbackId,
@@ -85,7 +104,6 @@ impl GpuWidget {
         let popover_binding = SystemPopoverBinding::new(&base);
 
         icon_handle.widget().set_visible(config.show_icon);
-        percentage_label.set_visible(config.show_percentage);
 
         let gpu_service = GpuService::global();
         let gpu_callback_id = {
@@ -93,7 +111,7 @@ impl GpuWidget {
             let icon_handle = icon_handle.clone();
             let percentage_label = percentage_label.clone();
             let show_icon = config.show_icon;
-            let show_percentage = config.show_percentage;
+            let format = config.format.clone();
             let popover_binding = popover_binding.clone();
 
             gpu_service.connect(move |snapshot: &GpuSnapshot| {
@@ -102,7 +120,7 @@ impl GpuWidget {
                     &icon_handle,
                     &percentage_label,
                     show_icon,
-                    show_percentage,
+                    &format,
                     snapshot,
                 );
 
@@ -139,13 +157,38 @@ impl Drop for GpuWidget {
     }
 }
 
+/// Format GPU label text according to the selected format.
+fn format_gpu_label(snapshot: &GpuSnapshot, format: &GpuFormat) -> String {
+    match format {
+        GpuFormat::Percentage => match snapshot.gpu_usage {
+            Some(usage) => format!("{:.0}%", usage),
+            None => "—".to_string(),
+        },
+        GpuFormat::Temperature => match snapshot.temperature {
+            Some(temp) => format!("{:.0}°C", temp),
+            None => "—".to_string(),
+        },
+        GpuFormat::Both => {
+            let usage_part = match snapshot.gpu_usage {
+                Some(usage) => format!("{:.0}%", usage),
+                None => "—".to_string(),
+            };
+            let temp_part = match snapshot.temperature {
+                Some(temp) => format!("{:.0}°C", temp),
+                None => "—".to_string(),
+            };
+            format!("{} {}", usage_part, temp_part)
+        }
+    }
+}
+
 /// Update GPU widget visuals and tooltip from a snapshot.
 fn update_gpu_widget(
     container: &gtk4::Box,
     icon_handle: &IconHandle,
     percentage_label: &Label,
     show_icon: bool,
-    show_percentage: bool,
+    format: &GpuFormat,
     snapshot: &GpuSnapshot,
 ) {
     if !snapshot.available {
@@ -155,10 +198,8 @@ fn update_gpu_widget(
         if show_icon {
             icon_handle.widget().set_visible(true);
         }
-        if show_percentage {
-            percentage_label.set_label("?");
-            percentage_label.set_visible(true);
-        }
+        percentage_label.set_label("—");
+        percentage_label.set_visible(true);
 
         let tooltip_manager = TooltipManager::global();
         tooltip_manager.set_styled_tooltip(container, "GPU: No supported GPU detected");
@@ -175,14 +216,9 @@ fn update_gpu_widget(
 
     icon_handle.widget().set_visible(show_icon);
 
-    if show_percentage {
-        let text = match snapshot.gpu_usage {
-            Some(usage) => format!("{:.0}%", usage),
-            None => "?".to_string(),
-        };
-        percentage_label.set_label(&text);
-    }
-    percentage_label.set_visible(show_percentage);
+    let text = format_gpu_label(snapshot, format);
+    percentage_label.set_label(&text);
+    percentage_label.set_visible(true);
 
     let mut lines = Vec::new();
 
@@ -233,14 +269,17 @@ mod tests {
         };
         let config = GpuConfig::from_entry(&entry);
         assert!(config.show_icon);
-        assert!(config.show_percentage);
+        assert_eq!(config.format, GpuFormat::Percentage);
     }
 
     #[test]
     fn test_gpu_config_custom() {
         let mut options = std::collections::HashMap::new();
         options.insert("show_icon".to_string(), toml::Value::Boolean(false));
-        options.insert("show_percentage".to_string(), toml::Value::Boolean(true));
+        options.insert(
+            "format".to_string(),
+            toml::Value::String("temperature".to_string()),
+        );
 
         let entry = WidgetEntry {
             name: "gpu".to_string(),
@@ -248,6 +287,88 @@ mod tests {
         };
         let config = GpuConfig::from_entry(&entry);
         assert!(!config.show_icon);
-        assert!(config.show_percentage);
+        assert_eq!(config.format, GpuFormat::Temperature);
+    }
+
+    #[test]
+    fn test_gpu_format_from_str() {
+        assert_eq!(GpuFormat::from_str("percentage"), GpuFormat::Percentage);
+        assert_eq!(GpuFormat::from_str("Percentage"), GpuFormat::Percentage);
+        assert_eq!(GpuFormat::from_str("temperature"), GpuFormat::Temperature);
+        assert_eq!(GpuFormat::from_str("Temperature"), GpuFormat::Temperature);
+        assert_eq!(GpuFormat::from_str("temp"), GpuFormat::Temperature);
+        assert_eq!(GpuFormat::from_str("TEMP"), GpuFormat::Temperature);
+        assert_eq!(GpuFormat::from_str("both"), GpuFormat::Both);
+        assert_eq!(GpuFormat::from_str("Both"), GpuFormat::Both);
+        assert_eq!(GpuFormat::from_str("unknown"), GpuFormat::Percentage);
+    }
+
+    #[test]
+    fn test_format_gpu_label_percentage() {
+        let snapshot = GpuSnapshot {
+            available: true,
+            gpu_usage: Some(76.0),
+            temperature: Some(72.0),
+            ..Default::default()
+        };
+        assert_eq!(format_gpu_label(&snapshot, &GpuFormat::Percentage), "76%");
+    }
+
+    #[test]
+    fn test_format_gpu_label_temperature() {
+        let snapshot = GpuSnapshot {
+            available: true,
+            gpu_usage: Some(76.0),
+            temperature: Some(72.0),
+            ..Default::default()
+        };
+        assert_eq!(format_gpu_label(&snapshot, &GpuFormat::Temperature), "72°C");
+    }
+
+    #[test]
+    fn test_format_gpu_label_temperature_unavailable() {
+        let snapshot = GpuSnapshot {
+            available: true,
+            gpu_usage: Some(76.0),
+            temperature: None,
+            ..Default::default()
+        };
+        // Shows dash when temperature is unavailable — no silent fallback
+        assert_eq!(format_gpu_label(&snapshot, &GpuFormat::Temperature), "—");
+    }
+
+    #[test]
+    fn test_format_gpu_label_both() {
+        let snapshot = GpuSnapshot {
+            available: true,
+            gpu_usage: Some(76.0),
+            temperature: Some(72.0),
+            ..Default::default()
+        };
+        assert_eq!(format_gpu_label(&snapshot, &GpuFormat::Both), "76% 72°C");
+    }
+
+    #[test]
+    fn test_format_gpu_label_both_no_temp() {
+        let snapshot = GpuSnapshot {
+            available: true,
+            gpu_usage: Some(76.0),
+            temperature: None,
+            ..Default::default()
+        };
+        assert_eq!(format_gpu_label(&snapshot, &GpuFormat::Both), "76% —");
+    }
+
+    #[test]
+    fn test_format_gpu_label_no_data() {
+        let snapshot = GpuSnapshot {
+            available: true,
+            gpu_usage: None,
+            temperature: None,
+            ..Default::default()
+        };
+        assert_eq!(format_gpu_label(&snapshot, &GpuFormat::Percentage), "—");
+        assert_eq!(format_gpu_label(&snapshot, &GpuFormat::Temperature), "—");
+        assert_eq!(format_gpu_label(&snapshot, &GpuFormat::Both), "— —");
     }
 }
