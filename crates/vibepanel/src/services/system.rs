@@ -362,7 +362,7 @@ pub fn format_speed(bytes_per_sec: u64) -> String {
     } else if bytes_per_sec >= MB {
         format!("{:.1} MB/s", bytes_per_sec as f64 / MB as f64)
     } else if bytes_per_sec >= KB {
-        format!("{:.0} KB/s", bytes_per_sec as f64 / KB as f64)
+        format!("{:.1} KB/s", bytes_per_sec as f64 / KB as f64)
     } else {
         format!("{} B/s", bytes_per_sec)
     }
@@ -387,7 +387,7 @@ mod tests {
     #[test]
     fn test_format_speed() {
         assert_eq!(format_speed(500), "500 B/s");
-        assert_eq!(format_speed(1024), "1 KB/s");
+        assert_eq!(format_speed(1024), "1.0 KB/s");
         assert_eq!(format_speed(1024 * 1024), "1.0 MB/s");
         assert_eq!(format_speed(1536 * 1024), "1.5 MB/s");
     }

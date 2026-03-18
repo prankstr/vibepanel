@@ -598,6 +598,25 @@ pub mod widget {
     /// GPU suspended/idle state (`.gpu-suspended`).
     pub const GPU_SUSPENDED: &str = "gpu-suspended";
 
+    // Network Speed
+    /// Network speed widget (`.network-speed`).
+    pub const NETWORK_SPEED: &str = "network-speed";
+
+    /// Network speed icon (`.network-speed-icon`).
+    pub const NETWORK_SPEED_ICON: &str = "network-speed-icon";
+
+    /// Network speed download arrow label (`.network-speed-dl-arrow`).
+    pub const NETWORK_SPEED_DL_ARROW: &str = "network-speed-dl-arrow";
+
+    /// Network speed download speed label (`.network-speed-dl-label`).
+    pub const NETWORK_SPEED_DL_LABEL: &str = "network-speed-dl-label";
+
+    /// Network speed upload arrow label (`.network-speed-ul-arrow`).
+    pub const NETWORK_SPEED_UL_ARROW: &str = "network-speed-ul-arrow";
+
+    /// Network speed upload speed label (`.network-speed-ul-label`).
+    pub const NETWORK_SPEED_UL_LABEL: &str = "network-speed-ul-label";
+
     // Custom
     /// Custom widget prefix (`.custom-<name>`).
     /// Each instance gets a dynamic `custom-{id}` class built from this prefix.

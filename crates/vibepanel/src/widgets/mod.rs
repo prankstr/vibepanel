@@ -29,6 +29,7 @@ mod media_popover;
 mod media_visualizer;
 mod media_window;
 mod memory;
+mod network_speed;
 mod notifications;
 mod notifications_common;
 mod notifications_popover;
@@ -66,6 +67,7 @@ pub use cpu::{CpuConfig, CpuWidget};
 pub use custom::{CustomConfig, CustomWidget};
 pub use gpu::{GpuConfig, GpuWidget};
 pub use memory::{MemoryConfig, MemoryWidget};
+pub use network_speed::{NetworkSpeedConfig, NetworkSpeedWidget};
 
 use gtk4::Widget;
 use gtk4::prelude::*;
@@ -281,6 +283,15 @@ impl WidgetFactory {
                 Some(BuiltWidget {
                     widget: root,
                     handle: Box::new(gpu),
+                })
+            }
+            "network_speed" => {
+                let cfg = NetworkSpeedConfig::from_entry(entry);
+                let network = NetworkSpeedWidget::new(cfg);
+                let root = network.widget().clone().upcast::<Widget>();
+                Some(BuiltWidget {
+                    widget: root,
+                    handle: Box::new(network),
                 })
             }
             "media" => {
