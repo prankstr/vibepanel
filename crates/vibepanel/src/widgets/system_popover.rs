@@ -76,8 +76,9 @@ pub struct SystemPopoverController {
     gpu_usage_label: Label,
     gpu_temp_label: Label,
     gpu_progress: ProgressBar,
-    gpu_vram_label: Label,
-    gpu_detail_label: Label,
+    gpu_vram_value_label: Label,
+    gpu_vram_progress: ProgressBar,
+    gpu_vram_detail_label: Label,
 }
 
 impl SystemPopoverController {
@@ -141,45 +142,37 @@ impl SystemPopoverController {
             self.gpu_progress.set_fraction(0.0);
         }
 
-        // Temperature in title
-        self.gpu_temp_label.set_label(&match snapshot.temperature {
-            Some(temp) => format!("{:.0}°C", temp),
-            None => String::new(),
-        });
+        // Clock + power + temperature in title (least-volatile first)
+        let mut title_parts = Vec::new();
+        if let Some(mhz) = snapshot.clock_mhz {
+            title_parts.push(format!("{} MHz", mhz));
+        }
+        if let Some(watts) = snapshot.power_watts {
+            title_parts.push(format!("{:.1} W", watts));
+        }
+        if let Some(temp) = snapshot.temperature {
+            title_parts.push(format!("{:.0}°C", temp));
+        }
+        self.gpu_temp_label.set_label(&title_parts.join("  ·  "));
 
-        // VRAM detail
-        let vram_text = match (snapshot.vram_used, snapshot.vram_total) {
+        // VRAM bar + detail
+        let vram_pct = snapshot.vram_percent();
+        if let Some(pct) = vram_pct {
+            self.gpu_vram_value_label.set_label(&format!("{:.1}%", pct));
+            self.gpu_vram_progress.set_fraction(pct as f64 / 100.0);
+        } else {
+            self.gpu_vram_value_label.set_label("--");
+            self.gpu_vram_progress.set_fraction(0.0);
+        }
+
+        let vram_detail = match (snapshot.vram_used, snapshot.vram_total) {
             (Some(used), Some(total)) => {
-                let pct = snapshot
-                    .vram_percent()
-                    .map(|p| format!(" ({:.0}%)", p))
-                    .unwrap_or_default();
-                format!(
-                    "{} / {}{}",
-                    format_bytes_long(used),
-                    format_bytes_long(total),
-                    pct
-                )
+                format!("{} / {}", format_bytes_long(used), format_bytes_long(total))
             }
             (Some(used), None) => format!("{} used", format_bytes_long(used)),
             _ => "--".to_string(),
         };
-        self.gpu_vram_label.set_label(&vram_text);
-
-        // Clock + Power detail line
-        let mut details = Vec::new();
-        if let Some(mhz) = snapshot.clock_mhz {
-            details.push(format!("{} MHz", mhz));
-        }
-        if let Some(watts) = snapshot.power_watts {
-            details.push(format!("{:.1} W", watts));
-        }
-        if details.is_empty() {
-            self.gpu_detail_label.set_visible(false);
-        } else {
-            self.gpu_detail_label.set_label(&details.join("  ·  "));
-            self.gpu_detail_label.set_visible(true);
-        }
+        self.gpu_vram_detail_label.set_label(&vram_detail);
     }
 
     /// Toggle the cores expander visibility.
@@ -409,16 +402,17 @@ pub fn build_system_popover_with_controller() -> (Widget, SystemPopoverControlle
     gpu_progress.add_css_class(sp::PROGRESS_BAR);
     gpu_section.append(&gpu_progress);
 
-    let gpu_vram_label = Label::new(Some("-- / --"));
-    gpu_vram_label.add_css_class(color::MUTED);
-    gpu_vram_label.set_halign(Align::Start);
-    gpu_section.append(&gpu_vram_label);
+    let (gpu_vram_row, gpu_vram_value_label) = stat_row("VRAM", 6);
+    gpu_section.append(&gpu_vram_row);
 
-    let gpu_detail_label = Label::new(Some(""));
-    gpu_detail_label.add_css_class(color::MUTED);
-    gpu_detail_label.set_halign(Align::Start);
-    gpu_detail_label.set_visible(false);
-    gpu_section.append(&gpu_detail_label);
+    let gpu_vram_progress = ProgressBar::new();
+    gpu_vram_progress.add_css_class(sp::PROGRESS_BAR);
+    gpu_section.append(&gpu_vram_progress);
+
+    let gpu_vram_detail_label = Label::new(Some("-- / --"));
+    gpu_vram_detail_label.add_css_class(color::MUTED);
+    gpu_vram_detail_label.set_halign(Align::Start);
+    gpu_section.append(&gpu_vram_detail_label);
 
     gpu_card.append(&gpu_section);
     container.append(&gpu_card);
@@ -559,8 +553,9 @@ pub fn build_system_popover_with_controller() -> (Widget, SystemPopoverControlle
         gpu_usage_label,
         gpu_temp_label,
         gpu_progress,
-        gpu_vram_label,
-        gpu_detail_label,
+        gpu_vram_value_label,
+        gpu_vram_progress,
+        gpu_vram_detail_label,
     };
 
     let controller_clone = controller.clone();
