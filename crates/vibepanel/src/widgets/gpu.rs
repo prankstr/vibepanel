@@ -30,7 +30,7 @@ const DEFAULT_SHOW_ICON: bool = true;
 pub enum GpuFormat {
     /// "76%"
     #[default]
-    Percentage,
+    Usage,
     /// "72°C"
     Temperature,
     /// "76% 72°C"
@@ -42,7 +42,7 @@ impl GpuFormat {
         match s.to_lowercase().as_str() {
             "temperature" | "temp" => Self::Temperature,
             "both" => Self::Both,
-            _ => Self::Percentage,
+            _ => Self::Usage,
         }
     }
 }
@@ -160,7 +160,7 @@ impl Drop for GpuWidget {
 /// Format GPU label text according to the selected format.
 fn format_gpu_label(snapshot: &GpuSnapshot, format: &GpuFormat) -> String {
     match format {
-        GpuFormat::Percentage => match snapshot.gpu_usage {
+        GpuFormat::Usage => match snapshot.gpu_usage {
             Some(usage) => format!("{:.0}%", usage),
             None => "—".to_string(),
         },
@@ -269,7 +269,7 @@ mod tests {
         };
         let config = GpuConfig::from_entry(&entry);
         assert!(config.show_icon);
-        assert_eq!(config.format, GpuFormat::Percentage);
+        assert_eq!(config.format, GpuFormat::Usage);
     }
 
     #[test]
@@ -292,26 +292,27 @@ mod tests {
 
     #[test]
     fn test_gpu_format_from_str() {
-        assert_eq!(GpuFormat::from_str("percentage"), GpuFormat::Percentage);
-        assert_eq!(GpuFormat::from_str("Percentage"), GpuFormat::Percentage);
+        assert_eq!(GpuFormat::from_str("usage"), GpuFormat::Usage);
+        assert_eq!(GpuFormat::from_str("Usage"), GpuFormat::Usage);
+        assert_eq!(GpuFormat::from_str("percentage"), GpuFormat::Usage);
         assert_eq!(GpuFormat::from_str("temperature"), GpuFormat::Temperature);
         assert_eq!(GpuFormat::from_str("Temperature"), GpuFormat::Temperature);
         assert_eq!(GpuFormat::from_str("temp"), GpuFormat::Temperature);
         assert_eq!(GpuFormat::from_str("TEMP"), GpuFormat::Temperature);
         assert_eq!(GpuFormat::from_str("both"), GpuFormat::Both);
         assert_eq!(GpuFormat::from_str("Both"), GpuFormat::Both);
-        assert_eq!(GpuFormat::from_str("unknown"), GpuFormat::Percentage);
+        assert_eq!(GpuFormat::from_str("unknown"), GpuFormat::Usage);
     }
 
     #[test]
-    fn test_format_gpu_label_percentage() {
+    fn test_format_gpu_label_usage() {
         let snapshot = GpuSnapshot {
             available: true,
             gpu_usage: Some(76.0),
             temperature: Some(72.0),
             ..Default::default()
         };
-        assert_eq!(format_gpu_label(&snapshot, &GpuFormat::Percentage), "76%");
+        assert_eq!(format_gpu_label(&snapshot, &GpuFormat::Usage), "76%");
     }
 
     #[test]
@@ -367,7 +368,7 @@ mod tests {
             temperature: None,
             ..Default::default()
         };
-        assert_eq!(format_gpu_label(&snapshot, &GpuFormat::Percentage), "—");
+        assert_eq!(format_gpu_label(&snapshot, &GpuFormat::Usage), "—");
         assert_eq!(format_gpu_label(&snapshot, &GpuFormat::Temperature), "—");
         assert_eq!(format_gpu_label(&snapshot, &GpuFormat::Both), "— —");
     }
