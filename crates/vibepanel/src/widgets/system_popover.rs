@@ -30,6 +30,7 @@ use gtk4::{
     Align, Box as GtkBox, Label, Orientation, ProgressBar, Revealer, RevealerTransitionType, Widget,
 };
 
+use crate::services::callbacks::CallbackId;
 use crate::services::config_manager::ConfigManager;
 use crate::services::gpu::{GpuService, GpuSnapshot};
 use crate::services::icons::{IconHandle, IconsService};
@@ -73,7 +74,6 @@ pub struct SystemPopoverController {
 
     // GPU section (conditional: only present when GPU is detected)
     gpu_card: GtkBox,
-    gpu_name_label: Label,
     gpu_metrics_label: Label,
     gpu_usage_label: Label,
     gpu_progress: ProgressBar,
@@ -135,14 +135,6 @@ impl SystemPopoverController {
         }
         self.gpu_card.set_visible(true);
 
-        // Device name in title row
-        if let Some(ref name) = snapshot.device_name {
-            self.gpu_name_label.set_label(name);
-            self.gpu_name_label.set_visible(true);
-        } else {
-            self.gpu_name_label.set_visible(false);
-        }
-
         if let Some(usage) = snapshot.gpu_usage {
             self.gpu_usage_label.set_label(&format!("{:.1}%", usage));
             self.gpu_progress.set_fraction(usage as f64 / 100.0);
@@ -162,7 +154,7 @@ impl SystemPopoverController {
         if let Some(temp) = snapshot.temperature {
             metrics_parts.push(format!("{:.0}°C", temp));
         }
-        let metrics_text = metrics_parts.join("  \u{00B7}  ");
+        let metrics_text = metrics_parts.join(" \u{00B7} ");
         self.gpu_metrics_label.set_label(&metrics_text);
         self.gpu_metrics_label.set_visible(!metrics_text.is_empty());
 
@@ -402,7 +394,7 @@ pub fn build_system_popover_with_controller() -> (Widget, SystemPopoverControlle
 
     let gpu_section = GtkBox::new(Orientation::Vertical, 8);
 
-    // Row 1: [icon] GPU  <device name>
+    // Row 1: [icon] GPU  <clock · power · temp>
     let gpu_title_row = GtkBox::new(Orientation::Horizontal, 6);
     gpu_title_row.add_css_class(sp::SECTION_TITLE);
     gpu_title_row.add_css_class(sp::GPU_TITLE);
@@ -414,22 +406,14 @@ pub fn build_system_popover_with_controller() -> (Widget, SystemPopoverControlle
     gpu_label.add_css_class(surface::POPOVER_TITLE);
     gpu_title_row.append(&gpu_label);
 
-    let gpu_name_label = Label::new(None);
-    gpu_name_label.add_css_class(color::MUTED);
-    gpu_name_label.set_hexpand(true);
-    gpu_name_label.set_halign(Align::End);
-    gpu_name_label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
-    gpu_name_label.add_css_class(sp::GPU_NAME);
-    gpu_title_row.append(&gpu_name_label);
-
-    gpu_section.append(&gpu_title_row);
-
-    // Row 2: metrics (clock · power · temp) right-aligned under device name
     let gpu_metrics_label = Label::new(None);
     gpu_metrics_label.add_css_class(color::MUTED);
     gpu_metrics_label.add_css_class(sp::GPU_METRICS);
+    gpu_metrics_label.set_hexpand(true);
     gpu_metrics_label.set_halign(Align::End);
-    gpu_section.append(&gpu_metrics_label);
+    gpu_title_row.append(&gpu_metrics_label);
+
+    gpu_section.append(&gpu_title_row);
 
     let (gpu_usage_row, gpu_usage_label) = stat_row("Usage", 6);
     gpu_section.append(&gpu_usage_row);
@@ -586,7 +570,6 @@ pub fn build_system_popover_with_controller() -> (Widget, SystemPopoverControlle
         load_5_label,
         load_15_label,
         gpu_card,
-        gpu_name_label,
         gpu_metrics_label,
         gpu_usage_label,
         gpu_progress,
@@ -612,6 +595,9 @@ pub fn build_system_popover_with_controller() -> (Widget, SystemPopoverControlle
 #[derive(Clone)]
 pub struct SystemPopoverBinding {
     controller: Rc<RefCell<Option<SystemPopoverController>>>,
+    /// Held to keep the `Rc` alive; managed via clones in open/close closures.
+    #[allow(dead_code)]
+    gpu_callback_id: Rc<Cell<Option<CallbackId>>>,
 }
 
 impl SystemPopoverBinding {
@@ -619,28 +605,51 @@ impl SystemPopoverBinding {
     ///
     /// GPU polling is started when the popover opens and stopped when it closes,
     /// so that NVML calls don't prevent the GPU from entering D3cold sleep.
+    /// A GPU service callback is also registered while the popover is open so that
+    /// GPU metrics update live (even when there is no GPU bar widget).
     pub fn new(base: &crate::widgets::base::BaseWidget) -> Self {
         let controller: Rc<RefCell<Option<SystemPopoverController>>> = Rc::new(RefCell::new(None));
+        let gpu_callback_id: Rc<Cell<Option<CallbackId>>> = Rc::new(Cell::new(None));
         let controller_for_builder = controller.clone();
+        let gpu_cb_for_builder = gpu_callback_id.clone();
 
         let menu_handle = base.create_menu(move || {
             // Builder runs each time the popover opens.
             // Start GPU polling so the popover gets fresh data.
-            GpuService::request_polling(&GpuService::global());
+            let gpu_service = GpuService::global();
+            GpuService::request_polling(&gpu_service);
 
             let (widget, ctrl) = build_system_popover_with_controller();
             *controller_for_builder.borrow_mut() = Some(ctrl);
+
+            // Subscribe to GPU snapshot updates so the popover refreshes while open.
+            let controller_for_gpu = controller_for_builder.clone();
+            let cb_id = gpu_service.connect(move |snapshot: &GpuSnapshot| {
+                if let Some(ctrl) = controller_for_gpu.borrow().as_ref() {
+                    ctrl.update_from_gpu_snapshot(snapshot);
+                }
+            });
+            gpu_cb_for_builder.set(Some(cb_id));
+
             widget
         });
 
         // Stop GPU polling and drop the controller so we don't update invisible widgets.
         let controller_for_close = controller.clone();
+        let gpu_cb_for_close = gpu_callback_id.clone();
         menu_handle.set_on_close(move || {
+            // Disconnect GPU callback before releasing polling.
+            if let Some(cb_id) = gpu_cb_for_close.take() {
+                GpuService::global().disconnect(cb_id);
+            }
             GpuService::global().release_polling();
             *controller_for_close.borrow_mut() = None;
         });
 
-        Self { controller }
+        Self {
+            controller,
+            gpu_callback_id,
+        }
     }
 
     /// Update the popover if it's currently open.

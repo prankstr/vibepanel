@@ -1089,9 +1089,6 @@ pub mod system_popover {
     /// GPU title row container (`.system-gpu-title`).
     pub const GPU_TITLE: &str = "system-gpu-title";
 
-    /// GPU device name label in title row (`.system-gpu-name`).
-    pub const GPU_NAME: &str = "system-gpu-name";
-
-    /// GPU metrics label row (clock · power · temp) (`.system-gpu-metrics`).
+    /// GPU metrics label in title row (clock · power · temp) (`.system-gpu-metrics`).
     pub const GPU_METRICS: &str = "system-gpu-metrics";
 }
