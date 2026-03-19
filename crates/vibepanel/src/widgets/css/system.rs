@@ -70,5 +70,20 @@ button.system-expander-header > overlay > box {
 .system-network-icon {
     font-size: 0.9em;
 }
+
+/* GPU title row: icon + "GPU" + device name + chevron */
+.system-gpu-title {
+    margin-bottom: 4px;
+}
+
+/* GPU device name in title row — truncate long names */
+.system-gpu-name {
+    min-width: 0;
+}
+
+/* GPU metrics row (clock · power · temp) */
+.system-gpu-metrics {
+    margin-bottom: 4px;
+}
 "#
 }

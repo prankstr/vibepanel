@@ -57,7 +57,7 @@ pub struct GpuConfig {
 
 impl WidgetConfig for GpuConfig {
     fn from_entry(entry: &WidgetEntry) -> Self {
-        warn_unknown_options("gpu", entry, &["show_icon", "format"]);
+        warn_unknown_options("gpu", entry, &["show_icon", "format", "device"]);
 
         let show_icon = entry
             .options
@@ -99,7 +99,7 @@ impl GpuWidget {
 
         let icon_handle = base.add_icon("video-display-symbolic", &[widget::GPU_ICON]);
 
-        let percentage_label = base.add_label(None, &[widget::GPU_LABEL, class::VCENTER_CAPS]);
+        let gpu_label = base.add_label(None, &[widget::GPU_LABEL, class::VCENTER_CAPS]);
 
         let popover_binding = SystemPopoverBinding::new(&base);
 
@@ -109,7 +109,7 @@ impl GpuWidget {
         let gpu_callback_id = {
             let container = base.widget().clone();
             let icon_handle = icon_handle.clone();
-            let percentage_label = percentage_label.clone();
+            let gpu_label = gpu_label.clone();
             let show_icon = config.show_icon;
             let format = config.format.clone();
             let popover_binding = popover_binding.clone();
@@ -118,7 +118,7 @@ impl GpuWidget {
                 update_gpu_widget(
                     &container,
                     &icon_handle,
-                    &percentage_label,
+                    &gpu_label,
                     show_icon,
                     &format,
                     snapshot,
@@ -186,7 +186,7 @@ fn format_gpu_label(snapshot: &GpuSnapshot, format: &GpuFormat) -> String {
 fn update_gpu_widget(
     container: &gtk4::Box,
     icon_handle: &IconHandle,
-    percentage_label: &Label,
+    gpu_label: &Label,
     show_icon: bool,
     format: &GpuFormat,
     snapshot: &GpuSnapshot,
@@ -198,8 +198,8 @@ fn update_gpu_widget(
         if show_icon {
             icon_handle.widget().set_visible(true);
         }
-        percentage_label.set_label("—");
-        percentage_label.set_visible(true);
+        gpu_label.set_label("—");
+        gpu_label.set_visible(true);
 
         let tooltip_manager = TooltipManager::global();
         tooltip_manager.set_styled_tooltip(container, "GPU: No supported GPU detected");
@@ -217,8 +217,8 @@ fn update_gpu_widget(
     icon_handle.widget().set_visible(show_icon);
 
     let text = format_gpu_label(snapshot, format);
-    percentage_label.set_label(&text);
-    percentage_label.set_visible(true);
+    gpu_label.set_label(&text);
+    gpu_label.set_visible(true);
 
     let mut lines = Vec::new();
 

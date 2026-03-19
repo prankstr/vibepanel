@@ -1,4 +1,4 @@
-//! GpuService - polling-based GPU resource monitoring.
+//! GpuService - polling-based GPU resource monitoring with multi-GPU support.
 //!
 //! This service provides GPU utilization, VRAM usage, temperature, clock speed,
 //! and power draw by reading vendor-specific interfaces:
@@ -6,18 +6,13 @@
 //! - **AMD**: sysfs files under `/sys/class/drm/cardN/device/`
 //! - **NVIDIA**: NVML via the `nvml-wrapper` crate (runtime-loaded `libnvidia-ml.so`)
 //!
-//! Only the first detected GPU is monitored (AMD checked first, then NVIDIA).
+//! All GPUs are discovered at startup. One is selected for active polling based on:
 //!
-//! ## AMD Sysfs Files (under `/sys/class/drm/cardN/device/`)
-//!
-//! | File                          | Metric              | Parse            |
-//! |-------------------------------|---------------------|------------------|
-//! | `gpu_busy_percent`            | GPU utilization     | u32 → f32        |
-//! | `mem_info_vram_total`         | Total VRAM (bytes)  | u64              |
-//! | `mem_info_vram_used`          | Used VRAM (bytes)   | u64              |
-//! | `hwmon/hwmon*/temp1_input`    | Temperature (m°C)   | u32 / 1000 → f32 |
-//! | `hwmon/hwmon*/freq1_input`    | GPU clock (Hz)      | u64 / 1e6 → MHz  |
-//! | `hwmon/hwmon*/power1_average` | Power draw (µW)     | u64 / 1e6 → W    |
+//! 1. **Explicit config**: `device = N` in `[widgets.gpu]` selects a specific index.
+//! 2. **Auto heuristic** (default): Prefers discrete GPUs over integrated.
+//!    AMD discrete detection uses `boot_vga` sysfs (0 = discrete).
+//!    NVIDIA GPUs are always treated as discrete.
+//!    Falls back to index 0 if no discrete GPU is found.
 //!
 //! ## Usage
 //!
@@ -41,13 +36,11 @@ use nvml_wrapper::enum_wrappers::device::{Clock, TemperatureSensor};
 use tracing::{debug, trace, warn};
 
 use super::callbacks::{CallbackId, Callbacks};
+use super::config_manager::ConfigManager;
 
 const DEFAULT_POLL_INTERVAL_SECS: u32 = 3;
 
-/// Threshold above which GPU usage is considered "high".
-///
-/// Set higher than CPU (80%) because sustained high GPU usage is normal
-/// during gaming, rendering, and compute workloads.
+/// Threshold above which GPU usage is considered "high" (higher than CPU since sustained GPU load is normal).
 pub(crate) const GPU_HIGH_USAGE_THRESHOLD: f32 = 90.0;
 
 const DRM_CLASS_PATH: &str = "/sys/class/drm";
@@ -102,12 +95,15 @@ struct AmdGpuDevice {
     hwmon_path: Option<PathBuf>,
 
     device_name: Option<String>,
+
+    /// Whether this is a discrete GPU (determined via `boot_vga` sysfs attribute).
+    is_discrete: bool,
 }
 
 struct NvidiaGpuDevice {
     /// Kept alive for the lifetime of the service; `Device` handles are
     /// re-acquired each poll via `device_by_index` to avoid lifetime complexity.
-    nvml: Nvml,
+    nvml: Rc<Nvml>,
 
     device_index: u32,
     device_name: Option<String>,
@@ -118,11 +114,28 @@ enum GpuDevice {
     Nvidia(Box<NvidiaGpuDevice>), // boxed to keep enum size small (Nvml is ~11KB)
 }
 
+impl GpuDevice {
+    fn name(&self) -> Option<&str> {
+        match self {
+            GpuDevice::Amd(d) => d.device_name.as_deref(),
+            GpuDevice::Nvidia(d) => d.device_name.as_deref(),
+        }
+    }
+
+    fn is_discrete(&self) -> bool {
+        match self {
+            GpuDevice::Amd(d) => d.is_discrete,
+            // NVIDIA GPUs on Linux are always discrete (no NVIDIA iGPUs exist).
+            GpuDevice::Nvidia(_) => true,
+        }
+    }
+}
+
 /// Shared, process-wide GPU monitoring service.
 ///
-/// Polls GPU metrics at regular intervals via vendor-specific backends
-/// (AMD sysfs, NVIDIA NVML) and notifies registered callbacks whenever
-/// the snapshot updates.
+/// Discovers all available GPUs at startup and polls one selected device
+/// at regular intervals via vendor-specific backends (AMD sysfs, NVIDIA NVML).
+/// Notifies registered callbacks whenever the snapshot updates.
 pub struct GpuService {
     snapshot: RefCell<GpuSnapshot>,
     callbacks: Callbacks<GpuSnapshot>,
@@ -130,7 +143,11 @@ pub struct GpuService {
     /// Timer source for periodic polling.
     timer_source: RefCell<Option<SourceId>>,
 
-    device: Option<GpuDevice>,
+    /// All discovered GPU devices.
+    devices: Vec<GpuDevice>,
+
+    /// Index into `devices` of the currently polled GPU, or `None` if no GPU.
+    selected_index: Cell<Option<usize>>,
 
     /// Polling interval in seconds.
     poll_interval: Cell<u32>,
@@ -140,9 +157,27 @@ impl GpuService {
     fn new() -> Rc<Self> {
         debug!("GpuService: initializing");
 
-        let device = Self::discover_gpu();
+        let devices = Self::discover_all_gpus();
+        let device_selection = Self::read_device_config();
 
-        let initial_snapshot = if device.is_some() {
+        let selected_index = Self::select_gpu(&devices, &device_selection);
+
+        if let Some(idx) = selected_index {
+            let method = match device_selection {
+                Some(i) => format!("config (device = {})", i),
+                None => "auto".to_string(),
+            };
+            debug!(
+                "GpuService: selected GPU {} ({:?}) via {}",
+                idx,
+                devices[idx].name().unwrap_or("unknown"),
+                method,
+            );
+        } else {
+            debug!("GpuService: no GPU selected");
+        }
+
+        let initial_snapshot = if selected_index.is_some() {
             GpuSnapshot {
                 available: true,
                 ..Default::default()
@@ -155,11 +190,12 @@ impl GpuService {
             snapshot: RefCell::new(initial_snapshot),
             callbacks: Callbacks::new(),
             timer_source: RefCell::new(None),
-            device,
+            devices,
+            selected_index: Cell::new(selected_index),
             poll_interval: Cell::new(DEFAULT_POLL_INTERVAL_SECS),
         });
 
-        if service.device.is_some() {
+        if selected_index.is_some() {
             Self::start_polling(&service);
         }
 
@@ -215,11 +251,14 @@ impl GpuService {
     }
 
     fn poll(&self) {
-        let Some(device) = &self.device else {
+        let Some(idx) = self.selected_index.get() else {
+            return;
+        };
+        let Some(device) = self.devices.get(idx) else {
             return;
         };
 
-        trace!("GpuService: polling GPU metrics");
+        trace!("GpuService: polling GPU {} metrics", idx);
 
         let snapshot = match device {
             GpuDevice::Amd(amd) => Self::poll_amd(amd),
@@ -307,43 +346,37 @@ impl GpuService {
         }
     }
 
-    fn discover_gpu() -> Option<GpuDevice> {
-        if let Some(amd) = Self::discover_amdgpu() {
-            debug!(
-                "GpuService: found AMD GPU at {:?} (hwmon: {:?}, name: {:?})",
-                amd.device_path, amd.hwmon_path, amd.device_name
-            );
-            return Some(GpuDevice::Amd(amd));
+    /// Discover all supported GPUs (AMD via sysfs, NVIDIA via NVML).
+    fn discover_all_gpus() -> Vec<GpuDevice> {
+        let mut devices = Vec::new();
+
+        for amd in Self::discover_all_amdgpu() {
+            devices.push(GpuDevice::Amd(amd));
         }
 
-        if let Some(nvidia) = Self::discover_nvidia() {
-            debug!(
-                "GpuService: found NVIDIA GPU (index: {}, name: {:?})",
-                nvidia.device_index, nvidia.device_name
-            );
-            return Some(GpuDevice::Nvidia(Box::new(nvidia)));
+        for nvidia in Self::discover_all_nvidia() {
+            devices.push(GpuDevice::Nvidia(Box::new(nvidia)));
         }
 
-        debug!("GpuService: no supported GPU found");
-        None
+        if devices.is_empty() {
+            debug!("GpuService: no supported GPU found");
+        }
+
+        devices
     }
 
-    /// Discover the first AMD GPU by scanning `/sys/class/drm/card*`.
-    ///
-    /// Checks for the `amdgpu` driver by reading the `driver` symlink under
-    /// each card's `device/` directory.
-    fn discover_amdgpu() -> Option<AmdGpuDevice> {
+    /// Scan `/sys/class/drm/card*` for AMD GPUs using the `amdgpu` driver.
+    fn discover_all_amdgpu() -> Vec<AmdGpuDevice> {
         let drm_path = Path::new(DRM_CLASS_PATH);
         if !drm_path.exists() {
-            debug!("GpuService: {} does not exist", DRM_CLASS_PATH);
-            return None;
+            return Vec::new();
         }
 
         let entries = match fs::read_dir(drm_path) {
             Ok(it) => it,
             Err(err) => {
                 warn!("GpuService: failed to read {}: {err}", DRM_CLASS_PATH);
-                return None;
+                return Vec::new();
             }
         };
 
@@ -359,6 +392,8 @@ impl GpuService {
 
         // Sort by card number for deterministic ordering
         cards.sort();
+
+        let mut devices = Vec::new();
 
         for card_path in cards {
             let device_path = card_path.join("device");
@@ -377,59 +412,123 @@ impl GpuService {
                     let hwmon_path = discover_hwmon(&device_path);
                     let device_name = read_device_name(&device_path);
 
-                    return Some(AmdGpuDevice {
+                    // boot_vga: 1 = primary (typically integrated), 0 = secondary (typically discrete).
+                    let boot_vga = read_sysfs_u32(&device_path.join("boot_vga"));
+                    let is_discrete = boot_vga.map(|v| v == 0).unwrap_or(false);
+
+                    debug!(
+                        "GpuService: found AMD GPU {:?} at {:?} (discrete: {})",
+                        device_name, device_path, is_discrete,
+                    );
+
+                    devices.push(AmdGpuDevice {
                         device_path,
                         hwmon_path,
                         device_name,
+                        is_discrete,
                     });
                 }
             }
         }
 
-        None
+        devices
     }
 
-    /// Discover an NVIDIA GPU via NVML.
-    ///
-    /// `Nvml::init()` runtime-loads `libnvidia-ml.so`. If the library isn't
-    /// present (no NVIDIA driver installed), this returns `None` gracefully.
-    fn discover_nvidia() -> Option<NvidiaGpuDevice> {
+    /// Discover all NVIDIA GPUs via NVML (runtime-loads `libnvidia-ml.so`).
+    fn discover_all_nvidia() -> Vec<NvidiaGpuDevice> {
         let nvml = match Nvml::init() {
-            Ok(n) => n,
+            Ok(n) => Rc::new(n),
             Err(e) => {
                 debug!("GpuService: NVML init failed (no NVIDIA driver?): {e}");
-                return None;
+                return Vec::new();
             }
         };
 
         let count = match nvml.device_count() {
-            Ok(0) => {
-                debug!("GpuService: NVML reports 0 devices");
-                return None;
-            }
+            Ok(0) => return Vec::new(),
             Ok(c) => c,
             Err(e) => {
                 warn!("GpuService: NVML device_count failed: {e}");
-                return None;
+                return Vec::new();
             }
         };
 
-        let device_index = 0;
-        let device_name = match nvml.device_by_index(device_index) {
-            Ok(dev) => dev.name().ok(),
-            Err(e) => {
-                warn!("GpuService: NVML device_by_index({device_index}) failed: {e}");
-                return None;
+        let mut devices = Vec::new();
+
+        for device_index in 0..count {
+            let device_name = match nvml.device_by_index(device_index) {
+                Ok(dev) => dev.name().ok(),
+                Err(e) => {
+                    warn!("GpuService: NVML device_by_index({device_index}) failed: {e}");
+                    continue;
+                }
+            };
+
+            debug!(
+                "GpuService: found NVIDIA GPU {:?} (nvml_index: {})",
+                device_name, device_index,
+            );
+
+            devices.push(NvidiaGpuDevice {
+                nvml: nvml.clone(),
+                device_index,
+                device_name,
+            });
+        }
+
+        devices
+    }
+
+    /// Read the `device` config option from `[widgets.gpu]`.
+    fn read_device_config() -> Option<u32> {
+        ConfigManager::global()
+            .get_widget_option("gpu", "device")
+            .and_then(|v| match v {
+                toml::Value::Integer(i) if i >= 0 => Some(i as u32),
+                toml::Value::String(ref s) if s == "auto" => None,
+                other => {
+                    warn!("GpuService: invalid 'device' config value: {other}, using auto");
+                    None
+                }
+            })
+    }
+
+    /// Select GPU: explicit config index > first discrete > index 0.
+    fn select_gpu(devices: &[GpuDevice], selection: &Option<u32>) -> Option<usize> {
+        if devices.is_empty() {
+            return None;
+        }
+
+        if let Some(i) = selection {
+            let idx = *i as usize;
+            if idx < devices.len() {
+                return Some(idx);
             }
-        };
+            warn!(
+                "GpuService: configured device index {} out of range (have {} GPU(s)), falling back to auto",
+                i,
+                devices.len(),
+            );
+        }
 
-        debug!("GpuService: NVML found {count} device(s), using index {device_index}");
+        Self::auto_select(devices)
+    }
 
-        Some(NvidiaGpuDevice {
-            nvml,
-            device_index,
-            device_name,
-        })
+    /// Auto-select a GPU: prefer discrete, then index 0.
+    fn auto_select(devices: &[GpuDevice]) -> Option<usize> {
+        if devices.is_empty() {
+            return None;
+        }
+
+        // Prefer the first discrete GPU.
+        if let Some(idx) = devices.iter().position(|d| d.is_discrete()) {
+            debug!("GpuService: auto-selected discrete GPU at index {}", idx);
+            return Some(idx);
+        }
+
+        // Fall back to the first GPU.
+        debug!("GpuService: no discrete GPU found, defaulting to index 0");
+        Some(0)
     }
 }
 
@@ -441,10 +540,7 @@ impl Drop for GpuService {
     }
 }
 
-/// Discover the hwmon directory under a device path.
-///
-/// The hwmon numbering (hwmon0, hwmon1, ...) is unstable across reboots,
-/// so we glob for any `hwmon/hwmon*` directory and use the first one found.
+/// Find the first `hwmon/hwmon*` directory under a device path.
 fn discover_hwmon(device_path: &Path) -> Option<PathBuf> {
     let hwmon_parent = device_path.join("hwmon");
     if !hwmon_parent.exists() {
@@ -458,7 +554,7 @@ fn discover_hwmon(device_path: &Path) -> Option<PathBuf> {
             let name = entry.file_name();
             let name_str = name.to_string_lossy();
             if name_str.starts_with("hwmon") {
-                debug!("GpuService: discovered hwmon at {}", path.to_string_lossy());
+                trace!("GpuService: found hwmon at {}", path.to_string_lossy());
                 return Some(path);
             }
         }
@@ -554,5 +650,52 @@ mod tests {
             ..Default::default()
         };
         assert!(snap.vram_percent().is_none());
+    }
+
+    /// Helper to create a dummy AMD GPU device for selection tests.
+    fn dummy_amd(name: &str, is_discrete: bool) -> GpuDevice {
+        GpuDevice::Amd(AmdGpuDevice {
+            device_path: PathBuf::from("/dev/null"),
+            hwmon_path: None,
+            device_name: Some(name.to_string()),
+            is_discrete,
+        })
+    }
+
+    #[test]
+    fn test_auto_select_empty() {
+        assert_eq!(GpuService::auto_select(&[]), None);
+    }
+
+    #[test]
+    fn test_auto_select_single_integrated() {
+        let devices = vec![dummy_amd("iGPU", false)];
+        assert_eq!(GpuService::auto_select(&devices), Some(0));
+    }
+
+    #[test]
+    fn test_auto_select_prefers_discrete() {
+        let devices = vec![dummy_amd("iGPU", false), dummy_amd("dGPU", true)];
+        assert_eq!(GpuService::auto_select(&devices), Some(1));
+    }
+
+    #[test]
+    fn test_select_gpu_explicit_index() {
+        let devices = vec![dummy_amd("iGPU", false), dummy_amd("dGPU", true)];
+        // Explicit config overrides auto-selection.
+        assert_eq!(GpuService::select_gpu(&devices, &Some(0)), Some(0));
+    }
+
+    #[test]
+    fn test_select_gpu_out_of_range_falls_back() {
+        let devices = vec![dummy_amd("dGPU", true)];
+        // Out-of-range index falls back to auto (which picks discrete at 0).
+        assert_eq!(GpuService::select_gpu(&devices, &Some(5)), Some(0));
+    }
+
+    #[test]
+    fn test_select_gpu_none_config_uses_auto() {
+        let devices = vec![dummy_amd("iGPU", false), dummy_amd("dGPU", true)];
+        assert_eq!(GpuService::select_gpu(&devices, &None), Some(1));
     }
 }

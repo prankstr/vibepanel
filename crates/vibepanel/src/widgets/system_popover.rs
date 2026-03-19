@@ -73,8 +73,9 @@ pub struct SystemPopoverController {
 
     // GPU section (conditional: only present when GPU is detected)
     gpu_card: GtkBox,
+    gpu_name_label: Label,
+    gpu_metrics_label: Label,
     gpu_usage_label: Label,
-    gpu_temp_label: Label,
     gpu_progress: ProgressBar,
     gpu_vram_value_label: Label,
     gpu_vram_progress: ProgressBar,
@@ -134,6 +135,14 @@ impl SystemPopoverController {
         }
         self.gpu_card.set_visible(true);
 
+        // Device name in title row
+        if let Some(ref name) = snapshot.device_name {
+            self.gpu_name_label.set_label(name);
+            self.gpu_name_label.set_visible(true);
+        } else {
+            self.gpu_name_label.set_visible(false);
+        }
+
         if let Some(usage) = snapshot.gpu_usage {
             self.gpu_usage_label.set_label(&format!("{:.1}%", usage));
             self.gpu_progress.set_fraction(usage as f64 / 100.0);
@@ -142,18 +151,20 @@ impl SystemPopoverController {
             self.gpu_progress.set_fraction(0.0);
         }
 
-        // Clock + power + temperature in title (least-volatile first)
-        let mut title_parts = Vec::new();
+        // Clock + power + temperature on metrics row
+        let mut metrics_parts = Vec::new();
         if let Some(mhz) = snapshot.clock_mhz {
-            title_parts.push(format!("{} MHz", mhz));
+            metrics_parts.push(format!("{} MHz", mhz));
         }
         if let Some(watts) = snapshot.power_watts {
-            title_parts.push(format!("{:.1} W", watts));
+            metrics_parts.push(format!("{:.1} W", watts));
         }
         if let Some(temp) = snapshot.temperature {
-            title_parts.push(format!("{:.0}°C", temp));
+            metrics_parts.push(format!("{:.0}°C", temp));
         }
-        self.gpu_temp_label.set_label(&title_parts.join("  ·  "));
+        let metrics_text = metrics_parts.join("  \u{00B7}  ");
+        self.gpu_metrics_label.set_label(&metrics_text);
+        self.gpu_metrics_label.set_visible(!metrics_text.is_empty());
 
         // VRAM bar + detail
         let vram_pct = snapshot.vram_percent();
@@ -391,9 +402,34 @@ pub fn build_system_popover_with_controller() -> (Widget, SystemPopoverControlle
 
     let gpu_section = GtkBox::new(Orientation::Vertical, 8);
 
-    let (gpu_title, gpu_temp_label) =
-        section_title_with_value("video-display-symbolic", "GPU", &icons);
-    gpu_section.append(&gpu_title);
+    // Row 1: [icon] GPU  <device name>
+    let gpu_title_row = GtkBox::new(Orientation::Horizontal, 6);
+    gpu_title_row.add_css_class(sp::SECTION_TITLE);
+    gpu_title_row.add_css_class(sp::GPU_TITLE);
+
+    let gpu_icon = icons.create_icon("video-display-symbolic", &[icon::TEXT, sp::SECTION_ICON]);
+    gpu_title_row.append(&gpu_icon.widget());
+
+    let gpu_label = Label::new(Some("GPU"));
+    gpu_label.add_css_class(surface::POPOVER_TITLE);
+    gpu_title_row.append(&gpu_label);
+
+    let gpu_name_label = Label::new(None);
+    gpu_name_label.add_css_class(color::MUTED);
+    gpu_name_label.set_hexpand(true);
+    gpu_name_label.set_halign(Align::End);
+    gpu_name_label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+    gpu_name_label.add_css_class(sp::GPU_NAME);
+    gpu_title_row.append(&gpu_name_label);
+
+    gpu_section.append(&gpu_title_row);
+
+    // Row 2: metrics (clock · power · temp) on their own row
+    let gpu_metrics_label = Label::new(None);
+    gpu_metrics_label.add_css_class(color::MUTED);
+    gpu_metrics_label.add_css_class(sp::GPU_METRICS);
+    gpu_metrics_label.set_halign(Align::Start);
+    gpu_section.append(&gpu_metrics_label);
 
     let (gpu_usage_row, gpu_usage_label) = stat_row("Usage", 6);
     gpu_section.append(&gpu_usage_row);
@@ -550,8 +586,9 @@ pub fn build_system_popover_with_controller() -> (Widget, SystemPopoverControlle
         load_5_label,
         load_15_label,
         gpu_card,
+        gpu_name_label,
+        gpu_metrics_label,
         gpu_usage_label,
-        gpu_temp_label,
         gpu_progress,
         gpu_vram_value_label,
         gpu_vram_progress,
