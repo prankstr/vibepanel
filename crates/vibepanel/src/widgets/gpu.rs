@@ -50,6 +50,7 @@ impl GpuFormat {
 /// Configuration for the GPU widget.
 #[derive(Debug, Clone)]
 pub struct GpuConfig {
+    /// Whether to show an icon.
     pub show_icon: bool,
     /// Display format for GPU metrics.
     pub format: GpuFormat,
@@ -85,13 +86,18 @@ impl Default for GpuConfig {
     }
 }
 
+/// GPU widget that displays icon, usage, and opens a shared system popover on click.
 pub struct GpuWidget {
+    /// Shared base widget container.
     base: BaseWidget,
+    /// Callback ID for GpuService, used to disconnect on drop.
     gpu_callback_id: CallbackId,
+    /// Callback ID for SystemService, used to disconnect on drop.
     system_callback_id: CallbackId,
 }
 
 impl GpuWidget {
+    /// Create a new GPU widget with the given configuration.
     pub fn new(config: GpuConfig) -> Self {
         let base = BaseWidget::new(&[widget::GPU]);
 
@@ -149,6 +155,7 @@ impl GpuWidget {
         }
     }
 
+    /// Get the root GTK widget for embedding in the bar.
     pub fn widget(&self) -> &gtk4::Box {
         self.base.widget()
     }

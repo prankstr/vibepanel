@@ -71,7 +71,7 @@ button.system-expander-header > overlay > box {
     font-size: 0.9em;
 }
 
-/* GPU title row: icon + "GPU" + device name + chevron */
+/* GPU title row: icon + "GPU" + device name */
 .system-gpu-title {
     margin-bottom: 4px;
 }

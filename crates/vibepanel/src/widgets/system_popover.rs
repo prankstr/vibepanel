@@ -85,7 +85,7 @@ pub struct SystemPopoverController {
 impl SystemPopoverController {
     /// Update all labels and progress bars from the latest snapshot.
     pub fn update_from_snapshot(&self, snapshot: &SystemSnapshot) {
-        // CPU - temp in title (Option 3)
+        // CPU
         self.cpu_usage_label
             .set_label(&format!("{:.1}%", snapshot.cpu_usage));
         self.cpu_temp_label.set_label(&match snapshot.cpu_temp {
@@ -424,11 +424,11 @@ pub fn build_system_popover_with_controller() -> (Widget, SystemPopoverControlle
 
     gpu_section.append(&gpu_title_row);
 
-    // Row 2: metrics (clock · power · temp) on their own row
+    // Row 2: metrics (clock · power · temp) right-aligned under device name
     let gpu_metrics_label = Label::new(None);
     gpu_metrics_label.add_css_class(color::MUTED);
     gpu_metrics_label.add_css_class(sp::GPU_METRICS);
-    gpu_metrics_label.set_halign(Align::Start);
+    gpu_metrics_label.set_halign(Align::End);
     gpu_section.append(&gpu_metrics_label);
 
     let (gpu_usage_row, gpu_usage_label) = stat_row("Usage", 6);
@@ -633,9 +633,11 @@ impl SystemPopoverBinding {
             widget
         });
 
-        // Stop GPU polling when the popover closes.
+        // Stop GPU polling and drop the controller so we don't update invisible widgets.
+        let controller_for_close = controller.clone();
         menu_handle.set_on_close(move || {
             GpuService::global().release_polling();
+            *controller_for_close.borrow_mut() = None;
         });
 
         Self { controller }
