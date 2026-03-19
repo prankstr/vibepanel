@@ -14,7 +14,7 @@ use gtk4::prelude::*;
 use vibepanel_core::config::WidgetEntry;
 
 use crate::services::callbacks::CallbackId;
-use crate::services::gpu::{GpuService, GpuSnapshot};
+use crate::services::gpu::{GpuPowerState, GpuService, GpuSnapshot};
 use crate::services::icons::IconHandle;
 use crate::services::system::{SystemService, SystemSnapshot, format_bytes_long};
 use crate::services::tooltip::TooltipManager;
@@ -106,6 +106,10 @@ impl GpuWidget {
         icon_handle.widget().set_visible(config.show_icon);
 
         let gpu_service = GpuService::global();
+
+        // Bar widget needs continuous polling while it exists.
+        GpuService::request_polling(&gpu_service);
+
         let gpu_callback_id = {
             let container = base.widget().clone();
             let icon_handle = icon_handle.clone();
@@ -152,13 +156,18 @@ impl GpuWidget {
 
 impl Drop for GpuWidget {
     fn drop(&mut self) {
-        GpuService::global().disconnect(self.gpu_callback_id);
+        let gpu_service = GpuService::global();
+        gpu_service.disconnect(self.gpu_callback_id);
+        gpu_service.release_polling();
         SystemService::global().disconnect(self.system_callback_id);
     }
 }
 
 /// Format GPU label text according to the selected format.
 fn format_gpu_label(snapshot: &GpuSnapshot, format: &GpuFormat) -> String {
+    if snapshot.power_state == GpuPowerState::Suspended {
+        return "Idle".to_string();
+    }
     match format {
         GpuFormat::Usage => match snapshot.gpu_usage {
             Some(usage) => format!("{:.0}%", usage),
@@ -214,6 +223,12 @@ fn update_gpu_widget(
         icon_handle.remove_css_class(widget::GPU_HIGH);
     }
 
+    if snapshot.power_state == GpuPowerState::Suspended {
+        container.add_css_class(widget::GPU_SUSPENDED);
+    } else {
+        container.remove_css_class(widget::GPU_SUSPENDED);
+    }
+
     icon_handle.widget().set_visible(show_icon);
 
     let text = format_gpu_label(snapshot, format);
@@ -222,7 +237,9 @@ fn update_gpu_widget(
 
     let mut lines = Vec::new();
 
-    if let Some(usage) = snapshot.gpu_usage {
+    if snapshot.power_state == GpuPowerState::Suspended {
+        lines.push("GPU: Idle (suspended)".to_string());
+    } else if let Some(usage) = snapshot.gpu_usage {
         lines.push(format!("GPU: {:.1}%", usage));
     } else {
         lines.push("GPU: --".to_string());

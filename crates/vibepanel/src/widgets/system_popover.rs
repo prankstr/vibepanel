@@ -616,14 +616,26 @@ pub struct SystemPopoverBinding {
 
 impl SystemPopoverBinding {
     /// Create a new binding and wire up the popover menu on the given base widget.
+    ///
+    /// GPU polling is started when the popover opens and stopped when it closes,
+    /// so that NVML calls don't prevent the GPU from entering D3cold sleep.
     pub fn new(base: &crate::widgets::base::BaseWidget) -> Self {
         let controller: Rc<RefCell<Option<SystemPopoverController>>> = Rc::new(RefCell::new(None));
         let controller_for_builder = controller.clone();
 
-        base.create_menu(move || {
+        let menu_handle = base.create_menu(move || {
+            // Builder runs each time the popover opens.
+            // Start GPU polling so the popover gets fresh data.
+            GpuService::request_polling(&GpuService::global());
+
             let (widget, ctrl) = build_system_popover_with_controller();
             *controller_for_builder.borrow_mut() = Some(ctrl);
             widget
+        });
+
+        // Stop GPU polling when the popover closes.
+        menu_handle.set_on_close(move || {
+            GpuService::global().release_polling();
         });
 
         Self { controller }

@@ -589,6 +589,9 @@ pub mod widget {
     /// GPU high usage state (`.gpu-high`).
     pub const GPU_HIGH: &str = "gpu-high";
 
+    /// GPU suspended/idle state (`.gpu-suspended`).
+    pub const GPU_SUSPENDED: &str = "gpu-suspended";
+
     // Custom
     /// Custom widget prefix (`.custom-<name>`).
     /// Each instance gets a dynamic `custom-{id}` class built from this prefix.

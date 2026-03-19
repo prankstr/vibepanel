@@ -78,6 +78,8 @@ pub struct MenuHandle {
     /// ID returned from PopoverTracker when this popover is active.
     /// Used to correctly clear ourselves from the tracker on hide.
     tracker_id: Cell<Option<PopoverId>>,
+    /// Stored on_close callback, forwarded to the LayerShellPopover on lazy init.
+    on_close: RefCell<Option<Rc<dyn Fn()>>>,
 }
 
 impl MenuHandle {
@@ -91,6 +93,7 @@ impl MenuHandle {
             widget_name,
             parent,
             tracker_id: Cell::new(None),
+            on_close: RefCell::new(None),
         })
     }
 
@@ -124,8 +127,29 @@ impl MenuHandle {
         let builder = self.builder.clone();
         let popover = LayerShellPopover::new(&app, &self.widget_name, move || builder());
 
+        // Forward any stored on_close callback
+        if let Some(ref cb) = *self.on_close.borrow() {
+            let cb = cb.clone();
+            popover.set_on_close(move || cb());
+        }
+
         *popover_opt = Some(popover.clone());
         Some(popover)
+    }
+
+    /// Set a callback to be invoked when the popover is hidden.
+    ///
+    /// If the popover hasn't been created yet (lazy init), the callback is
+    /// stored and forwarded when `ensure_popover()` creates it.
+    pub fn set_on_close<F: Fn() + 'static>(&self, callback: F) {
+        let cb = Rc::new(callback);
+        *self.on_close.borrow_mut() = Some(cb.clone());
+
+        // If popover already exists, forward immediately
+        if let Some(ref popover) = *self.popover.borrow() {
+            let cb = cb.clone();
+            popover.set_on_close(move || cb());
+        }
     }
 
     /// Get the anchor position for the popover.

@@ -45,9 +45,27 @@ pub(crate) const GPU_HIGH_USAGE_THRESHOLD: f32 = 90.0;
 
 const DRM_CLASS_PATH: &str = "/sys/class/drm";
 
+/// GPU hardware power state, read from sysfs `power/runtime_status`.
+///
+/// Used to skip NVML/sysfs polling when the GPU is in D3cold sleep.
+/// NVML calls (even `device_by_index`) count as device activity and
+/// prevent NVIDIA GPUs from entering power-saving states.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum GpuPowerState {
+    /// GPU is powered on and active.
+    Active,
+    /// GPU is in runtime suspend (D3cold/D3hot).
+    Suspended,
+    /// Could not determine power state (sysfs not available).
+    #[default]
+    Unknown,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct GpuSnapshot {
     pub available: bool,
+    /// Hardware power state (active, suspended, or unknown).
+    pub power_state: GpuPowerState,
     /// GPU utilization percentage (0.0 - 100.0).
     pub gpu_usage: Option<f32>,
     /// Used VRAM in bytes.
@@ -94,6 +112,9 @@ struct AmdGpuDevice {
     /// `None` if hwmon was not found (metrics like temp/clock/power won't be available).
     hwmon_path: Option<PathBuf>,
 
+    /// Sysfs `power/runtime_status` path for checking hardware power state.
+    runtime_status_path: Option<PathBuf>,
+
     device_name: Option<String>,
 
     /// Whether this is a discrete GPU (determined via `boot_vga` sysfs attribute).
@@ -107,6 +128,9 @@ struct NvidiaGpuDevice {
 
     device_index: u32,
     device_name: Option<String>,
+
+    /// Sysfs `power/runtime_status` path for checking hardware power state.
+    runtime_status_path: Option<PathBuf>,
 }
 
 enum GpuDevice {
@@ -136,6 +160,11 @@ impl GpuDevice {
 /// Discovers all available GPUs at startup and polls one selected device
 /// at regular intervals via vendor-specific backends (AMD sysfs, NVIDIA NVML).
 /// Notifies registered callbacks whenever the snapshot updates.
+///
+/// Unlike other services, GPU polling is demand-driven: callers must use
+/// `request_polling()`/`release_polling()` to start/stop the timer. This is
+/// because NVML calls (even `device_by_index()`) count as device activity and
+/// prevent NVIDIA GPUs from entering D3cold power savings.
 pub struct GpuService {
     snapshot: RefCell<GpuSnapshot>,
     callbacks: Callbacks<GpuSnapshot>,
@@ -151,6 +180,9 @@ pub struct GpuService {
 
     /// Polling interval in seconds.
     poll_interval: Cell<u32>,
+
+    /// Reference count for polling requests. Polling runs only while > 0.
+    poll_requests: Cell<u32>,
 }
 
 impl GpuService {
@@ -186,20 +218,15 @@ impl GpuService {
             GpuSnapshot::unknown()
         };
 
-        let service = Rc::new(Self {
+        Rc::new(Self {
             snapshot: RefCell::new(initial_snapshot),
             callbacks: Callbacks::new(),
             timer_source: RefCell::new(None),
             devices,
             selected_index: Cell::new(selected_index),
             poll_interval: Cell::new(DEFAULT_POLL_INTERVAL_SECS),
-        });
-
-        if selected_index.is_some() {
-            Self::start_polling(&service);
-        }
-
-        service
+            poll_requests: Cell::new(0),
+        })
     }
 
     pub fn global() -> Rc<Self> {
@@ -250,6 +277,45 @@ impl GpuService {
         *this.timer_source.borrow_mut() = Some(source_id);
     }
 
+    fn stop_polling(&self) {
+        if let Some(source_id) = self.timer_source.borrow_mut().take() {
+            debug!("GpuService: stopping polling");
+            source_id.remove();
+        }
+    }
+
+    /// Request that GPU polling be active. Polling starts on the first request
+    /// (0 -> 1 transition) and stops when all requests are released.
+    ///
+    /// Requires `&Rc<Self>` because `start_polling` creates a weak reference
+    /// for the timer closure.
+    pub fn request_polling(this: &Rc<Self>) {
+        if this.selected_index.get().is_none() {
+            return;
+        }
+        let prev = this.poll_requests.get();
+        this.poll_requests.set(prev + 1);
+        if prev == 0 {
+            debug!("GpuService: first poll request, starting polling");
+            Self::start_polling(this);
+        }
+    }
+
+    /// Release a polling request. Polling stops when the last request is released
+    /// (1 -> 0 transition).
+    pub fn release_polling(&self) {
+        let prev = self.poll_requests.get();
+        if prev == 0 {
+            debug!("GpuService: release_polling called with no outstanding requests");
+            return;
+        }
+        self.poll_requests.set(prev - 1);
+        if prev == 1 {
+            debug!("GpuService: last poll request released, stopping polling");
+            self.stop_polling();
+        }
+    }
+
     fn poll(&self) {
         let Some(idx) = self.selected_index.get() else {
             return;
@@ -260,10 +326,34 @@ impl GpuService {
 
         trace!("GpuService: polling GPU {} metrics", idx);
 
-        let snapshot = match device {
+        // Check hardware power state before touching vendor APIs.
+        // NVML calls prevent NVIDIA GPUs from entering D3cold sleep.
+        let runtime_path = match device {
+            GpuDevice::Amd(d) => d.runtime_status_path.as_deref(),
+            GpuDevice::Nvidia(d) => d.runtime_status_path.as_deref(),
+        };
+        let power_state = runtime_path
+            .map(read_runtime_status)
+            .unwrap_or(GpuPowerState::Unknown);
+
+        if power_state == GpuPowerState::Suspended {
+            trace!("GpuService: GPU {} is suspended, skipping vendor poll", idx);
+            let snapshot = GpuSnapshot {
+                available: true,
+                power_state: GpuPowerState::Suspended,
+                device_name: device.name().map(str::to_string),
+                ..Default::default()
+            };
+            *self.snapshot.borrow_mut() = snapshot;
+            self.callbacks.notify(&self.snapshot.borrow());
+            return;
+        }
+
+        let mut snapshot = match device {
             GpuDevice::Amd(amd) => Self::poll_amd(amd),
             GpuDevice::Nvidia(nvidia) => Self::poll_nvidia(nvidia),
         };
+        snapshot.power_state = power_state;
 
         *self.snapshot.borrow_mut() = snapshot;
         self.callbacks.notify(&self.snapshot.borrow());
@@ -298,6 +388,7 @@ impl GpuService {
             clock_mhz,
             power_watts,
             device_name: device.device_name.clone(),
+            ..Default::default()
         }
     }
 
@@ -343,6 +434,7 @@ impl GpuService {
             clock_mhz,
             power_watts,
             device_name: nvidia.device_name.clone(),
+            ..Default::default()
         }
     }
 
@@ -416,6 +508,14 @@ impl GpuService {
                     let boot_vga = read_sysfs_u32(&device_path.join("boot_vga"));
                     let is_discrete = boot_vga.map(|v| v == 0).unwrap_or(false);
 
+                    // Resolve the PCI device path for runtime_status.
+                    // device_path is a symlink like /sys/class/drm/card1/device ->
+                    // ../../devices/pci.../XXXX:XX:XX.X; canonicalize to get the real path.
+                    let runtime_status_path = fs::canonicalize(&device_path)
+                        .ok()
+                        .map(|p| p.join("power/runtime_status"))
+                        .filter(|p| p.exists());
+
                     debug!(
                         "GpuService: found AMD GPU {:?} at {:?} (discrete: {})",
                         device_name, device_path, is_discrete,
@@ -424,6 +524,7 @@ impl GpuService {
                     devices.push(AmdGpuDevice {
                         device_path,
                         hwmon_path,
+                        runtime_status_path,
                         device_name,
                         is_discrete,
                     });
@@ -456,13 +557,29 @@ impl GpuService {
         let mut devices = Vec::new();
 
         for device_index in 0..count {
-            let device_name = match nvml.device_by_index(device_index) {
-                Ok(dev) => dev.name().ok(),
+            let device = match nvml.device_by_index(device_index) {
+                Ok(dev) => dev,
                 Err(e) => {
                     warn!("GpuService: NVML device_by_index({device_index}) failed: {e}");
                     continue;
                 }
             };
+
+            let device_name = device.name().ok();
+
+            // Get PCI bus ID for runtime_status path.
+            // NVML reports format like "00000000:01:00.0"; sysfs uses "0000:01:00.0".
+            let runtime_status_path = device
+                .pci_info()
+                .ok()
+                .map(|pci| {
+                    let bus_id = pci.bus_id.to_lowercase();
+                    PathBuf::from(format!(
+                        "/sys/bus/pci/devices/{}/power/runtime_status",
+                        bus_id
+                    ))
+                })
+                .filter(|p| p.exists());
 
             debug!(
                 "GpuService: found NVIDIA GPU {:?} (nvml_index: {})",
@@ -473,6 +590,7 @@ impl GpuService {
                 nvml: nvml.clone(),
                 device_index,
                 device_name,
+                runtime_status_path,
             });
         }
 
@@ -599,6 +717,18 @@ fn read_sysfs_string(path: &Path) -> Option<String> {
     }
 }
 
+/// Read the GPU's PCI runtime power management status from sysfs.
+fn read_runtime_status(path: &Path) -> GpuPowerState {
+    match fs::read_to_string(path) {
+        Ok(content) => match content.trim() {
+            "active" => GpuPowerState::Active,
+            "suspended" => GpuPowerState::Suspended,
+            _ => GpuPowerState::Unknown,
+        },
+        Err(_) => GpuPowerState::Unknown,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -657,6 +787,7 @@ mod tests {
         GpuDevice::Amd(AmdGpuDevice {
             device_path: PathBuf::from("/dev/null"),
             hwmon_path: None,
+            runtime_status_path: None,
             device_name: Some(name.to_string()),
             is_discrete,
         })
