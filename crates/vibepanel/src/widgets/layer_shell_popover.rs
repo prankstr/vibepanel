@@ -319,11 +319,6 @@ impl LayerShellPopover {
     /// `is_visible()` return false) and moved into a timeout closure that
     /// closes it after the CSS transition completes.
     pub fn hide(&self) {
-        // Fire on_close callback before tearing down
-        if let Some(ref cb) = *self.on_close.borrow() {
-            cb();
-        }
-
         // Destroy click-catcher immediately
         if let Some(catcher) = self.click_catcher.borrow_mut().take() {
             catcher.close();
@@ -335,6 +330,11 @@ impl LayerShellPopover {
         let Some(window) = window else {
             return;
         };
+
+        // Fire on_close callback only when actually closing a visible popover.
+        if let Some(ref cb) = *self.on_close.borrow() {
+            cb();
+        }
 
         // Start close animation on the content widget
         if let Some(ref content) = content {

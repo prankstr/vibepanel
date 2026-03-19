@@ -568,15 +568,17 @@ impl GpuService {
             let device_name = device.name().ok();
 
             // Get PCI bus ID for runtime_status path.
-            // NVML reports format like "00000000:01:00.0"; sysfs uses "0000:01:00.0".
+            // NVML uses an 8-char domain ("00000000:06:00.0") while sysfs uses
+            // 4-char ("0000:06:00.0"). Normalize by stripping leading zeros and
+            // re-adding a 4-char prefix.
             let runtime_status_path = device
                 .pci_info()
                 .ok()
                 .map(|pci| {
-                    let bus_id = pci.bus_id.to_lowercase();
+                    let bus_id = pci.bus_id.trim_start_matches('0');
+                    let bus_id = format!("0000{bus_id}").to_lowercase();
                     PathBuf::from(format!(
-                        "/sys/bus/pci/devices/{}/power/runtime_status",
-                        bus_id
+                        "/sys/bus/pci/devices/{bus_id}/power/runtime_status",
                     ))
                 })
                 .filter(|p| p.exists());
