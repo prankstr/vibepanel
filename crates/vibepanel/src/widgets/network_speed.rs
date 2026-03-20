@@ -27,24 +27,10 @@ use crate::widgets::{WidgetConfig, warn_unknown_options};
 const DEFAULT_SHOW_ICON: bool = true;
 const DEFAULT_SHOW_ARROWS: bool = true;
 
-/// Internal spacing (px) between a directional arrow (↓/↑) and its speed label.
-///
-/// Much tighter than the default `--spacing-widget-gap` (~10px) so the arrow
-/// visually binds to its value. Each arrow+label pair is wrapped in its own
-/// `GtkBox` at this spacing, avoiding CSS specificity battles with the global
-/// `.widget .content > *:not(:last-child)` margin rule.
+/// Tight spacing between arrow and speed label to visually bind them.
 const ARROW_LABEL_SPACING: i32 = 4;
 
-/// Baseline reference string for Pango width measurement.
-///
-/// Digit `8` is the widest in most proportional fonts. Each speed label is
-/// measured against this string on `connect_realize` and given a minimum-width
-/// floor via `set_size_request`. If actual content is wider (e.g. `140.4 KB/s`
-/// during a burst), the label gracefully grows past the floor.
-///
-/// Using `"88.8 KB/s"` rather than `"888.8 KB/s"` keeps the widget compact
-/// for the common case — it's rare to sustain 100+ KB/s on both download and
-/// upload simultaneously.
+/// Reference string for minimum label width (digit 8 is widest in most fonts).
 const SPEED_BASELINE: &str = "88.8 KB/s";
 
 /// Network speed display format options.
@@ -147,10 +133,7 @@ impl NetworkSpeedWidget {
             &[widget::NETWORK_SPEED_ICON],
         );
 
-        // Build download group (arrow + speed) if format includes download.
-        // Each arrow+label pair is wrapped in a sub-box with tight internal
-        // spacing (ARROW_LABEL_SPACING) so the arrow visually binds to its
-        // value without fighting the global widget-gap CSS rule.
+        // Build download group if format includes download
         let (dl_arrow, dl_label) = if matches!(
             config.format,
             NetworkSpeedFormat::Both | NetworkSpeedFormat::Download
@@ -198,7 +181,6 @@ impl NetworkSpeedWidget {
             let ul_arrow = ul_arrow.clone();
             let show_icon = config.show_icon;
             let format = config.format.clone();
-            let show_arrows = config.show_arrows;
             let popover_binding = popover_binding.clone();
 
             system_service.connect(move |snapshot: &SystemSnapshot| {
@@ -210,7 +192,6 @@ impl NetworkSpeedWidget {
                     ul_arrow.as_ref(),
                     ul_label.as_ref(),
                     show_icon,
-                    show_arrows,
                     &format,
                     snapshot,
                 );
@@ -272,15 +253,7 @@ fn build_speed_group(
     (arrow, speed)
 }
 
-/// Set up Pango-based baseline width measurement for a speed label.
-///
-/// On `connect_realize`, measures the baseline reference string ("888.8 KB/s")
-/// with the label's actual font and sets a minimum width floor via
-/// `set_size_request`. This prevents the label from jittering as speed values
-/// change between e.g. "0 B/s" and "1.5 MB/s".
-///
-/// The label is left-aligned (`xalign=0.0`) so that text hugs the directional
-/// arrow, with any extra padding appearing on the right where digits grow into.
+/// Set minimum width based on baseline string to prevent jitter.
 fn setup_baseline_sizing(label: &Label) {
     label.set_xalign(0.0);
     label.connect_realize(|label| {
@@ -300,7 +273,6 @@ fn update_network_widget(
     ul_arrow: Option<&Label>,
     ul_label: Option<&Label>,
     show_icon: bool,
-    _show_arrows: bool,
     format: &NetworkSpeedFormat,
     snapshot: &SystemSnapshot,
 ) {
