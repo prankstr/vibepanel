@@ -53,6 +53,7 @@ mic_off
 more_horiz
 more_vert
 mouse
+network_check
 notifications
 notifications_active
 notifications_off
@@ -79,7 +80,6 @@ speaker
 speed
 sports_esports
 stop
-swap_horiz
 volume_down
 volume_off
 volume_up

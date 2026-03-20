@@ -10,8 +10,8 @@
 //! - `TooltipManager` for styled tooltips
 //! - Shared popover with CPU/Memory widgets for detailed system info
 
-use gtk4::Label;
 use gtk4::prelude::*;
+use gtk4::{Label, Orientation};
 use vibepanel_core::config::WidgetEntry;
 
 use crate::services::callbacks::CallbackId;
@@ -27,14 +27,25 @@ use crate::widgets::{WidgetConfig, warn_unknown_options};
 const DEFAULT_SHOW_ICON: bool = true;
 const DEFAULT_SHOW_ARROWS: bool = true;
 
+/// Internal spacing (px) between a directional arrow (↓/↑) and its speed label.
+///
+/// Much tighter than the default `--spacing-widget-gap` (~10px) so the arrow
+/// visually binds to its value. Each arrow+label pair is wrapped in its own
+/// `GtkBox` at this spacing, avoiding CSS specificity battles with the global
+/// `.widget .content > *:not(:last-child)` margin rule.
+const ARROW_LABEL_SPACING: i32 = 4;
+
 /// Baseline reference string for Pango width measurement.
 ///
-/// Digit `8` is the widest in most proportional fonts; "888.8 KB/s" is the
-/// widest realistic output from `format_speed()` (KB/s and MB/s both produce
-/// up to 4 digits + unit). Each speed label is measured against this string
-/// on `connect_realize` and given a minimum-width floor via `set_size_request`.
-/// If actual content is wider, the label gracefully grows.
-const SPEED_BASELINE: &str = "888.8 KB/s";
+/// Digit `8` is the widest in most proportional fonts. Each speed label is
+/// measured against this string on `connect_realize` and given a minimum-width
+/// floor via `set_size_request`. If actual content is wider (e.g. `140.4 KB/s`
+/// during a burst), the label gracefully grows past the floor.
+///
+/// Using `"88.8 KB/s"` rather than `"888.8 KB/s"` keeps the widget compact
+/// for the common case — it's rare to sustain 100+ KB/s on both download and
+/// upload simultaneously.
+const SPEED_BASELINE: &str = "88.8 KB/s";
 
 /// Network speed display format options.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -136,52 +147,41 @@ impl NetworkSpeedWidget {
             &[widget::NETWORK_SPEED_ICON],
         );
 
-        // Build download labels (arrow + speed) if format includes download
-        let dl_arrow = if config.show_arrows
-            && matches!(
-                config.format,
-                NetworkSpeedFormat::Both | NetworkSpeedFormat::Download
-            ) {
-            let label = base.add_label(Some("↓"), &[widget::NETWORK_SPEED_DL_ARROW]);
-            Some(label)
-        } else {
-            None
-        };
-
-        let dl_label = if matches!(
+        // Build download group (arrow + speed) if format includes download.
+        // Each arrow+label pair is wrapped in a sub-box with tight internal
+        // spacing (ARROW_LABEL_SPACING) so the arrow visually binds to its
+        // value without fighting the global widget-gap CSS rule.
+        let (dl_arrow, dl_label) = if matches!(
             config.format,
             NetworkSpeedFormat::Both | NetworkSpeedFormat::Download
         ) {
-            let label =
-                base.add_label(None, &[widget::NETWORK_SPEED_DL_LABEL, class::VCENTER_CAPS]);
-            setup_baseline_sizing(&label);
-            Some(label)
+            let (arrow, label) = build_speed_group(
+                &base,
+                config.show_arrows,
+                "↓",
+                widget::NETWORK_SPEED_DL_ARROW,
+                widget::NETWORK_SPEED_DL_LABEL,
+            );
+            (arrow, Some(label))
         } else {
-            None
+            (None, None)
         };
 
-        // Build upload labels (arrow + speed) if format includes upload
-        let ul_arrow = if config.show_arrows
-            && matches!(
-                config.format,
-                NetworkSpeedFormat::Both | NetworkSpeedFormat::Upload
-            ) {
-            let label = base.add_label(Some("↑"), &[widget::NETWORK_SPEED_UL_ARROW]);
-            Some(label)
-        } else {
-            None
-        };
-
-        let ul_label = if matches!(
+        // Build upload group (arrow + speed) if format includes upload
+        let (ul_arrow, ul_label) = if matches!(
             config.format,
             NetworkSpeedFormat::Both | NetworkSpeedFormat::Upload
         ) {
-            let label =
-                base.add_label(None, &[widget::NETWORK_SPEED_UL_LABEL, class::VCENTER_CAPS]);
-            setup_baseline_sizing(&label);
-            Some(label)
+            let (arrow, label) = build_speed_group(
+                &base,
+                config.show_arrows,
+                "↑",
+                widget::NETWORK_SPEED_UL_ARROW,
+                widget::NETWORK_SPEED_UL_LABEL,
+            );
+            (arrow, Some(label))
         } else {
-            None
+            (None, None)
         };
 
         let popover_binding = SystemPopoverBinding::new(&base);
@@ -235,6 +235,41 @@ impl Drop for NetworkSpeedWidget {
     fn drop(&mut self) {
         SystemService::global().disconnect(self.system_callback_id);
     }
+}
+
+/// Build a speed group: an optional arrow label + speed value label, wrapped
+/// in a sub-box with tight internal spacing.
+///
+/// The sub-box is appended directly to the base widget's content box.
+/// Returns `(Option<arrow_label>, speed_label)`.
+fn build_speed_group(
+    base: &BaseWidget,
+    show_arrow: bool,
+    arrow_char: &str,
+    arrow_class: &str,
+    label_class: &str,
+) -> (Option<Label>, Label) {
+    let group = gtk4::Box::new(Orientation::Horizontal, ARROW_LABEL_SPACING);
+    group.set_valign(gtk4::Align::Center);
+
+    let arrow = if show_arrow {
+        let lbl = Label::new(Some(arrow_char));
+        lbl.add_css_class(arrow_class);
+        group.append(&lbl);
+        Some(lbl)
+    } else {
+        None
+    };
+
+    let speed = Label::new(None);
+    speed.add_css_class(label_class);
+    speed.add_css_class(class::VCENTER_CAPS);
+    setup_baseline_sizing(&speed);
+    group.append(&speed);
+
+    base.content().append(&group);
+
+    (arrow, speed)
 }
 
 /// Set up Pango-based baseline width measurement for a speed label.

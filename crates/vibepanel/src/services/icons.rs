@@ -212,7 +212,7 @@ fn material_symbol_lookup(icon_name: &str) -> Option<&'static str> {
         // Wired networking
         "network-wired" => "lan",
         "network-wired-symbolic" => "lan",
-        "network-transmit-receive-symbolic" => "swap_horiz",
+        "network-transmit-receive-symbolic" => "network_check",
         "network-offline-symbolic" => "settings_ethernet",
 
         // Simplified Wi-Fi names

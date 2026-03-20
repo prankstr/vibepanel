@@ -352,6 +352,10 @@ pub fn format_bytes_long(bytes: u64) -> String {
 }
 
 /// Format bytes per second as a human-readable speed string (e.g., "1.5 MB/s").
+///
+/// Always uses KB/s as the minimum unit (e.g., 500 B/s → "0.5 KB/s") so that
+/// all outputs share a uniform `N.N UNIT/s` structure, preventing visual jitter
+/// when displayed in fixed-width bar widgets.
 pub fn format_speed(bytes_per_sec: u64) -> String {
     const KB: u64 = 1024;
     const MB: u64 = KB * 1024;
@@ -361,10 +365,8 @@ pub fn format_speed(bytes_per_sec: u64) -> String {
         format!("{:.1} GB/s", bytes_per_sec as f64 / GB as f64)
     } else if bytes_per_sec >= MB {
         format!("{:.1} MB/s", bytes_per_sec as f64 / MB as f64)
-    } else if bytes_per_sec >= KB {
-        format!("{:.1} KB/s", bytes_per_sec as f64 / KB as f64)
     } else {
-        format!("{} B/s", bytes_per_sec)
+        format!("{:.1} KB/s", bytes_per_sec as f64 / KB as f64)
     }
 }
 
@@ -386,7 +388,8 @@ mod tests {
 
     #[test]
     fn test_format_speed() {
-        assert_eq!(format_speed(500), "500 B/s");
+        assert_eq!(format_speed(0), "0.0 KB/s");
+        assert_eq!(format_speed(500), "0.5 KB/s");
         assert_eq!(format_speed(1024), "1.0 KB/s");
         assert_eq!(format_speed(1024 * 1024), "1.0 MB/s");
         assert_eq!(format_speed(1536 * 1024), "1.5 MB/s");
