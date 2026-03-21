@@ -482,7 +482,7 @@ impl QuickSettingsWindow {
                                 subtitle.set_label(if expanding {
                                     "Hold to confirm"
                                 } else {
-                                    "Hold to shutdown"
+                                    "Hold to shut down"
                                 });
                             }
                         })),
@@ -1188,7 +1188,7 @@ impl QuickSettingsWindow {
             collapse(&power_state.base);
             // Reset subtitle back to default
             if let Some(ref subtitle) = *power_state.base.subtitle.borrow() {
-                subtitle.set_label("Hold to shutdown");
+                subtitle.set_label("Hold to shut down");
             }
         }
 
