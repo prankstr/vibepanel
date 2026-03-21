@@ -57,7 +57,7 @@ struct PowerAction {
 const POWER_ACTIONS: &[PowerAction] = &[
     PowerAction {
         id: "shutdown",
-        label: "Shutdown",
+        label: "Shut Down",
         icon: "system-shutdown-symbolic",
         command: &["systemctl", "poweroff"],
     },
@@ -562,7 +562,7 @@ pub fn build_power_card_expander() -> (
     let card = ToggleCard::builder()
         .icon("system-shutdown-symbolic")
         .label("Power")
-        .subtitle("Hold to shutdown")
+        .subtitle("Hold to shut down")
         .active(false)
         .sensitive(true)
         .icon_active(false)
