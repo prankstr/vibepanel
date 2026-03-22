@@ -24,7 +24,7 @@ use crate::services::tooltip::TooltipManager;
 use crate::styles::media;
 use crate::widgets::base::{BaseWidget, MenuHandle};
 use crate::widgets::marquee_label::MarqueeLabel;
-use crate::widgets::media_components::ArtState;
+use crate::widgets::media_components::{ArtState, art_radius_percent};
 use crate::widgets::media_popover::{MediaPopoverController, build_media_popover_with_controller};
 use crate::widgets::media_visualizer::BarVisualizer;
 use crate::widgets::media_window::{MediaWindowHandle, create_media_window};
@@ -66,6 +66,13 @@ pub struct MediaConfig {
     pub popout_opacity: f64,
     /// Enable the audio visualizer (requires cava). Default: true.
     pub visualizer: bool,
+    /// Override border radius for album art (0-100 percentage).
+    /// When `None`, uses the global `widgets.border_radius`.
+    ///
+    /// Note: This field is parsed for config validation but read dynamically from
+    /// `ConfigManager::get_widget_option()` at runtime to support live-reload.
+    #[allow(dead_code)]
+    pub art_radius: Option<u32>,
 }
 
 impl WidgetConfig for MediaConfig {
@@ -79,6 +86,7 @@ impl WidgetConfig for MediaConfig {
                 "max_chars",
                 "popout_opacity",
                 "visualizer",
+                "art_radius",
             ],
         );
 
@@ -116,12 +124,19 @@ impl WidgetConfig for MediaConfig {
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
 
+        let art_radius = entry
+            .options
+            .get("art_radius")
+            .and_then(|v| v.as_integer())
+            .map(|v| v.clamp(0, 100) as u32);
+
         Self {
             template,
             empty_text,
             max_chars,
             popout_opacity,
             visualizer,
+            art_radius,
         }
     }
 }
@@ -134,6 +149,7 @@ impl Default for MediaConfig {
             max_chars: DEFAULT_MAX_CHARS,
             popout_opacity: 1.0,
             visualizer: true,
+            art_radius: None,
         }
     }
 }
@@ -512,8 +528,7 @@ impl MediaWidget {
         {
             let config_mgr = ConfigManager::global();
             let art_size = (config_mgr.bar_size() as f64 * ART_DISPLAY_SCALE) as i32;
-            let radius_percent = (config_mgr.widget_radius_percent() as f32 / 100.0).min(0.5);
-            let corner_radius = art_size as f32 * radius_percent;
+            let corner_radius = art_size as f32 * art_radius_percent();
 
             let picture = RoundedPicture::new();
             picture.set_pixel_size(art_size);
@@ -831,8 +846,7 @@ impl MediaWidget {
             Some(ConfigManager::global().on_theme_change(move || {
                 let config_mgr = ConfigManager::global();
                 let art_size = (config_mgr.bar_size() as f64 * ART_DISPLAY_SCALE) as i32;
-                let radius_percent = (config_mgr.widget_radius_percent() as f32 / 100.0).min(0.5);
-                let corner_radius = art_size as f32 * radius_percent;
+                let corner_radius = art_size as f32 * art_radius_percent();
                 picture_for_theme.set_corner_radius(corner_radius);
             }))
         } else {
@@ -1217,6 +1231,31 @@ mod tests {
         assert_eq!(config.template, "{art}{artist} - {title}{controls}");
         assert_eq!(config.empty_text, "");
         assert_eq!(config.max_chars, 20);
+        assert_eq!(config.art_radius, None);
+    }
+
+    #[test]
+    fn test_media_config_art_radius() {
+        let mut options = std::collections::HashMap::new();
+        options.insert("art_radius".to_string(), toml::Value::Integer(10));
+        let entry = WidgetEntry {
+            name: "media".to_string(),
+            options,
+        };
+        let config = MediaConfig::from_entry(&entry);
+        assert_eq!(config.art_radius, Some(10));
+    }
+
+    #[test]
+    fn test_media_config_art_radius_clamped() {
+        let mut options = std::collections::HashMap::new();
+        options.insert("art_radius".to_string(), toml::Value::Integer(200));
+        let entry = WidgetEntry {
+            name: "media".to_string(),
+            options,
+        };
+        let config = MediaConfig::from_entry(&entry);
+        assert_eq!(config.art_radius, Some(100));
     }
 
     #[test]

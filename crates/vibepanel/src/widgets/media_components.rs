@@ -24,6 +24,18 @@ use crate::widgets::rounded_picture::RoundedPicture;
 // Shared Controller
 // ============================================================================
 
+/// Get the effective art radius percentage, using the media `art_radius` option
+/// if set, otherwise falling back to the global `widgets.border_radius`.
+pub fn art_radius_percent() -> f32 {
+    let config_mgr = ConfigManager::global();
+    let percent = config_mgr
+        .get_widget_option("media", "art_radius")
+        .and_then(|v| v.as_integer())
+        .map(|v| v.clamp(0, 100) as u32)
+        .unwrap_or_else(|| config_mgr.widget_radius_percent());
+    (percent as f32 / 100.0).min(0.5)
+}
+
 /// Shared controller for media UI views (popover and pop-out window).
 ///
 /// Owns references to UI elements and provides a unified `update_from_snapshot()`
@@ -471,10 +483,9 @@ pub fn build_album_art(
     Option<MediaVisualizer>,
 ) {
     let icons = IconsService::global();
-    let config_mgr = ConfigManager::global();
 
-    // Corner radius proportional to art size.
-    let radius_percent = (config_mgr.widget_radius_percent() as f32 / 100.0).min(0.5);
+    // Corner radius proportional to art size, using art_radius override if set.
+    let radius_percent = art_radius_percent();
     let corner_radius = size as f32 * radius_percent;
 
     let container = GtkBox::new(Orientation::Vertical, 0);
