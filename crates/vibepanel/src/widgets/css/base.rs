@@ -3,28 +3,21 @@
 //! These are truly shared styles that apply across multiple surfaces
 //! (bar, popovers, quick settings, etc).
 
-use super::{POPOVER_ANIMATION_MS, POPOVER_BG_WITH_OPACITY};
+use super::POPOVER_BG_WITH_OPACITY;
 
 /// Return shared utility CSS.
 pub fn css(animations: bool) -> String {
     let popover_bg = POPOVER_BG_WITH_OPACITY;
-    let hover_transition = if animations {
-        "transition: background-color 100ms ease;"
-    } else {
-        "transition: none;"
-    };
+    // Hover transitions are intentionally disabled (always `transition: none;`).
+    // Interrupted CSS transitions are observed to cause unbounded memory growth
+    // (e.g. spam-clicking a bar widget to toggle its popover).
+    // The 100ms background-color hover transition is barely perceptible and not
+    // worth the risk. Background-color changes still apply instantly.
+    let hover_transition = "transition: none;";
     let slider_transition = if animations {
         "transition: transform 100ms ease-out;"
     } else {
         "transition: none;"
-    };
-    let popover_transition = if animations {
-        format!(
-            "transition: opacity {ms}ms cubic-bezier(0.2, 0, 0, 1),\n                transform {ms}ms cubic-bezier(0.2, 0, 0, 1);",
-            ms = POPOVER_ANIMATION_MS,
-        )
-    } else {
-        "transition: none;".to_string()
     };
     format!(
         r#"
@@ -301,19 +294,6 @@ button:hover {{
 }}
 .slider-row .qs-toggle-more:hover {{
     background: var(--color-card-overlay-hover);
-}}
-
-/* ===== POPOVER OPEN/CLOSE ANIMATION ===== */
-
-.popover-animate {{
-    {popover_transition}
-    opacity: 1;
-    transform: scale(1);
-}}
-
-.popover-animate.popover-hidden {{
-    opacity: 0;
-    transform: scale(0.95);
 }}
 "#
     )

@@ -29,9 +29,9 @@ pub const WIDGET_BG_HOVER: &str = "color-mix(in srgb, color-mix(in srgb, var(--w
 
 /// Popover open/close animation duration in milliseconds.
 ///
-/// Single source of truth for both CSS transitions and Rust timeout durations.
-/// Used by `base.rs` for the `.popover-animate` CSS rule and by
-/// `layer_shell_popover.rs` / `quick_settings/window.rs` for close-animation timeouts.
+/// Single source of truth for tick-callback animation durations.
+/// Used by `layer_shell_popover.rs` and `quick_settings/window.rs` for
+/// open/close animations driven by frame-clock tick callbacks.
 pub const POPOVER_ANIMATION_MS: u64 = 150;
 
 /// Dismiss animation duration in milliseconds (matches quick settings revealers).
