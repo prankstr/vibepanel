@@ -18,6 +18,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::Duration;
 
+use super::scale_box::ScaleBox;
 use crate::services::compositor::CompositorManager;
 use crate::services::config_manager::ConfigManager;
 use crate::services::surfaces::SurfaceStyleManager;
@@ -37,7 +38,7 @@ const POPOVER_DEFAULT_WIDTH_ESTIMATE: i32 = 320;
 
 const POPOVER_MIN_VALID_WIDTH: i32 = 20;
 
-/// Duration of the popover open/close CSS transition.
+/// Duration of the popover open/close animation.
 /// Derived from the single source of truth in `css::POPOVER_ANIMATION_MS`.
 pub const POPOVER_ANIMATION_DURATION: Duration =
     Duration::from_millis(super::css::POPOVER_ANIMATION_MS);
@@ -243,26 +244,40 @@ where
 
 /// A layer-shell popover for widget menus.
 ///
-/// Creates fresh windows on each `show()` call and destroys them on `hide()`,
-/// ensuring clean state without remembered scroll positions or expanded sections.
+/// The window shell (`ApplicationWindow` with layer-shell configuration) is
+/// created lazily on first show and **reused** across open/close cycles.
+/// Content is built fresh on each `show()` via the builder closure, placed
+/// inside a persistent `ScaleBox` animation shell.
 ///
-/// Supports animated open/close via CSS transitions (scale + fade). On hide,
-/// the window is taken out of the struct (so `is_visible()` returns false
-/// immediately) and the close animation plays on the orphaned window before
-/// it is destroyed.
+/// Open/close animation is a simple opacity snap + timeout: the `ScaleBox`
+/// opacity is set to 0 immediately on hide, then the window is hidden and
+/// `on_close` fires after `POPOVER_ANIMATION_DURATION`.
 pub struct LayerShellPopover {
     app: Application,
     widget_name: String,
     builder: Rc<dyn Fn() -> gtk4::Widget>,
     window: RefCell<Option<ApplicationWindow>>,
     click_catcher: RefCell<Option<ApplicationWindow>>,
-    /// Reference to the popover content widget for animation class toggling.
-    content_widget: RefCell<Option<gtk4::Widget>>,
+    /// Persistent animation shell. Never destroyed. Builder content is placed
+    /// inside this as a child and swapped on each show.
+    anim_shell: RefCell<Option<ScaleBox>>,
     /// Anchor X coordinate (widget center) in monitor coordinates.
     anchor_x: Cell<i32>,
     anchor_monitor: RefCell<Option<Monitor>>,
-    /// Optional callback invoked when the popover is hidden.
+    /// Optional callback invoked when the popover is fully hidden (after close
+    /// animation completes). NOT fired at the start of hide().
     on_close: RefCell<Option<Rc<dyn Fn()>>>,
+    /// Generation counter incremented on every show/hide to cancel stale
+    /// idle callbacks and timeout callbacks.
+    generation: Rc<Cell<u32>>,
+    /// Logical open state. True from the moment show() is called until
+    /// hide() is called. Used by is_visible() so the toggle logic in BaseWidget works correctly
+    /// even while a close animation is in flight.
+    logically_open: Cell<bool>,
+    /// Set when `mark_content_dirty()` is called while the popover is not
+    /// logically open (e.g. a notification arrives during the close animation).
+    /// Checked and cleared on the next show so the content gets rebuilt.
+    content_dirty: Cell<bool>,
 }
 
 impl LayerShellPopover {
@@ -283,19 +298,24 @@ impl LayerShellPopover {
             builder: Rc::new(builder),
             window: RefCell::new(None),
             click_catcher: RefCell::new(None),
-            content_widget: RefCell::new(None),
+            anim_shell: RefCell::new(None),
             anchor_x: Cell::new(0),
             anchor_monitor: RefCell::new(None),
             on_close: RefCell::new(None),
+            generation: Rc::new(Cell::new(0)),
+            logically_open: Cell::new(false),
+            content_dirty: Cell::new(false),
         })
     }
 
-    /// Check if the popover is currently visible.
+    /// Check if the popover is logically open.
+    ///
+    /// Returns `true` from the moment `show_at()` is called until `hide()`
+    /// is called, even though the window may still be visible during the close
+    /// animation. This is critical for the toggle logic in `BaseWidget` to
+    /// work correctly during rapid clicking.
     pub fn is_visible(&self) -> bool {
-        self.window
-            .borrow()
-            .as_ref()
-            .is_some_and(|w| w.is_visible())
+        self.logically_open.get()
     }
 
     /// Set a callback to be invoked when the popover is hidden.
@@ -303,114 +323,220 @@ impl LayerShellPopover {
         *self.on_close.borrow_mut() = Some(Rc::new(callback));
     }
 
+    /// Mark the popover content as needing a rebuild.
+    ///
+    /// Called by `MenuHandle::refresh_if_visible()` when the popover is not
+    /// logically open (e.g. a notification arrives during the close animation).
+    /// The flag is checked on the next show so the stale content gets
+    /// replaced before the user sees it again.
+    pub fn mark_content_dirty(&self) {
+        self.content_dirty.set(true);
+    }
+
     /// Show the popover at the given anchor position.
     ///
-    /// Creates fresh window and click-catcher instances.
+    /// Reuses all persistent shells (window, animation, click-catcher) and
+    /// builds fresh content.
     pub fn show_at(self: &Rc<Self>, x: i32, monitor: Option<Monitor>) {
         self.anchor_x.set(x);
         *self.anchor_monitor.borrow_mut() = monitor;
         self.show_internal();
     }
 
-    /// Hide the popover with a close animation.
+    /// Hide the popover, keeping the window shell alive.
     ///
-    /// The click-catcher is destroyed immediately so the bar is interactive
-    /// during the animation. The window is taken out of the struct (making
-    /// `is_visible()` return false) and moved into a timeout closure that
-    /// closes it after the CSS transition completes.
+    /// The click-catcher is hidden immediately so the bar is interactive
+    /// during the animation. The animation shell snaps to opacity 0,
+    /// then a timeout hides the window and fires `on_close`.
     pub fn hide(&self) {
-        // Destroy click-catcher immediately
-        if let Some(catcher) = self.click_catcher.borrow_mut().take() {
-            catcher.close();
+        // Mark as logically closed immediately — the toggle logic in BaseWidget
+        // checks this to decide show vs hide on the next click.
+        self.logically_open.set(false);
+
+        // Bump generation to cancel any pending idle callback from show_internal().
+        let generation = self.generation.get().wrapping_add(1);
+        self.generation.set(generation);
+
+        // Hide click-catcher immediately so bar is interactive during animation.
+        if let Some(ref catcher) = *self.click_catcher.borrow() {
+            catcher.set_visible(false);
         }
 
-        let content = self.content_widget.borrow_mut().take();
-        let window = self.window.borrow_mut().take();
+        let window = self.window.borrow().as_ref().cloned();
+        let anim_shell = self.anim_shell.borrow().as_ref().cloned();
 
         let Some(window) = window else {
             return;
         };
 
-        // Fire on_close callback only when actually closing a visible popover.
-        if let Some(ref cb) = *self.on_close.borrow() {
-            cb();
+        // Release keyboard grab while hiding.
+        window.set_keyboard_mode(KeyboardMode::None);
+
+        // Snap the animation shell to hidden state.
+        if let Some(ref shell) = anim_shell {
+            shell.set_opacity(0.0);
         }
 
-        // Start close animation on the content widget
-        if let Some(ref content) = content {
-            content.add_css_class(surface::POPOVER_HIDDEN);
+        // If animations are disabled, hide window immediately.
+        if !ConfigManager::global().animations_enabled() {
+            if let Some(ref shell) = anim_shell {
+                shell.remove_child();
+            }
+            window.set_visible(false);
+            if let Some(ref cb) = *self.on_close.borrow() {
+                cb();
+            }
+            return;
         }
 
-        // The orphaned window closes itself after the animation duration.
-        // If show_at() is called during this window, a new window is created
-        // independently — Rust ownership prevents conflicts.
-        let delay = if ConfigManager::global().animations_enabled() {
-            POPOVER_ANIMATION_DURATION
-        } else {
-            Duration::ZERO
-        };
-        glib::timeout_add_local_once(delay, move || {
-            // `window` and `content` are moved here and dropped after close
-            let _ = &content;
-            window.close();
+        // Hide the window and fire on_close after the animation duration.
+        let on_close = self.on_close.borrow().clone();
+        let gen_rc = Rc::clone(&self.generation);
+        glib::timeout_add_local_once(POPOVER_ANIMATION_DURATION, move || {
+            // Bail if a newer show/hide cycle started.
+            if gen_rc.get() != generation {
+                return;
+            }
+            if let Some(ref shell) = anim_shell {
+                shell.remove_child();
+            }
+            window.set_visible(false);
+            if let Some(ref cb) = on_close {
+                cb();
+            }
         });
     }
 
+    /// Rebuild the popover content in-place without any animation.
+    ///
+    /// Used by `MenuHandle::refresh_if_visible()` to hot-swap content while the
+    /// popover is already open (e.g. a new notification arrives). This avoids
+    /// the hide→show cycle which would trigger unnecessary animation.
+    pub fn rebuild_content(&self) {
+        let Some(anim_shell) = self.anim_shell.borrow().as_ref().cloned() else {
+            return;
+        };
+
+        anim_shell.remove_child();
+
+        let content = (self.builder)();
+        content.add_css_class(surface::POPOVER);
+        let popover_class = format!("{}-popover", self.widget_name);
+        content.add_css_class(&popover_class);
+
+        anim_shell.set_child(&content);
+
+        SurfaceStyleManager::global().apply_pango_attrs_all(&anim_shell);
+    }
+
     fn show_internal(self: &Rc<Self>) {
-        // Guard against re-entrancy: if already visible, hide first to avoid
-        // orphaning the old window/click-catcher
-        if self.is_visible() {
-            self.hide();
+        // Mark as logically open immediately.
+        self.logically_open.set(true);
+
+        // Fresh content will be built below, so clear any pending dirty flag.
+        self.content_dirty.set(false);
+
+        // Bump generation to cancel any stale timeout or idle callbacks.
+        let generation = self.generation.get().wrapping_add(1);
+        self.generation.set(generation);
+
+        // If the window is somehow still visible (shouldn't happen with
+        // logically_open guard, but be defensive), hide it synchronously.
+        if self
+            .window
+            .borrow()
+            .as_ref()
+            .is_some_and(|w| w.is_visible())
+        {
+            if let Some(ref shell) = *self.anim_shell.borrow() {
+                shell.set_opacity(0.0);
+                shell.remove_child();
+            }
+            if let Some(ref window) = *self.window.borrow() {
+                window.set_visible(false);
+            }
         }
 
-        // Create the main window
-        let window = self.create_window();
+        let window = self.ensure_window_shell();
 
-        // Set monitor if specified
+        let anim_shell = self.ensure_anim_shell();
+
+        anim_shell.remove_child();
+
+        // Build fresh content from the builder closure.
+        let content = (self.builder)();
+        content.add_css_class(surface::POPOVER);
+        let popover_class = format!("{}-popover", self.widget_name);
+        content.add_css_class(&popover_class);
+
+        anim_shell.set_child(&content);
+
+        SurfaceStyleManager::global().apply_pango_attrs_all(&anim_shell);
+
         if let Some(ref monitor) = *self.anchor_monitor.borrow() {
             window.set_monitor(Some(monitor));
         }
 
-        // Create and show click-catcher first
-        let bar_zone = calculate_bar_exclusive_zone();
-        let weak_self = Rc::downgrade(self);
-        let catcher = create_click_catcher(&self.app, bar_zone, move || {
-            if let Some(popover) = weak_self.upgrade() {
-                popover.hide();
-            }
-        });
+        // Set the shell to the hidden state (will be revealed after positioning).
+        anim_shell.set_opacity(0.0);
 
+        // Ensure the outer wrapper is set as the window's child (persists).
+        if window.child().is_none() {
+            let outer = GtkBox::new(Orientation::Vertical, 0);
+            outer.add_css_class(surface::WIDGET_MENU);
+            outer.add_css_class(surface::NO_FOCUS);
+            SurfaceStyleManager::global().apply_shadow_margins(&outer, POPOVER_SHADOW_MARGIN);
+            outer.append(&anim_shell);
+            window.set_child(Some(&outer));
+        }
+
+        // Restore keyboard mode (hide() sets it to None).
+        window.set_keyboard_mode(popover_keyboard_mode());
+
+        // Show click-catcher (persistent, created lazily).
+        let catcher = self.ensure_click_catcher();
         if let Some(ref monitor) = *self.anchor_monitor.borrow() {
             catcher.set_monitor(Some(monitor));
         }
-
+        catcher.set_margin(popover_bar_edge(), calculate_bar_exclusive_zone());
         catcher.set_visible(true);
-        *self.click_catcher.borrow_mut() = Some(catcher.clone());
 
-        // Show window with opacity trick to avoid flicker during positioning
+        // Show window with opacity trick to avoid flicker during positioning.
         window.set_opacity(0.0);
         window.set_visible(true);
         window.present();
 
-        *self.window.borrow_mut() = Some(window.clone());
-
-        // After window is mapped, update position and reveal with animation
+        // After window is mapped, update position and reveal.
         let weak_self = Rc::downgrade(self);
-        glib::idle_add_local(move || {
+        let gen_rc = Rc::clone(&self.generation);
+        glib::idle_add_local_once(move || {
+            // Bail if a newer show/hide cycle started before this idle fired.
+            if gen_rc.get() != generation {
+                return;
+            }
+
             if let Some(popover) = weak_self.upgrade() {
                 popover.update_position();
                 if let Some(ref window) = *popover.window.borrow() {
                     window.set_opacity(1.0);
                 }
-                if let Some(ref content) = *popover.content_widget.borrow() {
-                    content.remove_css_class(surface::POPOVER_HIDDEN);
+                if let Some(ref shell) = *popover.anim_shell.borrow() {
+                    shell.set_opacity(1.0);
                 }
             }
-            ControlFlow::Break
         });
     }
 
-    fn create_window(self: &Rc<Self>) -> ApplicationWindow {
+    /// Ensure the window shell exists, creating it lazily if needed.
+    ///
+    /// The shell includes the `ApplicationWindow`, layer-shell configuration,
+    /// and ESC key handler — but no content. Content is set by `show_internal()`
+    /// on each open.
+    fn ensure_window_shell(self: &Rc<Self>) -> ApplicationWindow {
+        if let Some(ref window) = *self.window.borrow() {
+            return window.clone();
+        }
+
         let window = ApplicationWindow::builder()
             .application(&self.app)
             .title(format!("vibepanel {} popover", self.widget_name))
@@ -434,36 +560,6 @@ impl LayerShellPopover {
         window.set_anchor(Edge::Left, false);
         window.set_keyboard_mode(popover_keyboard_mode());
 
-        // Build content
-        let content = (self.builder)();
-        content.add_css_class(surface::POPOVER);
-        let popover_class = format!("{}-popover", self.widget_name);
-        content.add_css_class(&popover_class);
-
-        // Start in hidden state for the open animation
-        content.add_css_class(surface::POPOVER_ANIMATE);
-        content.add_css_class(surface::POPOVER_HIDDEN);
-
-        *self.content_widget.borrow_mut() = Some(content.clone().upcast());
-
-        // Wrap in container with margins for shadow space.
-        // The bar-adjacent side gets 0 margin (tight against bar),
-        // the opposite side gets shadow margin for drop shadow rendering.
-        let outer = GtkBox::new(Orientation::Vertical, 0);
-        outer.add_css_class(surface::WIDGET_MENU);
-        outer.add_css_class(surface::NO_FOCUS);
-        SurfaceStyleManager::global().apply_shadow_margins(&outer, POPOVER_SHADOW_MARGIN);
-        outer.append(&content);
-
-        // Apply surface styles (background, shadow, font) to the content
-        // Note: content does NOT have WIDGET_MENU_CONTENT class, so it gets shadow
-        SurfaceStyleManager::global().apply_surface_styles(&content, true);
-
-        // Apply Pango font attributes
-        SurfaceStyleManager::global().apply_pango_attrs_all(&outer);
-
-        window.set_child(Some(&outer));
-
         // ESC key handler
         {
             let weak_self = Rc::downgrade(self);
@@ -474,7 +570,50 @@ impl LayerShellPopover {
             });
         }
 
+        *self.window.borrow_mut() = Some(window.clone());
         window
+    }
+
+    /// Ensure the persistent animation shell exists, creating it lazily.
+    ///
+    /// The animation shell is a `ScaleBox` whose child (builder content) is
+    /// swapped on each show. It is **never destroyed** and carries no styling —
+    /// it is a pure transparent animation wrapper. Visual styles (background,
+    /// padding, border-radius) live on the content widget via CSS classes
+    /// resolved by the global stylesheet.
+    fn ensure_anim_shell(&self) -> ScaleBox {
+        if let Some(ref shell) = *self.anim_shell.borrow() {
+            return shell.clone();
+        }
+
+        let shell = ScaleBox::new();
+
+        // Start fully hidden.
+        shell.set_opacity(0.0);
+
+        *self.anim_shell.borrow_mut() = Some(shell.clone());
+        shell
+    }
+
+    /// Ensure the persistent click-catcher exists, creating it lazily.
+    ///
+    /// The click-catcher is shown/hidden each cycle rather than created/destroyed
+    /// to avoid per-cycle allocation of an `ApplicationWindow` + layer-shell surface.
+    fn ensure_click_catcher(self: &Rc<Self>) -> ApplicationWindow {
+        if let Some(ref catcher) = *self.click_catcher.borrow() {
+            return catcher.clone();
+        }
+
+        let bar_zone = calculate_bar_exclusive_zone();
+        let weak_self = Rc::downgrade(self);
+        let catcher = create_click_catcher(&self.app, bar_zone, move || {
+            if let Some(popover) = weak_self.upgrade() {
+                popover.hide();
+            }
+        });
+
+        *self.click_catcher.borrow_mut() = Some(catcher.clone());
+        catcher
     }
 
     fn update_position(&self) {
@@ -533,6 +672,26 @@ impl LayerShellPopover {
 pub trait Dismissible {
     fn dismiss(&self);
     fn is_visible(&self) -> bool;
+}
+
+impl Drop for LayerShellPopover {
+    fn drop(&mut self) {
+        // If the popover was still open when destroyed, fire on_close
+        // synchronously so consumers can clean up resources
+        // (e.g. SystemPopoverBinding releases GPU polling).
+        if self.logically_open.get() {
+            if let Some(ref cb) = *self.on_close.borrow() {
+                cb();
+            }
+        }
+
+        if let Some(catcher) = self.click_catcher.borrow_mut().take() {
+            catcher.close();
+        }
+        if let Some(window) = self.window.borrow_mut().take() {
+            window.close();
+        }
+    }
 }
 
 impl Dismissible for LayerShellPopover {

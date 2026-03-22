@@ -82,6 +82,14 @@ pub struct MenuHandle {
     on_close: RefCell<Option<Rc<dyn Fn()>>>,
 }
 
+impl Drop for MenuHandle {
+    fn drop(&mut self) {
+        if let Some(id) = self.tracker_id.take() {
+            PopoverTracker::global().clear_if_active(id);
+        }
+    }
+}
+
 impl MenuHandle {
     fn new<F>(widget_name: String, builder: F, parent: GtkBox) -> Rc<Self>
     where
@@ -227,10 +235,9 @@ impl MenuHandle {
 
     /// Refresh the popover content if it's currently visible.
     ///
-    /// For layer-shell popovers, this hides and re-shows the popover
-    /// to rebuild its content. This may cause a brief visual flash,
-    /// but is necessary because layer-shell windows are recreated fresh
-    /// each time (to avoid stale state issues with layer-shell surfaces).
+    /// Rebuilds the popover content in-place by calling the builder closure
+    /// and swapping the animation shell's child. No animation is triggered —
+    /// the popover stays fully open at its current position.
     ///
     /// Used by widgets like Notifications that need to update their
     /// popover content dynamically while the popover is open.
@@ -239,9 +246,11 @@ impl MenuHandle {
             let Some(popover) = self.ensure_popover() else {
                 return;
             };
-            let (anchor_x, monitor) = self.get_anchor_info();
-            popover.hide();
-            popover.show_at(anchor_x, monitor);
+            popover.rebuild_content();
+        } else if let Some(ref popover) = *self.popover.borrow() {
+            // Popover is mid-close (or fully closed). Mark content dirty so
+            // a mid-close reversal rebuilds before the user sees stale content.
+            popover.mark_content_dirty();
         }
     }
 }
