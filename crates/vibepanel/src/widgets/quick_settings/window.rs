@@ -7,7 +7,7 @@
 //! while hidden. UI state is reset on close so it opens fresh.
 
 use gtk4::gdk::{self, Monitor};
-use gtk4::glib;
+use gtk4::glib::{self, ControlFlow};
 use gtk4::prelude::*;
 use gtk4::{
     Application, ApplicationWindow, Box as GtkBox, Button, Label, Orientation, PolicyType,
@@ -30,10 +30,11 @@ use crate::services::updates::UpdatesService;
 use crate::services::vpn::VpnService;
 use crate::styles::{qs, state, surface};
 use crate::widgets::layer_shell_popover::{
-    Dismissible, POPOVER_ANIMATION_DURATION, calculate_bar_exclusive_zone,
+    ANIM_SCALE_FROM, AnimDirection, AnimState, Dismissible, calculate_bar_exclusive_zone,
     calculate_popover_bar_margin, calculate_popover_right_margin, create_click_catcher,
     popover_bar_edge, popover_keyboard_mode, setup_esc_handler,
 };
+use crate::widgets::scale_box::ScaleBox;
 
 use super::audio_card::{
     self, AudioCardState, build_audio_details, build_audio_hint_label, build_audio_row,
@@ -114,19 +115,37 @@ const AUDIO_SECTION_TOP_MARGIN: i32 = 12;
 
 /// Full Quick Settings window.
 ///
+/// ## Animation architecture
+///
+/// Open/close animations are driven by a **tick callback** on the animation
+/// shell (`ScaleBox`), not by CSS `transition:` properties. This avoids
+/// unbounded memory growth observed when CSS transitions are interrupted.
+/// See `LayerShellPopover` for the same pattern.
 pub struct QuickSettingsWindow {
     window: ApplicationWindow,
     click_catcher: RefCell<Option<ApplicationWindow>>,
-    /// Outer container with animation classes, target for open/close animation.
+    /// Animation shell wrapping the outer container. Opacity and scale are
+    /// animated via tick callback — no CSS transitions involved.
+    anim_shell: ScaleBox,
+    /// Outer container (shadow margins, surface styles). Child of `anim_shell`.
     outer_container: RefCell<Option<GtkBox>>,
     /// Anchor X position in monitor coordinates.
     anchor_x: Cell<i32>,
-    anchor_monitor: RefCell<Option<Monitor>>,
+    anchor_monitor: RefCell<Option<gdk::Monitor>>,
     /// Whether the window has been mapped at least once (used to skip
     /// the opacity fade-in trick on subsequent shows).
     has_been_mapped: Cell<bool>,
     /// Whether a close animation is currently playing.
     is_animating_out: Cell<bool>,
+    /// Logical open state. True from show_panel() until hide_panel() is called.
+    /// Used by toggle_at() and Dismissible so clicks during close animation
+    /// re-open the panel instead of being silently swallowed.
+    logically_open: Cell<bool>,
+    /// Shared animation state driven by the tick callback.
+    anim_state: Rc<RefCell<AnimState>>,
+    /// Generation counter incremented on every show/hide to cancel stale
+    /// tick callbacks and idle callbacks.
+    anim_generation: Rc<Cell<u32>>,
     cards_config: QuickSettingsCardsConfig,
     audio_scroll_percentage: i32,
     scroll_container: ScrolledWindow,
@@ -191,15 +210,25 @@ impl QuickSettingsWindow {
         scroll_container.set_vscrollbar_policy(PolicyType::Automatic);
         scroll_container.set_propagate_natural_height(true);
 
+        // Create the animation shell — a ScaleBox that wraps the outer
+        // container. Opacity and scale are animated via tick callback.
+        let anim_shell = ScaleBox::new();
+        anim_shell.set_opacity(0.0);
+        anim_shell.set_scale(ANIM_SCALE_FROM);
+
         // Content is built after construction.
         let qs = Rc::new(Self {
             window: window.clone(),
             click_catcher: RefCell::new(None),
+            anim_shell: anim_shell.clone(),
             outer_container: RefCell::new(None),
             anchor_x: Cell::new(0),
             anchor_monitor: RefCell::new(None),
             has_been_mapped: Cell::new(false),
             is_animating_out: Cell::new(false),
+            logically_open: Cell::new(false),
+            anim_state: Rc::new(RefCell::new(AnimState::new_idle())),
+            anim_generation: Rc::new(Cell::new(0)),
             cards_config: config.cards,
             audio_scroll_percentage: config.audio_scroll_percentage,
             scroll_container,
@@ -224,9 +253,12 @@ impl QuickSettingsWindow {
         });
 
         let outer = Self::build_content(&qs);
-        window.set_child(Some(&outer));
 
-        // Store outer container for animation class toggling
+        // Hierarchy: window → anim_shell (ScaleBox) → outer (GtkBox)
+        anim_shell.set_child(&outer);
+        window.set_child(Some(&anim_shell));
+
+        // Store outer container reference.
         *qs.outer_container.borrow_mut() = Some(outer.clone());
 
         // Apply Pango font attributes to all labels if enabled in config.
@@ -367,7 +399,6 @@ impl QuickSettingsWindow {
         // Apply surface styles - background now controlled via CSS variables
         outer.add_css_class("quick-settings-popover");
         outer.add_css_class(surface::POPOVER);
-        outer.add_css_class(surface::POPOVER_ANIMATE);
         SurfaceStyleManager::global().apply_surface_styles(&outer, true);
 
         let content = GtkBox::new(Orientation::Vertical, 0);
@@ -1313,36 +1344,29 @@ impl QuickSettingsWindow {
     /// being made visible again). On re-show, the window is already mapped so
     /// we skip the opacity fade-in trick and go straight to positioning.
     fn show_panel(self: &Rc<Self>) {
-        // Cancel any in-progress close animation
+        // Mark as logically open immediately so toggle_at() works correctly
+        // even if a close animation is still in flight.
+        self.logically_open.set(true);
+
+        // Note: unlike LayerShellPopover, we don't attempt mid-close reversal
+        // here — not worth the complexity for a 150ms animation.
         self.is_animating_out.set(false);
+
+        // Bump generation to cancel stale tick callbacks and idle callbacks.
+        let generation = self.anim_generation.get().wrapping_add(1);
+        self.anim_generation.set(generation);
 
         if let Some(monitor) = self.anchor_monitor.borrow().as_ref() {
             self.window.set_monitor(Some(monitor));
         }
 
-        // Create click-catcher (fresh each time — trivial cost)
-        let app = self
-            .window
-            .application()
-            .expect("QuickSettingsWindow must have an associated Application");
-
-        let bar_zone = calculate_bar_exclusive_zone();
-        let qs_weak = Rc::downgrade(self);
-        let catcher = create_click_catcher(&app, bar_zone, move || {
-            if let Some(qs) = qs_weak.upgrade() {
-                qs.hide_panel();
-            }
-        });
-
-        // Add QS-specific CSS class
-        catcher.add_css_class(qs::CLICK_CATCHER);
-
-        // Set monitor and show click-catcher
+        // Show click-catcher (persistent, created lazily).
+        let catcher = self.ensure_click_catcher();
         if let Some(monitor) = self.anchor_monitor.borrow().as_ref() {
             catcher.set_monitor(Some(monitor));
         }
+        catcher.set_margin(popover_bar_edge(), calculate_bar_exclusive_zone());
         catcher.set_visible(true);
-        *self.click_catcher.borrow_mut() = Some(catcher.clone());
 
         // Restore keyboard mode
         self.window.set_keyboard_mode(popover_keyboard_mode());
@@ -1350,10 +1374,9 @@ impl QuickSettingsWindow {
         // Set the global current QS window reference
         set_current_qs_window(self);
 
-        // Start with content hidden for open animation
-        if let Some(ref outer) = *self.outer_container.borrow() {
-            outer.add_css_class(surface::POPOVER_HIDDEN);
-        }
+        // Set animation shell to hidden state for open animation.
+        self.anim_shell.set_opacity(0.0);
+        self.anim_shell.set_scale(ANIM_SCALE_FROM);
 
         if self.has_been_mapped.get() {
             // Re-show: window was previously mapped and hidden. The surface
@@ -1363,14 +1386,21 @@ impl QuickSettingsWindow {
             self.window.set_visible(true);
             self.window.present();
 
-            // Trigger open animation + re-deliver service snapshots
+            // Start open animation + re-deliver service snapshots.
             let window_weak = self.window.downgrade();
+            let gen_rc = Rc::clone(&self.anim_generation);
             glib::idle_add_local_once(move || {
+                if gen_rc.get() != generation {
+                    return;
+                }
                 if let Some(window) = window_weak.upgrade()
                     && let Some(qs) = get_qs_window_data(&window)
                 {
-                    if let Some(ref outer) = *qs.outer_container.borrow() {
-                        outer.remove_css_class(surface::POPOVER_HIDDEN);
+                    if ConfigManager::global().animations_enabled() {
+                        qs.start_animation(AnimDirection::Opening, generation);
+                    } else {
+                        qs.anim_shell.set_opacity(1.0);
+                        qs.anim_shell.set_scale(1.0);
                     }
                     let snapshot = NetworkService::global().snapshot();
                     network_card::on_network_changed(&qs.network, &snapshot, &qs.window);
@@ -1385,16 +1415,22 @@ impl QuickSettingsWindow {
             self.window.present();
 
             let window_weak = self.window.downgrade();
+            let gen_rc = Rc::clone(&self.anim_generation);
             glib::idle_add_local_once(move || {
+                if gen_rc.get() != generation {
+                    return;
+                }
                 if let Some(window) = window_weak.upgrade()
                     && let Some(qs) = get_qs_window_data(&window)
                 {
                     qs.update_position();
                     qs.window.set_opacity(1.0);
 
-                    // Trigger open animation
-                    if let Some(ref outer) = *qs.outer_container.borrow() {
-                        outer.remove_css_class(surface::POPOVER_HIDDEN);
+                    if ConfigManager::global().animations_enabled() {
+                        qs.start_animation(AnimDirection::Opening, generation);
+                    } else {
+                        qs.anim_shell.set_opacity(1.0);
+                        qs.anim_shell.set_scale(1.0);
                     }
 
                     let snapshot = NetworkService::global().snapshot();
@@ -1406,14 +1442,18 @@ impl QuickSettingsWindow {
 
     /// Hide the panel with a close animation, keeping the window alive.
     ///
-    /// The click-catcher is destroyed and keyboard grab released immediately
-    /// so the bar is interactive during the animation. UI state is reset and
-    /// the window hidden after the CSS transition completes.
+    /// The click-catcher is hidden and keyboard grab released immediately
+    /// so the bar is interactive during the animation. The animation shell
+    /// fades out via tick callback, then UI state is reset and the window hidden.
     /// Does NOT clear PopoverTracker — the caller is responsible for that.
     pub(super) fn hide_panel(&self) {
         if self.is_animating_out.get() {
             return;
         }
+
+        // Mark as logically closed immediately so toggle_at() can re-open
+        // during the close animation instead of swallowing the click.
+        self.logically_open.set(false);
 
         // Restore keyboard mode if it was released for VPN password dialogs
         vpn_card::restore_keyboard_if_released();
@@ -1425,42 +1465,141 @@ impl QuickSettingsWindow {
         // Release keyboard grab while hidden
         self.window.set_keyboard_mode(KeyboardMode::None);
 
-        // Destroy click-catcher immediately so bar is interactive
-        if let Some(catcher) = self.click_catcher.borrow_mut().take() {
-            catcher.close();
+        // Hide click-catcher immediately so bar is interactive during animation.
+        if let Some(ref catcher) = *self.click_catcher.borrow() {
+            catcher.set_visible(false);
         }
 
-        // Start close animation
-        if let Some(ref outer) = *self.outer_container.borrow() {
-            outer.add_css_class(surface::POPOVER_HIDDEN);
-        }
+        // Bump generation to cancel any pending idle callback from show_panel().
+        let generation = self.anim_generation.get().wrapping_add(1);
+        self.anim_generation.set(generation);
 
         self.is_animating_out.set(true);
 
-        // After animation completes, reset UI state and hide the window.
-        // If show_panel() was called during the animation, is_animating_out
-        // will have been cleared — the stale timeout becomes a no-op.
-        let window_weak = self.window.downgrade();
-        let delay = if ConfigManager::global().animations_enabled() {
-            POPOVER_ANIMATION_DURATION
-        } else {
-            std::time::Duration::ZERO
-        };
-        glib::timeout_add_local_once(delay, move || {
-            let Some(window) = window_weak.upgrade() else {
-                return;
-            };
-            let Some(qs) = get_qs_window_data(&window) else {
-                return;
-            };
-            if !qs.is_animating_out.get() {
-                return;
-            }
+        if !ConfigManager::global().animations_enabled() {
+            // Animations disabled — snap closed immediately.
+            self.anim_shell.set_opacity(0.0);
+            self.anim_shell.set_scale(ANIM_SCALE_FROM);
+            self.is_animating_out.set(false);
+            self.reset_ui_state();
+            self.window.set_visible(false);
+            return;
+        }
 
-            qs.is_animating_out.set(false);
-            qs.reset_ui_state();
-            qs.window.set_visible(false);
+        // Ensure the window is fully visible (the idle callback from show_panel
+        // may not have fired yet, leaving window.opacity at 0.0).
+        self.window.set_opacity(1.0);
+
+        // Start (or reverse into) the close animation.
+        self.start_animation(AnimDirection::Closing, generation);
+    }
+
+    /// Ensure the persistent click-catcher exists, creating it lazily.
+    ///
+    /// The click-catcher is shown/hidden each cycle rather than created/destroyed
+    /// to avoid per-cycle allocation of an `ApplicationWindow` + layer-shell surface.
+    fn ensure_click_catcher(self: &Rc<Self>) -> ApplicationWindow {
+        if let Some(ref catcher) = *self.click_catcher.borrow() {
+            return catcher.clone();
+        }
+
+        let app = self
+            .window
+            .application()
+            .expect("QuickSettingsWindow must have an associated Application");
+
+        let bar_zone = calculate_bar_exclusive_zone();
+        let qs_weak = Rc::downgrade(self);
+        let catcher = create_click_catcher(&app, bar_zone, move || {
+            if let Some(qs) = qs_weak.upgrade() {
+                qs.hide_panel();
+            }
         });
+
+        catcher.add_css_class(qs::CLICK_CATCHER);
+
+        *self.click_catcher.borrow_mut() = Some(catcher.clone());
+        catcher
+    }
+
+    /// Start or reverse the open/close animation via a tick callback.
+    ///
+    /// If an animation is already in flight (e.g., opening and user clicks to
+    /// close), the current progress is captured and the animation reverses from
+    /// that point with proportional timing — no snapping.
+    fn start_animation(&self, direction: AnimDirection, generation: u32) {
+        // Cache the current border radius for the duration of this animation.
+        self.anim_shell
+            .set_radius(ConfigManager::global().surface_border_radius() as f32);
+
+        let start_time_us = self
+            .anim_shell
+            .frame_clock()
+            .map(|fc| fc.frame_time())
+            .unwrap_or(0);
+
+        let need_tick = self.anim_state.borrow_mut().prepare(
+            direction,
+            generation,
+            start_time_us,
+            self.anim_shell.opacity(),
+        );
+
+        if !need_tick {
+            return;
+        }
+
+        let anim_state = Rc::clone(&self.anim_state);
+        let anim_gen = Rc::clone(&self.anim_generation);
+        let window_weak = self.window.downgrade();
+        let shell_clone = self.anim_shell.clone();
+
+        self.anim_shell
+            .add_tick_callback(move |shell, frame_clock| {
+                if anim_gen.get() != generation {
+                    return ControlFlow::Break;
+                }
+
+                let now_us = frame_clock.frame_time();
+                let (progress, complete, direction) = {
+                    let state = anim_state.borrow();
+                    if !state.active {
+                        return ControlFlow::Break;
+                    }
+                    (
+                        state.current_progress(now_us),
+                        state.is_complete(now_us),
+                        state.direction,
+                    )
+                };
+
+                // Apply visual state — opacity and scale, no CSS involvement.
+                shell.set_opacity(progress);
+                let scale = ANIM_SCALE_FROM + (1.0 - ANIM_SCALE_FROM) * progress;
+                shell_clone.set_scale(scale);
+
+                if complete {
+                    anim_state.borrow_mut().active = false;
+
+                    if direction == AnimDirection::Closing {
+                        shell.set_opacity(0.0);
+                        shell_clone.set_scale(ANIM_SCALE_FROM);
+                        if let Some(window) = window_weak.upgrade()
+                            && let Some(qs) = get_qs_window_data(&window)
+                        {
+                            qs.is_animating_out.set(false);
+                            qs.reset_ui_state();
+                            qs.window.set_visible(false);
+                        }
+                    } else {
+                        shell.set_opacity(1.0);
+                        shell_clone.set_scale(1.0);
+                    }
+                    return ControlFlow::Break;
+                }
+
+                ControlFlow::Continue
+            });
     }
 
     /// Temporarily release exclusive keyboard grab to allow external dialogs
@@ -1577,12 +1716,13 @@ impl QuickSettingsWindowHandle {
     }
 
     pub fn toggle_at(&self, x: i32, monitor: Option<Monitor>) {
-        // Check if window exists and is visible
+        // Check logical state, not window visibility — the window may still
+        // be visible during a close animation but logically_open is already false.
         let is_visible = self
             .window
             .borrow()
             .as_ref()
-            .is_some_and(|w| w.window.is_visible());
+            .is_some_and(|w| w.logically_open.get());
 
         if is_visible {
             // Window is visible — hide it (keep alive for instant re-show)
@@ -1645,6 +1785,6 @@ impl Dismissible for QuickSettingsDismissible {
         self.window
             .borrow()
             .as_ref()
-            .is_some_and(|w| w.window.is_visible())
+            .is_some_and(|w| w.logically_open.get())
     }
 }
