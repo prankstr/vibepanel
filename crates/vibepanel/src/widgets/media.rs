@@ -647,8 +647,10 @@ impl MediaWidget {
 
         // We need access to the menu handle to close the popover when popping out.
         // Use the same pattern as notifications: store it after create_menu returns.
+        // The on_popout closure captures a Weak to avoid a reference cycle:
+        //   menu_handle_cell → MenuHandle → builder closure → on_popout → menu_handle_cell
         let menu_handle_cell: Rc<RefCell<Option<Rc<MenuHandle>>>> = Rc::new(RefCell::new(None));
-        let menu_handle_for_builder = menu_handle_cell.clone();
+        let menu_handle_weak = Rc::downgrade(&menu_handle_cell);
 
         // Create the on_popout callback that will be called when the pop-out button is clicked.
         let on_popout = move || {
@@ -656,7 +658,9 @@ impl MediaWidget {
             TooltipManager::global().cancel_and_hide();
 
             // Close the popover first
-            if let Some(menu_handle) = menu_handle_for_builder.borrow().as_ref() {
+            if let Some(cell) = menu_handle_weak.upgrade()
+                && let Some(menu_handle) = cell.borrow().as_ref()
+            {
                 menu_handle.hide();
             }
 

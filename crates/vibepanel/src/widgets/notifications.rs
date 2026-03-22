@@ -347,8 +347,10 @@ impl NotificationsWidget {
 
         // We need a reference to the menu handle inside the builder, but the handle
         // is created by create_menu. Use a RefCell to store it after creation.
+        // The builder captures a Weak to avoid a reference cycle:
+        //   menu_handle_cell → MenuHandle → builder closure → menu_handle_cell
         let menu_handle_cell: Rc<RefCell<Option<Rc<MenuHandle>>>> = Rc::new(RefCell::new(None));
-        let menu_handle_for_builder = Rc::clone(&menu_handle_cell);
+        let menu_handle_weak = Rc::downgrade(&menu_handle_cell);
 
         let menu_handle = self.base.create_menu(move || {
             // Mark as seen when popover opens
@@ -356,9 +358,11 @@ impl NotificationsWidget {
 
             // Create close callback that hides the popover
             let on_close: Option<ClosePopoverCallback> =
-                menu_handle_for_builder.borrow().as_ref().map(|handle| {
-                    let handle_clone = Rc::clone(handle);
-                    Rc::new(move || handle_clone.hide()) as ClosePopoverCallback
+                menu_handle_weak.upgrade().and_then(|cell| {
+                    cell.borrow().as_ref().map(|handle| {
+                        let handle_clone = Rc::clone(handle);
+                        Rc::new(move || handle_clone.hide()) as ClosePopoverCallback
+                    })
                 });
 
             build_popover_content(on_close, Rc::clone(&suppress_rebuild))
