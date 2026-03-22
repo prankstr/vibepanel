@@ -618,8 +618,6 @@ impl SystemPopoverBinding {
             widget
         });
 
-        // Reuse the system popover widget across open/close cycles to avoid
-        // per-cycle widget allocation. See GTK issue #7758.
         menu_handle.set_reuse_content(true);
 
         // Start GPU polling and subscribe to updates each time the popover opens.

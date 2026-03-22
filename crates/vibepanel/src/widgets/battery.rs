@@ -105,8 +105,6 @@ impl BatteryWidget {
         let controller_for_builder = controller_cell.clone();
 
         // Create a popover menu for detailed battery info.
-        // Reuse the widget across open/close cycles to avoid per-cycle
-        // widget allocation. See GTK issue #7758.
         let menu_handle = base.create_menu(move || {
             let (widget, controller) = build_battery_popover_with_controller();
             *controller_for_builder.borrow_mut() = Some(controller);

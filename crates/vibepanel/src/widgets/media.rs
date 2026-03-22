@@ -735,8 +735,6 @@ impl MediaWidget {
             widget
         });
 
-        // Reuse the media popover widget across open/close cycles to avoid
-        // per-cycle widget allocation. See GTK issue #7758.
         menu_handle.set_reuse_content(true);
 
         // Push a fresh snapshot each time the popover opens so values are current.

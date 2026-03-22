@@ -476,10 +476,6 @@ impl LayerShellPopover {
     /// When enabled, the builder is called only once and the resulting widget
     /// is cached. On subsequent opens the cached widget is re-parented into
     /// the anim shell instead of calling the builder again.
-    ///
-    /// This avoids per-cycle widget allocation which is observed to cause
-    /// unbounded memory growth in GTK4 for widgets with complex internal
-    /// trees (e.g. gtk4::Calendar). See GTK issue #7758.
     pub fn set_reuse_content(&self, reuse: bool) {
         self.reuse_content.set(reuse);
     }

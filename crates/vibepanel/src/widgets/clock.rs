@@ -99,8 +99,7 @@ impl ClockWidget {
         });
 
         // Reuse the calendar widget across open/close cycles to avoid
-        // unbounded memory growth from GTK4's Calendar internal widget tree.
-        // See GTK issue #7758.
+        // unbounded memory growth from GTK4.
         menu_handle.set_reuse_content(true);
         menu_handle.set_on_show(move || {
             if let Some(ref cb) = *refresh_slot.borrow() {
