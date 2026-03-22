@@ -37,6 +37,7 @@ mod notifications_toast;
 mod osd;
 pub(crate) mod ripple;
 mod rounded_picture;
+pub(crate) mod scale_box;
 mod spacer;
 mod system_popover;
 mod tray;
