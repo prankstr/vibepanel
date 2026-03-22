@@ -611,39 +611,49 @@ impl SystemPopoverBinding {
         let controller: Rc<RefCell<Option<SystemPopoverController>>> = Rc::new(RefCell::new(None));
         let gpu_callback_id: Rc<Cell<Option<CallbackId>>> = Rc::new(Cell::new(None));
         let controller_for_builder = controller.clone();
-        let gpu_cb_for_builder = gpu_callback_id.clone();
 
         let menu_handle = base.create_menu(move || {
-            // Builder runs each time the popover opens.
-            // Start GPU polling so the popover gets fresh data.
+            let (widget, ctrl) = build_system_popover_with_controller();
+            *controller_for_builder.borrow_mut() = Some(ctrl);
+            widget
+        });
+
+        // Reuse the system popover widget across open/close cycles to avoid
+        // per-cycle widget allocation. See GTK issue #7758.
+        menu_handle.set_reuse_content(true);
+
+        // Start GPU polling and subscribe to updates each time the popover opens.
+        let controller_for_show = controller.clone();
+        let gpu_cb_for_show = gpu_callback_id.clone();
+        menu_handle.set_on_show(move || {
             let gpu_service = GpuService::global();
             GpuService::request_polling(&gpu_service);
 
-            let (widget, ctrl) = build_system_popover_with_controller();
-            *controller_for_builder.borrow_mut() = Some(ctrl);
+            // Push fresh system + GPU snapshots so values are current on open.
+            if let Some(ctrl) = controller_for_show.borrow().as_ref() {
+                let sys_snapshot = SystemService::global().snapshot();
+                ctrl.update_from_snapshot(&sys_snapshot);
+                let gpu_snapshot = gpu_service.snapshot();
+                ctrl.update_from_gpu_snapshot(&gpu_snapshot);
+            }
 
-            // Subscribe to GPU snapshot updates so the popover refreshes while open.
-            let controller_for_gpu = controller_for_builder.clone();
+            // Subscribe to GPU snapshot updates so metrics refresh while open.
+            let controller_for_gpu = controller_for_show.clone();
             let cb_id = gpu_service.connect(move |snapshot: &GpuSnapshot| {
                 if let Some(ctrl) = controller_for_gpu.borrow().as_ref() {
                     ctrl.update_from_gpu_snapshot(snapshot);
                 }
             });
-            gpu_cb_for_builder.set(Some(cb_id));
-
-            widget
+            gpu_cb_for_show.set(Some(cb_id));
         });
 
-        // Stop GPU polling and drop the controller so we don't update invisible widgets.
-        let controller_for_close = controller.clone();
+        // Stop GPU polling when the popover closes.
         let gpu_cb_for_close = gpu_callback_id.clone();
         menu_handle.set_on_close(move || {
-            // Disconnect GPU callback before releasing polling.
             if let Some(cb_id) = gpu_cb_for_close.take() {
                 GpuService::global().disconnect(cb_id);
             }
             GpuService::global().release_polling();
-            *controller_for_close.borrow_mut() = None;
         });
 
         Self {

@@ -387,6 +387,10 @@ pub struct LayerShellPopover {
     /// Optional callback invoked when the popover is fully hidden (after close
     /// animation completes). NOT fired at the start of hide().
     on_close: RefCell<Option<Rc<dyn Fn()>>>,
+    /// Optional callback invoked every time the popover is shown (after content
+    /// is parented but before the animation starts). Use this to refresh data
+    /// in reuse mode — e.g. updating the calendar to today's date.
+    on_show: RefCell<Option<Rc<dyn Fn()>>>,
     /// Shared animation state driven by the tick callback.
     anim_state: Rc<RefCell<AnimState>>,
     /// Generation counter incremented on every show/hide to cancel stale
@@ -400,6 +404,16 @@ pub struct LayerShellPopover {
     /// logically open (e.g. a notification arrives during the close animation).
     /// Checked and cleared on mid-close reversal so the content gets rebuilt.
     content_dirty: Cell<bool>,
+    /// When true, the builder is called only once and the content widget is
+    /// cached across open/close cycles. On subsequent opens the cached widget
+    /// is re-parented into the anim shell instead of calling the builder again.
+    ///
+    /// This avoids per-cycle widget allocation which is observed to leak memory
+    /// in GTK4 for widgets with complex internal trees (e.g. Calendar).
+    reuse_content: Cell<bool>,
+    /// Cached content widget for reuse mode. Kept alive across close cycles
+    /// so it can be re-parented on the next open.
+    cached_content: RefCell<Option<gtk4::Widget>>,
 }
 
 impl LayerShellPopover {
@@ -424,10 +438,13 @@ impl LayerShellPopover {
             anchor_x: Cell::new(0),
             anchor_monitor: RefCell::new(None),
             on_close: RefCell::new(None),
+            on_show: RefCell::new(None),
             anim_state: Rc::new(RefCell::new(AnimState::new_idle())),
             anim_generation: Rc::new(Cell::new(0)),
             logically_open: Cell::new(false),
             content_dirty: Cell::new(false),
+            reuse_content: Cell::new(false),
+            cached_content: RefCell::new(None),
         })
     }
 
@@ -444,6 +461,27 @@ impl LayerShellPopover {
     /// Set a callback to be invoked when the popover is hidden.
     pub fn set_on_close<F: Fn() + 'static>(&self, callback: F) {
         *self.on_close.borrow_mut() = Some(Rc::new(callback));
+    }
+
+    /// Set a callback to be invoked every time the popover is shown.
+    ///
+    /// In reuse mode this is called after the cached content is re-parented,
+    /// allowing consumers to refresh data (e.g. update calendar to today).
+    pub fn set_on_show<F: Fn() + 'static>(&self, callback: F) {
+        *self.on_show.borrow_mut() = Some(Rc::new(callback));
+    }
+
+    /// Enable content reuse mode.
+    ///
+    /// When enabled, the builder is called only once and the resulting widget
+    /// is cached. On subsequent opens the cached widget is re-parented into
+    /// the anim shell instead of calling the builder again.
+    ///
+    /// This avoids per-cycle widget allocation which is observed to cause
+    /// unbounded memory growth in GTK4 for widgets with complex internal
+    /// trees (e.g. gtk4::Calendar). See GTK issue #7758.
+    pub fn set_reuse_content(&self, reuse: bool) {
+        self.reuse_content.set(reuse);
     }
 
     /// Mark the popover content as needing a rebuild.
@@ -538,10 +576,18 @@ impl LayerShellPopover {
 
         anim_shell.remove_child();
 
+        // Invalidate cache so the builder runs fresh.
+        *self.cached_content.borrow_mut() = None;
+
         let content = (self.builder)();
         content.add_css_class(surface::POPOVER);
         let popover_class = format!("{}-popover", self.widget_name);
         content.add_css_class(&popover_class);
+
+        // Re-cache if in reuse mode.
+        if self.reuse_content.get() {
+            *self.cached_content.borrow_mut() = Some(content.clone());
+        }
 
         anim_shell.set_child(&content);
 
@@ -625,13 +671,34 @@ impl LayerShellPopover {
 
         anim_shell.remove_child();
 
-        // Build fresh content from the builder closure.
-        let content = (self.builder)();
-        content.add_css_class(surface::POPOVER);
-        let popover_class = format!("{}-popover", self.widget_name);
-        content.add_css_class(&popover_class);
+        // Get or build content. In reuse mode, the builder is called only once
+        // and the widget is cached for subsequent opens. This avoids per-cycle
+        // widget allocation which leaks memory in GTK4 for complex widgets.
+        let content = if self.reuse_content.get() {
+            if let Some(ref cached) = *self.cached_content.borrow() {
+                cached.clone()
+            } else {
+                let fresh = (self.builder)();
+                fresh.add_css_class(surface::POPOVER);
+                let popover_class = format!("{}-popover", self.widget_name);
+                fresh.add_css_class(&popover_class);
+                *self.cached_content.borrow_mut() = Some(fresh.clone());
+                fresh
+            }
+        } else {
+            let fresh = (self.builder)();
+            fresh.add_css_class(surface::POPOVER);
+            let popover_class = format!("{}-popover", self.widget_name);
+            fresh.add_css_class(&popover_class);
+            fresh
+        };
 
         anim_shell.set_child(&content);
+
+        // Fire on_show callback (e.g. to refresh calendar to today's date).
+        if let Some(ref cb) = *self.on_show.borrow() {
+            cb();
+        }
 
         SurfaceStyleManager::global().apply_pango_attrs_all(&anim_shell);
 

@@ -727,16 +727,36 @@ impl MediaWidget {
         };
 
         let menu_handle = base.create_menu(move || {
-            // Drop old controller before building the new one so stale
-            // callbacks are cleaned up before new ones are registered.
-            controller_for_builder.borrow_mut().take();
-
             let on_popout_clone = on_popout.clone();
             let (widget, controller) = build_media_popover_with_controller(move || {
                 on_popout_clone();
             });
             *controller_for_builder.borrow_mut() = Some(controller);
             widget
+        });
+
+        // Reuse the media popover widget across open/close cycles to avoid
+        // per-cycle widget allocation. See GTK issue #7758.
+        menu_handle.set_reuse_content(true);
+
+        // Push a fresh snapshot each time the popover opens so values are current.
+        let controller_for_show = controller_cell.clone();
+        menu_handle.set_on_show(move || {
+            if let Some(ctrl) = controller_for_show.borrow().as_ref() {
+                let snapshot = MediaService::global().snapshot();
+                ctrl.update_from_snapshot(&snapshot);
+            }
+        });
+
+        // Pause the popover visualizer when closed so cava callbacks and
+        // tick-driven redraws don't run on an invisible widget.
+        let controller_for_close = controller_cell.clone();
+        menu_handle.set_on_close(move || {
+            if let Some(ctrl) = controller_for_close.borrow().as_ref()
+                && let Some(ref viz) = ctrl.visualizer
+            {
+                viz.pause();
+            }
         });
 
         *menu_handle_cell.borrow_mut() = Some(menu_handle);

@@ -80,6 +80,10 @@ pub struct MenuHandle {
     tracker_id: Cell<Option<PopoverId>>,
     /// Stored on_close callback, forwarded to the LayerShellPopover on lazy init.
     on_close: RefCell<Option<Rc<dyn Fn()>>>,
+    /// Stored on_show callback, forwarded to the LayerShellPopover on lazy init.
+    on_show: RefCell<Option<Rc<dyn Fn()>>>,
+    /// Whether to enable content reuse mode on the popover.
+    reuse_content: Cell<bool>,
 }
 
 impl Drop for MenuHandle {
@@ -102,6 +106,8 @@ impl MenuHandle {
             parent,
             tracker_id: Cell::new(None),
             on_close: RefCell::new(None),
+            on_show: RefCell::new(None),
+            reuse_content: Cell::new(false),
         })
     }
 
@@ -141,6 +147,17 @@ impl MenuHandle {
             popover.set_on_close(move || cb());
         }
 
+        // Forward any stored on_show callback
+        if let Some(ref cb) = *self.on_show.borrow() {
+            let cb = cb.clone();
+            popover.set_on_show(move || cb());
+        }
+
+        // Forward reuse mode
+        if self.reuse_content.get() {
+            popover.set_reuse_content(true);
+        }
+
         *popover_opt = Some(popover.clone());
         Some(popover)
     }
@@ -157,6 +174,33 @@ impl MenuHandle {
         if let Some(ref popover) = *self.popover.borrow() {
             let cb = cb.clone();
             popover.set_on_close(move || cb());
+        }
+    }
+
+    /// Set a callback to be invoked every time the popover is shown.
+    ///
+    /// If the popover hasn't been created yet (lazy init), the callback is
+    /// stored and forwarded when `ensure_popover()` creates it.
+    pub fn set_on_show<F: Fn() + 'static>(&self, callback: F) {
+        let cb = Rc::new(callback);
+        *self.on_show.borrow_mut() = Some(cb.clone());
+
+        if let Some(ref popover) = *self.popover.borrow() {
+            let cb = cb.clone();
+            popover.set_on_show(move || cb());
+        }
+    }
+
+    /// Enable content reuse mode.
+    ///
+    /// When enabled, the builder is called only once and the resulting widget
+    /// is cached across open/close cycles. Use `set_on_show()` to refresh
+    /// data on each open.
+    pub fn set_reuse_content(&self, reuse: bool) {
+        self.reuse_content.set(reuse);
+
+        if let Some(ref popover) = *self.popover.borrow() {
+            popover.set_reuse_content(reuse);
         }
     }
 

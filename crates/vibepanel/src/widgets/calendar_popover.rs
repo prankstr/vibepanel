@@ -13,11 +13,15 @@ use crate::styles::{calendar as cal, icon, surface};
 /// Shows a month view calendar with custom previous/next navigation, a
 /// "go to today" button, and a header label. Toggles a `show-today` CSS class
 /// when the currently viewed month matches the real current month.
-pub fn build_clock_calendar_popover(show_week_numbers: bool) -> Widget {
-    // Today and tracked month/year (always using day = 1 so that
-    // month arithmetic is simpler and avoids invalid dates like 31 Feb).
-    let today: NaiveDate = Local::now().date_naive();
-    let current_date = Rc::new(RefCell::new(today));
+///
+/// Returns the widget and a refresh callback. The refresh callback navigates
+/// the calendar to the real current date — call it on each open so the user
+/// always sees today's month, even when the widget is reused across cycles.
+pub fn build_clock_calendar_popover(show_week_numbers: bool) -> (Widget, Rc<dyn Fn()>) {
+    // "Today" is stored in a Cell so the on_show refresh callback can update
+    // it when the popover is reused across midnight boundaries.
+    let today = Rc::new(Cell::new(Local::now().date_naive()));
+    let current_date = Rc::new(RefCell::new(today.get()));
     // Flag to prevent signal handler from interfering during programmatic updates
     let updating = Rc::new(Cell::new(false));
 
@@ -122,7 +126,9 @@ pub fn build_clock_calendar_popover(show_week_numbers: bool) -> Widget {
     let update_calendar = {
         let calendar = calendar.clone();
         let updating = updating.clone();
-        move |today: NaiveDate, date: NaiveDate| {
+        let today = today.clone();
+        move |date: NaiveDate| {
+            let today = today.get();
             let is_current_month = date.month() == today.month() && date.year() == today.year();
 
             // Set flag to prevent signal handler from interfering
@@ -153,7 +159,7 @@ pub fn build_clock_calendar_popover(show_week_numbers: bool) -> Widget {
     {
         let date = *current_date.borrow();
         update_header(date);
-        update_calendar(today, date);
+        update_calendar(date);
     }
 
     // Navigation button handlers ---------------------------------------------
@@ -178,7 +184,7 @@ pub fn build_clock_calendar_popover(show_week_numbers: bool) -> Widget {
             if let Some(new_date) = new_date {
                 *current_date.borrow_mut() = new_date;
                 update_header(new_date);
-                update_calendar(today, new_date);
+                update_calendar(new_date);
             }
         });
     }
@@ -187,12 +193,14 @@ pub fn build_clock_calendar_popover(show_week_numbers: bool) -> Widget {
         let current_date = current_date.clone();
         let update_header = update_header.clone();
         let update_calendar = update_calendar.clone();
+        let today = today.clone();
         today_button.connect_clicked(move |_| {
+            let today = today.get();
             let today_month = NaiveDate::from_ymd_opt(today.year(), today.month(), 1);
             if let Some(new_date) = today_month {
                 *current_date.borrow_mut() = new_date;
                 update_header(new_date);
-                update_calendar(today, new_date);
+                update_calendar(new_date);
             }
         });
     }
@@ -217,7 +225,7 @@ pub fn build_clock_calendar_popover(show_week_numbers: bool) -> Widget {
             if let Some(new_date) = new_date {
                 *current_date.borrow_mut() = new_date;
                 update_header(new_date);
-                update_calendar(today, new_date);
+                update_calendar(new_date);
             }
         });
     }
@@ -247,10 +255,23 @@ pub fn build_clock_calendar_popover(show_week_numbers: bool) -> Widget {
             {
                 *current_date.borrow_mut() = date;
                 update_header(date);
-                update_calendar(today, date);
+                update_calendar(date);
             }
         });
     }
 
-    container.upcast::<Widget>()
+    // Refresh callback — navigates calendar to the real current date.
+    // Called by on_show when the popover is reused across open/close cycles.
+    let refresh: Rc<dyn Fn()> = {
+        Rc::new(move || {
+            let new_today = Local::now().date_naive();
+            today.set(new_today);
+            let new_date = NaiveDate::from_ymd_opt(new_today.year(), new_today.month(), 1).unwrap();
+            *current_date.borrow_mut() = new_date;
+            update_header(new_date);
+            update_calendar(new_date);
+        })
+    };
+
+    (container.upcast::<Widget>(), refresh)
 }

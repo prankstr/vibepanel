@@ -85,7 +85,28 @@ impl ClockWidget {
         let label = base.add_label(Some("--:--"), &[wgt::CLOCK_LABEL]);
 
         let show_week_numbers = config.show_week_numbers;
-        base.create_menu(move || build_clock_calendar_popover(show_week_numbers));
+
+        // Shared slot for the calendar refresh callback. Populated by the
+        // builder on first open, invoked by on_show on every subsequent open.
+        type RefreshSlot = Rc<RefCell<Option<Rc<dyn Fn()>>>>;
+        let refresh_slot: RefreshSlot = Rc::new(RefCell::new(None));
+
+        let refresh_for_builder = refresh_slot.clone();
+        let menu_handle = base.create_menu(move || {
+            let (widget, refresh) = build_clock_calendar_popover(show_week_numbers);
+            *refresh_for_builder.borrow_mut() = Some(refresh);
+            widget
+        });
+
+        // Reuse the calendar widget across open/close cycles to avoid
+        // unbounded memory growth from GTK4's Calendar internal widget tree.
+        // See GTK issue #7758.
+        menu_handle.set_reuse_content(true);
+        menu_handle.set_on_show(move || {
+            if let Some(ref cb) = *refresh_slot.borrow() {
+                cb();
+            }
+        });
 
         let timer_source = Rc::new(RefCell::new(None));
 
