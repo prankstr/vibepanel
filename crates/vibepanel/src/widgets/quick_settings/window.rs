@@ -118,9 +118,9 @@ const AUDIO_SECTION_TOP_MARGIN: i32 = 12;
 /// ## Animation architecture
 ///
 /// Open/close animations are driven by a **tick callback** on the animation
-/// shell (`ScaleBox`), not by CSS `transition:` properties. This avoids
-/// unbounded memory growth observed when CSS transitions are interrupted.
-/// See `LayerShellPopover` for the same pattern.
+/// shell (`ScaleBox`), not by CSS `transition:` properties. CSS `transform:
+/// scale()` transitions are observed to cause unbounded memory growth in
+/// GTK4. See `LayerShellPopover` for the same pattern.
 pub struct QuickSettingsWindow {
     window: ApplicationWindow,
     click_catcher: RefCell<Option<ApplicationWindow>>,

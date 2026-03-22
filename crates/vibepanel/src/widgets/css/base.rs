@@ -8,11 +8,11 @@ use super::POPOVER_BG_WITH_OPACITY;
 /// Return shared utility CSS.
 pub fn css(animations: bool) -> String {
     let popover_bg = POPOVER_BG_WITH_OPACITY;
-    // Hover transitions are intentionally disabled (always `transition: none;`).
-    // Interrupted CSS transitions are observed to cause unbounded memory growth
-    // (e.g. spam-clicking a bar widget to toggle its popover).
-    // The 100ms background-color hover transition is barely perceptible and not
-    // worth the risk. Background-color changes still apply instantly.
+    // Hover background-color transitions are disabled unconditionally.
+    // CSS transitions on widgets with nested child widgets (e.g. Box > Label,
+    // Box > Image) are observed to cause unbounded memory growth in GTK4.
+    // Background-color changes still apply instantly on hover.
+    // Possibly related: https://gitlab.gnome.org/GNOME/gtk/-/issues/7758
     let hover_transition = "transition: none;";
     let slider_transition = if animations {
         "transition: transform 100ms ease-out;"

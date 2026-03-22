@@ -3,8 +3,8 @@
 //! The child is always allocated at full size — the scale effect is achieved
 //! by clipping to a centered rect in `snapshot()` that grows from smaller to
 //! full size. Combined with opacity fade this approximates `transform: scale()`
-//! without any scale transforms in the render tree (which cause unbounded
-//! memory growth in GTK4).
+//! without any scale transforms in the render tree (which are observed to
+//! cause unbounded memory growth in GTK4).
 //!
 //! Only calls `queue_draw()` on scale changes — no layout or CSS resolution.
 

@@ -361,8 +361,9 @@ where
 /// ## Animation architecture
 ///
 /// Open/close animations (opacity fade) are driven by a **tick callback**
-/// on the persistent animation shell, not by CSS `transition:` properties. This
-/// avoids unbounded memory growth observed when CSS transitions are interrupted.
+/// on the persistent animation shell, not by CSS `transition:` properties.
+/// CSS `transform: scale()` transitions are observed to cause unbounded
+/// memory growth in GTK4.
 ///
 /// The tick callback reads the frame clock each frame, computes eased progress
 /// from an `AnimState`, and applies opacity via `Widget::set_opacity()`. This gives:

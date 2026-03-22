@@ -20,13 +20,13 @@
 use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
 use gtk4::glib;
-use notify_debouncer_mini::{new_debouncer, notify::RecursiveMode, DebounceEventResult};
+use notify_debouncer_mini::{DebounceEventResult, new_debouncer, notify::RecursiveMode};
 use tracing::{debug, error, info, warn};
 
 use vibepanel_core::{Config, ThemePalette, ThemeSizes};
