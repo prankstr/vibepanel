@@ -125,7 +125,22 @@ impl NetworkSpeedWidget {
     /// Create a new Network widget with the given configuration.
     pub fn new(config: NetworkSpeedConfig) -> Self {
         let base = BaseWidget::new(&[widget::NETWORK_SPEED]);
+        let popover_binding = SystemPopoverBinding::new(&base);
+        Self::build(config, base, popover_binding)
+    }
 
+    /// Create a passive Network widget for use in a merge group.
+    pub fn new_passive(config: NetworkSpeedConfig, shared_binding: SystemPopoverBinding) -> Self {
+        let base = BaseWidget::new_passive(&[widget::NETWORK_SPEED]);
+        Self::build(config, base, shared_binding)
+    }
+
+    /// Shared construction for active and passive modes.
+    fn build(
+        config: NetworkSpeedConfig,
+        base: BaseWidget,
+        popover_binding: SystemPopoverBinding,
+    ) -> Self {
         base.set_tooltip("Network: unknown");
 
         let icon_handle = base.add_icon(
@@ -166,8 +181,6 @@ impl NetworkSpeedWidget {
         } else {
             (None, None)
         };
-
-        let popover_binding = SystemPopoverBinding::new(&base);
 
         icon_handle.widget().set_visible(config.show_icon);
 

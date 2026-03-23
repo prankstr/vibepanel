@@ -88,7 +88,7 @@ sectioned-bar.bar {{
     background-color: {widget_bg_hover};
 }}
 
-/* Pull non-first items left to overlap with previous item's right padding */
+/* Pull non-first items left to overlap adjacent .content padding (2 × 10px) */
 .widget-group .content > .widget-item:not(:first-child) {{
     margin-left: -20px;
 }}
@@ -111,6 +111,32 @@ sectioned-bar.bar {{
    parent .widget-group already provides the base widget background. */
 .widget-group .content > .widget-item.clickable:hover {{
     background-color: color-mix(in srgb, transparent 92%, var(--widget-hover-tint));
+}}
+
+/* ===== MERGE GROUP ===== */
+
+/* Merge group wrapper — acts as a single visual button for adjacent
+   same-popover widgets. Rounded corners clip the shared ripple effect.
+   overflow:hidden is set in Rust (not a valid GTK4 CSS property). */
+.widget-merge-group {{
+    border-radius: var(--radius-widget);
+}}
+
+/* Merge group hover — shared background for the entire merged button */
+.widget-merge-group.clickable:hover {{
+    background-color: color-mix(in srgb, transparent 92%, var(--widget-hover-tint));
+}}
+
+/* Passive widgets inside a merge group must not show their own
+   hover — the wrapper provides it. Background is already transparent
+   via .widget-group .widget-surface .widget-surface rule. */
+.merge-group-content > .widget-item.passive:hover {{
+    background-color: transparent;
+}}
+
+/* Pull non-first items left to overlap adjacent .content padding (2 × 10px) */
+.merge-group-content > .widget-item:not(:first-child) {{
+    margin-left: -20px;
 }}
 
 /* Spacing between items inside widgets */

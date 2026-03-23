@@ -100,14 +100,27 @@ impl MemoryWidget {
     /// Create a new Memory widget with the given configuration.
     pub fn new(config: MemoryConfig) -> Self {
         let base = BaseWidget::new(&[widget::MEMORY]);
+        let popover_binding = SystemPopoverBinding::new(&base);
+        Self::build(config, base, popover_binding)
+    }
 
+    /// Create a passive Memory widget for use in a merge group.
+    pub fn new_passive(config: MemoryConfig, shared_binding: SystemPopoverBinding) -> Self {
+        let base = BaseWidget::new_passive(&[widget::MEMORY]);
+        Self::build(config, base, shared_binding)
+    }
+
+    /// Shared construction for active and passive modes.
+    fn build(
+        config: MemoryConfig,
+        base: BaseWidget,
+        popover_binding: SystemPopoverBinding,
+    ) -> Self {
         base.set_tooltip("Memory: unknown");
 
         let icon_handle = base.add_icon("ram-symbolic", &[widget::MEMORY_ICON]);
 
         let memory_label = base.add_label(None, &[widget::MEMORY_LABEL, class::VCENTER_CAPS]);
-
-        let popover_binding = SystemPopoverBinding::new(&base);
 
         icon_handle.widget().set_visible(config.show_icon);
 

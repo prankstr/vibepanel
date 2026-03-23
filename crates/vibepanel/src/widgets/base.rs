@@ -69,12 +69,12 @@ pub fn configure_popover(popover: &Popover) {
 pub struct MenuHandle {
     /// The lazily-initialized popover
     popover: RefCell<Option<Rc<LayerShellPopover>>>,
-    /// Builder function to create the popover content
-    builder: Rc<dyn Fn() -> gtk4::Widget>,
+    /// Builder for popover content. `RefCell` allows `set_builder()` replacement.
+    builder: RefCell<Rc<dyn Fn() -> gtk4::Widget>>,
     /// Widget name for CSS styling
     widget_name: String,
-    /// Parent widget container
-    parent: GtkBox,
+    /// Parent widget container (used for popover anchor positioning)
+    parent: gtk4::Widget,
     /// ID returned from PopoverTracker when this popover is active.
     /// Used to correctly clear ourselves from the tracker on hide.
     tracker_id: Cell<Option<PopoverId>>,
@@ -95,20 +95,51 @@ impl Drop for MenuHandle {
 }
 
 impl MenuHandle {
-    fn new<F>(widget_name: String, builder: F, parent: GtkBox) -> Rc<Self>
+    pub(crate) fn new<F>(
+        widget_name: String,
+        builder: F,
+        parent: impl IsA<gtk4::Widget>,
+    ) -> Rc<Self>
     where
         F: Fn() -> gtk4::Widget + 'static,
     {
         Rc::new(Self {
             popover: RefCell::new(None),
-            builder: Rc::new(builder),
+            builder: RefCell::new(Rc::new(builder)),
             widget_name,
-            parent,
+            parent: parent.upcast(),
             tracker_id: Cell::new(None),
             on_close: RefCell::new(None),
             on_show: RefCell::new(None),
             reuse_content: Cell::new(false),
         })
+    }
+
+    /// Create a menu handle with a placeholder builder, to be replaced via `set_builder()`.
+    pub(crate) fn new_placeholder(widget_name: String, parent: impl IsA<gtk4::Widget>) -> Rc<Self> {
+        Rc::new(Self {
+            popover: RefCell::new(None),
+            builder: RefCell::new(Rc::new(|| {
+                unreachable!(
+                    "placeholder builder called — set_builder() must be called before showing the popover"
+                )
+            })),
+            widget_name,
+            parent: parent.upcast(),
+            tracker_id: Cell::new(None),
+            on_close: RefCell::new(None),
+            on_show: RefCell::new(None),
+            reuse_content: Cell::new(false),
+        })
+    }
+
+    /// Replace the builder function.
+    ///
+    /// Must be called before the popover is first shown; calling it afterward
+    /// has no effect because the `LayerShellPopover` captures the builder at
+    /// creation time.
+    pub(crate) fn set_builder<F: Fn() -> gtk4::Widget + 'static>(&self, builder: F) {
+        *self.builder.borrow_mut() = Rc::new(builder);
     }
 
     /// Ensure the popover is created, creating it lazily if needed.
@@ -138,7 +169,7 @@ impl MenuHandle {
             return None;
         };
 
-        let builder = self.builder.clone();
+        let builder = self.builder.borrow().clone();
         let popover = LayerShellPopover::new(&app, &self.widget_name, move || builder());
 
         // Forward any stored on_close callback
@@ -405,19 +436,18 @@ fn click_target_matches(
 /// The BaseWidget automatically creates an inner `.content` box for consistent
 /// padding and theming across all widgets. Widgets should add their children to
 /// `content()` rather than `widget()` directly.
+///
+/// In **passive** mode (see [`new_passive`](Self::new_passive)), the overlay,
+/// ripple, menu, and gesture fields are `None` — the merge-group wrapper
+/// provides those instead.
 pub struct BaseWidget {
     container: GtkBox,
     content: GtkBox,
-    overlay: Overlay,
-    /// Cairo-based ripple overlay for click-origin Material Design ripple.
-    /// Sits on top of content inside an `Overlay`, draws a flat-opacity
-    /// circle expanding from the click point.
-    ripple_handle: RippleHandle,
-    /// The widget's menu popover, if any. Each BaseWidget supports at most one menu.
-    menu: Rc<RefCell<Option<Rc<MenuHandle>>>>,
-    /// Widget name for CSS class-based styling of popovers (e.g., "clock")
+    overlay: Option<Overlay>,
+    ripple_handle: Option<RippleHandle>,
+    menu: Option<Rc<RefCell<Option<Rc<MenuHandle>>>>>,
     widget_name: String,
-    _gesture_click: GestureClick,
+    _gesture_click: Option<GestureClick>,
     _show_if_timer: Option<glib::SourceId>,
 }
 
@@ -432,9 +462,26 @@ impl BaseWidget {
     /// - The first class in `extra_classes` is used as the widget name for
     ///   popover styling (e.g., "clock" -> popovers get "clock-popover" class).
     pub fn new(extra_classes: &[&str]) -> Self {
+        Self::new_inner(extra_classes, false)
+    }
+
+    /// Create a passive base widget — no GestureClick, no RippleHandle, no menu.
+    ///
+    /// Used by widgets that participate in a merge group, where the merge
+    /// wrapper owns click handling, ripple animation, and the shared popover.
+    /// The widget still builds its visual content (icon, label, tooltip) and
+    /// responds to data service updates.
+    pub(crate) fn new_passive(extra_classes: &[&str]) -> Self {
+        Self::new_inner(extra_classes, true)
+    }
+
+    fn new_inner(extra_classes: &[&str], passive: bool) -> Self {
         let container = GtkBox::new(Orientation::Horizontal, 0);
         container.add_css_class(class::WIDGET);
         container.add_css_class(class::WIDGET_ITEM);
+        if passive {
+            container.add_css_class(class::PASSIVE);
+        }
         container.set_hexpand(false);
         for cls in extra_classes {
             container.add_css_class(cls);
@@ -456,6 +503,22 @@ impl BaseWidget {
         // Disable baseline alignment - it can cause vertical offset issues with text
         content.set_baseline_position(gtk4::BaselinePosition::Center);
 
+        if passive {
+            container.append(&content);
+            let show_if_timer = Self::setup_show_if_timer(&widget_name, &container);
+
+            return Self {
+                container,
+                content,
+                overlay: None,
+                ripple_handle: None,
+                menu: None,
+                widget_name,
+                _gesture_click: None,
+                _show_if_timer: show_if_timer,
+            };
+        }
+
         // Visual surface: rounded background + overflow clipping.
         // Must be a GtkBox (not Overlay) — Overlay doesn't clip background to border-radius.
         let surface = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
@@ -471,10 +534,8 @@ impl BaseWidget {
         overlay.set_hexpand(true);
         overlay.set_vexpand(true);
 
-        // Create Cairo-based ripple overlay for click-origin ripple effect
         let ripple_handle = RippleHandle::new();
         overlay.add_overlay(ripple_handle.widget());
-        // Tell the Overlay to measure this overlay so it fills the full area
         overlay.set_measure_overlay(ripple_handle.widget(), true);
 
         surface.append(&overlay);
@@ -573,11 +634,11 @@ impl BaseWidget {
         Self {
             container,
             content,
-            overlay,
-            ripple_handle,
-            menu,
+            overlay: Some(overlay),
+            ripple_handle: Some(ripple_handle),
+            menu: Some(menu),
             widget_name,
-            _gesture_click: gesture_click,
+            _gesture_click: Some(gesture_click),
             _show_if_timer: show_if_timer,
         }
     }
@@ -795,8 +856,8 @@ impl BaseWidget {
     }
 
     /// Get the ripple handle for triggering ripple animations.
-    pub fn ripple_handle(&self) -> &RippleHandle {
-        &self.ripple_handle
+    pub fn ripple_handle(&self) -> Option<&RippleHandle> {
+        self.ripple_handle.as_ref()
     }
 
     /// Get the inner `.content` box for adding widget children.
@@ -805,8 +866,8 @@ impl BaseWidget {
     }
 
     /// Get the overlay wrapping the content box.
-    pub fn overlay(&self) -> &Overlay {
-        &self.overlay
+    pub fn overlay(&self) -> Option<&Overlay> {
+        self.overlay.as_ref()
     }
 
     /// Create an icon using `IconsService`, apply CSS classes, pack it into the
@@ -859,6 +920,10 @@ impl BaseWidget {
     /// since at widget construction time the widget isn't yet attached to a window.
     ///
     /// Also adds the `clickable` CSS class to enable hover styling for interactive widgets.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called on a passive BaseWidget (which has no menu slot).
     pub fn create_menu<F>(&self, builder: F) -> Rc<MenuHandle>
     where
         F: Fn() -> gtk4::Widget + 'static,
@@ -867,7 +932,11 @@ impl BaseWidget {
         self.container.add_css_class(state::CLICKABLE);
 
         let handle = MenuHandle::new(self.widget_name.clone(), builder, self.container.clone());
-        *self.menu.borrow_mut() = Some(handle.clone());
+        let menu = self
+            .menu
+            .as_ref()
+            .expect("create_menu called on passive BaseWidget");
+        *menu.borrow_mut() = Some(handle.clone());
         handle
     }
 }

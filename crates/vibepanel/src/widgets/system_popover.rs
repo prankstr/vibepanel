@@ -608,11 +608,31 @@ impl SystemPopoverBinding {
     /// A GPU service callback is also registered while the popover is open so that
     /// GPU metrics update live (even when there is no GPU bar widget).
     pub fn new(base: &crate::widgets::base::BaseWidget) -> Self {
+        let menu_handle = base.create_menu(|| {
+            // Replaced by wire_lifecycle before the popover is shown
+            gtk4::Label::new(None).upcast::<Widget>()
+        });
+        Self::wire_lifecycle(&menu_handle)
+    }
+
+    /// Create a binding that uses an existing `MenuHandle` instead of creating
+    /// one from a `BaseWidget`.
+    ///
+    /// Used by the merge-group wrapper in `bar.rs`: the wrapper owns a single
+    /// shared `MenuHandle` and all passive widgets in the group share this
+    /// binding to update the popover when it's open.
+    pub(crate) fn new_for_menu(menu_handle: &Rc<crate::widgets::base::MenuHandle>) -> Self {
+        Self::wire_lifecycle(menu_handle)
+    }
+
+    /// Shared lifecycle wiring: installs the builder, reuse-content mode,
+    /// and on-show/on-close callbacks for GPU polling on a `MenuHandle`.
+    fn wire_lifecycle(menu_handle: &Rc<crate::widgets::base::MenuHandle>) -> Self {
         let controller: Rc<RefCell<Option<SystemPopoverController>>> = Rc::new(RefCell::new(None));
         let gpu_callback_id: Rc<Cell<Option<CallbackId>>> = Rc::new(Cell::new(None));
-        let controller_for_builder = controller.clone();
 
-        let menu_handle = base.create_menu(move || {
+        let controller_for_builder = controller.clone();
+        menu_handle.set_builder(move || {
             let (widget, ctrl) = build_system_popover_with_controller();
             *controller_for_builder.borrow_mut() = Some(ctrl);
             widget
@@ -620,14 +640,13 @@ impl SystemPopoverBinding {
 
         menu_handle.set_reuse_content(true);
 
-        // Start GPU polling and subscribe to updates each time the popover opens.
+        // Start GPU polling and push fresh snapshots each time the popover opens.
         let controller_for_show = controller.clone();
         let gpu_cb_for_show = gpu_callback_id.clone();
         menu_handle.set_on_show(move || {
             let gpu_service = GpuService::global();
             GpuService::request_polling(&gpu_service);
 
-            // Push fresh system + GPU snapshots so values are current on open.
             if let Some(ctrl) = controller_for_show.borrow().as_ref() {
                 let sys_snapshot = SystemService::global().snapshot();
                 ctrl.update_from_snapshot(&sys_snapshot);
@@ -635,7 +654,6 @@ impl SystemPopoverBinding {
                 ctrl.update_from_gpu_snapshot(&gpu_snapshot);
             }
 
-            // Subscribe to GPU snapshot updates so metrics refresh while open.
             let controller_for_gpu = controller_for_show.clone();
             let cb_id = gpu_service.connect(move |snapshot: &GpuSnapshot| {
                 if let Some(ctrl) = controller_for_gpu.borrow().as_ref() {

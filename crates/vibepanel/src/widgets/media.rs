@@ -791,11 +791,11 @@ impl MediaWidget {
         // Use insert_before to place it behind the content box in paint order.
         // When disabled in config, skip creation entirely to avoid spawning cava.
         let bar_visualizer = if config.visualizer {
+            let overlay = base.overlay().expect("media uses active BaseWidget");
             let viz = BarVisualizer::new();
-            base.overlay().add_overlay(viz.widget());
-            base.overlay().set_measure_overlay(viz.widget(), false);
-            viz.widget()
-                .insert_before(base.overlay(), Some(base.content()));
+            overlay.add_overlay(viz.widget());
+            overlay.set_measure_overlay(viz.widget(), false);
+            viz.widget().insert_before(overlay, Some(base.content()));
             Some(viz)
         } else {
             None

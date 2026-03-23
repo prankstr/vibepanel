@@ -535,7 +535,10 @@ impl QuickSettingsWidget {
         gesture.set_propagation_phase(gtk4::PropagationPhase::Capture);
 
         {
-            let ripple = base.ripple_handle().clone();
+            let ripple = base
+                .ripple_handle()
+                .expect("QuickSettings uses active BaseWidget")
+                .clone();
             let qs_window_handle = qs_window.clone();
             let root = base.widget().clone();
             gesture.connect_pressed(move |gesture, _n_press, x, y| {

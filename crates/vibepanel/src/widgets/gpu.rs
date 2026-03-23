@@ -100,14 +100,23 @@ impl GpuWidget {
     /// Create a new GPU widget with the given configuration.
     pub fn new(config: GpuConfig) -> Self {
         let base = BaseWidget::new(&[widget::GPU]);
+        let popover_binding = SystemPopoverBinding::new(&base);
+        Self::build(config, base, popover_binding)
+    }
 
+    /// Create a passive GPU widget for use in a merge group.
+    pub fn new_passive(config: GpuConfig, shared_binding: SystemPopoverBinding) -> Self {
+        let base = BaseWidget::new_passive(&[widget::GPU]);
+        Self::build(config, base, shared_binding)
+    }
+
+    /// Shared construction for active and passive modes.
+    fn build(config: GpuConfig, base: BaseWidget, popover_binding: SystemPopoverBinding) -> Self {
         base.set_tooltip("GPU: unknown");
 
         let icon_handle = base.add_icon("video-display-symbolic", &[widget::GPU_ICON]);
 
         let gpu_label = base.add_label(None, &[widget::GPU_LABEL, class::VCENTER_CAPS]);
-
-        let popover_binding = SystemPopoverBinding::new(&base);
 
         icon_handle.widget().set_visible(config.show_icon);
 

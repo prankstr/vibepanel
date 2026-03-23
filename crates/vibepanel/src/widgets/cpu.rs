@@ -80,14 +80,23 @@ impl CpuWidget {
     /// Create a new CPU widget with the given configuration.
     pub fn new(config: CpuConfig) -> Self {
         let base = BaseWidget::new(&[widget::CPU]);
+        let popover_binding = SystemPopoverBinding::new(&base);
+        Self::build(config, base, popover_binding)
+    }
 
+    /// Create a passive CPU widget for use in a merge group.
+    pub fn new_passive(config: CpuConfig, shared_binding: SystemPopoverBinding) -> Self {
+        let base = BaseWidget::new_passive(&[widget::CPU]);
+        Self::build(config, base, shared_binding)
+    }
+
+    /// Shared construction for active and passive modes.
+    fn build(config: CpuConfig, base: BaseWidget, popover_binding: SystemPopoverBinding) -> Self {
         base.set_tooltip("CPU: unknown");
 
         let icon_handle = base.add_icon("cpu-symbolic", &[widget::CPU_ICON]);
 
         let percentage_label = base.add_label(None, &[widget::CPU_LABEL, class::VCENTER_CAPS]);
-
-        let popover_binding = SystemPopoverBinding::new(&base);
 
         icon_handle.widget().set_visible(config.show_icon);
         percentage_label.set_visible(config.show_percentage);

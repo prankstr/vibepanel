@@ -1,7 +1,7 @@
 //! Bar window implementation using GTK4 and layer-shell.
 
 use gtk4::prelude::*;
-use gtk4::{Application, ApplicationWindow};
+use gtk4::{Application, ApplicationWindow, GestureClick, Overlay, gdk};
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -10,9 +10,20 @@ use tracing::{debug, info, warn};
 use vibepanel_core::config::{WidgetEntry, WidgetOrGroup};
 use vibepanel_core::{Config, ThemePalette};
 
+/// Horizontal spacing (px) between widgets inside a merge group.
+/// Matches the `.content` horizontal padding in `css/bar.rs`.
+const MERGE_GROUP_SPACING: i32 = 10;
+
+use crate::popover_tracker::PopoverTracker;
 use crate::sectioned_bar::SectionedBar;
-use crate::styles::{class, widget as style_widget};
-use crate::widgets::{self, BarState, QuickSettingsConfig, WidgetConfig, WidgetFactory};
+use crate::services::config_manager::ConfigManager;
+use crate::services::tooltip::TooltipManager;
+use crate::styles::{class, state, widget as style_widget};
+use crate::widgets::{
+    self, BarState, MenuHandle, PopoverKind, QuickSettingsConfig, RippleHandle,
+    SystemPopoverBinding, WidgetConfig, WidgetFactory, popover_kind_for,
+    trigger_ripple_from_gesture,
+};
 
 /// Create and configure the bar window with layer-shell.
 ///
@@ -236,14 +247,54 @@ fn build_widget_or_group(
             surface.append(&content);
             island.append(&surface);
 
+            // Partition into runs of same-popover widgets for merge grouping.
+            // Widgets with custom click handlers stay unmergeable so their
+            // on_click_right / on_click_middle commands aren't silently lost.
+            let kinds: Vec<PopoverKind> = group
+                .iter()
+                .map(|e| {
+                    let (right, middle) = ConfigManager::global().get_click_handlers(&e.name);
+                    if right.is_some() || middle.is_some() {
+                        PopoverKind::Unmergeable
+                    } else {
+                        popover_kind_for(&e.name)
+                    }
+                })
+                .collect();
+            let runs = compute_merge_runs(&kinds);
+
             let mut count = 0;
-            for entry in group {
-                if let Some(built) = WidgetFactory::build(entry, Some(qs_handle), output_id) {
-                    // Remove the .widget class from this widget since it's inside a group
-                    built.widget.remove_css_class(class::WIDGET);
-                    content.append(&built.widget);
-                    state.add_handle(built.handle);
-                    count += 1;
+
+            // Build entries individually (used for singletons and merge fallback).
+            let build_individually =
+                |entries: &[WidgetEntry], content: &gtk4::Box, state: &mut BarState| -> usize {
+                    let mut n = 0;
+                    for entry in entries {
+                        if let Some(built) = WidgetFactory::build(entry, Some(qs_handle), output_id)
+                        {
+                            built.widget.remove_css_class(class::WIDGET);
+                            content.append(&built.widget);
+                            state.add_handle(built.handle);
+                            n += 1;
+                        }
+                    }
+                    n
+                };
+
+            for (kind, start, end) in &runs {
+                let run_entries = &group[*start..*end];
+                let run_len = end - start;
+
+                if run_len >= 2 && *kind != PopoverKind::Unmergeable {
+                    let merged = build_merge_group(run_entries, *kind, &content, state);
+                    if merged > 0 {
+                        count += merged;
+                    } else {
+                        // Merge unsupported for this kind — fall back
+                        count += build_individually(run_entries, &content, state);
+                    }
+                } else {
+                    count += build_individually(run_entries, &content, state);
                 }
             }
 
@@ -256,6 +307,133 @@ fn build_widget_or_group(
             count
         }
     }
+}
+
+/// Partition `PopoverKind` values into runs of adjacent equal values.
+/// `Unmergeable` entries are never grouped — each becomes its own singleton run.
+fn compute_merge_runs(kinds: &[PopoverKind]) -> Vec<(PopoverKind, usize, usize)> {
+    let mut runs = Vec::new();
+    if kinds.is_empty() {
+        return runs;
+    }
+
+    let mut start = 0;
+    while start < kinds.len() {
+        let kind = kinds[start];
+        if kind == PopoverKind::Unmergeable {
+            runs.push((kind, start, start + 1));
+            start += 1;
+        } else {
+            let mut end = start + 1;
+            while end < kinds.len() && kinds[end] == kind {
+                end += 1;
+            }
+            runs.push((kind, start, end));
+            start = end;
+        }
+    }
+    runs
+}
+
+/// Build a merge-group wrapper for adjacent same-popover widgets.
+/// Returns the number of widgets successfully built (0 if unsupported kind).
+fn build_merge_group(
+    entries: &[WidgetEntry],
+    kind: PopoverKind,
+    parent_content: &gtk4::Box,
+    state: &mut BarState,
+) -> usize {
+    // Overlay wrapper — ripple sits on top of the content box.
+    let wrapper = Overlay::new();
+    wrapper.add_css_class(class::WIDGET_MERGE_GROUP);
+    wrapper.add_css_class(state::CLICKABLE);
+    wrapper.set_overflow(gtk4::Overflow::Hidden);
+
+    let inner_content = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
+    inner_content.add_css_class(class::MERGE_GROUP_CONTENT);
+    inner_content.set_vexpand(true);
+    inner_content.set_valign(gtk4::Align::Fill);
+    inner_content.set_spacing(MERGE_GROUP_SPACING);
+    wrapper.set_child(Some(&inner_content));
+
+    let ripple_handle = RippleHandle::new();
+    wrapper.add_overlay(ripple_handle.widget());
+    wrapper.set_measure_overlay(ripple_handle.widget(), true);
+
+    let widget_name = entries[0].name.clone();
+    let menu_handle = MenuHandle::new_placeholder(widget_name, wrapper.clone());
+
+    let binding = match kind {
+        PopoverKind::System => Some(SystemPopoverBinding::new_for_menu(&menu_handle)),
+        _ => {
+            warn!("Merge group for {:?} popover not yet supported", kind);
+            None
+        }
+    };
+
+    let Some(binding) = binding else {
+        return 0;
+    };
+
+    // Primary click toggles the shared popover. Right/middle-click handlers
+    // are not forwarded — the merge group is a single button, and per-widget
+    // click commands don't have a meaningful target here.
+    let gesture_click = GestureClick::new();
+    gesture_click.set_button(0);
+
+    {
+        let menu_for_cb = menu_handle.clone();
+        let ripple_for_press = ripple_handle.clone();
+        gesture_click.connect_pressed(move |gesture, _n_press, x, y| {
+            let button = gesture.current_button();
+            if button == gdk::BUTTON_PRIMARY {
+                let my_menu_was_visible = menu_for_cb.is_visible();
+
+                TooltipManager::global().cancel_and_hide();
+                PopoverTracker::global().dismiss_active();
+
+                if !my_menu_was_visible {
+                    menu_for_cb.show();
+                }
+
+                trigger_ripple_from_gesture(gesture, x, y, &ripple_for_press);
+            }
+        });
+    }
+
+    wrapper.add_controller(gesture_click.clone());
+
+    let mut built_widgets: Vec<widgets::BuiltWidget> = Vec::new();
+    for entry in entries {
+        if let Some(built) = WidgetFactory::build_passive(entry, &binding) {
+            built_widgets.push(built);
+        }
+    }
+
+    // If only 0–1 widgets survived (e.g. GPU unavailable), don't wrap in a
+    // merge group — return 0 so the caller rebuilds via the normal active path.
+    // Dropped passive widgets clean up their service callbacks via Drop.
+    if built_widgets.len() <= 1 {
+        return 0;
+    }
+
+    let count = built_widgets.len();
+    for built in built_widgets {
+        inner_content.append(&built.widget);
+        state.add_handle(built.handle);
+    }
+
+    parent_content.append(&wrapper);
+    // Keep the menu handle, gesture, and ripple alive
+    state.add_handle(Box::new(menu_handle));
+    state.add_handle(Box::new(gesture_click));
+    state.add_handle(Box::new(ripple_handle));
+    debug!(
+        "Created merge group with {} widget(s) ({:?} popover)",
+        count, kind
+    );
+
+    count
 }
 
 fn create_section(
@@ -528,4 +706,44 @@ fn generate_css(config: &Config, palette: &ThemePalette) -> String {
         "{}\n{}\n{}\n{}",
         css_vars, per_widget_css, utility_css, widget_css
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::widgets::PopoverKind::{System, Unmergeable};
+
+    #[test]
+    fn merge_runs_empty() {
+        assert_eq!(compute_merge_runs(&[]), vec![]);
+    }
+
+    #[test]
+    fn merge_runs_unmergeable_never_grouped() {
+        let runs = compute_merge_runs(&[Unmergeable, Unmergeable, Unmergeable]);
+        assert_eq!(
+            runs,
+            vec![
+                (Unmergeable, 0, 1),
+                (Unmergeable, 1, 2),
+                (Unmergeable, 2, 3),
+            ]
+        );
+    }
+
+    #[test]
+    fn merge_runs_system_grouping() {
+        // Consecutive System entries merge into one run
+        assert_eq!(
+            compute_merge_runs(&[System, System, System]),
+            vec![(System, 0, 3)]
+        );
+        // Unmergeable breaks a System run; singleton System stays singleton
+        assert_eq!(
+            compute_merge_runs(&[System, System, Unmergeable, System]),
+            vec![(System, 0, 2), (Unmergeable, 2, 3), (System, 3, 4)],
+        );
+        // Single System is its own run
+        assert_eq!(compute_merge_runs(&[System]), vec![(System, 0, 1)]);
+    }
 }

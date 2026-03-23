@@ -51,6 +51,7 @@ pub mod css;
 pub mod quick_settings;
 
 pub use base::BaseWidget;
+pub(crate) use base::{MenuHandle, RippleHandle, trigger_ripple_from_gesture};
 pub use battery::{BatteryConfig, BatteryWidget};
 pub use clock::{ClockConfig, ClockWidget};
 pub use media::{MediaConfig, MediaWidget};
@@ -70,11 +71,32 @@ pub use gpu::{GpuConfig, GpuWidget};
 pub use memory::{MemoryConfig, MemoryWidget};
 pub use network_speed::{NetworkSpeedConfig, NetworkSpeedWidget};
 
+pub(crate) use system_popover::SystemPopoverBinding;
+
 use gtk4::Widget;
 use gtk4::prelude::*;
 use std::any::Any;
 use tracing::{debug, warn};
 use vibepanel_core::config::WidgetEntry;
+
+/// The kind of shared popover a widget opens when clicked.
+///
+/// Used by merge-group logic to identify adjacent widgets that can be
+/// visually merged into a single button with shared hover/ripple/popover.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PopoverKind {
+    System,
+    /// Widget has no popover or its popover is not mergeable.
+    Unmergeable,
+}
+
+/// Return the popover kind for a given widget name.
+pub(crate) fn popover_kind_for(widget_name: &str) -> PopoverKind {
+    match widget_name {
+        "cpu" | "memory" | "gpu" | "network_speed" => PopoverKind::System,
+        _ => PopoverKind::Unmergeable,
+    }
+}
 
 use crate::services::battery::BatteryService;
 use crate::services::gpu::GpuService;
@@ -335,6 +357,65 @@ impl WidgetFactory {
             }
         }
     }
+
+    /// Build a widget in passive mode for a merge group.
+    ///
+    /// Returns `None` for unsupported widget types or if the widget should be
+    /// skipped (e.g., gpu when no GPU is detected).
+    pub(crate) fn build_passive(
+        entry: &WidgetEntry,
+        shared_binding: &SystemPopoverBinding,
+    ) -> Option<BuiltWidget> {
+        match entry.name.as_str() {
+            "cpu" => {
+                let cfg = CpuConfig::from_entry(entry);
+                let cpu = CpuWidget::new_passive(cfg, shared_binding.clone());
+                let root = cpu.widget().clone().upcast::<Widget>();
+                Some(BuiltWidget {
+                    widget: root,
+                    handle: Box::new(cpu),
+                })
+            }
+            "memory" => {
+                let cfg = MemoryConfig::from_entry(entry);
+                let memory = MemoryWidget::new_passive(cfg, shared_binding.clone());
+                let root = memory.widget().clone().upcast::<Widget>();
+                Some(BuiltWidget {
+                    widget: root,
+                    handle: Box::new(memory),
+                })
+            }
+            "gpu" => {
+                if !GpuService::global().snapshot().available {
+                    debug!("Skipping gpu widget: no supported GPU detected");
+                    return None;
+                }
+                let cfg = GpuConfig::from_entry(entry);
+                let gpu = GpuWidget::new_passive(cfg, shared_binding.clone());
+                let root = gpu.widget().clone().upcast::<Widget>();
+                Some(BuiltWidget {
+                    widget: root,
+                    handle: Box::new(gpu),
+                })
+            }
+            "network_speed" => {
+                let cfg = NetworkSpeedConfig::from_entry(entry);
+                let network = NetworkSpeedWidget::new_passive(cfg, shared_binding.clone());
+                let root = network.widget().clone().upcast::<Widget>();
+                Some(BuiltWidget {
+                    widget: root,
+                    handle: Box::new(network),
+                })
+            }
+            name => {
+                warn!(
+                    "build_passive called for unsupported widget type: '{}'",
+                    name
+                );
+                None
+            }
+        }
+    }
 }
 
 /// Holds widget handles to keep them alive for the lifetime of the bar.
@@ -368,5 +449,26 @@ impl BarState {
 impl Default for BarState {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn popover_kind_system_widgets() {
+        assert_eq!(popover_kind_for("cpu"), PopoverKind::System);
+        assert_eq!(popover_kind_for("memory"), PopoverKind::System);
+        assert_eq!(popover_kind_for("gpu"), PopoverKind::System);
+        assert_eq!(popover_kind_for("network_speed"), PopoverKind::System);
+    }
+
+    #[test]
+    fn popover_kind_non_system_widgets() {
+        assert_eq!(popover_kind_for("clock"), PopoverKind::Unmergeable);
+        assert_eq!(popover_kind_for("battery"), PopoverKind::Unmergeable);
+        assert_eq!(popover_kind_for("media"), PopoverKind::Unmergeable);
+        assert_eq!(popover_kind_for("unknown"), PopoverKind::Unmergeable);
     }
 }

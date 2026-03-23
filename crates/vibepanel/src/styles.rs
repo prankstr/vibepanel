@@ -27,6 +27,16 @@ pub mod class {
     /// Applied to shared island containers that hold multiple grouped widgets.
     pub const WIDGET_GROUP: &str = "widget-group";
 
+    /// Merge group wrapper (`.widget-merge-group`).
+    /// Merges adjacent same-popover widgets into a single visual button.
+    pub const WIDGET_MERGE_GROUP: &str = "widget-merge-group";
+
+    /// Inner content box of a merge group (`.merge-group-content`).
+    pub const MERGE_GROUP_CONTENT: &str = "merge-group-content";
+
+    /// Passive widget marker (`.passive`).
+    pub const PASSIVE: &str = "passive";
+
     /// Widget visual surface class (`.widget-surface`).
     /// Applied to a GtkBox that carries the widget's background-color and
     /// border-radius. Separated from `.widget` so the click target remains
