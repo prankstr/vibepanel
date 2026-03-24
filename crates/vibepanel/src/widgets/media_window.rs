@@ -12,7 +12,7 @@ use crate::services::callbacks::CallbackId;
 use crate::services::config_manager::ConfigManager;
 use crate::services::media::MediaService;
 use crate::services::surfaces::SurfaceStyleManager;
-use crate::styles::media;
+use crate::styles::{media, surface};
 use crate::widgets::media_components::{
     MediaViewController, build_album_art, build_media_controls, build_seek_section,
     build_track_info,
@@ -92,6 +92,7 @@ where
 
     let main_box = GtkBox::new(Orientation::Vertical, 0);
     main_box.add_css_class(media::CONTENT);
+    main_box.add_css_class(surface::NO_FOCUS);
     main_box.set_size_request(260, 150);
 
     // Apply surface styles for consistent theming

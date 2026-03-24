@@ -387,6 +387,8 @@ pub struct MediaWidget {
     /// Bar waveform visualizer — held so `Drop` disconnects from cava.
     /// `None` when visualizer is disabled in config.
     _bar_visualizer: Option<BarVisualizer>,
+    /// Keeps the `MenuHandle` alive so the popout closure's `Weak` can close the popover.
+    _menu_handle_cell: Rc<RefCell<Option<Rc<MenuHandle>>>>,
 }
 
 #[derive(Clone)]
@@ -860,6 +862,7 @@ impl MediaWidget {
             pending_hide: pending_hide_for_drop,
             _art_state: art_state_for_drop,
             _bar_visualizer: bar_visualizer,
+            _menu_handle_cell: menu_handle_cell,
         }
     }
 

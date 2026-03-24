@@ -2,7 +2,7 @@
 //!
 //! Provides reusable UI builders for the quick settings control center panels.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use crate::services::icons::{CairoSpinner, IconHandle, IconsService};
@@ -332,7 +332,6 @@ where
 {
     let btn = crate::widgets::base::vp_button();
     btn.set_has_frame(false);
-    btn.set_focusable(false);
     btn.set_focus_on_click(false);
     btn.add_css_class(qs::ROW_MENU_ITEM);
     btn.add_css_class(button::GHOST);
@@ -447,6 +446,9 @@ pub struct ScanButton {
     button: Button,
     label: Label,
     spinner: CairoSpinner,
+    /// Whether the button had keyboard-navigated focus when it was made
+    /// insensitive (i.e. `focus_visible` was active on the window).
+    had_keyboard_focus: Cell<bool>,
 }
 
 impl ScanButton {
@@ -494,6 +496,7 @@ impl ScanButton {
             button,
             label,
             spinner,
+            had_keyboard_focus: Cell::new(false),
         })
     }
 
@@ -503,7 +506,22 @@ impl ScanButton {
     }
 
     /// Set button sensitivity.
+    ///
+    /// When becoming insensitive, records whether the button had
+    /// keyboard-navigated focus (i.e. `focus_visible` was active) so it
+    /// can be restored when scanning ends.
     pub fn set_sensitive(&self, sensitive: bool) {
+        if !sensitive && self.button.has_focus() {
+            // Record that we had focus *and* that keyboard nav was active.
+            // We check focus_visible now because GTK may clear it once the
+            // focused widget becomes insensitive.
+            let kbd_nav = self
+                .button
+                .root()
+                .and_then(|r| r.downcast::<gtk4::Window>().ok())
+                .is_some_and(|w| gtk4::prelude::GtkWindowExt::gets_focus_visible(&w));
+            self.had_keyboard_focus.set(kbd_nav);
+        }
         self.button.set_sensitive(sensitive);
     }
 
@@ -514,8 +532,10 @@ impl ScanButton {
 
     /// Update active/scanning state.
     ///
-    /// When `active` is true, hides label and shows spinner.
-    /// When false, hides spinner and shows idle text.
+    /// When `active` is true, hides label and shows spinner.  When false,
+    /// hides spinner and shows idle text.  If the button had
+    /// keyboard-navigated focus before scanning started, focus is restored
+    /// automatically and `focus_visible` is re-enabled on the window.
     pub fn set_scanning(&self, active: bool) {
         if active {
             self.label.set_visible(false);
@@ -523,6 +543,17 @@ impl ScanButton {
         } else {
             self.spinner.stop();
             self.label.set_visible(true);
+            // Restore focus if the button had keyboard-nav focus before it
+            // was made insensitive.  We also re-enable focus_visible since
+            // GTK may have cleared it when focus was lost.
+            if self.had_keyboard_focus.replace(false) && self.button.is_sensitive() {
+                if let Some(root) = self.button.root()
+                    && let Some(window) = root.downcast_ref::<gtk4::Window>()
+                {
+                    gtk4::prelude::GtkWindowExt::set_focus_visible(window, true);
+                }
+                self.button.grab_focus();
+            }
         }
     }
 }
