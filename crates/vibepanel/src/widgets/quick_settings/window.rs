@@ -1908,22 +1908,6 @@ impl crate::popover_registry::PopoverToggleable for QuickSettingsWindowHandle {
             .is_some_and(|w| w.logically_open.get())
     }
 
-    fn ipc_enable_keyboard_nav(&self) {
-        if let Some(qs) = self.window.borrow().as_ref()
-            && qs.logically_open.get()
-        {
-            qs.enable_keyboard_nav();
-        }
-    }
-
-    fn ipc_prepare_keyboard_nav(&self) {
-        if let Some(qs) = self.window.borrow().as_ref()
-            && qs.logically_open.get()
-        {
-            qs.prepare_keyboard_nav();
-        }
-    }
-
     fn monitor_connector(&self) -> Option<String> {
         let widget_ref = self.bar_widget.borrow();
         widget_ref

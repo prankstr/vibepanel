@@ -357,18 +357,6 @@ impl crate::popover_registry::PopoverToggleable for MenuHandle {
         self.is_visible()
     }
 
-    fn ipc_enable_keyboard_nav(&self) {
-        if let Some(ref popover) = *self.popover.borrow() {
-            popover.enable_keyboard_nav();
-        }
-    }
-
-    fn ipc_prepare_keyboard_nav(&self) {
-        if let Some(ref popover) = *self.popover.borrow() {
-            popover.prepare_keyboard_nav();
-        }
-    }
-
     fn monitor_connector(&self) -> Option<String> {
         self.parent
             .root()

@@ -345,31 +345,24 @@ impl NotificationsWidget {
         let inner = Rc::clone(&self.inner);
         let suppress_rebuild = Rc::clone(&self.inner.suppress_rebuild);
 
-        // We need a reference to the menu handle inside the builder, but the handle
-        // is created by create_menu. Use a RefCell to store it after creation.
-        // The builder captures a Weak to avoid a reference cycle:
-        //   menu_handle_cell → MenuHandle → builder closure → menu_handle_cell
-        let menu_handle_cell: Rc<RefCell<Option<Rc<MenuHandle>>>> = Rc::new(RefCell::new(None));
-        let menu_handle_weak = Rc::downgrade(&menu_handle_cell);
+        // Placeholder builder — replaced immediately below once we have the handle.
+        let menu_handle = self
+            .base
+            .create_menu(|| GtkBox::new(Orientation::Vertical, 0).into());
 
-        let menu_handle = self.base.create_menu(move || {
-            // Mark as seen when popover opens
+        // Now that the handle exists, build the real builder with a Weak reference
+        // to it so the builder can create on_close callbacks that call handle.hide().
+        let handle_weak = Rc::downgrade(&menu_handle);
+        menu_handle.set_builder(move || {
             inner.mark_as_seen();
 
-            // Create close callback that hides the popover
-            let on_close: Option<ClosePopoverCallback> =
-                menu_handle_weak.upgrade().and_then(|cell| {
-                    cell.borrow().as_ref().map(|handle| {
-                        let handle_clone = Rc::clone(handle);
-                        Rc::new(move || handle_clone.hide()) as ClosePopoverCallback
-                    })
-                });
+            let on_close: Option<ClosePopoverCallback> = handle_weak
+                .upgrade()
+                .map(|handle| Rc::new(move || handle.hide()) as ClosePopoverCallback);
 
             build_popover_content(on_close, Rc::clone(&suppress_rebuild))
         });
 
-        // Store the menu handle in both places
-        *menu_handle_cell.borrow_mut() = Some(Rc::clone(&menu_handle));
         *self.inner.menu_handle.borrow_mut() = Some(menu_handle);
     }
 

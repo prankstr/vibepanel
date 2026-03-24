@@ -32,21 +32,6 @@ pub trait PopoverToggleable {
     /// Check if the popover is currently visible.
     fn ipc_is_visible(&self) -> bool;
 
-    /// Enable keyboard navigation for this popover.
-    /// Default: no-op. Implementors override to remove `.vp-no-focus`.
-    fn ipc_enable_keyboard_nav(&self) {}
-
-    /// Prepare deferred keyboard navigation for IPC-opened popovers.
-    ///
-    /// Clears auto-focus and installs a one-shot Tab listener. On first Tab,
-    /// `enable_keyboard_nav()` fires and Tab propagates through GTK's own
-    /// keynav path — landing on the first widget with correct `:focus-visible`.
-    ///
-    /// Default: falls back to `ipc_enable_keyboard_nav()` (immediate activation).
-    fn ipc_prepare_keyboard_nav(&self) {
-        self.ipc_enable_keyboard_nav();
-    }
-
     /// Return the monitor connector name (e.g., "eDP-1") this handle belongs to.
     /// Used on multi-monitor setups to dispatch to the focused monitor's handle.
     /// Default: `None` (treat as unknown — will match any monitor as fallback).
