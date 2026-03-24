@@ -70,7 +70,6 @@ where
     // Player selector button
     let player_btn = crate::widgets::base::vp_button();
     player_btn.set_has_frame(false);
-    player_btn.set_focusable(false);
     player_btn.set_focus_on_click(false);
     player_btn.set_valign(Align::Center);
     player_btn.add_css_class(surface::POPOVER_ICON_BTN);
@@ -91,7 +90,6 @@ where
     // Pop-out button
     let popout_btn = crate::widgets::base::vp_button();
     popout_btn.set_has_frame(false);
-    popout_btn.set_focusable(false);
     popout_btn.set_focus_on_click(false);
     popout_btn.set_valign(Align::Center);
     popout_btn.add_css_class(surface::POPOVER_ICON_BTN);

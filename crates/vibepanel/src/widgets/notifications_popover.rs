@@ -155,7 +155,6 @@ fn build_header(on_close: Option<ClosePopoverCallback>) -> GtkBox {
     // Mute toggle button (always visible)
     let mute_btn = crate::widgets::base::vp_button();
     mute_btn.set_has_frame(false);
-    mute_btn.set_focusable(false);
     mute_btn.set_focus_on_click(false);
     mute_btn.add_css_class(surface::POPOVER_ICON_BTN);
     mute_btn.set_valign(Align::Start);
@@ -217,7 +216,6 @@ fn build_header(on_close: Option<ClosePopoverCallback>) -> GtkBox {
     if count > 0 {
         let clear_btn = crate::widgets::base::vp_button();
         clear_btn.set_has_frame(false);
-        clear_btn.set_focusable(false);
         clear_btn.set_focus_on_click(false);
         clear_btn.add_css_class(surface::POPOVER_ICON_BTN);
         clear_btn.set_valign(Align::Start);

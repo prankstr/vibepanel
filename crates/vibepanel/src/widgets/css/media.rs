@@ -99,7 +99,6 @@ pub fn css(animations: bool) -> String {
 /* Player menu item - extends qs-row-menu-item */
 .media-player-menu-item {{
     border: none;
-    outline: none;
     box-shadow: none;
 }}
 

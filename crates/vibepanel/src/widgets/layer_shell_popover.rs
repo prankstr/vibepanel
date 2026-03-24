@@ -13,6 +13,22 @@ use gtk4::prelude::*;
 use gtk4::{
     Application, ApplicationWindow, Box as GtkBox, EventControllerKey, GestureClick, Orientation,
 };
+
+/// Whether a key is a keyboard navigation key (Tab, arrows, Home, End).
+/// Used by the deferred keyboard nav controller to gate activation.
+pub fn is_keynav_key(keyval: gdk::Key) -> bool {
+    matches!(
+        keyval,
+        gdk::Key::Tab
+            | gdk::Key::ISO_Left_Tab
+            | gdk::Key::Up
+            | gdk::Key::Down
+            | gdk::Key::Left
+            | gdk::Key::Right
+            | gdk::Key::Home
+            | gdk::Key::End
+    )
+}
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -336,7 +352,7 @@ where
     catcher
 }
 
-/// Set up ESC key handler on a window to call the dismiss callback.
+/// Set up ESC key handler on a window to dismiss the popover.
 pub fn setup_esc_handler<F>(window: &ApplicationWindow, on_dismiss: F)
 where
     F: Fn() + 'static,
@@ -414,6 +430,9 @@ pub struct LayerShellPopover {
     /// Cached content widget for reuse mode. Kept alive across close cycles
     /// so it can be re-parented on the next open.
     cached_content: RefCell<Option<gtk4::Widget>>,
+    /// One-shot key controller installed by `prepare_keyboard_nav()`.
+    /// Stored so `hide()` can remove it if Tab was never pressed.
+    deferred_kbd_controller: RefCell<Option<EventControllerKey>>,
 }
 
 impl LayerShellPopover {
@@ -445,6 +464,7 @@ impl LayerShellPopover {
             content_dirty: Cell::new(false),
             reuse_content: Cell::new(false),
             cached_content: RefCell::new(None),
+            deferred_kbd_controller: RefCell::new(None),
         })
     }
 
@@ -490,6 +510,85 @@ impl LayerShellPopover {
         self.content_dirty.set(true);
     }
 
+    /// Enable keyboard navigation by removing the `.vp-no-focus` CSS class
+    /// from the outer wrapper and enabling GTK's `focus-visible` property so
+    /// Adwaita renders `:focus-visible` rings on focused widgets.
+    ///
+    /// Activated by the deferred Tab controller installed in `show_internal()`.
+    /// On `hide()`, `focus-visible` is reset to `false` and `.vp-no-focus`
+    /// is restored so the next open starts focus-suppressed.
+    pub fn enable_keyboard_nav(&self) {
+        if let Some(ref window) = *self.window.borrow()
+            && let Some(child) = window.child()
+        {
+            gtk4::prelude::GtkWindowExt::set_focus_visible(window, true);
+            child.remove_css_class(surface::NO_FOCUS);
+        }
+    }
+
+    /// Prepare deferred keyboard navigation.
+    ///
+    /// Clears any auto-focus set by `present()` and installs a one-shot key
+    /// controller that waits for a keynav key (Tab, arrows, Home, End).
+    /// On the first such press, `enable_keyboard_nav()` fires and focus
+    /// lands on the first focusable widget with correct `:focus-visible`
+    /// state. Until a keynav key is pressed, the popover shows no focus rings.
+    pub fn prepare_keyboard_nav(self: &Rc<Self>) {
+        let Some(ref window) = *self.window.borrow() else {
+            return;
+        };
+
+        // Clear any auto-focus from present() so Tab starts from nothing
+        // and lands on the first focusable widget.
+        gtk4::prelude::GtkWindowExt::set_focus(window, None::<&gtk4::Widget>);
+
+        // Remove any previous deferred controller (e.g. rapid toggle).
+        self.remove_deferred_kbd_controller();
+
+        let controller = EventControllerKey::new();
+        let weak_self = Rc::downgrade(self);
+        let ctrl_ref = controller.clone();
+        controller.connect_key_pressed(move |_, keyval, _, _| {
+            let is_keynav = is_keynav_key(keyval);
+            if is_keynav && let Some(popover) = weak_self.upgrade() {
+                popover.enable_keyboard_nav();
+                if let Some(ref window) = *popover.window.borrow() {
+                    window.remove_controller(&ctrl_ref);
+                }
+                *popover.deferred_kbd_controller.borrow_mut() = None;
+            }
+            if keyval == gdk::Key::Tab || keyval == gdk::Key::ISO_Left_Tab {
+                // Let Tab propagate — GTK focuses the first widget with
+                // correct :focus-visible via its own keynav path.
+                Propagation::Proceed
+            } else if is_keynav {
+                // For arrows/Home/End, consume the key and simulate Tab's
+                // focus behavior so we land on the first widget instead of
+                // skipping it.
+                if let Some(popover) = weak_self.upgrade()
+                    && let Some(ref window) = *popover.window.borrow()
+                {
+                    window.child_focus(gtk4::DirectionType::TabForward);
+                }
+                Propagation::Stop
+            } else {
+                Propagation::Proceed
+            }
+        });
+
+        window.add_controller(controller.clone());
+        *self.deferred_kbd_controller.borrow_mut() = Some(controller);
+    }
+
+    /// Remove the deferred keyboard nav controller if installed.
+    fn remove_deferred_kbd_controller(&self) {
+        if let Some(controller) = self.deferred_kbd_controller.borrow_mut().take()
+            && let Some(ref window) = *self.window.borrow()
+        {
+            window.remove_controller(&controller);
+        }
+    }
+
     /// Show the popover at the given anchor position.
     ///
     /// Reuses all persistent shells (window, animation, click-catcher) and
@@ -515,6 +614,18 @@ impl LayerShellPopover {
         // Mark as logically closed immediately — the toggle logic in BaseWidget
         // checks this to decide show vs hide on the next click.
         self.logically_open.set(false);
+
+        // Restore focus suppression so the next open starts no-focus.
+        // (keyboard nav defers removal to enable_keyboard_nav().)
+        if let Some(ref window) = *self.window.borrow() {
+            gtk4::prelude::GtkWindowExt::set_focus_visible(window, false);
+            if let Some(child) = window.child()
+                && !child.has_css_class(surface::NO_FOCUS)
+            {
+                child.add_css_class(surface::NO_FOCUS);
+            }
+        }
+        self.remove_deferred_kbd_controller();
 
         // Bump generation to cancel any pending idle callback from show_internal().
         let generation = self.anim_generation.get().wrapping_add(1);
@@ -632,6 +743,9 @@ impl LayerShellPopover {
 
             // Reverse into opening — tick callback picks up new direction.
             self.start_animation(AnimDirection::Opening, generation);
+
+            // Install deferred Tab controller so keyboard nav activates on Tab.
+            self.prepare_keyboard_nav();
             return;
         }
 
@@ -731,6 +845,11 @@ impl LayerShellPopover {
         window.set_opacity(0.0);
         window.set_visible(true);
         window.present();
+
+        // Install deferred Tab controller so keyboard nav activates on first
+        // Tab press (for both mouse and IPC opens). Must run after present()
+        // because present() auto-focuses a widget which we need to clear.
+        self.prepare_keyboard_nav();
 
         // After window is mapped, update position and start the open animation.
         let weak_self = Rc::downgrade(self);

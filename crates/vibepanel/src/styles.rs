@@ -173,6 +173,13 @@ pub mod row {
     /// Row menu button (`.qs-row-menu-button`).
     pub const QS_MENU_BUTTON: &str = "qs-row-menu-button";
 
+    /// Row delegates focus to an inline button (`.vp-row-has-action`).
+    ///
+    /// Added to non-focusable rows that contain an inline action button so
+    /// CSS can suppress the row-level focus ring that GTK applies via
+    /// `:focus-visible` even on non-focusable rows.
+    pub const HAS_ACTION: &str = "vp-row-has-action";
+
     /// Row menu icon (`.qs-row-menu-icon`).
     pub const QS_MENU_ICON: &str = "qs-row-menu-icon";
 
@@ -646,6 +653,13 @@ pub mod surface {
 
     /// No focus outline container (`.vp-no-focus`).
     pub const NO_FOCUS: &str = "vp-no-focus";
+
+    /// Card-level focus indicator (`.vp-toggle-focused`).
+    ///
+    /// Toggled on a `.vp-card` box when the toggle button has keyboard focus.
+    /// Uses `box-shadow: inset` on the parent card so the ring wraps the
+    /// entire card (toggle + chevron), not just the focused button.
+    pub const TOGGLE_FOCUSED: &str = "vp-toggle-focused";
 
     /// Popover header icon button (`.vp-popover-icon-btn`).
     pub const POPOVER_ICON_BTN: &str = "vp-popover-icon-btn";

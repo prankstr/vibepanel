@@ -47,12 +47,6 @@ calendar.view grid label.day-number {
     font-weight: 325;
 }
 
-calendar.view grid label.day-number:focus {
-    outline: none;
-    border: none;
-    box-shadow: none;
-}
-
 calendar.view grid *:selected:not(.today) {
     background: transparent;
     color: inherit;

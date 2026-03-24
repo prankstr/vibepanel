@@ -903,7 +903,6 @@ fn render_menu_level(state: &Rc<RefCell<WidgetState>>) {
 
         let button = crate::widgets::base::vp_button();
         button.set_sensitive(entry.enabled);
-        button.set_focusable(false);
         button.set_focus_on_click(false);
         button.add_css_class(widget::TRAY_MENU_BUTTON);
 

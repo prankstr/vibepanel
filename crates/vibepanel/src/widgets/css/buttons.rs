@@ -11,7 +11,6 @@ button.vp-btn-compact {
     background: transparent;
     border: none;
     box-shadow: none;
-    outline: none;
 }
 
 /* Compact button - reset + zero padding/margin for icon-only buttons */
@@ -20,15 +19,6 @@ button.vp-btn-compact {
     margin: 0;
     min-width: 0;
     min-height: 0;
-}
-
-button.vp-btn-reset:focus,
-button.vp-btn-reset:focus-visible,
-button.vp-btn-compact:focus,
-button.vp-btn-compact:focus-visible {
-    outline: none;
-    border: none;
-    box-shadow: none;
 }
 
 button.vp-btn-accent {

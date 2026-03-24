@@ -48,7 +48,6 @@ pub fn build_clock_calendar_popover(show_week_numbers: bool) -> (Widget, Rc<dyn 
     let prev_button = crate::widgets::base::vp_button_from_icon_name("go-previous-symbolic");
     prev_button.add_css_class(surface::POPOVER_ICON_BTN);
     prev_button.set_has_frame(false);
-    prev_button.set_focusable(false);
     prev_button.set_focus_on_click(false);
 
     let icons = IconsService::global();
@@ -59,14 +58,12 @@ pub fn build_clock_calendar_popover(show_week_numbers: bool) -> (Widget, Rc<dyn 
     today_button.set_child(Some(&today_icon.widget()));
     today_button.add_css_class(surface::POPOVER_ICON_BTN);
     today_button.set_has_frame(false);
-    today_button.set_focusable(false);
     today_button.set_focus_on_click(false);
     today_button.set_tooltip_text(Some("Go to today"));
 
     let next_button = crate::widgets::base::vp_button_from_icon_name("go-next-symbolic");
     next_button.add_css_class(surface::POPOVER_ICON_BTN);
     next_button.set_has_frame(false);
-    next_button.set_focusable(false);
     next_button.set_focus_on_click(false);
 
     nav_box.append(&prev_button);

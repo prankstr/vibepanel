@@ -798,6 +798,44 @@ impl ToggleCard {
         toggle.set_child(Some(&content));
         card_box.append(&toggle);
 
+        // Card-level focus ring: when the toggle button has keyboard focus
+        // AND focus-visible is active, add .vp-toggle-focused on card_box so
+        // a box-shadow ring wraps the entire card (toggle + chevron).
+        // Also listen for focus_visible changes on the window so the ring
+        // disappears when GTK's 3 s timeout fires.
+        {
+            let cb = card_box.clone();
+            let cb2 = card_box.clone();
+            let toggle_weak = toggle.downgrade();
+            toggle.connect_notify_local(Some("has-focus"), move |btn, _| {
+                let dominated = btn.has_focus()
+                    && btn
+                        .root()
+                        .and_downcast_ref::<gtk4::Window>()
+                        .is_some_and(gtk4::prelude::GtkWindowExt::gets_focus_visible);
+                if dominated {
+                    cb.add_css_class(crate::styles::surface::TOGGLE_FOCUSED);
+                } else {
+                    cb.remove_css_class(crate::styles::surface::TOGGLE_FOCUSED);
+                }
+            });
+            toggle.connect_notify_local(Some("root"), move |btn, _| {
+                let Some(window) = btn.root().and_downcast::<gtk4::Window>() else {
+                    return;
+                };
+                let tw = toggle_weak.clone();
+                let cb = cb2.clone();
+                window.connect_focus_visible_notify(move |window| {
+                    let focused = tw.upgrade().is_some_and(|t| t.has_focus());
+                    if !focused || !gtk4::prelude::GtkWindowExt::gets_focus_visible(window) {
+                        cb.remove_css_class(crate::styles::surface::TOGGLE_FOCUSED);
+                    } else {
+                        cb.add_css_class(crate::styles::surface::TOGGLE_FOCUSED);
+                    }
+                });
+            });
+        }
+
         // Expander chevron
         let (expander_button, expander_icon) = if self.with_expander {
             let expander_result = ExpanderButton::new().build();
@@ -969,14 +1007,23 @@ impl ListRow {
         hbox.append(&label_result.container);
 
         // Trailing widget (e.g., menu button)
+        let has_trailing = self.trailing_widget.is_some();
         if let Some(trailing) = self.trailing_widget {
             trailing.set_halign(Align::End);
             hbox.append(&trailing);
         }
 
         list_row.set_child(Some(&hbox));
-        list_row.set_activatable(true);
-        list_row.set_focusable(true);
+        // When a trailing button is present it becomes the keyboard target —
+        // making the row itself non-focusable avoids a double focus ring
+        // (GTK keeps :focus-visible on the row even when a child button has
+        // focus).  Rows without trailing widgets remain focusable so they
+        // can be activated directly.
+        list_row.set_activatable(!has_trailing);
+        list_row.set_focusable(!has_trailing);
+        if has_trailing {
+            list_row.add_css_class(row::HAS_ACTION);
+        }
 
         ListRowResult {
             row: list_row,

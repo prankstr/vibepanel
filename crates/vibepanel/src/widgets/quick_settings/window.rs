@@ -10,8 +10,8 @@ use gtk4::gdk::{self, Monitor};
 use gtk4::glib::{self, ControlFlow};
 use gtk4::prelude::*;
 use gtk4::{
-    Application, ApplicationWindow, Box as GtkBox, Button, Label, Orientation, PolicyType,
-    Revealer, RevealerTransitionType, ScrolledWindow,
+    Application, ApplicationWindow, Box as GtkBox, Button, EventControllerKey, Label, Orientation,
+    PolicyType, Revealer, RevealerTransitionType, ScrolledWindow,
 };
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use std::cell::{Cell, RefCell};
@@ -32,7 +32,7 @@ use crate::styles::{qs, state, surface};
 use crate::widgets::layer_shell_popover::{
     ANIM_SCALE_FROM, AnimDirection, AnimState, Dismissible, calculate_bar_exclusive_zone,
     calculate_popover_bar_margin, calculate_popover_right_margin, create_click_catcher,
-    popover_bar_edge, popover_keyboard_mode, setup_esc_handler,
+    is_keynav_key, popover_bar_edge, popover_keyboard_mode, setup_esc_handler,
 };
 use crate::widgets::scale_box::ScaleBox;
 
@@ -172,6 +172,9 @@ pub struct QuickSettingsWindow {
     /// Power card state (expander variant only). Stored here so
     /// `reset_ui_state()` can collapse it without walking the widget tree.
     pub power: RefCell<Option<Rc<PowerCardExpanderState>>>,
+    /// One-shot key controller installed by `prepare_keyboard_nav()`.
+    /// Stored so `hide_panel()` can remove it if Tab was never pressed.
+    deferred_kbd_controller: RefCell<Option<EventControllerKey>>,
 }
 
 impl QuickSettingsWindow {
@@ -250,6 +253,7 @@ impl QuickSettingsWindow {
             brightness: Rc::new(BrightnessCardState::new()),
             updates: Rc::new(UpdatesCardState::new()),
             power: RefCell::new(None),
+            deferred_kbd_controller: RefCell::new(None),
         });
 
         let outer = Self::build_content(&qs);
@@ -1386,6 +1390,9 @@ impl QuickSettingsWindow {
             self.window.set_visible(true);
             self.window.present();
 
+            // Install deferred Tab controller for keyboard nav on first Tab.
+            self.prepare_keyboard_nav();
+
             // Start open animation + re-deliver service snapshots.
             let window_weak = self.window.downgrade();
             let gen_rc = Rc::clone(&self.anim_generation);
@@ -1414,6 +1421,9 @@ impl QuickSettingsWindow {
             self.window.set_visible(true);
             self.window.present();
 
+            // Install deferred Tab controller for keyboard nav on first Tab.
+            self.prepare_keyboard_nav();
+
             let window_weak = self.window.downgrade();
             let gen_rc = Rc::clone(&self.anim_generation);
             glib::idle_add_local_once(move || {
@@ -1440,6 +1450,72 @@ impl QuickSettingsWindow {
         }
     }
 
+    /// Enable keyboard navigation (remove focus suppression).
+    ///
+    /// Activated by the deferred keynav controller installed in `show_panel()`.
+    /// On `hide_panel()`, `focus-visible` is reset and `.vp-no-focus` is
+    /// restored so the next open starts focus-suppressed.
+    fn enable_keyboard_nav(&self) {
+        if let Some(ref outer) = *self.outer_container.borrow() {
+            gtk4::prelude::GtkWindowExt::set_focus_visible(&self.window, true);
+            outer.remove_css_class(surface::NO_FOCUS);
+        }
+    }
+
+    /// Prepare deferred keyboard navigation.
+    ///
+    /// Clears auto-focus and installs a one-shot keynav controller.
+    /// On the first keynav key (Tab, arrows, Home, End),
+    /// `enable_keyboard_nav()` fires and focus lands on the first
+    /// focusable widget.
+    fn prepare_keyboard_nav(&self) {
+        // Clear any auto-focus from present() so Tab starts from nothing.
+        gtk4::prelude::GtkWindowExt::set_focus(&self.window, None::<&gtk4::Widget>);
+
+        // Remove any previous deferred controller.
+        self.remove_deferred_kbd_controller();
+
+        let controller = EventControllerKey::new();
+        let window_weak = self.window.downgrade();
+        let ctrl_ref = controller.clone();
+        controller.connect_key_pressed(move |_, keyval, _, _| {
+            let is_keynav = is_keynav_key(keyval);
+            if is_keynav
+                && let Some(window) = window_weak.upgrade()
+                && let Some(qs) = get_qs_window_data(&window)
+            {
+                qs.enable_keyboard_nav();
+                window.remove_controller(&ctrl_ref);
+                *qs.deferred_kbd_controller.borrow_mut() = None;
+            }
+            if keyval == gdk::Key::Tab || keyval == gdk::Key::ISO_Left_Tab {
+                // Let Tab propagate — GTK focuses the first widget with
+                // correct :focus-visible via its own keynav path.
+                glib::Propagation::Proceed
+            } else if is_keynav {
+                // For arrows/Home/End, consume the key and simulate Tab's
+                // focus behavior so we land on the first widget instead of
+                // skipping it.
+                if let Some(window) = window_weak.upgrade() {
+                    window.child_focus(gtk4::DirectionType::TabForward);
+                }
+                glib::Propagation::Stop
+            } else {
+                glib::Propagation::Proceed
+            }
+        });
+
+        self.window.add_controller(controller.clone());
+        *self.deferred_kbd_controller.borrow_mut() = Some(controller);
+    }
+
+    /// Remove the deferred keyboard nav controller if installed.
+    fn remove_deferred_kbd_controller(&self) {
+        if let Some(controller) = self.deferred_kbd_controller.borrow_mut().take() {
+            self.window.remove_controller(&controller);
+        }
+    }
+
     /// Hide the panel with a close animation, keeping the window alive.
     ///
     /// The click-catcher is hidden and keyboard grab released immediately
@@ -1454,6 +1530,15 @@ impl QuickSettingsWindow {
         // Mark as logically closed immediately so toggle_at() can re-open
         // during the close animation instead of swallowing the click.
         self.logically_open.set(false);
+
+        // Restore focus suppression so the next open starts no-focus.
+        gtk4::prelude::GtkWindowExt::set_focus_visible(&self.window, false);
+        if let Some(ref outer) = *self.outer_container.borrow()
+            && !outer.has_css_class(surface::NO_FOCUS)
+        {
+            outer.add_css_class(surface::NO_FOCUS);
+        }
+        self.remove_deferred_kbd_controller();
 
         // Restore keyboard mode if it was released for VPN password dialogs
         vpn_card::restore_keyboard_if_released();
@@ -1821,6 +1906,22 @@ impl crate::popover_registry::PopoverToggleable for QuickSettingsWindowHandle {
             .borrow()
             .as_ref()
             .is_some_and(|w| w.logically_open.get())
+    }
+
+    fn ipc_enable_keyboard_nav(&self) {
+        if let Some(qs) = self.window.borrow().as_ref()
+            && qs.logically_open.get()
+        {
+            qs.enable_keyboard_nav();
+        }
+    }
+
+    fn ipc_prepare_keyboard_nav(&self) {
+        if let Some(qs) = self.window.borrow().as_ref()
+            && qs.logically_open.get()
+        {
+            qs.prepare_keyboard_nav();
+        }
     }
 
     fn monitor_connector(&self) -> Option<String> {

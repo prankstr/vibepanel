@@ -1219,7 +1219,7 @@ pub fn populate_wifi_list(
         {
             let pwd_row = ListBoxRow::new();
             pwd_row.set_activatable(false);
-            pwd_row.set_focusable(true);
+            pwd_row.set_focusable(false);
             pwd_box.set_visible(true);
             pwd_row.set_child(Some(pwd_box));
             list_box.append(&pwd_row);
@@ -1235,7 +1235,7 @@ pub fn populate_wifi_list(
     {
         let pwd_row = ListBoxRow::new();
         pwd_row.set_activatable(false);
-        pwd_row.set_focusable(true);
+        pwd_row.set_focusable(false);
         pwd_box.set_visible(true);
         pwd_row.set_child(Some(pwd_box));
         list_box.append(&pwd_row);

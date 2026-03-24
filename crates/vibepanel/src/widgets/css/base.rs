@@ -6,7 +6,13 @@
 use super::POPOVER_BG_WITH_OPACITY;
 
 /// Return shared utility CSS.
-pub fn css(animations: bool) -> String {
+///
+/// When `override_focus_ring` is `true`, Adwaita's built-in `:focus-visible`
+/// color (GNOME blue) is overridden with `var(--color-accent-primary)` so focus
+/// rings match the user's custom or monochrome accent. When `false` (GTK accent
+/// mode), Adwaita's built-in focus color is already correct and no override
+/// rules are emitted.
+pub fn css(animations: bool, override_focus_ring: bool) -> String {
     let popover_bg = POPOVER_BG_WITH_OPACITY;
     // Hover background-color transitions are disabled unconditionally.
     // CSS transitions on widgets with nested child widgets (e.g. Box > Label,
@@ -18,6 +24,51 @@ pub fn css(animations: bool) -> String {
         "transition: transform 100ms ease-out;"
     } else {
         "transition: none;"
+    };
+    // When the user has a custom or monochrome accent color, override Adwaita's
+    // focus ring (which resolves to GNOME blue) with var(--color-accent-primary).
+    // Scoped under `.vp-surface-popover` for higher specificity so our rules
+    // override Adwaita's.
+    let focus_ring_css = if override_focus_ring {
+        r#"
+/* ===== KEYBOARD NAV FOCUS COLOR ===== */
+/* Card-level focus ring: wraps the entire card (toggle + chevron) when
+   the toggle button has focus. Uses box-shadow on the parent because a
+   native outline on the toggle would only wrap the toggle itself.
+   Toggled from Rust via the has-focus signal on the toggle button. */
+.vp-card.vp-toggle-focused {
+    box-shadow: inset 0 0 0 2px var(--color-accent-primary);
+    transition: none;
+}
+
+/* When set_focus_visible(true) is called on a window, GTK sets the
+   :focus-visible pseudo-class on the focused widget.  Adwaita styles
+   this with GNOME blue — override with the user's accent color.
+   Rules must be self-contained (full outline shorthand) because
+   transition:none at our priority (USER=800) blocks Adwaita's
+   outline-width animation from 0→2px at THEME=200.
+   Scoped under .vp-surface-popover for specificity. */
+.vp-surface-popover button:focus-visible,
+.vp-surface-popover row:focus-visible,
+.vp-surface-popover switch:focus-visible,
+.vp-surface-popover entry:focus-visible {
+    outline: 2px solid var(--color-accent-primary);
+    outline-offset: -2px;
+    transition: none;
+}
+.vp-surface-popover scale:focus-visible > trough > slider {
+    outline: 2px solid var(--color-accent-primary);
+    outline-offset: -2px;
+    transition: none;
+}
+/* Suppress Adwaita's outline transition on entries so the accent color
+   doesn't flash blue when focus leaves. */
+.vp-surface-popover entry {
+    transition: none;
+}"#
+        .to_string()
+    } else {
+        String::new()
     };
     format!(
         r#"
@@ -148,11 +199,23 @@ popover.widget-menu.background > contents {{
 }}
 
 /* ===== FOCUS SUPPRESSION ===== */
+/* When GTK's 3 s focus_visible timeout fires, the focused widget keeps :focus
+   but loses :focus-visible.  Suppress Adwaita's residual :focus outline so no
+   faint ring lingers after keyboard nav times out. */
+.vp-surface-popover *:focus:not(:focus-visible) {{
+    outline: none;
+    box-shadow: none;
+}}
+
 /* Hide focus outlines in popovers - keyboard nav not primary interaction */
 .vp-no-focus *:focus,
 .vp-no-focus *:focus-visible,
 .vp-no-focus *:focus-within {{
     outline: none;
+    box-shadow: none;
+}}
+/* Also suppress card-level focus ring under .vp-no-focus */
+.vp-no-focus .vp-card.vp-toggle-focused {{
     box-shadow: none;
 }}
 
@@ -161,6 +224,35 @@ popover.widget-menu.background > contents {{
 .vp-no-focus entry:focus-visible {{
     outline: 2px solid var(--color-accent-primary);
     outline-offset: -2px;
+}}
+
+/* Suppress the toggle button's own :focus-visible outline inside a card —
+   the card-level box-shadow (.vp-toggle-focused) already provides the ring.
+   Only suppress .vp-btn-reset (the toggle), not the expander chevron. */
+.vp-card > .vp-btn-reset:focus-visible {{
+    outline: none;
+}}
+
+{focus_ring_css}
+
+/* Rows with inline action buttons delegate focus to the button.  GTK still
+   sets :focus-visible on the row even when non-focusable, so suppress it.
+   Must come after focus_ring_css and use .vp-surface-popover scope to beat
+   the accent color rule's specificity. */
+.vp-surface-popover row.vp-row-has-action,
+.vp-surface-popover row.vp-row-has-action:focus,
+.vp-surface-popover row.vp-row-has-action:focus-visible {{
+    outline: none;
+    box-shadow: none;
+    transition: none;
+}}
+
+/* Suppress :focus-within outlines on rows whose children handle their own
+   focus rings (e.g. password entry row).  The child widget (entry, button)
+   already shows the accent-colored ring. */
+.vp-surface-popover row:focus-within {{
+    outline: none;
+    box-shadow: none;
 }}
 
 /* ===== COMPONENT CLASSES ===== */
