@@ -19,7 +19,7 @@
 //! - Widget list changes
 //! - Output allow-list changes
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
@@ -67,6 +67,8 @@ pub struct BarManager {
     app: RefCell<Option<Application>>,
     /// Bar instances keyed by monitor connector name.
     bars: RefCell<HashMap<String, BarInstance>>,
+    /// Whether bars are hidden via IPC (full hide: exclusive zone + opacity + input).
+    hidden: Cell<bool>,
 }
 
 // Thread-local singleton storage
@@ -101,6 +103,7 @@ impl BarManager {
         Rc::new(Self {
             app: RefCell::new(None),
             bars: RefCell::new(HashMap::new()),
+            hidden: Cell::new(false),
         })
     }
 
@@ -159,6 +162,11 @@ impl BarManager {
         };
 
         self.bars.borrow_mut().insert(key.clone(), instance);
+
+        // If bars are IPC-hidden, unmap the newly created bar immediately
+        if self.hidden.get() {
+            window.set_visible(false);
+        }
 
         info!(
             "Created bar for monitor key={} connector={:?}",
@@ -237,6 +245,10 @@ impl BarManager {
     pub fn reconfigure_all(&self, display: &gtk4::gdk::Display, config: &Config) {
         info!("Reconfiguring all bars...");
 
+        // Clear the popover registry before destroying bars — handles will be
+        // re-registered during bar rebuild.
+        crate::popover_registry::clear();
+
         // Remove all existing bars
         let keys: Vec<String> = self.bars.borrow().keys().cloned().collect();
         for key in keys {
@@ -295,11 +307,58 @@ impl BarManager {
     /// Show all bars.
     ///
     /// Called after sync_monitors to reveal bars that weren't removed.
+    /// No-op if bars are IPC-hidden (the hidden state takes precedence).
     pub fn show_all(&self) {
+        if self.hidden.get() {
+            debug!("show_all skipped: bars are IPC-hidden");
+            return;
+        }
         for instance in self.bars.borrow().values() {
             instance.window.set_opacity(1.0);
         }
         debug!("All bars shown after monitor sync");
+    }
+
+    /// Hide all bars via IPC (full hide).
+    ///
+    /// Unmaps bar surfaces so they are completely invisible and release their
+    /// exclusive zone. Uses `set_visible(false)` which unmaps the layer-shell
+    /// surface at the compositor level — `set_opacity(0.0)` alone is not
+    /// sufficient because the compositor still composites the surface.
+    pub fn ipc_hide(&self) {
+        if self.hidden.get() {
+            return;
+        }
+        self.hidden.set(true);
+        for instance in self.bars.borrow().values() {
+            instance.window.set_visible(false);
+        }
+        info!("Bars hidden via IPC");
+    }
+
+    /// Show all bars via IPC (reverse full hide).
+    ///
+    /// Remaps bar surfaces. Layer-shell properties (anchors, monitor binding,
+    /// auto exclusive zone) are preserved across unmap/remap cycles by
+    /// gtk4-layer-shell, so `set_visible(true)` restores the bar fully.
+    pub fn ipc_show(&self) {
+        if !self.hidden.get() {
+            return;
+        }
+        self.hidden.set(false);
+        for instance in self.bars.borrow().values() {
+            instance.window.set_visible(true);
+        }
+        info!("Bars shown via IPC");
+    }
+
+    /// Toggle bar visibility via IPC.
+    pub fn ipc_toggle(&self) {
+        if self.hidden.get() {
+            self.ipc_show();
+        } else {
+            self.ipc_hide();
+        }
     }
 }
 

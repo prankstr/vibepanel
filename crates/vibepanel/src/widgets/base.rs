@@ -340,6 +340,46 @@ impl Dismissible for MenuHandle {
     }
 }
 
+impl crate::popover_registry::PopoverToggleable for MenuHandle {
+    fn ipc_show(&self) {
+        if !self.is_visible() {
+            self.show();
+        }
+    }
+
+    fn ipc_hide(&self) {
+        if self.is_visible() {
+            self.hide();
+        }
+    }
+
+    fn ipc_is_visible(&self) -> bool {
+        self.is_visible()
+    }
+
+    fn ipc_enable_keyboard_nav(&self) {
+        if let Some(ref popover) = *self.popover.borrow() {
+            popover.enable_keyboard_nav();
+        }
+    }
+
+    fn ipc_prepare_keyboard_nav(&self) {
+        if let Some(ref popover) = *self.popover.borrow() {
+            popover.prepare_keyboard_nav();
+        }
+    }
+
+    fn monitor_connector(&self) -> Option<String> {
+        self.parent
+            .root()
+            .and_then(|r| r.downcast_ref::<gtk4::Window>().cloned())
+            .and_then(|w| w.surface())
+            .and_then(|s| gdk::Display::default().and_then(|d| d.monitor_at_surface(&s)))
+            .and_then(|m| m.connector())
+            .map(|c| c.to_string())
+    }
+}
+
 /// Describe a process exit status in human-readable form.
 ///
 /// Translates well-known shell exit codes (127 = command not found,
@@ -937,6 +977,14 @@ impl BaseWidget {
             .as_ref()
             .expect("create_menu called on passive BaseWidget");
         *menu.borrow_mut() = Some(handle.clone());
+
+        // Register with the popover registry for IPC control.
+        // widget_name uses hyphens (CSS convention); registry normalizes at dispatch time.
+        crate::popover_registry::register(
+            &self.widget_name,
+            handle.clone() as Rc<dyn crate::popover_registry::PopoverToggleable>,
+        );
+
         handle
     }
 }

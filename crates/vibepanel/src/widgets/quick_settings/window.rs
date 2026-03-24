@@ -1688,6 +1688,9 @@ pub struct QuickSettingsWindowHandle {
     /// (which needs to clear it when dismissed) and mutated from multiple places
     /// (toggle_at close path and Dismissible::dismiss).
     tracker_id: Rc<Cell<Option<PopoverId>>>,
+    /// Reference to the bar-side QS widget for deriving anchor position.
+    /// Set after widget construction; `None` if the widget hasn't been built yet.
+    bar_widget: Rc<RefCell<Option<gtk4::Widget>>>,
 }
 
 impl QuickSettingsWindowHandle {
@@ -1697,6 +1700,7 @@ impl QuickSettingsWindowHandle {
             config,
             window: Rc::new(RefCell::new(None)),
             tracker_id: Rc::new(Cell::new(None)),
+            bar_widget: Rc::new(RefCell::new(None)),
         }
     }
 
@@ -1715,9 +1719,40 @@ impl QuickSettingsWindowHandle {
         *self.window.borrow_mut() = None;
     }
 
+    /// Store a reference to the bar-side QS widget for anchor derivation.
+    pub fn set_bar_widget(&self, widget: gtk4::Widget) {
+        *self.bar_widget.borrow_mut() = Some(widget);
+    }
+
+    /// Derive anchor position and monitor from the bar widget.
+    ///
+    /// Replicates the bar widget click handler's positioning logic
+    /// (`compute_bounds` center + `screen_margin` adjustment).
+    fn get_anchor_info(&self) -> (i32, Option<Monitor>) {
+        let widget_ref = self.bar_widget.borrow();
+        let Some(ref widget) = *widget_ref else {
+            return (0, None);
+        };
+        let Some(native) = widget.native() else {
+            return (0, None);
+        };
+        let Some(bounds) = widget.compute_bounds(&native) else {
+            return (0, None);
+        };
+
+        let screen_margin = ConfigManager::global().screen_margin() as i32;
+        let anchor_x = (bounds.x() + bounds.width() / 2.0) as i32 + screen_margin;
+
+        let monitor = native
+            .surface()
+            .and_then(|s| s.display().monitor_at_surface(&s));
+
+        (anchor_x, monitor)
+    }
+
     pub fn toggle_at(&self, x: i32, monitor: Option<Monitor>) {
-        // Check logical state, not window visibility — the window may still
-        // be visible during a close animation but logically_open is already false.
+        // Check logical state, not window visibility — the window may still be
+        // visible during a close animation but logically_open is already false.
         let is_visible = self
             .window
             .borrow()
@@ -1759,6 +1794,44 @@ impl QuickSettingsWindowHandle {
         };
         let id = PopoverTracker::global().set_active(Rc::new(dismissible));
         self.tracker_id.set(Some(id));
+    }
+}
+
+impl crate::popover_registry::PopoverToggleable for QuickSettingsWindowHandle {
+    fn ipc_show(&self) {
+        if !self.ipc_is_visible() {
+            let (x, monitor) = self.get_anchor_info();
+            self.toggle_at(x, monitor);
+        }
+    }
+
+    fn ipc_hide(&self) {
+        if self.ipc_is_visible() {
+            if let Some(qs) = self.window.borrow().as_ref() {
+                qs.hide_panel();
+            }
+            if let Some(id) = self.tracker_id.take() {
+                PopoverTracker::global().clear_if_active(id);
+            }
+        }
+    }
+
+    fn ipc_is_visible(&self) -> bool {
+        self.window
+            .borrow()
+            .as_ref()
+            .is_some_and(|w| w.logically_open.get())
+    }
+
+    fn monitor_connector(&self) -> Option<String> {
+        let widget_ref = self.bar_widget.borrow();
+        widget_ref
+            .as_ref()
+            .and_then(|w| w.native())
+            .and_then(|n| n.surface())
+            .and_then(|s| s.display().monitor_at_surface(&s))
+            .and_then(|m| m.connector())
+            .map(|c| c.to_string())
     }
 }
 

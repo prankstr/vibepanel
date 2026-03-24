@@ -5,6 +5,7 @@ use gtk4::{Application, ApplicationWindow, GestureClick, Overlay, gdk};
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use std::cell::RefCell;
 use std::path::PathBuf;
+use std::rc::Rc;
 use tracing::{debug, info, warn};
 
 use vibepanel_core::config::{WidgetEntry, WidgetOrGroup};
@@ -148,6 +149,12 @@ pub fn create_bar_window(
     // Create handle for this bar's Quick Settings window.
     // The window is created lazily on first open and kept alive for instant re-show.
     let qs_handle = crate::widgets::QuickSettingsWindowHandle::new(app.clone(), qs_config.clone());
+
+    // Register QS handle with the popover registry for IPC control.
+    crate::popover_registry::register(
+        "quick_settings",
+        Rc::new(qs_handle.clone()) as Rc<dyn crate::popover_registry::PopoverToggleable>,
+    );
 
     // Create left section
     let left_section = create_section("left", config, state, &qs_handle, Some(output_id));
@@ -424,6 +431,16 @@ fn build_merge_group(
     }
 
     parent_content.append(&wrapper);
+
+    // Register the shared menu handle under ALL participating widget names
+    // for IPC popover control. Uses underscores (config convention).
+    for entry in entries {
+        crate::popover_registry::register(
+            &entry.name,
+            menu_handle.clone() as Rc<dyn crate::popover_registry::PopoverToggleable>,
+        );
+    }
+
     // Keep the menu handle, gesture, and ripple alive
     state.add_handle(Box::new(menu_handle));
     state.add_handle(Box::new(gesture_click));

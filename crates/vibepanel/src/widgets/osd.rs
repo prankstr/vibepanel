@@ -530,7 +530,7 @@ impl OsdOverlay {
                 self.show_brightness(*percent);
             }
             // Non-OSD messages are handled at the panel level, not here.
-            IpcMessage::ToggleInhibitor => {
+            IpcMessage::ToggleInhibitor | IpcMessage::Bar { .. } | IpcMessage::Popover { .. } => {
                 trace!("OSD: ignoring non-OSD message: {:?}", msg);
             }
         }

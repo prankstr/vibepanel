@@ -579,6 +579,9 @@ impl QuickSettingsWidget {
 
         base.widget().add_controller(gesture);
 
+        // Store widget reference on the handle so IPC can derive anchor position.
+        qs_window.set_bar_widget(base.widget().clone().upcast::<gtk4::Widget>());
+
         Self {
             base,
             qs_window_handle: qs_window,

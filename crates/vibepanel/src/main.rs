@@ -4,6 +4,7 @@
 
 mod bar;
 pub mod layout_math;
+pub mod popover_registry;
 pub mod popover_tracker;
 mod sectioned_bar;
 mod services;
@@ -70,6 +71,16 @@ enum Command {
     Media {
         #[command(subcommand)]
         action: MediaAction,
+    },
+    /// Control bar visibility
+    Bar {
+        #[command(subcommand)]
+        action: BarAction,
+    },
+    /// Control widget popovers
+    Popover {
+        #[command(subcommand)]
+        action: PopoverAction,
     },
 }
 
@@ -147,6 +158,35 @@ enum InhibitAction {
     Toggle,
 }
 
+#[derive(Subcommand, Debug)]
+enum BarAction {
+    /// Show the bar
+    Show,
+    /// Hide the bar (releases exclusive zone)
+    Hide,
+    /// Toggle bar visibility
+    Toggle,
+}
+
+#[derive(Subcommand, Debug)]
+enum PopoverAction {
+    /// Open a widget's popover
+    Open {
+        /// Widget name (e.g., clock, battery, quick-settings)
+        widget: String,
+    },
+    /// Close a popover (dismiss active if no widget specified)
+    Close {
+        /// Widget name (optional — closes active popover if omitted)
+        widget: Option<String>,
+    },
+    /// Toggle a widget's popover
+    Toggle {
+        /// Widget name (e.g., clock, battery, quick-settings)
+        widget: String,
+    },
+}
+
 fn main() -> ExitCode {
     let args = Args::parse();
 
@@ -220,6 +260,8 @@ fn handle_command(command: Command) -> ExitCode {
         Command::Volume { action } => handle_volume_command(action),
         Command::Inhibit { action } => handle_inhibit_command(action),
         Command::Media { action } => handle_media_command(action),
+        Command::Bar { action } => handle_bar_command(action),
+        Command::Popover { action } => handle_popover_command(action),
     }
 }
 
@@ -470,6 +512,50 @@ fn handle_media_command(action: MediaAction) -> ExitCode {
     }
 }
 
+/// Handle bar subcommands (show/hide/toggle) via IPC.
+fn handle_bar_command(action: BarAction) -> ExitCode {
+    use crate::services::ipc::{BarIpcAction, IpcMessage, send_ipc_message};
+
+    let ipc_action = match action {
+        BarAction::Show => BarIpcAction::Show,
+        BarAction::Hide => BarIpcAction::Hide,
+        BarAction::Toggle => BarIpcAction::Toggle,
+    };
+    let msg = IpcMessage::Bar { action: ipc_action };
+    match send_ipc_message(&msg) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!(
+                "Error: could not reach vibepanel IPC socket (is the panel running?): {}",
+                e
+            );
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Handle popover subcommands (open/close/toggle) via IPC.
+fn handle_popover_command(action: PopoverAction) -> ExitCode {
+    use crate::services::ipc::{IpcMessage, PopoverIpcAction, send_ipc_message};
+
+    let ipc_action = match action {
+        PopoverAction::Open { widget } => PopoverIpcAction::Open(widget),
+        PopoverAction::Close { widget } => PopoverIpcAction::Close(widget),
+        PopoverAction::Toggle { widget } => PopoverIpcAction::Toggle(widget),
+    };
+    let msg = IpcMessage::Popover { action: ipc_action };
+    match send_ipc_message(&msg) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!(
+                "Error: could not reach vibepanel IPC socket (is the panel running?): {}",
+                e
+            );
+            ExitCode::FAILURE
+        }
+    }
+}
+
 /// Initialize and run the GTK4 application.
 fn run_gtk_app(config: Config, config_source: Option<PathBuf>) -> ExitCode {
     // Log the config source for diagnostics
@@ -658,6 +744,34 @@ fn run_gtk_app(config: Config, config_source: Option<PathBuf>) -> ExitCode {
                         | IpcMessage::Brightness { .. } => {
                             if let Some(ref overlay) = osd_for_ipc {
                                 overlay.handle_ipc_message(&msg);
+                            }
+                        }
+                        IpcMessage::Bar { action } => {
+                            use crate::services::ipc::BarIpcAction;
+                            let manager = BarManager::global();
+                            match action {
+                                BarIpcAction::Show => manager.ipc_show(),
+                                BarIpcAction::Hide => manager.ipc_hide(),
+                                BarIpcAction::Toggle => manager.ipc_toggle(),
+                            }
+                        }
+                        IpcMessage::Popover { action } => {
+                            use crate::popover_registry::{self as registry, DispatchAction};
+                            use crate::services::ipc::PopoverIpcAction;
+                            match action {
+                                PopoverIpcAction::Open(name) => {
+                                    registry::dispatch(name, DispatchAction::Show);
+                                }
+                                PopoverIpcAction::Close(None) => {
+                                    crate::popover_tracker::PopoverTracker::global()
+                                        .dismiss_active();
+                                }
+                                PopoverIpcAction::Close(Some(name)) => {
+                                    registry::dispatch(name, DispatchAction::Hide);
+                                }
+                                PopoverIpcAction::Toggle(name) => {
+                                    registry::dispatch(name, DispatchAction::Toggle);
+                                }
                             }
                         }
                     }

@@ -39,6 +39,25 @@ pub fn socket_path() -> PathBuf {
     }
 }
 
+/// Bar visibility actions for IPC control.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BarIpcAction {
+    Show,
+    Hide,
+    Toggle,
+}
+
+/// Popover control actions for IPC.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PopoverIpcAction {
+    /// Open a specific widget's popover.
+    Open(String),
+    /// Close a specific widget's popover, or dismiss the active one if no target.
+    Close(Option<String>),
+    /// Toggle a specific widget's popover.
+    Toggle(String),
+}
+
 /// Panel IPC message types.
 #[derive(Debug, Clone, PartialEq)]
 pub enum IpcMessage {
@@ -50,6 +69,10 @@ pub enum IpcMessage {
     Brightness { percent: u32 },
     /// Toggle the idle inhibitor on/off.
     ToggleInhibitor,
+    /// Control bar visibility (show/hide/toggle).
+    Bar { action: BarIpcAction },
+    /// Control a popover (open/close/toggle).
+    Popover { action: PopoverIpcAction },
 }
 
 impl IpcMessage {
@@ -62,6 +85,17 @@ impl IpcMessage {
             IpcMessage::VolumeUnavailable => "volume_unavailable".to_string(),
             IpcMessage::Brightness { percent } => format!("brightness:{}", percent),
             IpcMessage::ToggleInhibitor => "toggle_inhibitor".to_string(),
+            IpcMessage::Bar { action } => match action {
+                BarIpcAction::Show => "bar:show".to_string(),
+                BarIpcAction::Hide => "bar:hide".to_string(),
+                BarIpcAction::Toggle => "bar:toggle".to_string(),
+            },
+            IpcMessage::Popover { action } => match action {
+                PopoverIpcAction::Open(name) => format!("popover:open:{}", name),
+                PopoverIpcAction::Close(None) => "popover:close".to_string(),
+                PopoverIpcAction::Close(Some(name)) => format!("popover:close:{}", name),
+                PopoverIpcAction::Toggle(name) => format!("popover:toggle:{}", name),
+            },
         }
     }
 
@@ -85,6 +119,50 @@ impl IpcMessage {
         if let Some(rest) = s.strip_prefix("brightness:") {
             let percent = rest.parse().ok()?;
             return Some(IpcMessage::Brightness { percent });
+        }
+        // Bar commands: bar:show, bar:hide, bar:toggle
+        if let Some(rest) = s.strip_prefix("bar:") {
+            let action = match rest {
+                "show" => BarIpcAction::Show,
+                "hide" => BarIpcAction::Hide,
+                "toggle" => BarIpcAction::Toggle,
+                _ => return None,
+            };
+            return Some(IpcMessage::Bar { action });
+        }
+        // Popover commands: popover:open:<widget>, popover:close, popover:close:<widget>,
+        //                   popover:toggle:<widget>
+        if let Some(rest) = s.strip_prefix("popover:") {
+            if rest == "close" {
+                return Some(IpcMessage::Popover {
+                    action: PopoverIpcAction::Close(None),
+                });
+            }
+            if let Some(name) = rest.strip_prefix("open:") {
+                if name.is_empty() {
+                    return None; // targetless open rejected
+                }
+                return Some(IpcMessage::Popover {
+                    action: PopoverIpcAction::Open(name.to_string()),
+                });
+            }
+            if let Some(name) = rest.strip_prefix("close:") {
+                if name.is_empty() {
+                    return None;
+                }
+                return Some(IpcMessage::Popover {
+                    action: PopoverIpcAction::Close(Some(name.to_string())),
+                });
+            }
+            if let Some(name) = rest.strip_prefix("toggle:") {
+                if name.is_empty() {
+                    return None; // targetless toggle rejected
+                }
+                return Some(IpcMessage::Popover {
+                    action: PopoverIpcAction::Toggle(name.to_string()),
+                });
+            }
+            return None;
         }
         None
     }
@@ -345,5 +423,82 @@ mod tests {
             IpcMessage::from_wire("\ntoggle_inhibitor\n"),
             Some(IpcMessage::ToggleInhibitor)
         );
+    }
+
+    #[test]
+    fn test_bar_message_roundtrip() {
+        let cases = vec![
+            IpcMessage::Bar {
+                action: BarIpcAction::Show,
+            },
+            IpcMessage::Bar {
+                action: BarIpcAction::Hide,
+            },
+            IpcMessage::Bar {
+                action: BarIpcAction::Toggle,
+            },
+        ];
+        for msg in cases {
+            let wire = msg.to_wire();
+            let parsed = IpcMessage::from_wire(&wire).expect("failed to parse");
+            assert_eq!(msg, parsed);
+        }
+    }
+
+    #[test]
+    fn test_popover_message_roundtrip() {
+        let cases = vec![
+            IpcMessage::Popover {
+                action: PopoverIpcAction::Open("clock".to_string()),
+            },
+            IpcMessage::Popover {
+                action: PopoverIpcAction::Close(None),
+            },
+            IpcMessage::Popover {
+                action: PopoverIpcAction::Close(Some("battery".to_string())),
+            },
+            IpcMessage::Popover {
+                action: PopoverIpcAction::Toggle("quick-settings".to_string()),
+            },
+        ];
+        for msg in cases {
+            let wire = msg.to_wire();
+            let parsed = IpcMessage::from_wire(&wire).expect("failed to parse");
+            assert_eq!(msg, parsed);
+        }
+    }
+
+    #[test]
+    fn test_from_wire_rejects_bar_garbage() {
+        assert_eq!(IpcMessage::from_wire("bar:"), None);
+        assert_eq!(IpcMessage::from_wire("bar:unknown"), None);
+        assert_eq!(IpcMessage::from_wire("bar"), None);
+    }
+
+    #[test]
+    fn test_from_wire_rejects_targetless_popover_open_and_toggle() {
+        // open and toggle require a target
+        assert_eq!(IpcMessage::from_wire("popover:open:"), None);
+        assert_eq!(IpcMessage::from_wire("popover:toggle:"), None);
+        // bare "popover:open" without colon is just unknown
+        assert_eq!(IpcMessage::from_wire("popover:open"), None);
+        assert_eq!(IpcMessage::from_wire("popover:toggle"), None);
+    }
+
+    #[test]
+    fn test_from_wire_accepts_targetless_popover_close() {
+        assert_eq!(
+            IpcMessage::from_wire("popover:close"),
+            Some(IpcMessage::Popover {
+                action: PopoverIpcAction::Close(None),
+            })
+        );
+    }
+
+    #[test]
+    fn test_from_wire_rejects_popover_garbage() {
+        assert_eq!(IpcMessage::from_wire("popover:"), None);
+        assert_eq!(IpcMessage::from_wire("popover:unknown:foo"), None);
+        assert_eq!(IpcMessage::from_wire("popover"), None);
     }
 }
