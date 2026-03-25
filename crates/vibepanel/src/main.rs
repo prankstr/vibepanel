@@ -170,14 +170,14 @@ enum BarAction {
 
 #[derive(Subcommand, Debug)]
 enum PopoverAction {
-    /// Open a widget's popover
-    Open {
+    /// Show a widget's popover
+    Show {
         /// Widget name (e.g., clock, battery, quick-settings)
         widget: String,
     },
-    /// Close a popover (dismiss active if no widget specified)
-    Close {
-        /// Widget name (optional — closes active popover if omitted)
+    /// Hide a popover (dismiss active if no widget specified)
+    Hide {
+        /// Widget name (optional — hides active popover if omitted)
         widget: Option<String>,
     },
     /// Toggle a widget's popover
@@ -534,13 +534,13 @@ fn handle_bar_command(action: BarAction) -> ExitCode {
     }
 }
 
-/// Handle popover subcommands (open/close/toggle) via IPC.
+/// Handle popover subcommands (show/hide/toggle) via IPC.
 fn handle_popover_command(action: PopoverAction) -> ExitCode {
     use crate::services::ipc::{IpcMessage, PopoverIpcAction, send_ipc_message};
 
     let ipc_action = match action {
-        PopoverAction::Open { widget } => PopoverIpcAction::Open(widget),
-        PopoverAction::Close { widget } => PopoverIpcAction::Close(widget),
+        PopoverAction::Show { widget } => PopoverIpcAction::Show(widget),
+        PopoverAction::Hide { widget } => PopoverIpcAction::Hide(widget),
         PopoverAction::Toggle { widget } => PopoverIpcAction::Toggle(widget),
     };
     let msg = IpcMessage::Popover { action: ipc_action };
@@ -759,14 +759,14 @@ fn run_gtk_app(config: Config, config_source: Option<PathBuf>) -> ExitCode {
                             use crate::popover_registry::{self as registry, DispatchAction};
                             use crate::services::ipc::PopoverIpcAction;
                             match action {
-                                PopoverIpcAction::Open(name) => {
+                                PopoverIpcAction::Show(name) => {
                                     registry::dispatch(name, DispatchAction::Show);
                                 }
-                                PopoverIpcAction::Close(None) => {
+                                PopoverIpcAction::Hide(None) => {
                                     crate::popover_tracker::PopoverTracker::global()
                                         .dismiss_active();
                                 }
-                                PopoverIpcAction::Close(Some(name)) => {
+                                PopoverIpcAction::Hide(Some(name)) => {
                                     registry::dispatch(name, DispatchAction::Hide);
                                 }
                                 PopoverIpcAction::Toggle(name) => {

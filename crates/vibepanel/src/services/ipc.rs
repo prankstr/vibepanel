@@ -50,10 +50,10 @@ pub enum BarIpcAction {
 /// Popover control actions for IPC.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PopoverIpcAction {
-    /// Open a specific widget's popover.
-    Open(String),
-    /// Close a specific widget's popover, or dismiss the active one if no target.
-    Close(Option<String>),
+    /// Show a specific widget's popover.
+    Show(String),
+    /// Hide a specific widget's popover, or dismiss the active one if no target.
+    Hide(Option<String>),
     /// Toggle a specific widget's popover.
     Toggle(String),
 }
@@ -91,9 +91,9 @@ impl IpcMessage {
                 BarIpcAction::Toggle => "bar:toggle".to_string(),
             },
             IpcMessage::Popover { action } => match action {
-                PopoverIpcAction::Open(name) => format!("popover:open:{}", name),
-                PopoverIpcAction::Close(None) => "popover:close".to_string(),
-                PopoverIpcAction::Close(Some(name)) => format!("popover:close:{}", name),
+                PopoverIpcAction::Show(name) => format!("popover:show:{}", name),
+                PopoverIpcAction::Hide(None) => "popover:hide".to_string(),
+                PopoverIpcAction::Hide(Some(name)) => format!("popover:hide:{}", name),
                 PopoverIpcAction::Toggle(name) => format!("popover:toggle:{}", name),
             },
         }
@@ -130,28 +130,28 @@ impl IpcMessage {
             };
             return Some(IpcMessage::Bar { action });
         }
-        // Popover commands: popover:open:<widget>, popover:close, popover:close:<widget>,
+        // Popover commands: popover:show:<widget>, popover:hide, popover:hide:<widget>,
         //                   popover:toggle:<widget>
         if let Some(rest) = s.strip_prefix("popover:") {
-            if rest == "close" {
+            if rest == "hide" {
                 return Some(IpcMessage::Popover {
-                    action: PopoverIpcAction::Close(None),
+                    action: PopoverIpcAction::Hide(None),
                 });
             }
-            if let Some(name) = rest.strip_prefix("open:") {
+            if let Some(name) = rest.strip_prefix("show:") {
                 if name.is_empty() {
-                    return None; // targetless open rejected
+                    return None; // targetless show rejected
                 }
                 return Some(IpcMessage::Popover {
-                    action: PopoverIpcAction::Open(name.to_string()),
+                    action: PopoverIpcAction::Show(name.to_string()),
                 });
             }
-            if let Some(name) = rest.strip_prefix("close:") {
+            if let Some(name) = rest.strip_prefix("hide:") {
                 if name.is_empty() {
                     return None;
                 }
                 return Some(IpcMessage::Popover {
-                    action: PopoverIpcAction::Close(Some(name.to_string())),
+                    action: PopoverIpcAction::Hide(Some(name.to_string())),
                 });
             }
             if let Some(name) = rest.strip_prefix("toggle:") {
@@ -449,13 +449,13 @@ mod tests {
     fn test_popover_message_roundtrip() {
         let cases = vec![
             IpcMessage::Popover {
-                action: PopoverIpcAction::Open("clock".to_string()),
+                action: PopoverIpcAction::Show("clock".to_string()),
             },
             IpcMessage::Popover {
-                action: PopoverIpcAction::Close(None),
+                action: PopoverIpcAction::Hide(None),
             },
             IpcMessage::Popover {
-                action: PopoverIpcAction::Close(Some("battery".to_string())),
+                action: PopoverIpcAction::Hide(Some("battery".to_string())),
             },
             IpcMessage::Popover {
                 action: PopoverIpcAction::Toggle("quick-settings".to_string()),
@@ -476,21 +476,21 @@ mod tests {
     }
 
     #[test]
-    fn test_from_wire_rejects_targetless_popover_open_and_toggle() {
-        // open and toggle require a target
-        assert_eq!(IpcMessage::from_wire("popover:open:"), None);
+    fn test_from_wire_rejects_targetless_popover_show_and_toggle() {
+        // show and toggle require a target
+        assert_eq!(IpcMessage::from_wire("popover:show:"), None);
         assert_eq!(IpcMessage::from_wire("popover:toggle:"), None);
-        // bare "popover:open" without colon is just unknown
-        assert_eq!(IpcMessage::from_wire("popover:open"), None);
+        // bare "popover:show" without colon is just unknown
+        assert_eq!(IpcMessage::from_wire("popover:show"), None);
         assert_eq!(IpcMessage::from_wire("popover:toggle"), None);
     }
 
     #[test]
-    fn test_from_wire_accepts_targetless_popover_close() {
+    fn test_from_wire_accepts_targetless_popover_hide() {
         assert_eq!(
-            IpcMessage::from_wire("popover:close"),
+            IpcMessage::from_wire("popover:hide"),
             Some(IpcMessage::Popover {
-                action: PopoverIpcAction::Close(None),
+                action: PopoverIpcAction::Hide(None),
             })
         );
     }
