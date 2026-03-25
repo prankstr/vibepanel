@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use parking_lot::RwLock;
 use serde_json::Value;
-use tracing::{debug, error, trace, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use super::{
     CompositorBackend, WindowCallback, WindowInfo, WorkspaceCallback, WorkspaceMeta,
@@ -94,6 +94,27 @@ impl HyprlandBackend {
         *self.event_socket_path.write() = Some(event_socket_path);
 
         true
+    }
+
+    /// Disable Hyprland's compositor-level layer animations for our popover surfaces.
+    ///
+    /// Hyprland animates layer surface resize/move by default which clashes
+    /// with GTK4 animations and causes a visible content-shift glitch.
+    ///
+    /// Session-scoped, only set on startup and not persisted anywhere
+    fn apply_layer_rules(&self) {
+        let cmd = "keyword layerrule no_anim on, match:namespace ^vibepanel-.*-popover$";
+        match self.send_command(cmd) {
+            Some(response) if response.trim() == "ok" => {
+                info!("Applied Hyprland layerrule: no_anim for vibepanel surfaces");
+            }
+            Some(response) => {
+                warn!("Hyprland layerrule response: {}", response.trim());
+            }
+            None => {
+                warn!("Failed to apply Hyprland no_anim layerrule");
+            }
+        }
     }
 
     /// Send a command to Hyprland and get the response.
@@ -653,6 +674,9 @@ impl CompositorBackend for HyprlandBackend {
             self.running.store(false, Ordering::SeqCst);
             return;
         }
+
+        // Disable compositor-level layer animations for our surfaces.
+        self.apply_layer_rules();
 
         // Store callbacks
         *self.callbacks.lock().unwrap_or_else(|e| e.into_inner()) =
