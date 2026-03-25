@@ -19,8 +19,8 @@ use gtk4::gdk::BUTTON_PRIMARY;
 use gtk4::glib::{self, SourceId};
 use gtk4::prelude::*;
 use gtk4::{
-    Align, Box as GtkBox, Button, GestureClick, Label, ListBox, ListBoxRow, Orientation, Overlay,
-    Popover, Revealer, RevealerTransitionType,
+    Align, Box as GtkBox, Button, EventControllerKey, GestureClick, Label, ListBox, ListBoxRow,
+    Orientation, Overlay, Popover, Revealer, RevealerTransitionType,
 };
 use tracing::{debug, warn};
 
@@ -113,7 +113,7 @@ fn execute_power_action(action: &PowerAction) {
     }
 }
 
-/// State for managing hold-to-confirm gesture.
+/// State for managing hold-to-confirm gesture (mouse/touch and keyboard).
 struct HoldToConfirmState {
     /// Timer ID for the animation completion callback.
     timeout_id: RefCell<Option<SourceId>>,
@@ -123,15 +123,20 @@ struct HoldToConfirmState {
     is_confirming: Cell<bool>,
     /// Animation start time (ms since epoch, approximate).
     start_time: Cell<u64>,
+    /// Weak ref to progress overlay for CSS/size resets.
+    progress: glib::WeakRef<GtkBox>,
 }
 
 impl HoldToConfirmState {
-    fn new() -> Self {
+    fn new(progress: &GtkBox) -> Self {
+        let weak = glib::WeakRef::new();
+        weak.set(Some(progress));
         Self {
             timeout_id: RefCell::new(None),
             anim_id: RefCell::new(None),
             is_confirming: Cell::new(false),
             start_time: Cell::new(0),
+            progress: weak,
         }
     }
 
@@ -145,12 +150,100 @@ impl HoldToConfirmState {
         }
         self.is_confirming.set(false);
     }
+
+    /// Cancel and reset progress bar visuals (CSS classes + width).
+    fn cancel_and_reset(&self) {
+        if !self.is_confirming.get() {
+            return;
+        }
+        self.cancel();
+        if let Some(progress) = self.progress.upgrade() {
+            progress.remove_css_class(qs::POWER_CONFIRMING);
+            if let Some(parent) = progress.parent() {
+                parent.remove_css_class(qs::POWER_CONFIRMING);
+            }
+            progress.set_size_request(0, -1);
+        }
+    }
+
+    /// Begin the hold-to-confirm animation and completion timer.
+    fn begin(
+        self: &Rc<Self>,
+        width_widget_weak: &glib::WeakRef<gtk4::Widget>,
+        on_confirmed: &Rc<dyn Fn()>,
+    ) {
+        self.cancel();
+
+        let Some(progress) = self.progress.upgrade() else {
+            return;
+        };
+
+        progress.add_css_class(qs::POWER_CONFIRMING);
+        if let Some(parent) = progress.parent() {
+            parent.add_css_class(qs::POWER_CONFIRMING);
+        }
+        self.is_confirming.set(true);
+
+        let start = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        self.start_time.set(start);
+        progress.set_size_request(0, -1);
+
+        // Animation loop
+        let state_anim = Rc::clone(self);
+        let width_weak = width_widget_weak.clone();
+        let anim_id = glib::timeout_add_local(Duration::from_millis(ANIM_FRAME_MS), move || {
+            if !state_anim.is_confirming.get() {
+                return glib::ControlFlow::Break;
+            }
+            let Some(progress) = state_anim.progress.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
+            let Some(width_widget) = width_weak.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
+
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            let elapsed = now.saturating_sub(state_anim.start_time.get());
+            let ratio = (elapsed as f64 / HOLD_DURATION_MS as f64).min(1.0);
+            let target_width = width_widget.width();
+            let current_width = (target_width as f64 * ratio) as i32;
+            progress.set_size_request(current_width, -1);
+
+            glib::ControlFlow::Continue
+        });
+        *self.anim_id.borrow_mut() = Some(anim_id);
+
+        // Completion timer
+        let state_timeout = Rc::clone(self);
+        let on_confirmed = Rc::clone(on_confirmed);
+        let timeout_id =
+            glib::timeout_add_local_once(Duration::from_millis(HOLD_DURATION_MS), move || {
+                if state_timeout.is_confirming.get() {
+                    state_timeout.cancel();
+                    if let Some(progress) = state_timeout.progress.upgrade() {
+                        progress.remove_css_class(qs::POWER_CONFIRMING);
+                        if let Some(parent) = progress.parent() {
+                            parent.remove_css_class(qs::POWER_CONFIRMING);
+                        }
+                        progress.set_size_request(0, -1);
+                    }
+                    on_confirmed();
+                }
+            });
+        *self.timeout_id.borrow_mut() = Some(timeout_id);
+    }
 }
 
 /// Animation frame interval in milliseconds (~60fps).
 const ANIM_FRAME_MS: u64 = 16;
 
-/// Set up hold-to-confirm gesture on a widget.
+/// Set up hold-to-confirm gesture on a widget (mouse/touch + keyboard).
 ///
 /// # Arguments
 /// * `gesture_widget` - The widget to attach the gesture to (receives click events)
@@ -170,157 +263,75 @@ fn setup_hold_to_confirm<W1, W2, F>(
     W2: IsA<gtk4::Widget>,
     F: Fn() + 'static,
 {
+    let state = Rc::new(HoldToConfirmState::new(progress_overlay));
+    let width_widget_weak: glib::WeakRef<gtk4::Widget> = glib::WeakRef::new();
+    width_widget_weak.set(Some(width_widget.upcast_ref()));
+    let on_confirmed: Rc<dyn Fn()> = Rc::new(on_confirmed);
+
+    // --- Mouse / touch: GestureClick ---
     let gesture = GestureClick::new();
     gesture.set_button(BUTTON_PRIMARY);
-    // Capture phase to get events before child widgets
     gesture.set_propagation_phase(gtk4::PropagationPhase::Capture);
 
-    let state = Rc::new(HoldToConfirmState::new());
-    let progress_weak = progress_overlay.downgrade();
-    let width_widget_weak = width_widget.upcast_ref::<gtk4::Widget>().downgrade();
-    let on_confirmed = Rc::new(on_confirmed);
-
-    // On mouse down: start the visual animation and completion timer
     {
         let state = Rc::clone(&state);
-        let progress_weak = progress_weak.clone();
-        let width_widget_weak = width_widget_weak.clone();
+        let width_weak = width_widget_weak.clone();
         let on_confirmed = Rc::clone(&on_confirmed);
-
         gesture.connect_pressed(move |gesture, _, _, _| {
-            // Cancel any previous animation
-            state.cancel();
-
-            let Some(progress) = progress_weak.upgrade() else {
-                return;
-            };
-
-            // Add confirming class for background color
-            progress.add_css_class(qs::POWER_CONFIRMING);
-            // Also add to parent overlay so CSS can make card background transparent
-            if let Some(parent) = progress.parent() {
-                parent.add_css_class(qs::POWER_CONFIRMING);
-            }
-            state.is_confirming.set(true);
-
-            // Record start time
-            let start = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as u64)
-                .unwrap_or(0);
-            state.start_time.set(start);
-
-            // Reset progress width
-            progress.set_size_request(0, -1);
-
-            // Start animation loop
-            let state_anim = Rc::clone(&state);
-            let progress_weak_anim = progress_weak.clone();
-            let width_widget_weak_anim = width_widget_weak.clone();
-
-            let anim_id =
-                glib::timeout_add_local(Duration::from_millis(ANIM_FRAME_MS), move || {
-                    if !state_anim.is_confirming.get() {
-                        return glib::ControlFlow::Break;
-                    }
-
-                    let Some(progress) = progress_weak_anim.upgrade() else {
-                        return glib::ControlFlow::Break;
-                    };
-
-                    let Some(width_widget) = width_widget_weak_anim.upgrade() else {
-                        return glib::ControlFlow::Break;
-                    };
-
-                    // Calculate elapsed time
-                    let now = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_millis() as u64)
-                        .unwrap_or(0);
-                    let elapsed = now.saturating_sub(state_anim.start_time.get());
-
-                    // Calculate progress (0.0 to 1.0)
-                    let ratio = (elapsed as f64 / HOLD_DURATION_MS as f64).min(1.0);
-
-                    // Get target width from width widget
-                    let target_width = width_widget.width();
-                    let current_width = (target_width as f64 * ratio) as i32;
-
-                    progress.set_size_request(current_width, -1);
-
-                    glib::ControlFlow::Continue
-                });
-            *state.anim_id.borrow_mut() = Some(anim_id);
-
-            // Set completion timer
-            let state_timeout = Rc::clone(&state);
-            let progress_weak_timeout = progress_weak.clone();
-            let on_confirmed = Rc::clone(&on_confirmed);
-
-            let timeout_id =
-                glib::timeout_add_local_once(Duration::from_millis(HOLD_DURATION_MS), move || {
-                    if state_timeout.is_confirming.get() {
-                        state_timeout.cancel();
-
-                        if let Some(progress) = progress_weak_timeout.upgrade() {
-                            progress.remove_css_class(qs::POWER_CONFIRMING);
-                            if let Some(parent) = progress.parent() {
-                                parent.remove_css_class(qs::POWER_CONFIRMING);
-                            }
-                            progress.set_size_request(0, -1);
-                        }
-
-                        on_confirmed();
-                    }
-                });
-            *state.timeout_id.borrow_mut() = Some(timeout_id);
-
-            // Claim the gesture sequence to prevent other handlers
+            state.begin(&width_weak, &on_confirmed);
             gesture.set_state(gtk4::EventSequenceState::Claimed);
         });
     }
-
-    // On mouse up: cancel if still in progress
     {
         let state = Rc::clone(&state);
-        let progress_weak = progress_weak.clone();
-
         gesture.connect_released(move |_, _, _, _| {
-            if state.is_confirming.get() {
-                state.cancel();
-
-                if let Some(progress) = progress_weak.upgrade() {
-                    progress.remove_css_class(qs::POWER_CONFIRMING);
-                    if let Some(parent) = progress.parent() {
-                        parent.remove_css_class(qs::POWER_CONFIRMING);
-                    }
-                    progress.set_size_request(0, -1);
-                }
-            }
+            state.cancel_and_reset();
         });
     }
-
-    // Handle gesture cancel (pointer left, etc.)
     {
         let state = Rc::clone(&state);
-        let progress_weak = progress_weak.clone();
-
         gesture.connect_cancel(move |_, _| {
-            if state.is_confirming.get() {
-                state.cancel();
-
-                if let Some(progress) = progress_weak.upgrade() {
-                    progress.remove_css_class(qs::POWER_CONFIRMING);
-                    if let Some(parent) = progress.parent() {
-                        parent.remove_css_class(qs::POWER_CONFIRMING);
-                    }
-                    progress.set_size_request(0, -1);
-                }
-            }
+            state.cancel_and_reset();
         });
     }
 
     gesture_widget.add_controller(gesture);
+
+    // --- Keyboard: Enter / Space hold ---
+    let key_ctrl = EventControllerKey::new();
+    {
+        let state = Rc::clone(&state);
+        let width_weak = width_widget_weak.clone();
+        let on_confirmed = Rc::clone(&on_confirmed);
+        key_ctrl.connect_key_pressed(move |_, keyval, _, _| {
+            if !is_confirm_key(keyval) {
+                return glib::Propagation::Proceed;
+            }
+            // Ignore key-repeat while already holding
+            if !state.is_confirming.get() {
+                state.begin(&width_weak, &on_confirmed);
+            }
+            glib::Propagation::Stop
+        });
+    }
+    {
+        let state = Rc::clone(&state);
+        key_ctrl.connect_key_released(move |_, keyval, _, _| {
+            if is_confirm_key(keyval) {
+                state.cancel_and_reset();
+            }
+        });
+    }
+
+    gesture_widget.add_controller(key_ctrl);
+}
+
+/// Whether a key is a hold-to-confirm activation key (Return/Enter/Space).
+fn is_confirm_key(keyval: gtk4::gdk::Key) -> bool {
+    matches!(
+        keyval,
+        gtk4::gdk::Key::Return | gtk4::gdk::Key::KP_Enter | gtk4::gdk::Key::space
+    )
 }
 
 /// Create a card-like button with hold-to-confirm overlay.

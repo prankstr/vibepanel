@@ -255,6 +255,14 @@ popover.widget-menu.background > contents {{
     box-shadow: none;
 }}
 
+/* Power action rows are directly focusable (hold-to-confirm on the row
+   itself).  Restore the accent focus ring that :focus-within above kills. */
+.vp-surface-popover row.qs-power-row:focus-visible {{
+    outline: 2px solid var(--color-accent-primary);
+    outline-offset: -2px;
+    transition: none;
+}}
+
 /* ===== COMPONENT CLASSES ===== */
 /* Reusable component patterns for cards, rows, sliders */
 
