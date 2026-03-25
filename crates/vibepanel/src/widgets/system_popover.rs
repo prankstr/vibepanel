@@ -217,6 +217,7 @@ impl SystemPopoverController {
                 let bar = ProgressBar::new();
                 bar.add_css_class(sp::CORE_BAR);
                 bar.set_hexpand(true);
+                bar.set_valign(gtk4::Align::Center);
                 row.append(&bar);
 
                 let pct_label = Label::new(Some("--"));
