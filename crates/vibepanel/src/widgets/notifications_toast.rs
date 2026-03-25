@@ -244,6 +244,7 @@ impl NotificationToast {
         dismiss_btn.add_css_class(notif::TOAST_DISMISS);
         dismiss_btn.add_css_class(button::RESET);
         dismiss_btn.set_valign(Align::Start);
+        dismiss_btn.set_focusable(false);
 
         let dismiss_icon = Image::from_icon_name("window-close-symbolic");
         dismiss_icon.set_halign(Align::Center);
@@ -303,6 +304,7 @@ impl NotificationToast {
                 let action_btn = crate::widgets::base::vp_button_with_label(action_label);
                 action_btn.add_css_class(notif::TOAST_ACTION);
                 action_btn.add_css_class(button::GHOST);
+                action_btn.set_focusable(false);
 
                 let on_action_clone = on_action.clone();
                 let on_dismiss_clone = on_dismiss.clone();
