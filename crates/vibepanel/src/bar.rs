@@ -246,13 +246,12 @@ fn build_widget_or_group(
             surface.set_hexpand(true);
             surface.set_vexpand(true);
 
-            // Add the first widget's name as a CSS class for per-widget CSS variable
-            // targeting. Added to both wrapper and surface so theme-generated
-            // selectors like `.widget.cpu` match the surface (which carries
-            // .widget) and user CSS targeting `.cpu` on the wrapper also works.
+            // Add the first widget's name as a CSS class on the surface for
+            // per-widget CSS variable targeting.  Theme-generated selectors
+            // like `.widget.cpu` and user CSS like `.cpu { ... }` both hit
+            // the painted surface — not the transparent wrapper.
             if let Some(first_entry) = group.first() {
                 let css_name = first_entry.name.replace('_', "-");
-                island.add_css_class(&css_name);
                 surface.add_css_class(&css_name);
             }
 

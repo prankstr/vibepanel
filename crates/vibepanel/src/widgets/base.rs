@@ -511,8 +511,14 @@ impl BaseWidget {
             container.add_css_class(class::PASSIVE);
         }
         container.set_hexpand(false);
-        for cls in extra_classes {
-            container.add_css_class(cls);
+
+        // Widget-specific classes (e.g. "clock", "battery") are added to the
+        // surface, not the wrapper.  Passive widgets have no surface so they
+        // keep the classes on the container directly.
+        if passive {
+            for cls in extra_classes {
+                container.add_css_class(cls);
+            }
         }
 
         // First extra class is the widget name (e.g., "clock", "battery")
@@ -551,11 +557,10 @@ impl BaseWidget {
         // Must be a GtkBox (not Overlay) — Overlay doesn't clip background to border-radius.
         let surface = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
         surface.add_css_class(class::WIDGET);
-        // Add widget name to the surface so theme-generated selectors like
-        // `.widget.battery` match. The name is already on the wrapper for
-        // user CSS targeting the outer element.
-        if let Some(css_name) = extra_classes.first() {
-            surface.add_css_class(css_name);
+        // Widget-specific classes live on the surface so user CSS like
+        // `.clock { background: ... }` targets the painted element only.
+        for cls in extra_classes {
+            surface.add_css_class(cls);
         }
         surface.set_overflow(gtk4::Overflow::Hidden);
         surface.set_hexpand(true);
