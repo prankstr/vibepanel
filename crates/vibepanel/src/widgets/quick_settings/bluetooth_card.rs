@@ -355,6 +355,8 @@ fn create_bluetooth_action_widget(dev: &BluetoothDevice, is_pairing: bool) -> gt
         configure_popover(&popover);
 
         let panel = GtkBox::new(Orientation::Vertical, 0);
+        panel.add_css_class(surface::POPOVER);
+        panel.add_css_class(surface::SURFACE_POPOVER);
         panel.add_css_class(surface::WIDGET_MENU_CONTENT);
 
         let content_box = GtkBox::new(Orientation::Vertical, 2);

@@ -27,7 +27,7 @@ use tracing::{debug, warn};
 use crate::services::compositor::CompositorManager;
 use crate::services::config_manager::ConfigManager;
 use crate::services::icons::{IconHandle, IconsService};
-use crate::styles::{button, card, color, qs, row};
+use crate::styles::{button, card, color, qs, row, surface};
 use crate::widgets::base::configure_popover;
 
 use super::components::{CardLabel, ToggleCard};
@@ -483,6 +483,9 @@ fn show_power_popover(parent: &Button) {
     configure_popover(&popover);
 
     let content = GtkBox::new(Orientation::Vertical, 2);
+    content.add_css_class(surface::POPOVER);
+    content.add_css_class(surface::SURFACE_POPOVER);
+    content.add_css_class(surface::WIDGET_MENU_CONTENT);
     content.add_css_class(qs::ROW_MENU_CONTENT);
     content.set_margin_top(4);
     content.set_margin_bottom(4);

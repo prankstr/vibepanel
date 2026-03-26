@@ -167,6 +167,8 @@ fn show_player_menu(parent: &Button) {
 
     // Outer panel for surface styling
     let panel = GtkBox::new(Orientation::Vertical, 0);
+    panel.add_css_class(surface::POPOVER);
+    panel.add_css_class(surface::SURFACE_POPOVER);
     panel.add_css_class(surface::WIDGET_MENU_CONTENT);
     panel.add_css_class(media::PLAYER_MENU);
 

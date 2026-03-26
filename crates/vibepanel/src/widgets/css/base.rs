@@ -131,6 +131,7 @@ label link:active {{
 }}
 
 popover.widget-menu,
+box.popover-wrapper,
 box.widget-menu-wrapper {{
     background: transparent;
     border: none;
@@ -152,6 +153,7 @@ popover.widget-menu.background > contents {{
 /* When GTK's 3 s focus_visible timeout fires, the focused widget keeps :focus
    but loses :focus-visible.  Suppress Adwaita's residual :focus outline so no
    faint ring lingers after keyboard nav times out. */
+.popover *:focus:not(:focus-visible),
 .vp-surface-popover *:focus:not(:focus-visible) {{
     outline: none;
     box-shadow: none;

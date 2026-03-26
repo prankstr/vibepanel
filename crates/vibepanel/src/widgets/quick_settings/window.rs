@@ -227,6 +227,7 @@ impl QuickSettingsWindow {
         // Margin wrapper sits between window and anim_shell, providing
         // transparent padding so the ScaleBox clip animation is visible.
         let margin_wrapper = GtkBox::new(Orientation::Vertical, 0);
+        margin_wrapper.add_css_class(surface::POPOVER_WRAPPER);
         margin_wrapper.add_css_class(surface::WIDGET_MENU_WRAPPER);
         margin_wrapper.add_css_class(surface::NO_FOCUS);
         SurfaceStyleManager::global()
@@ -420,6 +421,7 @@ impl QuickSettingsWindow {
         // Apply surface styles - background now controlled via CSS variables
         outer.add_css_class("quick-settings-popover");
         outer.add_css_class(surface::POPOVER);
+        outer.add_css_class(surface::SURFACE_POPOVER);
         outer.add_css_class(surface::WIDGET_MENU);
         SurfaceStyleManager::global().apply_surface_styles(&outer, true);
 

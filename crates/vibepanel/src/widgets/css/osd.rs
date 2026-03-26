@@ -6,7 +6,7 @@ pub fn css() -> &'static str {
 /* ===== OSD ===== */
 
 /* Window must be transparent so container shows properly */
-.osd-window {
+.osd-wrapper {
     background: transparent;
 }
 

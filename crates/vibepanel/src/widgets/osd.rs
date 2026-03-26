@@ -204,7 +204,7 @@ impl OsdOverlay {
             .resizable(false)
             .build();
 
-        window.add_css_class(osd::WINDOW);
+        window.add_css_class(osd::WRAPPER);
 
         // Set up layer shell defaults.
         Self::setup_layer_shell_defaults(&window);
@@ -220,6 +220,7 @@ impl OsdOverlay {
         // Content container with surface styling.
         let container = GtkBox::new(Orientation::Vertical, 0);
         container.add_css_class(osd::CONTAINER);
+        container.add_css_class(osd::OSD);
         if is_vertical {
             container.add_css_class(osd::VERTICAL);
         } else {

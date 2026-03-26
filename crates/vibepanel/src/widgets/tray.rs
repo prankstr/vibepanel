@@ -797,6 +797,7 @@ fn toggle_menu(state: &Rc<RefCell<WidgetState>>, identifier: &str, parent: &Widg
         let container = GtkBox::new(Orientation::Vertical, 2);
         container.add_css_class(widget::TRAY_MENU);
         container.add_css_class(surface::POPOVER);
+        container.add_css_class(surface::SURFACE_POPOVER);
         container.add_css_class(surface::WIDGET_MENU_CONTENT);
 
         // Add tray-specific popover class for CSS variable-based styling

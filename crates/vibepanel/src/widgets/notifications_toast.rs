@@ -62,7 +62,7 @@ impl NotificationToast {
             .default_width(POPOVER_WIDTH)
             .build();
 
-        window.add_css_class(notif::TOAST);
+        window.add_css_class(notif::TOAST_WRAPPER);
 
         // Determine bar position for toast anchoring
         let is_bottom = ConfigManager::global().bar_is_bottom();
@@ -174,6 +174,7 @@ impl NotificationToast {
     ) {
         let outer = GtkBox::new(Orientation::Vertical, 0);
         outer.add_css_class(notif::TOAST_CONTAINER);
+        outer.add_css_class(notif::TOAST);
 
         // Apply surface styling
         SurfaceStyleManager::global().apply_surface_styles(&outer, false);

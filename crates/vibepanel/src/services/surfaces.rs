@@ -449,7 +449,14 @@ popover.widget-menu.background * {{
             let selector = if has_menu_content_class {
                 format!(".{}", surface::WIDGET_MENU_CONTENT)
             } else {
-                css_name.to_string()
+                // Use the widget's first CSS class so the rule only targets
+                // the styled surface, not every descendant GtkBox.
+                let classes = widget.css_classes();
+                if let Some(first) = classes.first() {
+                    format!(".{}", first.as_str())
+                } else {
+                    css_name.to_string()
+                }
             };
 
             // Inner popover panels (.widget-menu-content) don't need shadow -

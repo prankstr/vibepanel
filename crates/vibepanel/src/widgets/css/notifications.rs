@@ -195,8 +195,8 @@ button.notification-action-btn label {{
 
 /* === Toast-specific === */
 
-window.notification-toast,
-.notification-toast {{
+window.notification-toast-wrapper,
+.notification-toast-wrapper {{
     background: transparent;
 }}
 
