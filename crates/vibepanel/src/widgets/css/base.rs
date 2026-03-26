@@ -130,7 +130,8 @@ label link:active {{
     color: var(--color-foreground-primary);
 }}
 
-popover.widget-menu {{
+popover.widget-menu,
+box.widget-menu-wrapper {{
     background: transparent;
     border: none;
     box-shadow: none;

@@ -647,6 +647,9 @@ pub mod surface {
     /// Widget menu popover (`.widget-menu`).
     pub const WIDGET_MENU: &str = "widget-menu";
 
+    /// Outer transparent wrapper around a layer-shell popover (`.widget-menu-wrapper`).
+    pub const WIDGET_MENU_WRAPPER: &str = "widget-menu-wrapper";
+
     /// Widget menu content (`.widget-menu-content`).
     pub const WIDGET_MENU_CONTENT: &str = "widget-menu-content";
 

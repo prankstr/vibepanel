@@ -688,6 +688,7 @@ impl LayerShellPopover {
 
         let content = (self.builder)();
         content.add_css_class(surface::POPOVER);
+        content.add_css_class(surface::WIDGET_MENU);
         let popover_class = format!("{}-popover", self.widget_name);
         content.add_css_class(&popover_class);
 
@@ -790,6 +791,7 @@ impl LayerShellPopover {
             } else {
                 let fresh = (self.builder)();
                 fresh.add_css_class(surface::POPOVER);
+                fresh.add_css_class(surface::WIDGET_MENU);
                 let popover_class = format!("{}-popover", self.widget_name);
                 fresh.add_css_class(&popover_class);
                 *self.cached_content.borrow_mut() = Some(fresh.clone());
@@ -798,6 +800,7 @@ impl LayerShellPopover {
         } else {
             let fresh = (self.builder)();
             fresh.add_css_class(surface::POPOVER);
+            fresh.add_css_class(surface::WIDGET_MENU);
             let popover_class = format!("{}-popover", self.widget_name);
             fresh.add_css_class(&popover_class);
             fresh
@@ -823,7 +826,7 @@ impl LayerShellPopover {
         // Ensure the outer wrapper is set as the window's child (persists).
         if window.child().is_none() {
             let outer = GtkBox::new(Orientation::Vertical, 0);
-            outer.add_css_class(surface::WIDGET_MENU);
+            outer.add_css_class(surface::WIDGET_MENU_WRAPPER);
             outer.add_css_class(surface::NO_FOCUS);
             SurfaceStyleManager::global().apply_shadow_margins(&outer, POPOVER_SHADOW_MARGIN);
             outer.append(&anim_shell);
