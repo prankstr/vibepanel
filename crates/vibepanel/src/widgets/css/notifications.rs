@@ -120,18 +120,26 @@ pub fn css(animations: bool) -> String {
 
 /* === Popover-specific === */
 
-/* Note: padding comes from apply_surface_styles() in base.rs */
+/* Remove right padding from the surface so the overlay scrollbar sits at the
+   popover edge instead of overlapping dismiss buttons. The header and list
+   add their own right padding to keep content inset. */
 .notification-popover {{
+    padding-right: 0;
 }}
 
 .notification-header {{
-    padding: 0 0 8px 0;
+    padding: 0 16px 8px 0;
     margin: 0;
 }}
 
-/* Header icon sizing */
+.notification-header .vp-popover-icon-btn {{
+    margin-top: -4px;
+}}
+
 .notification-header-icon {{
     font-size: calc(var(--icon-size) * 1.15);
+    margin-top: 1px;
+    margin-left: 1px;
 }}
 
 .notification-clear-label {{
@@ -139,7 +147,7 @@ pub fn css(animations: bool) -> String {
 }}
 
 .notification-list {{
-    padding: 8px 0 0 0;
+    padding: 8px 16px 0 0;
 }}
 
 /* Empty state */

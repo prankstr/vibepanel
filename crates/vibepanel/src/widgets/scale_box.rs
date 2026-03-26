@@ -51,6 +51,14 @@ mod imp {
     }
 
     impl WidgetImpl for ScaleBox {
+        fn request_mode(&self) -> gtk4::SizeRequestMode {
+            if let Some(child) = self.child.upgrade() {
+                child.request_mode()
+            } else {
+                gtk4::SizeRequestMode::ConstantSize
+            }
+        }
+
         fn measure(&self, orientation: gtk4::Orientation, for_size: i32) -> (i32, i32, i32, i32) {
             if let Some(child) = self.child.upgrade() {
                 child.measure(orientation, for_size)
