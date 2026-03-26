@@ -15,7 +15,12 @@
 
 /// Core structural/layout CSS classes.
 pub mod class {
-    /// Base widget container class (`.widget`).
+    /// Outer widget wrapper (`.widget-wrapper`).
+    /// Rectangular hit target so clicks register in rounded corners.
+    pub const WIDGET_WRAPPER: &str = "widget-wrapper";
+
+    /// Widget visual surface (`.widget`).
+    /// Carries background and border-radius; the class users target in custom CSS.
     pub const WIDGET: &str = "widget";
 
     /// Widget item class (`.widget-item`).
@@ -36,12 +41,6 @@ pub mod class {
 
     /// Passive widget marker (`.passive`).
     pub const PASSIVE: &str = "passive";
-
-    /// Widget visual surface class (`.widget-surface`).
-    /// Applied to a GtkBox that carries the widget's background-color and
-    /// border-radius. Separated from `.widget` so the click target remains
-    /// rectangular (Fitts's Law) while the visual appearance is rounded.
-    pub const WIDGET_SURFACE: &str = "widget-surface";
 
     /// Widget content inner box (`.content`).
     pub const CONTENT: &str = "content";

@@ -229,14 +229,7 @@ fn build_widget_or_group(
 
             // Create a shared island container for the group
             let island = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
-            island.add_css_class(class::WIDGET);
-            island.add_css_class(class::WIDGET_GROUP);
-
-            // Add the first widget's name as a CSS class for per-widget CSS variable targeting
-            // Normalize underscores to hyphens for CSS conventions
-            if let Some(first_entry) = group.first() {
-                island.add_css_class(&first_entry.name.replace('_', "-"));
-            }
+            island.add_css_class(class::WIDGET_WRAPPER);
 
             // Create inner content box (matching BaseWidget structure)
             let content = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
@@ -244,12 +237,24 @@ fn build_widget_or_group(
             content.set_vexpand(true);
             content.set_valign(gtk4::Align::Fill);
 
-            // Visual surface for rounded background (see WIDGET_SURFACE doc).
+            // Visual surface — also carries .widget-group so user CSS
+            // targeting either class hits the background element, not the wrapper.
             let surface = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
-            surface.add_css_class(class::WIDGET_SURFACE);
+            surface.add_css_class(class::WIDGET);
+            surface.add_css_class(class::WIDGET_GROUP);
             surface.set_overflow(gtk4::Overflow::Hidden);
             surface.set_hexpand(true);
             surface.set_vexpand(true);
+
+            // Add the first widget's name as a CSS class for per-widget CSS variable
+            // targeting. Added to both wrapper and surface so theme-generated
+            // selectors like `.widget.cpu` match the surface (which carries
+            // .widget) and user CSS targeting `.cpu` on the wrapper also works.
+            if let Some(first_entry) = group.first() {
+                let css_name = first_entry.name.replace('_', "-");
+                island.add_css_class(&css_name);
+                surface.add_css_class(&css_name);
+            }
 
             surface.append(&content);
             island.append(&surface);
@@ -273,20 +278,36 @@ fn build_widget_or_group(
             let mut count = 0;
 
             // Build entries individually (used for singletons and merge fallback).
-            let build_individually =
-                |entries: &[WidgetEntry], content: &gtk4::Box, state: &mut BarState| -> usize {
-                    let mut n = 0;
-                    for entry in entries {
-                        if let Some(built) = WidgetFactory::build(entry, Some(qs_handle), output_id)
-                        {
-                            built.widget.remove_css_class(class::WIDGET);
-                            content.append(&built.widget);
-                            state.add_handle(built.handle);
-                            n += 1;
+            let build_individually = |entries: &[WidgetEntry],
+                                      content: &gtk4::Box,
+                                      state: &mut BarState|
+             -> usize {
+                let mut n = 0;
+                for entry in entries {
+                    if let Some(built) = WidgetFactory::build(entry, Some(qs_handle), output_id) {
+                        // Group surface owns the background, so strip the
+                        // standalone wrapper class and force the inner .widget
+                        // surface transparent.  .widget is kept for border-radius
+                        // (ripple clipping); a scoped provider at transient
+                        // priority beats user CSS that also targets .widget.
+                        built.widget.remove_css_class(class::WIDGET_WRAPPER);
+                        if let Some(surface) = built.widget.first_child() {
+                            let provider = gtk4::CssProvider::new();
+                            provider.load_from_string(
+                                    ".widget { background-color: transparent; background-image: none; }",
+                                );
+                            #[allow(deprecated)]
+                            surface
+                                .style_context()
+                                .add_provider(&provider, TRANSIENT_CSS_PRIORITY);
                         }
+                        content.append(&built.widget);
+                        state.add_handle(built.handle);
+                        n += 1;
                     }
-                    n
-                };
+                }
+                n
+            };
 
             for (kind, start, end) in &runs {
                 let run_entries = &group[*start..*end];

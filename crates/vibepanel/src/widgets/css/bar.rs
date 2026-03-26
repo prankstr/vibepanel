@@ -60,21 +60,25 @@ sectioned-bar.bar {{
     color: var(--color-foreground-primary);
 }}
 
-/* Widget - individual widget containers */
-.widget {{
+/* Widget wrapper — transparent so only .widget paints a background layer */
+.widget-wrapper {{
     min-height: var(--widget-height);
+    background: transparent;
 }}
 
-/* Widget visual surface — rounded background, rectangular click target */
-.widget-surface {{
+/* Widget — visual surface */
+.widget {{
     background-color: {widget_bg};
     border-radius: var(--radius-widget);
 }}
 
 /* Padding on .content (not the container) so the ripple overlay
-   fills the entire widget background area edge-to-edge */
+   fills the entire widget background area edge-to-edge.
+   Passive widgets (merge groups) have no .widget surface — target
+   their .content directly via the third selector. */
 .widget:not(.widget-group) .content,
-.widget-group .content > .widget-item .content {{
+.widget-group > .content > .widget-item .content,
+.widget-item.passive > .content {{
     padding: var(--widget-padding-y) 10px;
 }}
 
@@ -83,13 +87,16 @@ sectioned-bar.bar {{
     padding: 0;
 }}
 
-/* Widget hover — :hover on rectangular .widget, visual on rounded .widget-surface */
-.widget.clickable:not(.widget-group):hover > .widget-surface {{
+/* Hover targets the wrapper but paints on the surface child */
+.widget-wrapper.clickable:hover > .widget:not(.widget-group) {{
     background-color: {widget_bg_hover};
 }}
 
-/* Pull non-first items left to overlap adjacent .content padding (2 × 10px) */
-.widget-group .content > .widget-item:not(:first-child) {{
+/* Pull non-first items left to overlap adjacent .content padding (2 × 10px).
+   Merge groups (.widget-merge-group) are also direct children of .content,
+   so they need the same treatment when they follow another item. */
+.widget-group .content > .widget-item:not(:first-child),
+.widget-group .content > .widget-merge-group:not(:first-child) {{
     margin-left: -20px;
 }}
 
@@ -99,16 +106,15 @@ sectioned-bar.bar {{
     border-radius: var(--radius-widget);
 }}
 
-/* Reset nested surface: group already provides background.
-   Keep border-radius: inherit so overflow:hidden still clips the ripple. */
-.widget-group .widget-surface .widget-surface {{
+/* Nested surfaces transparent — theme-priority fallback for grouped active
+   widgets.  The primary suppression is a scoped CSS provider in bar.rs
+   (transient priority), but this catches edge cases at theme priority. */
+.widget.widget-group .widget {{
     background-color: transparent;
     border-radius: inherit;
 }}
 
-/* Widget items inside groups - individual clickable hover targets.
-   Use only the tint overlay (not the full hover color) because the
-   parent .widget-group already provides the base widget background. */
+/* Grouped item hover — tint only (group surface provides base background) */
 .widget-group .content > .widget-item.clickable:hover {{
     background-color: color-mix(in srgb, transparent 92%, var(--widget-hover-tint));
 }}
@@ -127,9 +133,7 @@ sectioned-bar.bar {{
     background-color: color-mix(in srgb, transparent 92%, var(--widget-hover-tint));
 }}
 
-/* Passive widgets inside a merge group must not show their own
-   hover — the wrapper provides it. Background is already transparent
-   via .widget-group .widget-surface .widget-surface rule. */
+/* Passive items in merge groups don't show their own hover */
 .merge-group-content > .widget-item.passive:hover {{
     background-color: transparent;
 }}

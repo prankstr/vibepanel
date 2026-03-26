@@ -505,7 +505,7 @@ impl BaseWidget {
 
     fn new_inner(extra_classes: &[&str], passive: bool) -> Self {
         let container = GtkBox::new(Orientation::Horizontal, 0);
-        container.add_css_class(class::WIDGET);
+        container.add_css_class(class::WIDGET_WRAPPER);
         container.add_css_class(class::WIDGET_ITEM);
         if passive {
             container.add_css_class(class::PASSIVE);
@@ -550,15 +550,24 @@ impl BaseWidget {
         // Visual surface: rounded background + overflow clipping.
         // Must be a GtkBox (not Overlay) — Overlay doesn't clip background to border-radius.
         let surface = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
-        surface.add_css_class(class::WIDGET_SURFACE);
+        surface.add_css_class(class::WIDGET);
+        // Add widget name to the surface so theme-generated selectors like
+        // `.widget.battery` match. The name is already on the wrapper for
+        // user CSS targeting the outer element.
+        if let Some(css_name) = extra_classes.first() {
+            surface.add_css_class(css_name);
+        }
         surface.set_overflow(gtk4::Overflow::Hidden);
         surface.set_hexpand(true);
         surface.set_vexpand(true);
 
         // Wrap content in an Overlay so the ripple effect can sit on top
         // without affecting the widget background or content opacity.
+        // overflow:hidden + inherited border-radius clips the ripple to
+        // rounded corners (GtkBox parent overflow alone doesn't suffice).
         let overlay = Overlay::new();
         overlay.set_child(Some(&content));
+        overlay.set_overflow(gtk4::Overflow::Hidden);
         overlay.set_hexpand(true);
         overlay.set_vexpand(true);
 
@@ -877,7 +886,7 @@ impl BaseWidget {
 
     /// Get the root GTK container for this widget.
     ///
-    /// This is the outermost box with the `widget` CSS class.
+    /// This is the outermost box (`.widget-wrapper`).
     /// Most widgets should use `content()` to add children instead.
     pub fn widget(&self) -> &GtkBox {
         &self.container
