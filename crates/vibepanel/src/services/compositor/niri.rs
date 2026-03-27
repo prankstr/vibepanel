@@ -22,8 +22,8 @@ use serde_json::Value;
 use tracing::{debug, error, trace, warn};
 
 use super::{
-    CompositorBackend, WindowCallback, WindowInfo, WorkspaceCallback, WorkspaceMeta,
-    WorkspaceSnapshot,
+    CompositorBackend, KeyboardLayoutCallback, KeyboardLayoutInfo, WindowCallback, WindowInfo,
+    WorkspaceCallback, WorkspaceMeta, WorkspaceSnapshot,
 };
 
 const RECONNECT_INITIAL_MS: u64 = 1000;
@@ -40,6 +40,12 @@ struct SharedState {
     /// Per-output active window info (output name -> WindowInfo).
     /// This tracks the "would be focused" window for each monitor.
     per_output_window: RwLock<HashMap<String, WindowInfo>>,
+    /// Current keyboard layout info.
+    keyboard_layout: RwLock<Option<KeyboardLayoutInfo>>,
+    /// List of available keyboard layout names (from Niri's KeyboardLayouts).
+    keyboard_layout_names: RwLock<Vec<String>>,
+    /// Current keyboard layout index.
+    keyboard_layout_idx: RwLock<usize>,
 }
 
 impl Default for SharedState {
@@ -51,6 +57,9 @@ impl Default for SharedState {
             id_to_output: RwLock::new(HashMap::new()),
             windows: RwLock::new(HashMap::new()),
             per_output_window: RwLock::new(HashMap::new()),
+            keyboard_layout: RwLock::new(None),
+            keyboard_layout_names: RwLock::new(Vec::new()),
+            keyboard_layout_idx: RwLock::new(0),
         }
     }
 }
@@ -63,6 +72,7 @@ pub struct NiriBackend {
     socket_path: RwLock<Option<String>>,
     shared: Arc<SharedState>,
     callbacks: Mutex<Option<(WorkspaceCallback, WindowCallback)>>,
+    keyboard_layout_callback: Mutex<Option<KeyboardLayoutCallback>>,
 }
 
 #[derive(Debug, Clone)]
@@ -83,6 +93,7 @@ impl NiriBackend {
             socket_path: RwLock::new(None),
             shared: Arc::new(SharedState::default()),
             callbacks: Mutex::new(None),
+            keyboard_layout_callback: Mutex::new(None),
         }
     }
 
@@ -457,15 +468,113 @@ impl NiriBackend {
             Self::process_windows(shared, windows);
         }
 
+        // Fetch keyboard layouts
+        Self::fetch_keyboard_layouts(socket_path, shared);
+
         debug!("Fetched initial Niri state");
     }
 
+    /// Fetch keyboard layouts from Niri.
+    fn fetch_keyboard_layouts(socket_path: &str, shared: &SharedState) {
+        let Some(reply) =
+            Self::send_request_static(socket_path, &Value::String("KeyboardLayouts".to_string()))
+        else {
+            debug!("fetch_keyboard_layouts: failed to query from Niri");
+            return;
+        };
+
+        let Some(ok) = reply.get("Ok") else {
+            debug!("fetch_keyboard_layouts: Niri returned error: {:?}", reply);
+            return;
+        };
+
+        let Some(kb_layouts) = ok.get("KeyboardLayouts") else {
+            debug!("fetch_keyboard_layouts: no KeyboardLayouts in response");
+            return;
+        };
+
+        Self::process_keyboard_layouts(shared, kb_layouts);
+    }
+
+    /// Process keyboard layout data from Niri.
+    fn process_keyboard_layouts(shared: &SharedState, kb_layouts: &Value) -> bool {
+        let names = kb_layouts
+            .get("names")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|entry| entry.as_str().map(String::from))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        let current_idx = kb_layouts
+            .get("current_idx")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as usize;
+
+        let layout_count = names.len();
+        let layout_name = names.get(current_idx).cloned().unwrap_or_default();
+
+        debug!(
+            "process_keyboard_layouts: idx={}, layout='{}', count={}",
+            current_idx, layout_name, layout_count
+        );
+
+        *shared.keyboard_layout_names.write() = names;
+        *shared.keyboard_layout_idx.write() = current_idx;
+        *shared.keyboard_layout.write() = Some(KeyboardLayoutInfo {
+            layout_name,
+            short_name: String::new(),
+
+            layout_count: Some(layout_count),
+        });
+
+        true
+    }
+
+    /// Process a keyboard layout switch event.
+    fn process_keyboard_layout_switch(shared: &SharedState, idx: usize) -> bool {
+        let names = shared.keyboard_layout_names.read();
+        let layout_name = names.get(idx).cloned().unwrap_or_default();
+        let layout_count = names.len();
+
+        debug!(
+            "process_keyboard_layout_switch: idx={}, layout='{}'",
+            idx, layout_name
+        );
+
+        *shared.keyboard_layout_idx.write() = idx;
+        *shared.keyboard_layout.write() = Some(KeyboardLayoutInfo {
+            layout_name,
+            short_name: String::new(),
+
+            layout_count: Some(layout_count),
+        });
+
+        true
+    }
+
     /// Handle a Niri event.
-    fn handle_event(shared: &SharedState, event: &Value) -> (bool, bool) {
+    ///
+    /// Returns (workspace_changed, window_changed, keyboard_layout_changed).
+    fn handle_event(shared: &SharedState, event: &Value) -> (bool, bool, bool) {
         let mut workspace_changed = false;
         let mut window_changed = false;
+        let mut keyboard_layout_changed = false;
 
-        if let Some(workspaces_changed) = event.get("WorkspacesChanged") {
+        if let Some(kb_layouts_changed) = event.get("KeyboardLayoutsChanged") {
+            // Full layout list changed (e.g., user reconfigured layouts)
+            if let Some(kb_layouts) = kb_layouts_changed.get("keyboard_layouts") {
+                keyboard_layout_changed = Self::process_keyboard_layouts(shared, kb_layouts);
+            }
+        } else if let Some(kb_switched) = event.get("KeyboardLayoutSwitched") {
+            // Just switched to a different layout by index
+            if let Some(idx) = kb_switched.get("idx").and_then(|v| v.as_u64()) {
+                keyboard_layout_changed =
+                    Self::process_keyboard_layout_switch(shared, idx as usize);
+            }
+        } else if let Some(workspaces_changed) = event.get("WorkspacesChanged") {
             if let Some(workspaces) = workspaces_changed
                 .get("workspaces")
                 .and_then(|v| v.as_array())
@@ -602,7 +711,7 @@ impl NiriBackend {
             }
         }
 
-        (workspace_changed, window_changed)
+        (workspace_changed, window_changed, keyboard_layout_changed)
     }
 
     /// Run the event loop (in background thread).
@@ -611,6 +720,7 @@ impl NiriBackend {
         shared: Arc<SharedState>,
         socket_path: String,
         callbacks: Option<(WorkspaceCallback, WindowCallback)>,
+        kb_callback: Option<KeyboardLayoutCallback>,
     ) {
         // Fetch initial state
         Self::fetch_initial_state(&socket_path, &shared);
@@ -623,6 +733,13 @@ impl NiriBackend {
             for win_info in per_output.values() {
                 win_cb(win_info.clone());
             }
+        }
+
+        // Emit initial keyboard layout
+        if let Some(ref kb_cb) = kb_callback
+            && let Some(ref info) = *shared.keyboard_layout.read()
+        {
+            kb_cb(info.clone());
         }
 
         // Exponential backoff state
@@ -697,7 +814,8 @@ impl NiriBackend {
                                     continue;
                                 }
 
-                                let (ws_changed, win_changed) = Self::handle_event(&shared, &event);
+                                let (ws_changed, win_changed, kb_changed) =
+                                    Self::handle_event(&shared, &event);
 
                                 if let Some((ref ws_cb, ref win_cb)) = callbacks {
                                     if ws_changed {
@@ -710,6 +828,13 @@ impl NiriBackend {
                                             win_cb(win_info.clone());
                                         }
                                     }
+                                }
+
+                                if kb_changed
+                                    && let Some(ref kb_cb) = kb_callback
+                                    && let Some(ref info) = *shared.keyboard_layout.read()
+                                {
+                                    kb_cb(info.clone());
                                 }
                             }
                             Err(e) => {
@@ -765,12 +890,17 @@ impl CompositorBackend for NiriBackend {
         let running = Arc::clone(&self.running);
         let shared = Arc::clone(&self.shared);
         let callbacks = Some((on_workspace_update, on_window_update));
+        let kb_callback = self
+            .keyboard_layout_callback
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
 
         // Start event loop thread
         let handle = thread::Builder::new()
             .name("niri-event-loop".into())
             .spawn(move || {
-                Self::event_loop(running, shared, socket_path, callbacks);
+                Self::event_loop(running, shared, socket_path, callbacks, kb_callback);
             })
             .ok();
 
@@ -860,6 +990,28 @@ impl CompositorBackend for NiriBackend {
 
     fn name(&self) -> &'static str {
         "Niri"
+    }
+
+    fn set_keyboard_layout_callback(&self, callback: KeyboardLayoutCallback) {
+        *self
+            .keyboard_layout_callback
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(callback);
+    }
+
+    fn get_keyboard_layout(&self) -> Option<KeyboardLayoutInfo> {
+        self.shared.keyboard_layout.read().clone()
+    }
+
+    fn switch_keyboard_layout_next(&self) {
+        let request = serde_json::json!({
+            "Action": {
+                "SwitchLayout": {
+                    "layout": "Next"
+                }
+            }
+        });
+        let _ = self.send_request(&request);
     }
 }
 

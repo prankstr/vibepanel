@@ -20,8 +20,8 @@ use serde_json::Value;
 use tracing::{debug, error, info, trace, warn};
 
 use super::{
-    CompositorBackend, WindowCallback, WindowInfo, WorkspaceCallback, WorkspaceMeta,
-    WorkspaceSnapshot,
+    CompositorBackend, KeyboardLayoutCallback, KeyboardLayoutInfo, WindowCallback, WindowInfo,
+    WorkspaceCallback, WorkspaceMeta, WorkspaceSnapshot,
 };
 
 /// Default workspaces for Hyprland (dynamic workspaces, but we expose 1-10).
@@ -43,6 +43,12 @@ pub struct HyprlandBackend {
     callbacks: Mutex<Option<(WorkspaceCallback, WindowCallback)>>,
     monitor_workspaces: RwLock<HashMap<String, i32>>,
     focused_monitor: RwLock<Option<String>>,
+    /// Callback for keyboard layout changes, set by CompositorManager.
+    keyboard_layout_callback: Mutex<Option<KeyboardLayoutCallback>>,
+    /// Current keyboard layout info.
+    keyboard_layout: RwLock<Option<KeyboardLayoutInfo>>,
+    /// Name of the main keyboard device (auto-detected from `hyprctl devices`).
+    main_keyboard_name: RwLock<Option<String>>,
 }
 
 impl HyprlandBackend {
@@ -70,6 +76,9 @@ impl HyprlandBackend {
             callbacks: Mutex::new(None),
             monitor_workspaces: RwLock::new(HashMap::new()),
             focused_monitor: RwLock::new(None),
+            keyboard_layout_callback: Mutex::new(None),
+            keyboard_layout: RwLock::new(None),
+            main_keyboard_name: RwLock::new(None),
         }
     }
 
@@ -268,6 +277,60 @@ impl HyprlandBackend {
         debug!("Fetched initial Hyprland state");
     }
 
+    /// Fetch keyboard layout info from Hyprland devices.
+    fn fetch_keyboard_layout(&self) {
+        let Some(devices) = self.query_json("devices") else {
+            debug!("fetch_keyboard_layout: failed to query devices");
+            return;
+        };
+
+        let Some(keyboards) = devices.get("keyboards").and_then(|v| v.as_array()) else {
+            debug!("fetch_keyboard_layout: no keyboards in devices response");
+            return;
+        };
+
+        // Use Hyprland's `main` flag to find the primary keyboard.
+        // Falls back to first keyboard if none is marked main.
+        let main_kb = keyboards
+            .iter()
+            .find(|kb| kb.get("main").and_then(|v| v.as_bool()) == Some(true))
+            .or_else(|| keyboards.first());
+
+        let Some(kb) = main_kb else {
+            debug!("fetch_keyboard_layout: no suitable keyboard found");
+            return;
+        };
+
+        let kb_name = kb
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let active_layout = kb
+            .get("active_keymap")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        // Hyprland's "layout" field is a comma-separated list of layout codes
+        let layout_count = kb
+            .get("layout")
+            .and_then(|v| v.as_str())
+            .map(|layout_str| layout_str.split(',').filter(|s| !s.is_empty()).count());
+
+        debug!(
+            "fetch_keyboard_layout: main_kb='{}', layout='{}', layout_count={:?}",
+            kb_name, active_layout, layout_count
+        );
+
+        *self.main_keyboard_name.write() = Some(kb_name);
+        *self.keyboard_layout.write() = Some(KeyboardLayoutInfo {
+            layout_name: active_layout,
+            short_name: String::new(), // Widget extracts short name
+            layout_count,
+        });
+    }
+
     /// Refresh occupied workspaces and window counts from Hyprland.
     ///
     /// Also updates per-output state and monitor tracking.
@@ -444,10 +507,10 @@ impl HyprlandBackend {
     }
 
     /// Handle a Hyprland event line.
-    /// Returns (workspace_changed, window_changed).
-    fn handle_event(&self, line: &str) -> (bool, bool) {
+    /// Returns (workspace_changed, window_changed, keyboard_layout_changed).
+    fn handle_event(&self, line: &str) -> (bool, bool, bool) {
         let Some((event, data)) = line.split_once(">>") else {
-            return (false, false);
+            return (false, false, false);
         };
 
         trace!(
@@ -458,6 +521,7 @@ impl HyprlandBackend {
 
         let mut workspace_changed = false;
         let mut window_changed = false;
+        let mut keyboard_layout_changed = false;
 
         match event {
             "workspace" => {
@@ -549,10 +613,35 @@ impl HyprlandBackend {
                 // Workspace moved to different monitor - refresh all state
                 workspace_changed = self.refresh_occupied();
             }
+            "activelayout" => {
+                // activelayout>>KEYBOARD_NAME,LAYOUT_NAME
+                // Only process events from the main keyboard
+                if let Some((kb_name, layout_name)) = data.split_once(',') {
+                    let is_main = self
+                        .main_keyboard_name
+                        .read()
+                        .as_ref()
+                        .is_some_and(|name| name == kb_name);
+
+                    if is_main {
+                        let info = KeyboardLayoutInfo {
+                            layout_name: layout_name.to_string(),
+                            short_name: String::new(), // Widget extracts short name
+                            layout_count: self
+                                .keyboard_layout
+                                .read()
+                                .as_ref()
+                                .and_then(|i| i.layout_count),
+                        };
+                        *self.keyboard_layout.write() = Some(info);
+                        keyboard_layout_changed = true;
+                    }
+                }
+            }
             _ => {}
         }
 
-        (workspace_changed, window_changed)
+        (workspace_changed, window_changed, keyboard_layout_changed)
     }
 
     /// Run the event loop (in background thread).
@@ -571,6 +660,9 @@ impl HyprlandBackend {
         // Fetch initial state and emit
         backend.fetch_initial_state();
 
+        // Fetch initial keyboard layout (queries devices, auto-detects main keyboard)
+        backend.fetch_keyboard_layout();
+
         // Emit initial state
         if let Some((ws_cb, win_cb)) = backend
             .callbacks
@@ -582,6 +674,15 @@ impl HyprlandBackend {
             if let Some(ref win) = *backend.focused_window.read() {
                 win_cb(win.clone());
             }
+        }
+        // Emit initial keyboard layout
+        if let Some(ref kb_cb) = *backend
+            .keyboard_layout_callback
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            && let Some(ref info) = *backend.keyboard_layout.read()
+        {
+            kb_cb(info.clone());
         }
 
         // Exponential backoff state
@@ -623,7 +724,7 @@ impl HyprlandBackend {
 
                 match line {
                     Ok(line) => {
-                        let (ws_changed, win_changed) = backend.handle_event(&line);
+                        let (ws_changed, win_changed, kb_changed) = backend.handle_event(&line);
 
                         if let Some((ws_cb, win_cb)) = backend
                             .callbacks
@@ -637,6 +738,16 @@ impl HyprlandBackend {
                             if win_changed && let Some(ref win) = *backend.focused_window.read() {
                                 win_cb(win.clone());
                             }
+                        }
+
+                        if kb_changed
+                            && let Some(ref kb_cb) = *backend
+                                .keyboard_layout_callback
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                            && let Some(ref info) = *backend.keyboard_layout.read()
+                        {
+                            kb_cb(info.clone());
                         }
                     }
                     Err(e) => {
@@ -692,6 +803,11 @@ impl CompositorBackend for HyprlandBackend {
             .clone();
         let allowed_outputs = self.allowed_outputs.read().clone();
         let workspaces = self.workspaces.read().clone();
+        let kb_callback = self
+            .keyboard_layout_callback
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
 
         // Share the running flag with the thread so stop() works correctly
         let running = Arc::clone(&self.running);
@@ -712,6 +828,9 @@ impl CompositorBackend for HyprlandBackend {
             callbacks: Mutex::new(callbacks),
             monitor_workspaces: RwLock::new(HashMap::new()),
             focused_monitor: RwLock::new(None),
+            keyboard_layout_callback: Mutex::new(kb_callback),
+            keyboard_layout: RwLock::new(None),
+            main_keyboard_name: RwLock::new(None),
         });
 
         // Start event loop thread
@@ -770,6 +889,29 @@ impl CompositorBackend for HyprlandBackend {
 
     fn name(&self) -> &'static str {
         "Hyprland"
+    }
+
+    fn set_keyboard_layout_callback(&self, callback: KeyboardLayoutCallback) {
+        *self
+            .keyboard_layout_callback
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(callback);
+    }
+
+    fn get_keyboard_layout(&self) -> Option<KeyboardLayoutInfo> {
+        self.keyboard_layout.read().clone()
+    }
+
+    fn switch_keyboard_layout_next(&self) {
+        let main_kb = self.main_keyboard_name.read().clone();
+        if let Some(kb_name) = main_kb {
+            debug!("Switching keyboard layout for '{}'", kb_name);
+            let _ = self.send_command(&format!("switchxkblayout {} next", kb_name));
+        } else {
+            // Fallback: try "all" which switches all keyboards
+            debug!("No main keyboard detected, switching all keyboards");
+            let _ = self.send_command("switchxkblayout all next");
+        }
     }
 }
 

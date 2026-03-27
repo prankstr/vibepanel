@@ -23,6 +23,7 @@ mod mango;
 mod niri;
 mod sway;
 pub mod types;
+pub mod xkb_names;
 
 pub use factory::BackendKind;
 pub use hyprland::HyprlandBackend;
@@ -30,4 +31,4 @@ pub use manager::CompositorManager;
 pub use mango::MangoBackend;
 pub use niri::NiriBackend;
 pub use sway::SwayBackend;
-pub use types::*;
+pub use types::*; // Includes KeyboardLayoutInfo, KeyboardLayoutCallback

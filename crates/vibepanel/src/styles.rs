@@ -638,6 +638,16 @@ pub mod widget {
     /// Custom widget prefix (`.custom-<name>`).
     /// Each instance gets a dynamic `custom-{id}` class built from this prefix.
     pub const CUSTOM_PREFIX: &str = "custom-";
+
+    // Keyboard layout
+    /// Keyboard layout widget (`.keyboard-layout`).
+    pub const KEYBOARD_LAYOUT: &str = "keyboard-layout";
+
+    /// Keyboard layout icon (`.keyboard-layout-icon`).
+    pub const KEYBOARD_LAYOUT_ICON: &str = "keyboard-layout-icon";
+
+    /// Keyboard layout label (`.keyboard-layout-label`).
+    pub const KEYBOARD_LAYOUT_LABEL: &str = "keyboard-layout-label";
 }
 
 /// Surface and popover classes.

@@ -33,8 +33,8 @@ use tracing::{debug, info};
 use vibepanel_core::config::AdvancedConfig;
 
 use super::{
-    BackendKind, CompositorBackend, WindowCallback, WindowInfo, WorkspaceCallback, WorkspaceMeta,
-    WorkspaceSnapshot, factory,
+    BackendKind, CompositorBackend, KeyboardLayoutCallback, KeyboardLayoutInfo, WindowCallback,
+    WindowInfo, WorkspaceCallback, WorkspaceMeta, WorkspaceSnapshot, factory,
 };
 use crate::services::callbacks::{CallbackId, Callbacks};
 
@@ -48,8 +48,10 @@ pub struct CompositorManager {
     backend: RefCell<Option<Box<dyn CompositorBackend>>>,
     workspace_callbacks: Callbacks<WorkspaceSnapshot>,
     window_callbacks: Callbacks<WindowInfo>,
+    keyboard_layout_callbacks: Callbacks<KeyboardLayoutInfo>,
     last_workspace_snapshot: RefCell<Option<WorkspaceSnapshot>>,
     last_window_info: RefCell<Option<WindowInfo>>,
+    last_keyboard_layout: RefCell<Option<KeyboardLayoutInfo>>,
     started: RefCell<bool>,
 }
 
@@ -59,8 +61,10 @@ impl CompositorManager {
             backend: RefCell::new(None),
             workspace_callbacks: Callbacks::new(),
             window_callbacks: Callbacks::new(),
+            keyboard_layout_callbacks: Callbacks::new(),
             last_workspace_snapshot: RefCell::new(None),
             last_window_info: RefCell::new(None),
+            last_keyboard_layout: RefCell::new(None),
             started: RefCell::new(false),
         });
 
@@ -182,6 +186,36 @@ impl CompositorManager {
         }
     }
 
+    /// Register a callback for keyboard layout changes.
+    ///
+    /// The callback will be immediately invoked with the current state if available.
+    /// Returns a `CallbackId` that can be used to unregister the callback.
+    pub fn register_keyboard_layout_callback<F>(&self, callback: F) -> CallbackId
+    where
+        F: Fn(&KeyboardLayoutInfo) + 'static,
+    {
+        let id = self.keyboard_layout_callbacks.register(callback);
+
+        // Immediately send current state if available
+        if let Some(ref info) = *self.last_keyboard_layout.borrow() {
+            self.keyboard_layout_callbacks.notify_single(id, info);
+        }
+
+        id
+    }
+
+    /// Unregister a keyboard layout callback by its ID.
+    pub fn unregister_keyboard_layout_callback(&self, id: CallbackId) -> bool {
+        self.keyboard_layout_callbacks.unregister(id)
+    }
+
+    /// Switch to the next keyboard layout.
+    pub fn switch_keyboard_layout_next(&self) {
+        if let Some(ref backend) = *self.backend.borrow() {
+            backend.switch_keyboard_layout_next();
+        }
+    }
+
     /// Get the backend name (e.g., "Hyprland", "Niri", "MangoWC").
     pub fn backend_name(&self) -> &'static str {
         if let Some(ref backend) = *self.backend.borrow() {
@@ -209,6 +243,16 @@ impl CompositorManager {
 
         // Dispatch to all registered callbacks
         self.window_callbacks.notify(&window_info);
+    }
+
+    /// Handle a keyboard layout update from the backend.
+    /// Called via glib::idle_add_once from the backend thread.
+    pub(crate) fn handle_keyboard_layout_update(&self, info: KeyboardLayoutInfo) {
+        // Store for new listeners
+        *self.last_keyboard_layout.borrow_mut() = Some(info.clone());
+
+        // Dispatch to all registered callbacks
+        self.keyboard_layout_callbacks.notify(&info);
     }
 
     /// Initialize the backend.
@@ -263,12 +307,26 @@ impl CompositorManager {
             });
         });
 
+        // Keyboard layout events: no coalescing needed — layout changes are
+        // infrequent, user-initiated, and atomic (one event per switch).
+        let on_keyboard_layout_update: KeyboardLayoutCallback =
+            Arc::new(move |keyboard_layout_info| {
+                glib::idle_add_once(move || {
+                    CompositorManager::global().handle_keyboard_layout_update(keyboard_layout_info);
+                });
+            });
+
+        // Register keyboard layout callback before start() so the backend
+        // can fire it during initialization if it discovers the current layout.
+        backend.set_keyboard_layout_callback(on_keyboard_layout_update);
+
         // Start the backend first (which fetches initial state internally)
         backend.start(on_workspace_update, on_window_update);
 
         // Now store initial state - backend has fetched it during start()
         *this.last_workspace_snapshot.borrow_mut() = Some(backend.get_workspace_snapshot());
         *this.last_window_info.borrow_mut() = backend.get_focused_window();
+        *this.last_keyboard_layout.borrow_mut() = backend.get_keyboard_layout();
 
         // Store backend
         *this.backend.borrow_mut() = Some(backend);

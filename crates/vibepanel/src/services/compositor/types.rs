@@ -107,12 +107,26 @@ impl WindowInfo {
     }
 }
 
+/// Information about the current keyboard layout.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct KeyboardLayoutInfo {
+    /// Full layout name (e.g., "English (US)").
+    pub layout_name: String,
+    /// Short layout identifier (e.g., "us"), if available from the backend.
+    pub short_name: String,
+    /// Total number of configured keyboard layouts, if known.
+    pub layout_count: Option<usize>,
+}
+
 /// Callback type for workspace state updates.
 pub type WorkspaceCallback = Arc<dyn Fn(WorkspaceSnapshot) + Send + Sync>;
 
 /// Callback type for focused window updates.
 /// Receives `WindowInfo::default()` when no window is focused.
 pub type WindowCallback = Arc<dyn Fn(WindowInfo) + Send + Sync>;
+
+/// Callback type for keyboard layout updates.
+pub type KeyboardLayoutCallback = Arc<dyn Fn(KeyboardLayoutInfo) + Send + Sync>;
 
 /// Trait for compositor backend implementations.
 ///
@@ -185,6 +199,25 @@ pub trait CompositorBackend: Send + Sync {
     /// Used for logout functionality. Default implementation is a no-op
     /// for compositors that don't support this.
     fn quit_compositor(&self) {
+        // Default no-op
+    }
+
+    /// Register a callback for keyboard layout changes.
+    ///
+    /// Default no-op for backends without keyboard layout support.
+    fn set_keyboard_layout_callback(&self, _callback: KeyboardLayoutCallback) {
+        // Default no-op
+    }
+
+    /// Get the current keyboard layout, if known.
+    fn get_keyboard_layout(&self) -> Option<KeyboardLayoutInfo> {
+        None
+    }
+
+    /// Switch to the next keyboard layout.
+    ///
+    /// Default no-op for backends without keyboard layout support.
+    fn switch_keyboard_layout_next(&self) {
         // Default no-op
     }
 }
@@ -300,5 +333,31 @@ mod tests {
         assert!(snapshot.active_workspace.contains(&3));
         assert!(!snapshot.active_workspace.contains(&2));
         assert_eq!(snapshot.active_workspace.len(), 2);
+    }
+
+    #[test]
+    fn test_keyboard_layout_info_default() {
+        let info = KeyboardLayoutInfo::default();
+        assert!(info.layout_name.is_empty());
+        assert!(info.short_name.is_empty());
+        assert_eq!(info.layout_count, None);
+    }
+
+    #[test]
+    fn test_keyboard_layout_info_equality() {
+        let info1 = KeyboardLayoutInfo {
+            layout_name: "English (US)".to_string(),
+            short_name: "us".to_string(),
+            layout_count: Some(2),
+        };
+        let info2 = info1.clone();
+        assert_eq!(info1, info2);
+
+        let info3 = KeyboardLayoutInfo {
+            layout_name: "German".to_string(),
+            short_name: "de".to_string(),
+            layout_count: Some(2),
+        };
+        assert_ne!(info1, info3);
     }
 }

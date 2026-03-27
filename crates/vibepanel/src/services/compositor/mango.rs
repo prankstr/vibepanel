@@ -33,8 +33,8 @@ use super::dwl_ipc::{
     TagState, ZdwlIpcManagerV2, ZdwlIpcOutputV2, zdwl_ipc_manager_v2, zdwl_ipc_output_v2,
 };
 use super::{
-    CompositorBackend, WindowCallback, WindowInfo, WorkspaceCallback, WorkspaceMeta,
-    WorkspaceSnapshot,
+    CompositorBackend, KeyboardLayoutCallback, KeyboardLayoutInfo, WindowCallback, WindowInfo,
+    WorkspaceCallback, WorkspaceMeta, WorkspaceSnapshot, xkb_names,
 };
 
 /// Default number of workspaces/tags for DWL.
@@ -87,12 +87,16 @@ struct SharedState {
     snapshot: RwLock<WorkspaceSnapshot>,
     /// Current focused window info.
     focused_window: RwLock<Option<WindowInfo>>,
+    /// Current keyboard layout info.
+    keyboard_layout: RwLock<Option<KeyboardLayoutInfo>>,
     /// Number of tags from protocol.
     tag_count: AtomicU32,
     /// Pending workspace switch request (-1 = none).
     pending_switch: AtomicI32,
     /// Pending compositor quit request.
     pending_quit: AtomicBool,
+    /// Pending keyboard layout switch request.
+    pending_kb_switch: AtomicBool,
 }
 
 impl Default for SharedState {
@@ -100,9 +104,11 @@ impl Default for SharedState {
         Self {
             snapshot: RwLock::new(WorkspaceSnapshot::default()),
             focused_window: RwLock::new(None),
+            keyboard_layout: RwLock::new(None),
             tag_count: AtomicU32::new(DEFAULT_WORKSPACE_COUNT),
             pending_switch: AtomicI32::new(-1),
             pending_quit: AtomicBool::new(false),
+            pending_kb_switch: AtomicBool::new(false),
         }
     }
 }
@@ -127,6 +133,8 @@ struct WaylandState {
     on_workspace_update: Option<WorkspaceCallback>,
     /// Window update callback.
     on_window_update: Option<WindowCallback>,
+    /// Keyboard layout update callback.
+    on_keyboard_layout_update: Option<KeyboardLayoutCallback>,
     /// Shared state for cross-thread access.
     shared: Arc<SharedState>,
 }
@@ -143,6 +151,7 @@ impl WaylandState {
             focused_output: None,
             on_workspace_update: None,
             on_window_update: None,
+            on_keyboard_layout_update: None,
             shared,
         }
     }
@@ -193,6 +202,23 @@ impl WaylandState {
         {
             debug!("Sending quit request to compositor");
             dwl_output.quit();
+        }
+    }
+
+    /// Check for and process any pending keyboard layout switch.
+    fn process_pending_kb_switch(&self) {
+        if self.shared.pending_kb_switch.swap(false, Ordering::SeqCst)
+            && let Some(dwl_output) = self.get_focused_dwl_output()
+        {
+            debug!("Sending keyboard layout switch via dispatch");
+            dwl_output.dispatch(
+                "switch_keyboard_layout".to_string(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+            );
         }
     }
 
@@ -501,6 +527,23 @@ impl Dispatch<ZdwlIpcOutputV2, ObjectId> for WaylandState {
             zdwl_ipc_output_v2::Event::LayoutSymbol { layout: _ } => {}
             zdwl_ipc_output_v2::Event::Fullscreen { is_fullscreen: _ } => {}
             zdwl_ipc_output_v2::Event::Floating { is_floating: _ } => {}
+            zdwl_ipc_output_v2::Event::KbLayout { kb_layout } => {
+                debug!("DWL keyboard layout: {}", kb_layout);
+
+                let info = KeyboardLayoutInfo {
+                    layout_name: xkb_names::language_from_xkb(&kb_layout)
+                        .map(String::from)
+                        .unwrap_or_else(|| kb_layout.to_uppercase()),
+                    short_name: kb_layout,
+                    layout_count: None,
+                };
+
+                *state.shared.keyboard_layout.write() = Some(info.clone());
+
+                if let Some(ref cb) = state.on_keyboard_layout_update {
+                    cb(info);
+                }
+            }
             _ => {}
         }
     }
@@ -538,6 +581,8 @@ pub struct MangoBackend {
     source_ids: Mutex<Vec<glib::SourceId>>,
     /// Eventfd used to wake the fd watcher for workspace switching.
     wake_fd: Mutex<Option<OwnedFd>>,
+    /// Keyboard layout change callback.
+    keyboard_layout_callback: Mutex<Option<KeyboardLayoutCallback>>,
 }
 
 impl MangoBackend {
@@ -549,6 +594,7 @@ impl MangoBackend {
             running: AtomicBool::new(false),
             source_ids: Mutex::new(Vec::new()),
             wake_fd: Mutex::new(None),
+            keyboard_layout_callback: Mutex::new(None),
         }
     }
 
@@ -582,6 +628,11 @@ impl CompositorBackend for MangoBackend {
         let mut state = WaylandState::new(shared);
         state.on_workspace_update = Some(on_workspace_update.clone());
         state.on_window_update = Some(on_window_update.clone());
+        state.on_keyboard_layout_update = self
+            .keyboard_layout_callback
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
 
         // Get the registry and bind to globals
         let display = connection.display();
@@ -719,6 +770,7 @@ impl CompositorBackend for MangoBackend {
                     let st = state_for_wake.borrow();
                     st.process_pending_switch();
                     st.process_pending_quit();
+                    st.process_pending_kb_switch();
                 }
 
                 // Flush to send the request
@@ -851,6 +903,50 @@ impl CompositorBackend for MangoBackend {
 
     fn name(&self) -> &'static str {
         "MangoWC/DWL"
+    }
+
+    fn set_keyboard_layout_callback(&self, callback: KeyboardLayoutCallback) {
+        *self
+            .keyboard_layout_callback
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(callback);
+    }
+
+    fn get_keyboard_layout(&self) -> Option<KeyboardLayoutInfo> {
+        self.shared.keyboard_layout.read().clone()
+    }
+
+    fn switch_keyboard_layout_next(&self) {
+        // MangoWC uses the dispatch request with "switch_keyboard_layout".
+        // We need to signal the main thread to process this, similar to
+        // switch_workspace. For now, we store a pending request and wake
+        // the eventfd — but dispatch requires a DWL output proxy which
+        // is only accessible on the main thread.
+        //
+        // Since the WaylandState with the DWL output proxy runs on the
+        // glib main loop, we use a similar wake mechanism as switch_workspace.
+        // However, dispatch is a different operation — we use a separate
+        // atomic flag for it.
+        debug!("Requesting keyboard layout switch");
+        self.shared.pending_kb_switch.store(true, Ordering::SeqCst);
+
+        // Wake the fd watcher to process the switch.
+        if let Some(wake_fd) = self
+            .wake_fd
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            // SAFETY: wake_fd is valid (held by Mutex), writing 8-byte u64 with correct alignment.
+            let val: u64 = 1;
+            unsafe {
+                libc::write(
+                    wake_fd.as_raw_fd(),
+                    &val as *const u64 as *const libc::c_void,
+                    8,
+                );
+            }
+        }
     }
 }
 

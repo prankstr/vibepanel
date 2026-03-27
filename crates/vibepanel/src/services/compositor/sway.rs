@@ -24,8 +24,8 @@ use serde_json::Value;
 use tracing::{debug, error, trace, warn};
 
 use super::{
-    CompositorBackend, WindowCallback, WindowInfo, WorkspaceCallback, WorkspaceMeta,
-    WorkspaceSnapshot,
+    CompositorBackend, KeyboardLayoutCallback, KeyboardLayoutInfo, WindowCallback, WindowInfo,
+    WorkspaceCallback, WorkspaceMeta, WorkspaceSnapshot,
 };
 
 // i3 IPC constants
@@ -37,11 +37,13 @@ const IPC_RUN_COMMAND: u32 = 0;
 const IPC_GET_WORKSPACES: u32 = 1;
 const IPC_SUBSCRIBE: u32 = 2;
 const IPC_GET_TREE: u32 = 4;
+const IPC_GET_INPUTS: u32 = 100;
 
 // Event types have bit 31 set in the response type
 const IPC_EVENT_BIT: u32 = 1 << 31;
 const IPC_EVENT_WORKSPACE: u32 = IPC_EVENT_BIT; // event type 0
 const IPC_EVENT_WINDOW: u32 = IPC_EVENT_BIT | 3;
+const IPC_EVENT_INPUT: u32 = IPC_EVENT_BIT | 21;
 
 const RECONNECT_INITIAL_MS: u64 = 1000;
 const RECONNECT_MAX_MS: u64 = 30000;
@@ -155,6 +157,7 @@ struct SharedState {
     workspace_snapshot: RwLock<WorkspaceSnapshot>,
     focused_window: RwLock<Option<WindowInfo>>,
     workspaces: RwLock<Vec<WorkspaceMeta>>,
+    keyboard_layout: RwLock<Option<KeyboardLayoutInfo>>,
 }
 
 impl Default for SharedState {
@@ -172,6 +175,7 @@ impl Default for SharedState {
                     })
                     .collect(),
             ),
+            keyboard_layout: RwLock::new(None),
         }
     }
 }
@@ -182,6 +186,7 @@ pub struct SwayBackend {
     socket_path: RwLock<Option<String>>,
     shared: Arc<SharedState>,
     callbacks: Mutex<Option<(WorkspaceCallback, WindowCallback)>>,
+    keyboard_layout_callback: Mutex<Option<KeyboardLayoutCallback>>,
     compositor_name: &'static str,
     socket_env_var: &'static str,
 }
@@ -200,6 +205,7 @@ impl SwayBackend {
             socket_path: RwLock::new(None),
             shared: Arc::new(SharedState::default()),
             callbacks: Mutex::new(None),
+            keyboard_layout_callback: Mutex::new(None),
             compositor_name,
             socket_env_var,
         }
@@ -493,15 +499,68 @@ impl SwayBackend {
         Self::fetch_tree(socket_path, shared, wm);
     }
 
+    /// Fetch keyboard layout from Sway's `get_inputs`.
+    fn fetch_keyboard_layout(socket_path: &str, shared: &SharedState, wm: &str) {
+        let Some(inputs) = ipc_request(socket_path, IPC_GET_INPUTS, b"", wm) else {
+            debug!("fetch_keyboard_layout: failed to query inputs from {}", wm);
+            return;
+        };
+
+        let Some(inputs) = inputs.as_array() else {
+            debug!(
+                "fetch_keyboard_layout: {} get_inputs response is not an array",
+                wm
+            );
+            return;
+        };
+
+        // Find the first keyboard input device.
+        let main_kb = inputs
+            .iter()
+            .find(|input| input.get("type").and_then(|v| v.as_str()) == Some("keyboard"));
+
+        let Some(kb) = main_kb else {
+            debug!(
+                "fetch_keyboard_layout: no suitable keyboard found in {}",
+                wm
+            );
+            return;
+        };
+
+        let active_layout = kb
+            .get("xkb_active_layout_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        let layout_count = kb
+            .get("xkb_layout_names")
+            .and_then(|v| v.as_array())
+            .map(|names| names.len());
+
+        debug!(
+            "fetch_keyboard_layout: layout='{}', layout_count={:?}",
+            active_layout, layout_count
+        );
+
+        *shared.keyboard_layout.write() = Some(KeyboardLayoutInfo {
+            layout_name: active_layout,
+            short_name: String::new(),
+            layout_count,
+        });
+    }
+
     /// Run the event loop (in background thread).
     fn event_loop(
         running: Arc<AtomicBool>,
         shared: Arc<SharedState>,
         socket_path: String,
         callbacks: Option<(WorkspaceCallback, WindowCallback)>,
+        kb_callback: Option<KeyboardLayoutCallback>,
         wm: &str,
     ) {
         Self::fetch_all(&socket_path, &shared, wm);
+        Self::fetch_keyboard_layout(&socket_path, &shared, wm);
 
         if let Some((ref ws_cb, ref win_cb)) = callbacks {
             ws_cb(shared.workspace_snapshot.read().clone());
@@ -510,6 +569,11 @@ impl SwayBackend {
             } else {
                 win_cb(WindowInfo::default());
             }
+        }
+        if let Some(ref kb_cb) = kb_callback
+            && let Some(ref info) = *shared.keyboard_layout.read()
+        {
+            kb_cb(info.clone());
         }
 
         let mut backoff_ms = RECONNECT_INITIAL_MS;
@@ -535,7 +599,7 @@ impl SwayBackend {
                 }
             };
 
-            let subscribe_payload = b"[\"workspace\", \"window\"]";
+            let subscribe_payload = b"[\"workspace\", \"window\", \"input\"]";
             if let Err(e) = ipc_send(&mut stream, IPC_SUBSCRIBE, subscribe_payload) {
                 if running.load(Ordering::SeqCst) {
                     warn!(
@@ -599,7 +663,7 @@ impl SwayBackend {
                             }
                         };
 
-                        let (ws_changed, win_changed) =
+                        let (ws_changed, win_changed, kb_changed) =
                             Self::handle_event(msg_type, &event, &socket_path, &shared, wm);
 
                         if let Some((ref ws_cb, ref win_cb)) = callbacks {
@@ -613,6 +677,13 @@ impl SwayBackend {
                                     win_cb(WindowInfo::default());
                                 }
                             }
+                        }
+
+                        if kb_changed
+                            && let Some(ref kb_cb) = kb_callback
+                            && let Some(ref info) = *shared.keyboard_layout.read()
+                        {
+                            kb_cb(info.clone());
                         }
                     }
                     Err(e) => {
@@ -634,14 +705,14 @@ impl SwayBackend {
     }
 
     /// Handle a single event.
-    /// Returns (workspace_changed, window_changed).
+    /// Returns (workspace_changed, window_changed, keyboard_layout_changed).
     fn handle_event(
         msg_type: u32,
         event: &Value,
         socket_path: &str,
         shared: &SharedState,
         wm: &str,
-    ) -> (bool, bool) {
+    ) -> (bool, bool, bool) {
         let change = event.get("change").and_then(|v| v.as_str()).unwrap_or("");
 
         trace!("{} event: type=0x{:x}, change={}", wm, msg_type, change);
@@ -649,32 +720,62 @@ impl SwayBackend {
         match msg_type {
             IPC_EVENT_WORKSPACE => {
                 Self::fetch_all(socket_path, shared, wm);
-                (true, true)
+                (true, true, false)
             }
             IPC_EVENT_WINDOW => {
                 match change {
                     "focus" | "title" => {
                         Self::fetch_tree(socket_path, shared, wm);
-                        (false, true)
+                        (false, true, false)
                     }
                     "close" | "new" | "move" => {
                         // Window count / occupancy may have changed
                         Self::fetch_all(socket_path, shared, wm);
-                        (true, true)
+                        (true, true, false)
                     }
                     "urgent" => {
                         Self::fetch_all(socket_path, shared, wm);
-                        (true, false)
+                        (true, false, false)
                     }
                     _ => {
                         trace!("Unhandled {} window change: {}", wm, change);
-                        (false, false)
+                        (false, false, false)
                     }
                 }
             }
+            IPC_EVENT_INPUT => {
+                // Input event — check if it's a keyboard layout change
+                // The event payload contains "input" with "type", "xkb_active_layout_name", etc.
+                if change == "xkb_layout"
+                    && let Some(input) = event.get("input")
+                {
+                    let input_type = input.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                    if input_type == "keyboard" {
+                        let active_layout = input
+                            .get("xkb_active_layout_name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let layout_count = input
+                            .get("xkb_layout_names")
+                            .and_then(|v| v.as_array())
+                            .map(|names| names.len());
+
+                        trace!("{} keyboard layout changed: '{}'", wm, active_layout);
+
+                        *shared.keyboard_layout.write() = Some(KeyboardLayoutInfo {
+                            layout_name: active_layout,
+                            short_name: String::new(),
+                            layout_count,
+                        });
+                        return (false, false, true);
+                    }
+                }
+                (false, false, false)
+            }
             _ => {
                 trace!("Unhandled {} event type: 0x{:x}", wm, msg_type);
-                (false, false)
+                (false, false, false)
             }
         }
     }
@@ -706,6 +807,11 @@ impl CompositorBackend for SwayBackend {
         let running = Arc::clone(&self.running);
         let shared = Arc::clone(&self.shared);
         let callbacks = Some((on_workspace_update, on_window_update));
+        let kb_callback = self
+            .keyboard_layout_callback
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
 
         let handle = thread::Builder::new()
             .name(format!(
@@ -713,7 +819,7 @@ impl CompositorBackend for SwayBackend {
                 wm.to_lowercase().replace(' ', "-")
             ))
             .spawn(move || {
-                Self::event_loop(running, shared, socket_path, callbacks, wm);
+                Self::event_loop(running, shared, socket_path, callbacks, kb_callback, wm);
             })
             .ok();
 
@@ -811,6 +917,30 @@ impl CompositorBackend for SwayBackend {
 
     fn name(&self) -> &'static str {
         self.compositor_name
+    }
+
+    fn set_keyboard_layout_callback(&self, callback: KeyboardLayoutCallback) {
+        *self
+            .keyboard_layout_callback
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(callback);
+    }
+
+    fn get_keyboard_layout(&self) -> Option<KeyboardLayoutInfo> {
+        self.shared.keyboard_layout.read().clone()
+    }
+
+    fn switch_keyboard_layout_next(&self) {
+        let socket_path = self.socket_path.read();
+        if let Some(ref path) = *socket_path {
+            debug!("Switching keyboard layout on {}", self.compositor_name);
+            let _ = ipc_request(
+                path,
+                IPC_RUN_COMMAND,
+                b"input type:keyboard xkb_switch_layout next",
+                self.compositor_name,
+            );
+        }
     }
 }
 

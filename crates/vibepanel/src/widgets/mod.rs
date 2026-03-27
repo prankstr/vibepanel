@@ -21,6 +21,7 @@ mod clock;
 mod cpu;
 mod custom;
 mod gpu;
+mod keyboard_layout;
 pub mod layer_shell_popover;
 mod marquee_label;
 mod media;
@@ -68,6 +69,7 @@ pub use workspaces::{WorkspacesConfig, WorkspacesWidget};
 pub use cpu::{CpuConfig, CpuWidget};
 pub use custom::{CustomConfig, CustomWidget};
 pub use gpu::{GpuConfig, GpuWidget};
+pub use keyboard_layout::{KeyboardLayoutConfig, KeyboardLayoutWidget};
 pub use memory::{MemoryConfig, MemoryWidget};
 pub use network_speed::{NetworkSpeedConfig, NetworkSpeedWidget};
 
@@ -315,6 +317,15 @@ impl WidgetFactory {
                 Some(BuiltWidget {
                     widget: root,
                     handle: Box::new(network),
+                })
+            }
+            "keyboard_layout" => {
+                let cfg = KeyboardLayoutConfig::from_entry(entry);
+                let keyboard_layout = KeyboardLayoutWidget::new(cfg);
+                let root = keyboard_layout.widget().clone().upcast::<Widget>();
+                Some(BuiltWidget {
+                    widget: root,
+                    handle: Box::new(keyboard_layout),
                 })
             }
             "media" => {
