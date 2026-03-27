@@ -3,6 +3,20 @@
 //! This module centralizes all CSS class names used across the codebase,
 //! making them discoverable, avoiding typos, and enabling IDE autocompletion.
 //!
+//! # Naming Convention
+//!
+//! - **`vp-` prefix**: Generic names that collide with GTK4/Adwaita CSS
+//!   classes (e.g., `card` → `vp-card`, `row` → `vp-row`, `primary` → `vp-primary`).
+//! - **No prefix**: Domain-specific names unlikely to collide
+//!   (e.g., `widget`, `clock`, `bar`, `popover`, `notification-toast`).
+//! - **Widget prefix**: Sub-element classes namespaced by widget name
+//!   (e.g., `media-*`, `notification-*`, `qs-*`, `battery-popover-*`).
+//! - **State modifiers**: Short names used only in compound selectors
+//!   (e.g., `.active`, `.expanded`, `.clickable`).
+//!
+//! When adding a new class, check if the name exists in GTK4 or Adwaita
+//! theme CSS. If it does, use the `vp-` prefix.
+//!
 //! # Usage
 //!
 //! ```ignore
