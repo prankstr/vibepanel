@@ -22,6 +22,8 @@ const CLICK_CATCHER_OPACITY: f64 = 0.005;
 // Border opacities (subtle borders that don't compete with content)
 const BORDER_OPACITY_DARK: f64 = 0.10;
 const BORDER_OPACITY_LIGHT: f64 = 0.12;
+// GTK mode: average of dark/light since we can't know the theme at build time
+const BORDER_OPACITY_GTK: f64 = 0.11;
 
 // Shadow configuration (layered shadows for natural look)
 const SHADOW_OPACITY_DARK: f64 = 0.40;
@@ -156,6 +158,13 @@ pub fn rgb_to_hex(r: u8, g: u8, b: u8) -> String {
 /// Format an RGBA color string.
 pub fn rgba_str(r: u8, g: u8, b: u8, a: f64) -> String {
     format!("rgba({}, {}, {}, {:.2})", r, g, b, a)
+}
+
+/// Build a `color-mix()` expression that blends `@window_fg_color` at the given
+/// percentage with `transparent`.  Used throughout GTK mode to derive
+/// foreground-based colors that adapt to the active GTK theme at runtime.
+fn gtk_fg_mix(pct: f64) -> String {
+    format!("color-mix(in srgb, @window_fg_color {pct:.1}%, transparent)")
 }
 
 /// Computed sizes based on bar height.
@@ -445,7 +454,13 @@ impl ThemePalette {
                 Some(explicit) => (explicit * 100.0).round() as u32,
                 None => (self.bar_opacity.max(self.widget_opacity) * 100.0).round() as u32,
             },
-            widget_hover_tint = if self.is_dark_mode { "white" } else { "black" },
+            widget_hover_tint = if self.is_gtk_mode {
+                "@window_fg_color"
+            } else if self.is_dark_mode {
+                "white"
+            } else {
+                "black"
+            },
             fg_primary = self.foreground_primary,
             fg_muted = self.foreground_muted,
             fg_disabled = self.foreground_disabled,
@@ -661,7 +676,9 @@ impl ThemePalette {
             }
             AccentSource::None => {
                 // Monochrome mode - use mode-appropriate colors
-                if self.is_dark_mode {
+                if self.is_gtk_mode {
+                    self.accent_primary = gtk_fg_mix(25.0);
+                } else if self.is_dark_mode {
                     self.accent_primary = "rgba(255, 255, 255, 0.25)".to_string();
                 } else {
                     self.accent_primary = "rgba(0, 0, 0, 0.20)".to_string();
@@ -707,7 +724,14 @@ impl ThemePalette {
     }
 
     fn compute_foreground_colors(&mut self) {
-        if self.is_dark_mode {
+        if self.is_gtk_mode {
+            // GTK mode: reference the theme's foreground color so it adapts to
+            // both light and dark GTK themes at runtime.
+            self.foreground_primary = "@window_fg_color".to_string();
+            self.foreground_muted = gtk_fg_mix(FOREGROUND_MUTED_OPACITY * 100.0);
+            self.foreground_disabled = gtk_fg_mix(FOREGROUND_DISABLED_OPACITY * 100.0);
+            self.foreground_faint = gtk_fg_mix(FOREGROUND_FAINT_OPACITY * 100.0);
+        } else if self.is_dark_mode {
             self.foreground_primary = "#ffffff".to_string();
             self.foreground_muted = format!("rgba(255, 255, 255, {:.2})", FOREGROUND_MUTED_OPACITY);
             self.foreground_disabled =
@@ -723,9 +747,12 @@ impl ThemePalette {
 
     fn compute_accent_derived(&mut self) {
         // Accent text matches system text direction:
+        // - GTK mode → use theme's foreground (adapts at runtime)
         // - Light mode (dark system text) → dark accent text
         // - Dark mode (light system text) → light accent text
-        let accent_text_color = if self.is_dark_mode {
+        let accent_text_color = if self.is_gtk_mode {
+            "@window_fg_color".to_string()
+        } else if self.is_dark_mode {
             "#ffffff".to_string()
         } else {
             "#000000".to_string()
@@ -744,7 +771,6 @@ impl ThemePalette {
             }
             AccentSource::Gtk => {
                 // GTK accent - use @accent_color references
-                // These will be overridden in css_vars_block() to reference GTK colors
                 self.accent_subtle =
                     "color-mix(in srgb, @accent_color 20%, transparent)".to_string();
                 self.accent_text = accent_text_color;
@@ -752,26 +778,44 @@ impl ThemePalette {
                 self.accent_hover_bg = "color-mix(in srgb, @accent_color 80%, black)".to_string();
             }
             AccentSource::None => {
-                // Monochrome mode - adapt to dark/light theme
-                if self.is_dark_mode {
+                // Monochrome mode - adapt to theme
+                if self.is_gtk_mode {
+                    self.accent_subtle = gtk_fg_mix(8.0);
+                    self.accent_text = self.foreground_primary.clone();
+                    self.accent_hover_bg = format!(
+                        "color-mix(in srgb, {} 90%, @window_fg_color)",
+                        self.accent_primary
+                    );
+                } else if self.is_dark_mode {
                     self.accent_subtle = "rgba(255, 255, 255, 0.08)".to_string();
                     self.accent_text = self.foreground_primary.clone();
+                    self.accent_hover_bg =
+                        format!("color-mix(in srgb, {} 90%, white)", self.accent_primary);
                 } else {
                     self.accent_subtle = "rgba(0, 0, 0, 0.06)".to_string();
                     self.accent_text = self.foreground_primary.clone();
+                    self.accent_hover_bg =
+                        format!("color-mix(in srgb, {} 80%, black)", self.accent_primary);
                 }
-                // Monochrome accent follows theme direction (same as --widget-hover-tint)
-                let tint = if self.is_dark_mode { "white" } else { "black" };
-                let ratio = if self.is_dark_mode { 90 } else { 80 };
-                self.accent_hover_bg = format!(
-                    "color-mix(in srgb, {} {}%, {})",
-                    self.accent_primary, ratio, tint
-                );
             }
         }
     }
 
     fn compute_overlays(&mut self) {
+        if self.is_gtk_mode {
+            // GTK mode: use the theme's foreground color for overlays so they
+            // adapt to both light and dark themes.  We use OVERLAY_OPACITY_DARK
+            // percentages as the base (same as the dark-mode default that was
+            // previously hardcoded for GTK mode).
+            let base = OVERLAY_OPACITY_DARK * 100.0;
+            self.card_overlay = gtk_fg_mix(base);
+            self.card_overlay_hover = gtk_fg_mix(base * HOVER_MULTIPLIER);
+            self.card_overlay_subtle = gtk_fg_mix(base * SUBTLE_MULTIPLIER);
+            self.card_overlay_strong = gtk_fg_mix(base * ACTIVE_MULTIPLIER);
+            self.click_catcher_overlay = rgba_str(128, 128, 128, CLICK_CATCHER_OPACITY);
+            return;
+        }
+
         let ((r, g, b), base_opacity) = if self.is_dark_mode {
             ((255u8, 255u8, 255u8), OVERLAY_OPACITY_DARK)
         } else {
@@ -786,27 +830,39 @@ impl ThemePalette {
     }
 
     fn compute_borders_and_shadows(&mut self) {
+        // In GTK mode, derive border color from the theme's foreground.
+        // Shadows always use black (shadows are naturally dark regardless of theme).
         if !self.shadows_enabled {
-            let border_opacity = if self.is_dark_mode {
-                BORDER_OPACITY_DARK
+            if self.is_gtk_mode {
+                self.border_subtle = gtk_fg_mix(BORDER_OPACITY_GTK * 100.0);
             } else {
-                BORDER_OPACITY_LIGHT
-            };
-            self.border_subtle = if self.is_dark_mode {
-                format!("rgba(255, 255, 255, {:.2})", border_opacity)
-            } else {
-                format!("rgba(0, 0, 0, {:.2})", border_opacity)
-            };
+                let border_opacity = if self.is_dark_mode {
+                    BORDER_OPACITY_DARK
+                } else {
+                    BORDER_OPACITY_LIGHT
+                };
+                self.border_subtle = if self.is_dark_mode {
+                    format!("rgba(255, 255, 255, {:.2})", border_opacity)
+                } else {
+                    format!("rgba(0, 0, 0, {:.2})", border_opacity)
+                };
+            }
             self.shadow_soft = "none".to_string();
             self.shadow_strong = "none".to_string();
             return;
         }
 
-        let shadow_opacity = if self.is_dark_mode {
+        if self.is_gtk_mode {
+            self.border_subtle = gtk_fg_mix(BORDER_OPACITY_GTK * 100.0);
+        } else if self.is_dark_mode {
             self.border_subtle = format!("rgba(255, 255, 255, {:.2})", BORDER_OPACITY_DARK);
-            SHADOW_OPACITY_DARK
         } else {
             self.border_subtle = format!("rgba(0, 0, 0, {:.2})", BORDER_OPACITY_LIGHT);
+        }
+
+        let shadow_opacity = if self.is_dark_mode {
+            SHADOW_OPACITY_DARK
+        } else {
             SHADOW_OPACITY_LIGHT
         };
 
@@ -835,7 +891,10 @@ impl ThemePalette {
     }
 
     fn compute_slider_tracks(&mut self) {
-        if self.is_dark_mode {
+        if self.is_gtk_mode {
+            self.slider_track = gtk_fg_mix(TRACK_OPACITY_DARK * 100.0);
+            self.slider_track_disabled = gtk_fg_mix(TRACK_OPACITY_DARK * 0.6 * 100.0);
+        } else if self.is_dark_mode {
             self.slider_track = format!("rgba(255, 255, 255, {:.2})", TRACK_OPACITY_DARK);
             self.slider_track_disabled =
                 format!("rgba(255, 255, 255, {:.2})", TRACK_OPACITY_DARK * 0.6);
@@ -846,6 +905,21 @@ impl ThemePalette {
     }
 
     fn compute_critical_backgrounds(&mut self) {
+        if self.is_gtk_mode {
+            // GTK mode: blend via CSS color-mix since we can't parse GTK named
+            // colors at build time.
+            self.row_critical_background = format!(
+                "color-mix(in srgb, {} 18%, @view_bg_color)",
+                self.state_urgent
+            );
+            self.toast_critical_background = format!(
+                "color-mix(in srgb, {} {:.0}%, @window_bg_color)",
+                self.state_urgent,
+                TOAST_CRITICAL_URGENT_WEIGHT * 100.0
+            );
+            return;
+        }
+
         // Row critical: 18% urgent blended over widget background
         self.row_critical_background =
             match blend_colors(&self.state_urgent, &self.widget_background, 0.18) {
@@ -1163,6 +1237,20 @@ mod tests {
         let palette = ThemePalette::from_config(&config);
 
         assert_eq!(palette.accent_source, AccentSource::Gtk);
+        // Verify derived values for GTK accent in GTK mode
+        assert_eq!(palette.accent_primary, "@accent_color");
+        assert_eq!(
+            palette.accent_subtle,
+            "color-mix(in srgb, @accent_color 20%, transparent)"
+        );
+        assert_eq!(
+            palette.accent_hover_bg,
+            "color-mix(in srgb, @accent_color 80%, black)"
+        );
+        assert_eq!(
+            palette.accent_text, "@window_fg_color",
+            "accent_text should use GTK theme foreground in GTK mode"
+        );
     }
 
     #[test]
@@ -1219,8 +1307,201 @@ mod tests {
         let palette = ThemePalette::from_config(&config);
 
         assert!(palette.is_gtk_mode);
-        // Should default to dark for overlay calculations
+        // is_dark_mode remains true as a fallback for shadow opacity etc.
         assert!(palette.is_dark_mode);
+    }
+
+    #[test]
+    fn test_gtk_mode_foreground_uses_theme_color() {
+        let mut config = Config::default();
+        config.theme.mode = "gtk".to_string();
+
+        let palette = ThemePalette::from_config(&config);
+
+        assert_eq!(palette.foreground_primary, "@window_fg_color");
+        // Verify exact computed value to catch arithmetic bugs
+        assert_eq!(
+            palette.foreground_muted,
+            "color-mix(in srgb, @window_fg_color 60.0%, transparent)"
+        );
+        assert!(
+            palette.foreground_disabled.contains("@window_fg_color"),
+            "disabled should reference @window_fg_color, got: {}",
+            palette.foreground_disabled
+        );
+        assert!(
+            palette.foreground_faint.contains("@window_fg_color"),
+            "faint should reference @window_fg_color, got: {}",
+            palette.foreground_faint
+        );
+    }
+
+    #[test]
+    fn test_gtk_mode_css_vars_contain_theme_colors() {
+        let mut config = Config::default();
+        config.theme.mode = "gtk".to_string();
+
+        let palette = ThemePalette::from_config(&config);
+        let css = palette.css_vars_block();
+
+        // Foreground should reference GTK theme color
+        assert!(
+            css.contains("--color-foreground-primary: @window_fg_color"),
+            "CSS should contain @window_fg_color for foreground-primary"
+        );
+        // Hover tint should reference GTK theme color
+        assert!(
+            css.contains("--widget-hover-tint: @window_fg_color"),
+            "CSS should contain @window_fg_color for widget-hover-tint"
+        );
+        // Accent text should reference GTK theme color
+        assert!(
+            css.contains("--color-accent-text: @window_fg_color"),
+            "CSS should contain @window_fg_color for accent-text"
+        );
+    }
+
+    #[test]
+    fn test_gtk_mode_derived_colors_use_theme_references() {
+        // Verify that borders, sliders, overlays, and critical backgrounds all
+        // reference GTK named colors instead of hardcoded rgba values.
+        let mut config = Config::default();
+        config.theme.mode = "gtk".to_string();
+
+        let palette = ThemePalette::from_config(&config);
+
+        // Borders
+        assert!(
+            palette.border_subtle.contains("@window_fg_color"),
+            "border_subtle should reference @window_fg_color, got: {}",
+            palette.border_subtle
+        );
+
+        // Slider tracks
+        assert!(
+            palette.slider_track.contains("@window_fg_color"),
+            "slider_track should reference @window_fg_color, got: {}",
+            palette.slider_track
+        );
+        assert!(
+            palette.slider_track_disabled.contains("@window_fg_color"),
+            "slider_track_disabled should reference @window_fg_color, got: {}",
+            palette.slider_track_disabled
+        );
+
+        // Overlay variants
+        for (name, value) in [
+            ("card_overlay", &palette.card_overlay),
+            ("card_overlay_hover", &palette.card_overlay_hover),
+            ("card_overlay_subtle", &palette.card_overlay_subtle),
+            ("card_overlay_strong", &palette.card_overlay_strong),
+        ] {
+            assert!(
+                value.contains("@window_fg_color"),
+                "{} should reference @window_fg_color, got: {}",
+                name,
+                value
+            );
+        }
+        // click_catcher_overlay is neutral gray, not theme-dependent
+        assert!(
+            palette.click_catcher_overlay.contains("rgba(128, 128, 128"),
+            "click_catcher_overlay should remain neutral gray"
+        );
+
+        // Critical backgrounds
+        assert!(
+            palette.row_critical_background.contains("@view_bg_color"),
+            "row_critical_background should reference @view_bg_color, got: {}",
+            palette.row_critical_background
+        );
+        assert!(
+            palette
+                .toast_critical_background
+                .contains("@window_bg_color"),
+            "toast_critical_background should reference @window_bg_color, got: {}",
+            palette.toast_critical_background
+        );
+    }
+
+    #[test]
+    fn test_gtk_mode_accent_none_uses_theme_color() {
+        // GTK mode + monochrome accent should use @window_fg_color
+        let mut config = Config::default();
+        config.theme.mode = "gtk".to_string();
+        config.theme.accent = Some("none".to_string());
+
+        let palette = ThemePalette::from_config(&config);
+
+        assert_eq!(palette.accent_source, AccentSource::None);
+        assert!(
+            palette.accent_primary.contains("@window_fg_color"),
+            "monochrome accent in GTK mode should use @window_fg_color, got: {}",
+            palette.accent_primary
+        );
+        assert!(
+            palette.accent_subtle.contains("@window_fg_color"),
+            "monochrome accent_subtle in GTK mode should use @window_fg_color, got: {}",
+            palette.accent_subtle
+        );
+    }
+
+    #[test]
+    fn test_non_gtk_modes_unchanged() {
+        // Verify that dark/light modes still use hardcoded colors (no regression)
+        let mut dark_config = Config::default();
+        dark_config.theme.mode = "dark".to_string();
+        let dark = ThemePalette::from_config(&dark_config);
+        assert_eq!(dark.foreground_primary, "#ffffff");
+        assert!(!dark.foreground_muted.contains("@window_fg_color"));
+
+        let mut light_config = Config::default();
+        light_config.theme.mode = "light".to_string();
+        let light = ThemePalette::from_config(&light_config);
+        assert_eq!(light.foreground_primary, "#1a1a1a");
+        assert!(!light.foreground_muted.contains("@window_fg_color"));
+    }
+
+    #[test]
+    fn test_gtk_mode_shadows_disabled() {
+        // GTK mode with shadows disabled should still use @window_fg_color
+        // for borders, and set shadows to "none"
+        let mut config = Config::default();
+        config.theme.mode = "gtk".to_string();
+        config.theme.shadows = false;
+
+        let palette = ThemePalette::from_config(&config);
+
+        assert!(
+            palette.border_subtle.contains("@window_fg_color"),
+            "border_subtle should reference @window_fg_color when shadows disabled, got: {}",
+            palette.border_subtle
+        );
+        assert_eq!(palette.shadow_soft, "none");
+        assert_eq!(palette.shadow_strong, "none");
+    }
+
+    #[test]
+    fn test_gtk_mode_custom_accent() {
+        // GTK mode + custom accent: accent uses hex color, but accent_text
+        // should still use @window_fg_color (adapts to theme)
+        let mut config = Config::default();
+        config.theme.mode = "gtk".to_string();
+        config.theme.accent = Some("#ff0000".to_string());
+
+        let palette = ThemePalette::from_config(&config);
+
+        assert_eq!(
+            palette.accent_source,
+            AccentSource::Custom("#ff0000".to_string())
+        );
+        assert_eq!(palette.accent_primary, "#ff0000");
+        assert_eq!(
+            palette.accent_text, "@window_fg_color",
+            "accent_text should use GTK theme color in GTK mode"
+        );
+        // Foreground should still be GTK-aware
+        assert_eq!(palette.foreground_primary, "@window_fg_color");
     }
 
     #[test]
