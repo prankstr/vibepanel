@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.0](https://github.com/prankstr/vibepanel/compare/v0.12.1...v0.13.0) (2026-04-01)
+
+
+### Features
+
+* **bar/widgets:** toggle bar and popover with the cli ([#87](https://github.com/prankstr/vibepanel/issues/87)) ([2c35adb](https://github.com/prankstr/vibepanel/commit/2c35adba8e84abbc0f2fbd10e6d416ef05164f06))
+* **custom:** add image field to load images from file ([e53cd82](https://github.com/prankstr/vibepanel/commit/e53cd82aecf799cff9157621701a5a2e80c03a82))
+* **media:** add override setting for art radius ([#85](https://github.com/prankstr/vibepanel/issues/85)) ([ddb84ea](https://github.com/prankstr/vibepanel/commit/ddb84eaacfb770717dc1ede851590bc2c35ad535))
+* **widget:** release first version of gpu widget for amd and nvidia([#77](https://github.com/prankstr/vibepanel/issues/77)) ([c189ab2](https://github.com/prankstr/vibepanel/commit/c189ab2c6d8e81114fc7d6783e5f3324910f84b9))
+* **widgets:** add override setting for popover opacity ([16f2ba7](https://github.com/prankstr/vibepanel/commit/16f2ba79e8c288b5616f7fb9a42338089763ec65))
+* **widgets:** add standalone bar widget to show network_speed ([#79](https://github.com/prankstr/vibepanel/issues/79)) ([b5b7b06](https://github.com/prankstr/vibepanel/commit/b5b7b067df05a97cbeddaa2f4b8b10990fffb63e))
+* **widgets:** keyboard layout widget with layout cycling on click ([#91](https://github.com/prankstr/vibepanel/issues/91)) ([e48f6e2](https://github.com/prankstr/vibepanel/commit/e48f6e294d2dc28448b8a13118c6328ff36eee8f))
+* **widgets:** merge button for groups with widgets that share popover ([#86](https://github.com/prankstr/vibepanel/issues/86)) ([1572899](https://github.com/prankstr/vibepanel/commit/15728997fb9ec475e7a5adf169aee175d56dec44))
+
+
+### Bug Fixes
+
+* **css:** move user-facing classes to styled surfaces ([#95](https://github.com/prankstr/vibepanel/issues/95)) ([3a59b06](https://github.com/prankstr/vibepanel/commit/3a59b06fc93357d9586d8d0323637d95c10d87f3))
+* **media:** max_chars 0 now takes up unlimited space ([48a05e6](https://github.com/prankstr/vibepanel/commit/48a05e678d5344d0a56d7e628b3d6ef47a512dc7)), closes [#81](https://github.com/prankstr/vibepanel/issues/81)
+* **media:** remove dead popover padding override and adjust popout icon ([c9495e6](https://github.com/prankstr/vibepanel/commit/c9495e61ee42c69bfb12b15c59aed9d939c2a873))
+* **niri:** open popover on correct screen when using cli ([622316d](https://github.com/prankstr/vibepanel/commit/622316d97cfe61a45ad61afc6f95d360ace37a91))
+* **quick_settings:** prevent password field from disappearing mid input ([70d5cc6](https://github.com/prankstr/vibepanel/commit/70d5cc6f6fafa4093827c7e6bef240eed8450d15))
+* rework popover animations and lifecycle to avoid gtk memory leak  ([#84](https://github.com/prankstr/vibepanel/issues/84)) ([e57fe57](https://github.com/prankstr/vibepanel/commit/e57fe57accca964c834d623773197215046deca9))
+* **system:** align cpu usage bars ([b85a062](https://github.com/prankstr/vibepanel/commit/b85a0625d444fc08ff3ed0aa4be76cb871138cf4))
+* **theme:** disable hyprlands on animations as they interfere with ours ([#89](https://github.com/prankstr/vibepanel/issues/89)) ([b85a062](https://github.com/prankstr/vibepanel/commit/b85a0625d444fc08ff3ed0aa4be76cb871138cf4))
+* **theme:** disable revealer animation when theme.animations is disabled ([#75](https://github.com/prankstr/vibepanel/issues/75)) ([3636c3e](https://github.com/prankstr/vibepanel/commit/3636c3e10556e100a4a045763939199fe36ac530))
+* **theme:** use GTK theme colors for fonts in gtk mode ([#94](https://github.com/prankstr/vibepanel/issues/94)) ([c411790](https://github.com/prankstr/vibepanel/commit/c411790f07757093247abd112320c41d696bb9b5))
+* **tray:** properly show icons that use absolute file path ([ce13f36](https://github.com/prankstr/vibepanel/commit/ce13f36e30462d6bdd785a1d79db92d906275518))
+* **widgets:** click targets for bar widget ignore border radius ([a62f479](https://github.com/prankstr/vibepanel/commit/a62f479d9550e2d0d40daff573bcc6f3bdc8ea87))
+* **widgets:** focus ring uses correct accent color in every theme mode ([0c8762a](https://github.com/prankstr/vibepanel/commit/0c8762acf85eead8df8d43dc36494ee40368540a))
+* **widgets:** rename quick setting layer shell namespace for consistency ([660649d](https://github.com/prankstr/vibepanel/commit/660649d231e2fd4886b83629c08431702d43a512))
+
 ## [0.12.1](https://github.com/prankstr/vibepanel/compare/v0.12.0...v0.12.1) (2026-03-15)
 
 
