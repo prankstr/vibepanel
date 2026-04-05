@@ -41,6 +41,7 @@ mod rounded_picture;
 pub(crate) mod scale_box;
 mod spacer;
 mod system_popover;
+mod taskbar;
 mod tray;
 mod updates;
 mod updates_common;
@@ -61,6 +62,7 @@ pub use osd::OsdOverlay;
 pub use quick_settings::QuickSettingsWindowHandle;
 pub use quick_settings::{QuickSettingsConfig, QuickSettingsWidget};
 pub use spacer::{SpacerConfig, SpacerWidget};
+pub use taskbar::{TaskbarConfig, TaskbarWidget};
 pub use tray::{TrayConfig, TrayWidget};
 pub use updates::{UpdatesConfig, UpdatesWidget};
 pub use window_title::{WindowTitleConfig, WindowTitleWidget};
@@ -230,6 +232,15 @@ impl WidgetFactory {
                 Some(BuiltWidget {
                     widget: root,
                     handle: Box::new(window_title),
+                })
+            }
+            "taskbar" => {
+                let cfg = TaskbarConfig::from_entry(entry);
+                let taskbar = TaskbarWidget::new(cfg, output_id.map(|s| s.to_string()));
+                let root = taskbar.widget().clone().upcast::<Widget>();
+                Some(BuiltWidget {
+                    widget: root,
+                    handle: Box::new(taskbar),
                 })
             }
             "tray" => {

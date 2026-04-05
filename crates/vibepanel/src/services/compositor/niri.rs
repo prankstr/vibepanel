@@ -73,6 +73,7 @@ pub struct NiriBackend {
     shared: Arc<SharedState>,
     callbacks: Mutex<Option<(WorkspaceCallback, WindowCallback)>>,
     keyboard_layout_callback: Mutex<Option<KeyboardLayoutCallback>>,
+    window_list_callback: Mutex<Option<super::WindowListCallback>>,
 }
 
 #[derive(Debug, Clone)]
@@ -94,6 +95,7 @@ impl NiriBackend {
             shared: Arc::new(SharedState::default()),
             callbacks: Mutex::new(None),
             keyboard_layout_callback: Mutex::new(None),
+            window_list_callback: Mutex::new(None),
         }
     }
 
@@ -140,6 +142,29 @@ impl NiriBackend {
                 None
             }
         }
+    }
+
+    fn get_windows_from_shared(shared: &Arc<SharedState>) -> Vec<super::Window> {
+        let windows = shared.windows.read();
+        let id_to_output = shared.id_to_output.read();
+
+        windows
+            .values()
+            .map(|win| {
+                let output = win
+                    .workspace_id
+                    .and_then(|ws_id| id_to_output.get(&ws_id).cloned());
+
+                super::Window {
+                    id: win.id,
+                    title: win.title.clone(),
+                    app_id: win.app_id.clone(),
+                    workspace_id: win.workspace_id.map(|id| id as i32),
+                    output,
+                    is_focused: win.is_focused,
+                }
+            })
+            .collect()
     }
 
     /// Process workspace list and update internal state.
@@ -721,6 +746,7 @@ impl NiriBackend {
         socket_path: String,
         callbacks: Option<(WorkspaceCallback, WindowCallback)>,
         kb_callback: Option<KeyboardLayoutCallback>,
+        window_list_callback: Option<super::WindowListCallback>,
     ) {
         // Fetch initial state
         Self::fetch_initial_state(&socket_path, &shared);
@@ -836,6 +862,11 @@ impl NiriBackend {
                                 {
                                     kb_cb(info.clone());
                                 }
+
+                                if win_changed && let Some(ref wl_cb) = window_list_callback {
+                                    let windows = Self::get_windows_from_shared(&shared);
+                                    wl_cb(super::WindowListSnapshot { windows });
+                                }
                             }
                             Err(e) => {
                                 trace!("Failed to parse Niri event: {}", e);
@@ -895,12 +926,24 @@ impl CompositorBackend for NiriBackend {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
+        let window_list_callback = self
+            .window_list_callback
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
 
         // Start event loop thread
         let handle = thread::Builder::new()
             .name("niri-event-loop".into())
             .spawn(move || {
-                Self::event_loop(running, shared, socket_path, callbacks, kb_callback);
+                Self::event_loop(
+                    running,
+                    shared,
+                    socket_path,
+                    callbacks,
+                    kb_callback,
+                    window_list_callback,
+                );
             })
             .ok();
 
@@ -999,6 +1042,13 @@ impl CompositorBackend for NiriBackend {
             .unwrap_or_else(|e| e.into_inner()) = Some(callback);
     }
 
+    fn set_window_list_callback(&self, callback: super::WindowListCallback) {
+        *self
+            .window_list_callback
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(callback);
+    }
+
     fn get_keyboard_layout(&self) -> Option<KeyboardLayoutInfo> {
         self.shared.keyboard_layout.read().clone()
     }
@@ -1008,6 +1058,21 @@ impl CompositorBackend for NiriBackend {
             "Action": {
                 "SwitchLayout": {
                     "layout": "Next"
+                }
+            }
+        });
+        let _ = self.send_request(&request);
+    }
+
+    fn list_windows(&self) -> Vec<super::Window> {
+        Self::get_windows_from_shared(&self.shared)
+    }
+
+    fn focus_window(&self, window_id: u64) {
+        let request = serde_json::json!({
+            "Action": {
+                "FocusWindow": {
+                    "id": window_id
                 }
             }
         });

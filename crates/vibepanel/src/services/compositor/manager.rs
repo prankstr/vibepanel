@@ -49,9 +49,11 @@ pub struct CompositorManager {
     workspace_callbacks: Callbacks<WorkspaceSnapshot>,
     window_callbacks: Callbacks<WindowInfo>,
     keyboard_layout_callbacks: Callbacks<KeyboardLayoutInfo>,
+    window_list_callbacks: Callbacks<super::WindowListSnapshot>,
     last_workspace_snapshot: RefCell<Option<WorkspaceSnapshot>>,
     last_window_info: RefCell<Option<WindowInfo>>,
     last_keyboard_layout: RefCell<Option<KeyboardLayoutInfo>>,
+    last_window_list: RefCell<Option<super::WindowListSnapshot>>,
     started: RefCell<bool>,
 }
 
@@ -62,9 +64,11 @@ impl CompositorManager {
             workspace_callbacks: Callbacks::new(),
             window_callbacks: Callbacks::new(),
             keyboard_layout_callbacks: Callbacks::new(),
+            window_list_callbacks: Callbacks::new(),
             last_workspace_snapshot: RefCell::new(None),
             last_window_info: RefCell::new(None),
             last_keyboard_layout: RefCell::new(None),
+            last_window_list: RefCell::new(None),
             started: RefCell::new(false),
         });
 
@@ -209,10 +213,49 @@ impl CompositorManager {
         self.keyboard_layout_callbacks.unregister(id)
     }
 
+    /// Register a callback for window list changes.
+    ///
+    /// The callback will be immediately invoked with the current state if available.
+    /// Returns a `CallbackId` that can be used to unregister the callback.
+    pub fn register_window_list_callback<F>(&self, callback: F) -> CallbackId
+    where
+        F: Fn(&super::WindowListSnapshot) + 'static,
+    {
+        let id = self.window_list_callbacks.register(callback);
+
+        // Immediately send current state if available
+        if let Some(ref snapshot) = *self.last_window_list.borrow() {
+            self.window_list_callbacks.notify_single(id, snapshot);
+        }
+
+        id
+    }
+
+    /// Unregister a window list callback by its ID.
+    pub fn unregister_window_list_callback(&self, id: CallbackId) -> bool {
+        self.window_list_callbacks.unregister(id)
+    }
+
     /// Switch to the next keyboard layout.
     pub fn switch_keyboard_layout_next(&self) {
         if let Some(ref backend) = *self.backend.borrow() {
             backend.switch_keyboard_layout_next();
+        }
+    }
+
+    /// Get the list of all windows.
+    pub fn list_windows(&self) -> Vec<super::Window> {
+        if let Some(ref backend) = *self.backend.borrow() {
+            backend.list_windows()
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Focus a specific window by its ID.
+    pub fn focus_window(&self, window_id: u64) {
+        if let Some(ref backend) = *self.backend.borrow() {
+            backend.focus_window(window_id);
         }
     }
 
@@ -253,6 +296,16 @@ impl CompositorManager {
 
         // Dispatch to all registered callbacks
         self.keyboard_layout_callbacks.notify(&info);
+    }
+
+    /// Handle a window list update from the backend.
+    /// Called via glib::idle_add_once from the backend thread.
+    pub(crate) fn handle_window_list_update(&self, snapshot: super::WindowListSnapshot) {
+        // Store for new listeners
+        *self.last_window_list.borrow_mut() = Some(snapshot.clone());
+
+        // Dispatch to all registered callbacks
+        self.window_list_callbacks.notify(&snapshot);
     }
 
     /// Initialize the backend.
@@ -316,9 +369,19 @@ impl CompositorManager {
                 });
             });
 
-        // Register keyboard layout callback before start() so the backend
-        // can fire it during initialization if it discovers the current layout.
+        // Window list events: no coalescing needed — window changes are
+        // relatively infrequent and each event should update the UI.
+        let on_window_list_update: super::WindowListCallback =
+            Arc::new(move |window_list_snapshot| {
+                glib::idle_add_once(move || {
+                    CompositorManager::global().handle_window_list_update(window_list_snapshot);
+                });
+            });
+
+        // Register callbacks before start() so the backend
+        // can fire them during initialization.
         backend.set_keyboard_layout_callback(on_keyboard_layout_update);
+        backend.set_window_list_callback(on_window_list_update);
 
         // Start the backend first (which fetches initial state internally)
         backend.start(on_workspace_update, on_window_update);

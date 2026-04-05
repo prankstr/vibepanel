@@ -128,6 +128,36 @@ pub type WindowCallback = Arc<dyn Fn(WindowInfo) + Send + Sync>;
 /// Callback type for keyboard layout updates.
 pub type KeyboardLayoutCallback = Arc<dyn Fn(KeyboardLayoutInfo) + Send + Sync>;
 
+/// Information about a window in the window list.
+///
+/// Used by the taskbar to display all windows, not just the focused one.
+#[derive(Debug, Clone, Default)]
+pub struct Window {
+    /// Window ID (compositor-specific).
+    pub id: u64,
+    /// Window title (may be empty).
+    pub title: String,
+    /// Application ID (e.g., "firefox", "org.gnome.Nautilus").
+    pub app_id: String,
+    /// Workspace ID the window is on.
+    #[allow(dead_code)]
+    pub workspace_id: Option<i32>,
+    /// Output/monitor name the window is on.
+    pub output: Option<String>,
+    /// Whether this window is currently focused.
+    pub is_focused: bool,
+}
+
+/// Snapshot of all windows for the taskbar.
+#[derive(Debug, Clone, Default)]
+pub struct WindowListSnapshot {
+    /// List of all windows.
+    pub windows: Vec<Window>,
+}
+
+/// Callback type for window list updates.
+pub type WindowListCallback = Arc<dyn Fn(WindowListSnapshot) + Send + Sync>;
+
 /// Trait for compositor backend implementations.
 ///
 /// Each backend is responsible for:
@@ -218,6 +248,27 @@ pub trait CompositorBackend: Send + Sync {
     ///
     /// Default no-op for backends without keyboard layout support.
     fn switch_keyboard_layout_next(&self) {
+        // Default no-op
+    }
+
+    /// Get the list of all windows.
+    ///
+    /// Returns a snapshot of all windows currently open across all workspaces.
+    fn list_windows(&self) -> Vec<Window> {
+        Vec::new()
+    }
+
+    /// Register a callback for window list changes.
+    ///
+    /// Default no-op for backends without window list support.
+    fn set_window_list_callback(&self, _callback: WindowListCallback) {
+        // Default no-op
+    }
+
+    /// Focus a specific window by its ID.
+    ///
+    /// Requests the compositor to focus the specified window.
+    fn focus_window(&self, _window_id: u64) {
         // Default no-op
     }
 }
