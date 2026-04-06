@@ -710,7 +710,7 @@ fn per_widget_styles_changed(old: &Config, new: &Config) -> bool {
 /// Check if theme-related config has changed.
 fn config_theme_changed(old: &Config, new: &Config) -> bool {
     old.theme.mode != new.theme.mode
-        || old.theme.light != new.theme.light
+        || old.theme.scheme != new.theme.scheme
         || old.theme.wallpaper != new.theme.wallpaper
         || old.theme.accent != new.theme.accent
         || old.theme.animations != new.theme.animations

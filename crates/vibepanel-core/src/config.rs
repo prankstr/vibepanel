@@ -21,6 +21,9 @@ const VALID_COMPOSITORS: &[&str] = &[
 /// Known valid values for theme.mode.
 const VALID_THEME_MODES: &[&str] = &["auto", "dark", "light", "gtk"];
 
+/// Known valid values for theme.scheme.
+const VALID_THEME_SCHEMES: &[&str] = &["dark", "light"];
+
 /// Known valid values for bar.position.
 const VALID_BAR_POSITIONS: &[&str] = &["top", "bottom"];
 
@@ -224,6 +227,15 @@ impl Config {
             ));
         }
 
+        // Validate theme.scheme
+        if !VALID_THEME_SCHEMES.contains(&self.theme.scheme.as_str()) {
+            errors.push(format!(
+                "theme.scheme: invalid value '{}', expected one of: {}",
+                self.theme.scheme,
+                VALID_THEME_SCHEMES.join(", ")
+            ));
+        }
+
         // Validate theme.accent: must be "gtk", "none", or a valid hex color (if specified)
         // Note: accent is ignored when mode = "auto" (colors derived from wallpaper)
         if let Some(ref accent) = self.theme.accent
@@ -334,8 +346,8 @@ impl Config {
 
         // Warn about auto-mode-only fields set when mode != "auto"
         if self.theme.mode != "auto" {
-            if self.theme.light {
-                warnings.push("theme.light: has no effect when mode is not \"auto\"".to_string());
+            if self.theme.scheme != "dark" {
+                warnings.push("theme.scheme: has no effect when mode is not \"auto\"".to_string());
             }
             if self.theme.wallpaper.is_some() {
                 warnings
@@ -1016,10 +1028,10 @@ pub struct ThemeConfig {
     /// - "gtk": derive colors from GTK theme where possible
     pub mode: String,
 
-    /// Use the light Material You color scheme in auto mode.
+    /// Material You color scheme polarity: "dark" or "light".
     ///
-    /// Only meaningful when `mode = "auto"`. Default is false (dark scheme).
-    pub light: bool,
+    /// Only meaningful when `mode = "auto"`. Default is "dark".
+    pub scheme: String,
 
     /// Explicit wallpaper image path for auto mode.
     ///
@@ -1073,7 +1085,7 @@ impl Default for ThemeConfig {
         Self {
             // "auto" here; the shipped config.toml overrides to "dark" via deep-merge
             mode: "auto".to_string(),
-            light: false,
+            scheme: "dark".to_string(),
             wallpaper: None,
             accent: None,
             animations: true,

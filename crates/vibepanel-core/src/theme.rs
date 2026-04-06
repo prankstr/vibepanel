@@ -690,22 +690,22 @@ impl ThemePalette {
         // since it sets backgrounds, foregrounds, accent, and state colors directly.
         if config.theme.mode == "auto" {
             if let Some(theme) = material_theme {
-                // Pick light or dark scheme based on the `light` config field
-                let scheme = if config.theme.light {
+                let is_light = config.theme.scheme == "light";
+                let scheme = if is_light {
                     &theme.schemes.light
                 } else {
                     &theme.schemes.dark
                 };
-                self.is_dark_mode = !config.theme.light;
+                self.is_dark_mode = !is_light;
                 self.is_wallpaper_mode = true;
 
                 // Set defaults before apply_wallpaper_theme (which may override backgrounds)
-                self.bar_background = if config.theme.light {
+                self.bar_background = if is_light {
                     DEFAULT_BAR_BG_LIGHT.to_string()
                 } else {
                     DEFAULT_BAR_BG_DARK.to_string()
                 };
-                self.widget_background = if config.theme.light {
+                self.widget_background = if is_light {
                     DEFAULT_WIDGET_BG_LIGHT.to_string()
                 } else {
                     DEFAULT_WIDGET_BG_DARK.to_string()
