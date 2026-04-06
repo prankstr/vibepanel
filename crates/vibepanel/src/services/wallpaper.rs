@@ -93,13 +93,15 @@ fn detect_awww_wallpaper(monitor: Option<&str>) -> Option<String> {
     // Try to match the target monitor first
     if let Some(target) = monitor {
         for line in stdout.lines() {
-            // Output name is after the first `: ` and before the resolution
-            let after_ns = line.split_once(": ").map(|(_, rest)| rest)?;
-            let (output_name, _) = after_ns.split_once(':')?;
-            if output_name.trim() != target {
+            let Some(after_ns) = line.split_once(": ").map(|(_, rest)| rest) else {
                 continue;
+            };
+            let Some((output_name, _)) = after_ns.split_once(':') else {
+                continue;
+            };
+            if output_name.trim() == target {
+                return extract_awww_image_path(line);
             }
-            return extract_awww_image_path(line);
         }
     }
 
@@ -279,7 +281,7 @@ pub fn extract_theme_from_image(path: &str) -> Option<material_colors::theme::Th
         .inspect_err(|e| warn!("Failed to decode wallpaper image '{}': {}", path, e))
         .ok()?;
 
-    let resized = img.resize(128, 128, image::imageops::FilterType::Lanczos3);
+    let resized = img.resize(128, 128, image::imageops::FilterType::Triangle);
     let rgba = resized.to_rgba8();
 
     let pixels: Vec<Argb> = rgba

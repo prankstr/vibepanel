@@ -637,11 +637,7 @@ impl ConfigManager {
         self.poll_in_progress.set(true);
 
         let old_path = self.wallpaper_path.borrow().clone();
-        let config = self.config.borrow().clone();
-        // Snapshot theme fields to detect stale results when the callback fires
-        let config_mode = config.theme.mode.clone();
-        let config_light = config.theme.light;
-        let monitor_hint = config.bar.outputs.first().cloned();
+        let monitor_hint = self.config.borrow().bar.outputs.first().cloned();
 
         std::thread::spawn(move || {
             let new_path = detect_wallpaper(monitor_hint.as_deref());
@@ -658,31 +654,31 @@ impl ConfigManager {
                 old_path, new_path
             );
 
-            // Heavy work: extract theme from new wallpaper + rebuild palette
+            // Heavy work: image I/O + quantization on background thread
             let material_theme = new_path.as_deref().and_then(extract_theme_from_image);
             let source_color = material_theme.as_ref().map(|t| t.source);
-            let palette = ThemePalette::from_config(&config, material_theme.as_ref());
-            let surface_styles = palette.surface_styles();
-            let pango = config.advanced.pango_font_rendering;
 
+            // Palette construction uses live config on the main thread
             glib::idle_add_once(move || {
                 let mgr = ConfigManager::global();
                 mgr.poll_in_progress.set(false);
 
-                // If config changed while we were processing, skip — the config
-                // change already triggered its own theme rebuild.
-                let current = mgr.config.borrow();
-                if current.theme.mode != config_mode || current.theme.light != config_light {
-                    drop(current);
-                    debug!("Config changed during wallpaper poll, skipping stale result");
+                // If we're no longer in auto mode, skip — a config change already
+                // triggered its own theme rebuild.
+                let config = mgr.config.borrow().clone();
+                if config.theme.mode != "auto" {
+                    debug!("No longer in auto mode, skipping wallpaper poll result");
                     return;
                 }
-                drop(current);
 
                 *mgr.wallpaper_path.borrow_mut() = new_path;
                 mgr.cached_source_color.set(source_color);
 
-                SurfaceStyleManager::global().reconfigure(surface_styles.clone(), pango);
+                let palette = ThemePalette::from_config(&config, material_theme.as_ref());
+                let surface_styles = palette.surface_styles();
+
+                SurfaceStyleManager::global()
+                    .reconfigure(surface_styles.clone(), config.advanced.pango_font_rendering);
                 TooltipManager::global().reconfigure(surface_styles);
 
                 *mgr.palette.borrow_mut() = palette;
