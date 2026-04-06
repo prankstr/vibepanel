@@ -355,6 +355,13 @@ impl Config {
             }
         }
 
+        // Warn if explicit wallpaper path doesn't exist
+        if let Some(ref wallpaper) = self.theme.wallpaper
+            && !std::path::Path::new(wallpaper).exists()
+        {
+            warnings.push(format!("theme.wallpaper: file '{}' not found", wallpaper));
+        }
+
         warnings
     }
 

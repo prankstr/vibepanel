@@ -299,3 +299,65 @@ pub fn extract_theme_from_image(path: &str) -> Option<material_colors::theme::Th
             .build(),
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_awww_image_path_standard() {
+        let line =
+            "default: eDP-1: 1920x1080, scale: 1, currently displaying: image: /home/user/wall.png";
+        assert_eq!(
+            extract_awww_image_path(line),
+            Some("/home/user/wall.png".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_awww_image_path_spaces_in_path() {
+        let line = "default: DP-2: 2560x1440, scale: 1, currently displaying: image: /home/user/My Wallpapers/wall.jpg";
+        assert_eq!(
+            extract_awww_image_path(line),
+            Some("/home/user/My Wallpapers/wall.jpg".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_awww_image_path_no_marker() {
+        assert_eq!(extract_awww_image_path("some random line"), None);
+    }
+
+    #[test]
+    fn test_extract_awww_image_path_empty_after_marker() {
+        let line = "default: eDP-1: 1920x1080, scale: 1, currently displaying: image:   ";
+        assert_eq!(extract_awww_image_path(line), None);
+    }
+
+    #[test]
+    fn test_expand_tilde_home_prefix() {
+        assert_eq!(
+            expand_tilde("~/Pictures/wall.png", "/home/user"),
+            "/home/user/Pictures/wall.png"
+        );
+    }
+
+    #[test]
+    fn test_expand_tilde_bare() {
+        assert_eq!(expand_tilde("~", "/home/user"), "/home/user");
+    }
+
+    #[test]
+    fn test_expand_tilde_absolute_unchanged() {
+        assert_eq!(
+            expand_tilde("/usr/share/wall.png", "/home/user"),
+            "/usr/share/wall.png"
+        );
+    }
+
+    #[test]
+    fn test_expand_tilde_no_slash_unchanged() {
+        // "~foo" is not expanded (only "~/" and bare "~")
+        assert_eq!(expand_tilde("~foo", "/home/user"), "~foo");
+    }
+}

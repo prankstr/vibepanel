@@ -550,7 +550,8 @@ impl ConfigManager {
             debug!("Theme styles updated");
         }
 
-        // Store the new config BEFORE rebuilding/notifying, so widgets see new values
+        // Store the new config AFTER theme/CSS update but BEFORE widget rebuild,
+        // so widgets see the new values when notified
         *self.config.borrow_mut() = new_config.clone();
 
         // Restart or stop wallpaper polling if auto mode or wallpaper config changed
