@@ -63,5 +63,9 @@ parking_lot = "0.12"
 # HTTP
 minreq = { version = "2.14", default-features = false, features = ["https-rustls"] }
 
+# Color extraction
+material-colors = { version = "0.4.2" }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+
 # Internal crates
 vibepanel-core = { path = "crates/vibepanel-core" }

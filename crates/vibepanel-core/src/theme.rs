@@ -3,6 +3,10 @@
 //! `ThemePalette` is the single source of truth for all theme-related values.
 //! It parses config, computes derived values, and generates CSS variables.
 
+use material_colors::color::Argb;
+use material_colors::scheme::Scheme;
+use tracing::warn;
+
 use crate::Config;
 
 // Overlay opacities: base values for card backgrounds.
@@ -160,6 +164,47 @@ pub fn rgba_str(r: u8, g: u8, b: u8, a: f64) -> String {
     format!("rgba({}, {}, {}, {:.2})", r, g, b, a)
 }
 
+/// Format layered shadow CSS values (tight + diffuse) for a given color and opacity.
+///
+/// Returns `(shadow_soft, shadow_strong)` using the shared shadow geometry constants.
+fn format_shadows(r: u8, g: u8, b: u8, shadow_opacity: f64) -> (String, String) {
+    let tight_opacity = shadow_opacity * SHADOW_TIGHT_OPACITY_FACTOR;
+    let diffuse_opacity = shadow_opacity * SHADOW_DIFFUSE_OPACITY_FACTOR;
+
+    let soft = format!(
+        "0 {}px {}px rgba({}, {}, {}, {:.2}), 0 {}px {}px rgba({}, {}, {}, {:.2})",
+        SHADOW_TIGHT_OFFSET_Y,
+        SHADOW_TIGHT_BLUR,
+        r,
+        g,
+        b,
+        tight_opacity,
+        SHADOW_DIFFUSE_OFFSET_Y,
+        SHADOW_DIFFUSE_BLUR_SOFT,
+        r,
+        g,
+        b,
+        diffuse_opacity
+    );
+    let strong = format!(
+        "0 {}px {}px rgba({}, {}, {}, {:.2}), 0 {}px {}px rgba({}, {}, {}, {:.2})",
+        SHADOW_TIGHT_OFFSET_Y,
+        SHADOW_TIGHT_BLUR,
+        r,
+        g,
+        b,
+        tight_opacity,
+        SHADOW_DIFFUSE_OFFSET_Y,
+        SHADOW_DIFFUSE_BLUR_STRONG,
+        r,
+        g,
+        b,
+        diffuse_opacity
+    );
+
+    (soft, strong)
+}
+
 /// Build a `color-mix()` expression that blends `@window_fg_color` at the given
 /// percentage with `transparent`.  Used throughout GTK mode to derive
 /// foreground-based colors that adapt to the active GTK theme at runtime.
@@ -218,13 +263,15 @@ pub struct SurfaceStyles {
 
 /// Single source of truth for all theme values.
 ///
-/// Constructed via `ThemePalette::from_config(&config)`.
+/// Constructed via `ThemePalette::from_config(&config, None)`.
 #[derive(Debug, Clone)]
 pub struct ThemePalette {
     // Mode
     pub is_dark_mode: bool,
     /// Whether mode is "gtk" (derive colors from GTK theme).
     pub is_gtk_mode: bool,
+    /// Whether wallpaper-adaptive theming is active (full Material You scheme).
+    pub is_wallpaper_mode: bool,
 
     // Background colors
     pub bar_background: String,
@@ -299,11 +346,31 @@ pub struct ThemePalette {
     bar_is_bottom: bool,
 }
 
+/// Convert a material-colors `Argb` value to a CSS hex color string.
+fn argb_to_hex(argb: &Argb) -> String {
+    format!("#{:02x}{:02x}{:02x}", argb.red, argb.green, argb.blue)
+}
+
+/// Convert a material-colors `Argb` value to an rgba string at the given opacity.
+fn argb_to_rgba(argb: &Argb, alpha: f64) -> String {
+    format!(
+        "rgba({}, {}, {}, {:.2})",
+        argb.red, argb.green, argb.blue, alpha
+    )
+}
+
 impl ThemePalette {
     /// Create a ThemePalette from configuration.
-    pub fn from_config(config: &Config) -> Self {
+    ///
+    /// When `mode = "auto"`, pass the pre-extracted Material You theme from
+    /// the wallpaper. The caller (app crate) handles wallpaper detection and
+    /// image processing; core stays I/O-free.
+    pub fn from_config(
+        config: &Config,
+        material_theme: Option<&material_colors::theme::Theme>,
+    ) -> Self {
         let mut palette = Self::default();
-        palette.parse_config(config);
+        palette.parse_config(config, material_theme);
         palette.compute_derived_values();
         palette
     }
@@ -602,99 +669,141 @@ impl ThemePalette {
         css
     }
 
-    fn parse_config(&mut self, config: &Config) {
+    fn parse_config(
+        &mut self,
+        config: &Config,
+        material_theme: Option<&material_colors::theme::Theme>,
+    ) {
         // Check if GTK mode is requested
         self.is_gtk_mode = config.theme.mode == "gtk";
 
-        // Determine which default backgrounds to use based on explicit mode
-        // For "gtk" mode, we reference GTK CSS variables instead of hardcoded colors
-        let (default_bar_bg, default_widget_bg) = if self.is_gtk_mode {
-            // Reference GTK theme's colors - these will be resolved by GTK at runtime
-            ("@window_bg_color".to_string(), "@view_bg_color".to_string())
-        } else if config.theme.mode == "light" {
-            (
-                DEFAULT_BAR_BG_LIGHT.to_string(),
-                DEFAULT_WIDGET_BG_LIGHT.to_string(),
-            )
-        } else {
-            (
-                DEFAULT_BAR_BG_DARK.to_string(),
-                DEFAULT_WIDGET_BG_DARK.to_string(),
-            )
-        };
-
-        // Bar background - user can override with explicit color in bar.background_color
-        self.bar_background = config
-            .bar
-            .background_color
-            .clone()
-            .unwrap_or(default_bar_bg);
-
-        // Widget background - user can override with explicit color in widgets.background_color
-        self.widget_background = config
-            .widgets
-            .background_color
-            .clone()
-            .unwrap_or(default_widget_bg);
-
-        // Opacities from bar/widgets config
+        // Common setup — these are the same in every mode
         self.bar_opacity = config.bar.background_opacity;
         self.widget_opacity = config.widgets.background_opacity;
         self.popover_opacity = config.widgets.popover_background_opacity;
-
-        // Shadows config
         self.shadows_enabled = config.theme.shadows;
-
-        // Resolve is_dark_mode
-        // For GTK mode, we assume dark for overlay calculations since we can't query GTK's actual colors at build time
-        self.is_dark_mode = match config.theme.mode.as_str() {
-            "dark" => true,
-            "light" => false,
-            "gtk" => true, // Default to dark for overlays/borders; GTK handles actual background colors
-            _ => is_dark_color(&self.widget_background), // "auto"
-        };
-
-        // Parse accent configuration from the single `theme.accent` field.
-        // Smart default: if mode is "gtk" and accent is not specified, default to "gtk".
-        let accent_str = config.theme.accent.as_deref().unwrap_or_else(|| {
-            if config.theme.mode == "gtk" {
-                "gtk"
-            } else {
-                "#adabe0"
-            }
-        });
-        self.accent_source = match accent_str {
-            "gtk" => AccentSource::Gtk,
-            "none" => AccentSource::None,
-            color => AccentSource::Custom(color.to_string()),
-        };
-
-        // Set accent colors based on source
-        match &self.accent_source {
-            AccentSource::Custom(color) => {
-                self.accent_primary = color.clone();
-            }
-            AccentSource::None => {
-                // Monochrome mode - use mode-appropriate colors
-                if self.is_gtk_mode {
-                    self.accent_primary = gtk_fg_mix(25.0);
-                } else if self.is_dark_mode {
-                    self.accent_primary = "rgba(255, 255, 255, 0.25)".to_string();
-                } else {
-                    self.accent_primary = "rgba(0, 0, 0, 0.20)".to_string();
-                }
-            }
-            AccentSource::Gtk => {
-                // For GTK accent, we'll reference @accent_color in CSS.
-                // Store a fallback value here for any code that reads accent_primary directly.
-                self.accent_primary = "@accent_color".to_string();
-            }
-        }
-
-        // State colors
         self.state_success = config.theme.states.success.clone();
         self.state_warning = config.theme.states.warning.clone();
         self.state_urgent = config.theme.states.urgent.clone();
+
+        // Handle auto mode (wallpaper-adaptive Material You theming) first,
+        // since it sets backgrounds, foregrounds, accent, and state colors directly.
+        if config.theme.mode == "auto" {
+            if let Some(theme) = material_theme {
+                // Pick light or dark scheme based on the `light` config field
+                let scheme = if config.theme.light {
+                    &theme.schemes.light
+                } else {
+                    &theme.schemes.dark
+                };
+                self.is_dark_mode = !config.theme.light;
+                self.is_wallpaper_mode = true;
+
+                // Set defaults before apply_wallpaper_theme (which may override backgrounds)
+                self.bar_background = if config.theme.light {
+                    DEFAULT_BAR_BG_LIGHT.to_string()
+                } else {
+                    DEFAULT_BAR_BG_DARK.to_string()
+                };
+                self.widget_background = if config.theme.light {
+                    DEFAULT_WIDGET_BG_LIGHT.to_string()
+                } else {
+                    DEFAULT_WIDGET_BG_DARK.to_string()
+                };
+
+                // Apply full Material You palette
+                self.apply_wallpaper_theme(scheme, config);
+            } else {
+                warn!("Auto mode: no wallpaper theme provided, falling back to dark defaults");
+                self.is_dark_mode = true;
+                self.bar_background = config
+                    .bar
+                    .background_color
+                    .clone()
+                    .unwrap_or_else(|| DEFAULT_BAR_BG_DARK.to_string());
+                self.widget_background = config
+                    .widgets
+                    .background_color
+                    .clone()
+                    .unwrap_or_else(|| DEFAULT_WIDGET_BG_DARK.to_string());
+
+                self.accent_source = AccentSource::Custom("#adabe0".to_string());
+                self.accent_primary = "#adabe0".to_string();
+            }
+        } else {
+            // Non-auto modes: dark, light, gtk
+
+            // Determine which default backgrounds to use based on explicit mode
+            // For "gtk" mode, we reference GTK CSS variables instead of hardcoded colors
+            let (default_bar_bg, default_widget_bg) = if self.is_gtk_mode {
+                ("@window_bg_color".to_string(), "@view_bg_color".to_string())
+            } else if config.theme.mode == "light" {
+                (
+                    DEFAULT_BAR_BG_LIGHT.to_string(),
+                    DEFAULT_WIDGET_BG_LIGHT.to_string(),
+                )
+            } else {
+                (
+                    DEFAULT_BAR_BG_DARK.to_string(),
+                    DEFAULT_WIDGET_BG_DARK.to_string(),
+                )
+            };
+
+            self.bar_background = config
+                .bar
+                .background_color
+                .clone()
+                .unwrap_or(default_bar_bg);
+
+            self.widget_background = config
+                .widgets
+                .background_color
+                .clone()
+                .unwrap_or(default_widget_bg);
+
+            // Resolve is_dark_mode
+            // For GTK mode, we assume dark for overlay calculations since we can't query GTK's actual colors at build time
+            self.is_dark_mode = match config.theme.mode.as_str() {
+                "light" => false,
+                "gtk" => true, // Default to dark for overlays/borders; GTK handles actual background colors
+                _ => true,     // "dark" and any unknown mode
+            };
+
+            // Parse accent configuration from the `theme.accent` field.
+            // Smart default: if mode is "gtk" and accent is not specified, default to "gtk".
+            let accent_str = config.theme.accent.as_deref().unwrap_or_else(|| {
+                if config.theme.mode == "gtk" {
+                    "gtk"
+                } else {
+                    "#adabe0"
+                }
+            });
+            self.accent_source = match accent_str {
+                "gtk" => AccentSource::Gtk,
+                "none" => AccentSource::None,
+                color => AccentSource::Custom(color.to_string()),
+            };
+
+            // Set accent colors based on source
+            match &self.accent_source {
+                AccentSource::Custom(color) => {
+                    self.accent_primary = color.clone();
+                }
+                AccentSource::None => {
+                    // Monochrome mode - use mode-appropriate colors
+                    if self.is_gtk_mode {
+                        self.accent_primary = gtk_fg_mix(25.0);
+                    } else if self.is_dark_mode {
+                        self.accent_primary = "rgba(255, 255, 255, 0.25)".to_string();
+                    } else {
+                        self.accent_primary = "rgba(0, 0, 0, 0.20)".to_string();
+                    }
+                }
+                AccentSource::Gtk => {
+                    self.accent_primary = "@accent_color".to_string();
+                }
+            }
+        }
 
         // Typography - use "inherit" for empty font_family to use system font
         self.font_family = if config.theme.typography.font_family.is_empty() {
@@ -714,12 +823,16 @@ impl ThemePalette {
     }
 
     fn compute_derived_values(&mut self) {
-        self.compute_foreground_colors();
-        self.compute_accent_derived();
-        self.compute_overlays();
-        self.compute_borders_and_shadows();
-        self.compute_slider_tracks();
-        self.compute_critical_backgrounds();
+        if !self.is_wallpaper_mode {
+            // Normal mode: compute all derived color values from config inputs.
+            // In wallpaper mode, apply_wallpaper_theme() already set all colors directly.
+            self.compute_foreground_colors();
+            self.compute_accent_derived();
+            self.compute_overlays();
+            self.compute_borders_and_shadows();
+            self.compute_slider_tracks();
+            self.compute_critical_backgrounds();
+        }
         self.compute_sizes();
     }
 
@@ -866,28 +979,7 @@ impl ThemePalette {
             SHADOW_OPACITY_LIGHT
         };
 
-        let tight_opacity = shadow_opacity * SHADOW_TIGHT_OPACITY_FACTOR;
-        let diffuse_opacity = shadow_opacity * SHADOW_DIFFUSE_OPACITY_FACTOR;
-
-        self.shadow_soft = format!(
-            "0 {}px {}px rgba(0, 0, 0, {:.2}), 0 {}px {}px rgba(0, 0, 0, {:.2})",
-            SHADOW_TIGHT_OFFSET_Y,
-            SHADOW_TIGHT_BLUR,
-            tight_opacity,
-            SHADOW_DIFFUSE_OFFSET_Y,
-            SHADOW_DIFFUSE_BLUR_SOFT,
-            diffuse_opacity
-        );
-
-        self.shadow_strong = format!(
-            "0 {}px {}px rgba(0, 0, 0, {:.2}), 0 {}px {}px rgba(0, 0, 0, {:.2})",
-            SHADOW_TIGHT_OFFSET_Y,
-            SHADOW_TIGHT_BLUR,
-            tight_opacity,
-            SHADOW_DIFFUSE_OFFSET_Y,
-            SHADOW_DIFFUSE_BLUR_STRONG,
-            diffuse_opacity
-        );
+        (self.shadow_soft, self.shadow_strong) = format_shadows(0, 0, 0, shadow_opacity);
     }
 
     fn compute_slider_tracks(&mut self) {
@@ -938,6 +1030,96 @@ impl ThemePalette {
             match blend_colors(&self.state_urgent, base, TOAST_CRITICAL_URGENT_WEIGHT) {
                 Some((r, g, b)) => rgba_str(r, g, b, 0.95),
                 None => "rgba(40, 20, 20, 0.95)".to_string(),
+            };
+    }
+
+    /// Apply a full Material You color scheme from a wallpaper-extracted theme.
+    ///
+    /// This sets all color fields on the palette directly from the Material You scheme,
+    /// bypassing the normal `compute_*` methods for colors. Non-color fields (opacities,
+    /// radii, sizes, font, shadows_enabled) are left untouched.
+    ///
+    /// If the user explicitly set `bar.background_color` or `widgets.background_color`
+    /// in their config, those values are preserved (not overridden by the Material You palette).
+    fn apply_wallpaper_theme(&mut self, scheme: &Scheme, config: &Config) {
+        // Backgrounds — only override if user didn't explicitly set them
+        if config.bar.background_color.is_none() {
+            self.bar_background = argb_to_hex(&scheme.surface_container);
+        }
+        if config.widgets.background_color.is_none() {
+            self.widget_background = argb_to_hex(&scheme.surface_container_low);
+        }
+
+        // Foregrounds
+        self.foreground_primary = argb_to_hex(&scheme.on_surface);
+        self.foreground_muted = argb_to_hex(&scheme.on_surface_variant);
+        self.foreground_disabled = argb_to_rgba(&scheme.on_surface, FOREGROUND_DISABLED_OPACITY);
+        self.foreground_faint = argb_to_rgba(&scheme.on_surface, FOREGROUND_FAINT_OPACITY);
+
+        // Accent
+        self.accent_source = AccentSource::Custom(argb_to_hex(&scheme.primary));
+        self.accent_primary = argb_to_hex(&scheme.primary);
+        self.accent_subtle = argb_to_rgba(&scheme.primary, 0.20);
+        self.accent_text = argb_to_hex(&scheme.on_primary);
+        self.accent_hover_bg = argb_to_hex(&scheme.primary_container);
+
+        // State colors: only override urgent (error), keep success/warning as user-configured
+        self.state_urgent = argb_to_hex(&scheme.error);
+
+        // Overlays — use surface_tint at varying opacities
+        let base_opacity = if self.is_dark_mode {
+            OVERLAY_OPACITY_DARK
+        } else {
+            OVERLAY_OPACITY_LIGHT
+        };
+        self.card_overlay = argb_to_rgba(&scheme.surface_tint, base_opacity);
+        self.card_overlay_hover =
+            argb_to_rgba(&scheme.surface_tint, base_opacity * HOVER_MULTIPLIER);
+        self.card_overlay_subtle =
+            argb_to_rgba(&scheme.surface_tint, base_opacity * SUBTLE_MULTIPLIER);
+        self.card_overlay_strong =
+            argb_to_rgba(&scheme.surface_tint, base_opacity * ACTIVE_MULTIPLIER);
+        self.click_catcher_overlay = rgba_str(128, 128, 128, CLICK_CATCHER_OPACITY);
+
+        // Borders
+        self.border_subtle = argb_to_hex(&scheme.outline_variant);
+
+        // Shadows — use the scheme's shadow color with existing shadow structure
+        let shadow_opacity = if self.is_dark_mode {
+            SHADOW_OPACITY_DARK
+        } else {
+            SHADOW_OPACITY_LIGHT
+        };
+
+        if self.shadows_enabled {
+            (self.shadow_soft, self.shadow_strong) = format_shadows(
+                scheme.shadow.red,
+                scheme.shadow.green,
+                scheme.shadow.blue,
+                shadow_opacity,
+            );
+        } else {
+            self.shadow_soft = "none".to_string();
+            self.shadow_strong = "none".to_string();
+        }
+
+        // Slider tracks
+        self.slider_track = argb_to_hex(&scheme.surface_container_highest);
+        self.slider_track_disabled = argb_to_rgba(&scheme.surface_container_highest, 0.6);
+
+        // Critical backgrounds
+        let error_hex = argb_to_hex(&scheme.error);
+        let widget_bg_hex = argb_to_hex(&scheme.surface_container_low);
+        self.row_critical_background = match blend_colors(&error_hex, &widget_bg_hex, 0.18) {
+            Some((r, g, b)) => rgba_str(r, g, b, 0.95),
+            None => argb_to_hex(&scheme.error_container),
+        };
+
+        let surface_hex = argb_to_hex(&scheme.surface);
+        self.toast_critical_background =
+            match blend_colors(&error_hex, &surface_hex, TOAST_CRITICAL_URGENT_WEIGHT) {
+                Some((r, g, b)) => rgba_str(r, g, b, 0.95),
+                None => argb_to_hex(&scheme.error_container),
             };
     }
 
@@ -997,6 +1179,7 @@ impl Default for ThemePalette {
         Self {
             is_dark_mode: true,
             is_gtk_mode: false,
+            is_wallpaper_mode: false,
             bar_background: DEFAULT_BAR_BG_DARK.to_string(),
             widget_background: DEFAULT_WIDGET_BG_DARK.to_string(),
             foreground_primary: "#ffffff".to_string(),
@@ -1104,8 +1287,9 @@ mod tests {
 
     #[test]
     fn test_theme_palette_default_is_dark() {
-        let config = Config::default();
-        let palette = ThemePalette::from_config(&config);
+        let mut config = Config::default();
+        config.theme.mode = "dark".to_string();
+        let palette = ThemePalette::from_config(&config, None);
         assert!(palette.is_dark_mode);
     }
 
@@ -1113,7 +1297,7 @@ mod tests {
     fn test_theme_palette_light_mode() {
         let mut config = Config::default();
         config.theme.mode = "light".to_string();
-        let palette = ThemePalette::from_config(&config);
+        let palette = ThemePalette::from_config(&config, None);
         assert!(!palette.is_dark_mode);
         assert_eq!(palette.foreground_primary, "#1a1a1a");
     }
@@ -1121,7 +1305,7 @@ mod tests {
     #[test]
     fn test_theme_palette_css_vars_contains_expected_vars() {
         let config = Config::default();
-        let palette = ThemePalette::from_config(&config);
+        let palette = ThemePalette::from_config(&config, None);
         let css = palette.css_vars_block();
 
         assert!(css.contains("--color-background-bar:"));
@@ -1208,7 +1392,7 @@ mod tests {
         let mut config = Config::default();
         config.bar.size = 48;
         // bar_height is the content height (bar.size), CSS padding adds the visual padding
-        let palette = ThemePalette::from_config(&config);
+        let palette = ThemePalette::from_config(&config, None);
 
         assert_eq!(palette.sizes.bar_height, 48);
         assert!(palette.sizes.widget_height > 0);
@@ -1217,9 +1401,10 @@ mod tests {
 
     #[test]
     fn test_accent_default_is_custom() {
-        // Default accent = None with mode = "auto" means use "#adabe0" as custom hex color
-        let config = Config::default();
-        let palette = ThemePalette::from_config(&config);
+        // Default accent = None with mode = "dark" means use "#adabe0" as custom hex color
+        let mut config = Config::default();
+        config.theme.mode = "dark".to_string();
+        let palette = ThemePalette::from_config(&config, None);
 
         assert_eq!(
             palette.accent_source,
@@ -1234,7 +1419,7 @@ mod tests {
         config.theme.mode = "gtk".to_string();
         // accent remains None
 
-        let palette = ThemePalette::from_config(&config);
+        let palette = ThemePalette::from_config(&config, None);
 
         assert_eq!(palette.accent_source, AccentSource::Gtk);
         // Verify derived values for GTK accent in GTK mode
@@ -1257,9 +1442,10 @@ mod tests {
     fn test_accent_custom_color() {
         // When accent is a hex color, use it as custom accent
         let mut config = Config::default();
+        config.theme.mode = "dark".to_string();
         config.theme.accent = Some("#ff0000".to_string());
 
-        let palette = ThemePalette::from_config(&config);
+        let palette = ThemePalette::from_config(&config, None);
 
         assert_eq!(
             palette.accent_source,
@@ -1275,9 +1461,10 @@ mod tests {
     fn test_accent_none_monochrome() {
         // When accent = "none", use monochrome mode
         let mut config = Config::default();
+        config.theme.mode = "dark".to_string();
         config.theme.accent = Some("none".to_string());
 
-        let palette = ThemePalette::from_config(&config);
+        let palette = ThemePalette::from_config(&config, None);
 
         assert_eq!(palette.accent_source, AccentSource::None);
         // In dark mode, monochrome uses white-based colors
@@ -1291,7 +1478,7 @@ mod tests {
         config.theme.mode = "light".to_string();
         config.theme.accent = Some("none".to_string());
 
-        let palette = ThemePalette::from_config(&config);
+        let palette = ThemePalette::from_config(&config, None);
 
         assert_eq!(palette.accent_source, AccentSource::None);
         // In light mode, monochrome uses black-based colors
@@ -1304,7 +1491,7 @@ mod tests {
         let mut config = Config::default();
         config.theme.mode = "gtk".to_string();
 
-        let palette = ThemePalette::from_config(&config);
+        let palette = ThemePalette::from_config(&config, None);
 
         assert!(palette.is_gtk_mode);
         // is_dark_mode remains true as a fallback for shadow opacity etc.
@@ -1316,7 +1503,7 @@ mod tests {
         let mut config = Config::default();
         config.theme.mode = "gtk".to_string();
 
-        let palette = ThemePalette::from_config(&config);
+        let palette = ThemePalette::from_config(&config, None);
 
         assert_eq!(palette.foreground_primary, "@window_fg_color");
         // Verify exact computed value to catch arithmetic bugs
@@ -1341,7 +1528,7 @@ mod tests {
         let mut config = Config::default();
         config.theme.mode = "gtk".to_string();
 
-        let palette = ThemePalette::from_config(&config);
+        let palette = ThemePalette::from_config(&config, None);
         let css = palette.css_vars_block();
 
         // Foreground should reference GTK theme color
@@ -1368,7 +1555,7 @@ mod tests {
         let mut config = Config::default();
         config.theme.mode = "gtk".to_string();
 
-        let palette = ThemePalette::from_config(&config);
+        let palette = ThemePalette::from_config(&config, None);
 
         // Borders
         assert!(
@@ -1431,7 +1618,7 @@ mod tests {
         config.theme.mode = "gtk".to_string();
         config.theme.accent = Some("none".to_string());
 
-        let palette = ThemePalette::from_config(&config);
+        let palette = ThemePalette::from_config(&config, None);
 
         assert_eq!(palette.accent_source, AccentSource::None);
         assert!(
@@ -1451,13 +1638,13 @@ mod tests {
         // Verify that dark/light modes still use hardcoded colors (no regression)
         let mut dark_config = Config::default();
         dark_config.theme.mode = "dark".to_string();
-        let dark = ThemePalette::from_config(&dark_config);
+        let dark = ThemePalette::from_config(&dark_config, None);
         assert_eq!(dark.foreground_primary, "#ffffff");
         assert!(!dark.foreground_muted.contains("@window_fg_color"));
 
         let mut light_config = Config::default();
         light_config.theme.mode = "light".to_string();
-        let light = ThemePalette::from_config(&light_config);
+        let light = ThemePalette::from_config(&light_config, None);
         assert_eq!(light.foreground_primary, "#1a1a1a");
         assert!(!light.foreground_muted.contains("@window_fg_color"));
     }
@@ -1470,7 +1657,7 @@ mod tests {
         config.theme.mode = "gtk".to_string();
         config.theme.shadows = false;
 
-        let palette = ThemePalette::from_config(&config);
+        let palette = ThemePalette::from_config(&config, None);
 
         assert!(
             palette.border_subtle.contains("@window_fg_color"),
@@ -1489,7 +1676,7 @@ mod tests {
         config.theme.mode = "gtk".to_string();
         config.theme.accent = Some("#ff0000".to_string());
 
-        let palette = ThemePalette::from_config(&config);
+        let palette = ThemePalette::from_config(&config, None);
 
         assert_eq!(
             palette.accent_source,
@@ -1509,11 +1696,11 @@ mod tests {
         // Test that sizes scale up proportionally with bar size
         let mut config_small = Config::default();
         config_small.bar.size = 24;
-        let palette_small = ThemePalette::from_config(&config_small);
+        let palette_small = ThemePalette::from_config(&config_small, None);
 
         let mut config_large = Config::default();
         config_large.bar.size = 48;
-        let palette_large = ThemePalette::from_config(&config_large);
+        let palette_large = ThemePalette::from_config(&config_large, None);
 
         // Larger bar should have proportionally larger sizes
         assert!(palette_large.sizes.widget_height > palette_small.sizes.widget_height);
@@ -1529,7 +1716,7 @@ mod tests {
         for bar_size in [36, 48, 60, 72] {
             let mut config = Config::default();
             config.bar.size = bar_size;
-            let palette = ThemePalette::from_config(&config);
+            let palette = ThemePalette::from_config(&config, None);
 
             // widget_height + 2*padding + 2*margin = widget_height + 4*widget_padding_y
             let total_widget_footprint =
@@ -1551,7 +1738,7 @@ mod tests {
         // Even with small bar, sizes should have sensible minimums
         let mut config = Config::default();
         config.bar.size = 16; // Very small bar
-        let palette = ThemePalette::from_config(&config);
+        let palette = ThemePalette::from_config(&config, None);
 
         assert!(
             palette.sizes.widget_padding_y >= 1,
@@ -1570,7 +1757,7 @@ mod tests {
             let mut config = Config::default();
             config.bar.size = bar_size;
             config.bar.border_radius = 100; // Request maximum radius
-            let palette = ThemePalette::from_config(&config);
+            let palette = ThemePalette::from_config(&config, None);
 
             // Bar radius is computed from rendered height (bar_size + 2*padding config)
             // With default padding=4, max radius = (bar_size + 8) / 2

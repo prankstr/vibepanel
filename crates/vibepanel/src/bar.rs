@@ -536,8 +536,8 @@ fn create_center_section(
 pub fn load_css(config: &Config) {
     let provider = gtk4::CssProvider::new();
 
-    // Create theme palette and generate CSS
-    let palette = ThemePalette::from_config(config);
+    // Use cached palette from ConfigManager (avoids re-reading wallpaper image)
+    let palette = ConfigManager::global().palette();
     let css = generate_css(config, &palette);
 
     // Debug: print theme configuration

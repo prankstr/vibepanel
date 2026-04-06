@@ -225,6 +225,7 @@ impl Config {
         }
 
         // Validate theme.accent: must be "gtk", "none", or a valid hex color (if specified)
+        // Note: accent is ignored when mode = "auto" (colors derived from wallpaper)
         if let Some(ref accent) = self.theme.accent
             && accent != "gtk"
             && accent != "none"
@@ -997,11 +998,23 @@ impl Default for ThemeIconsConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct ThemeConfig {
     /// Theme mode: "auto", "dark", "light", "gtk".
-    /// - "auto": detects from widget background luminance
+    /// - "auto": wallpaper-adaptive Material You theming (auto-detects from hyprpaper)
     /// - "dark": forces dark mode (light text on dark backgrounds)
     /// - "light": forces light mode (dark text on light backgrounds)
     /// - "gtk": derive colors from GTK theme where possible
     pub mode: String,
+
+    /// Use the light Material You color scheme in auto mode.
+    ///
+    /// Only meaningful when `mode = "auto"`. Default is false (dark scheme).
+    pub light: bool,
+
+    /// Explicit wallpaper image path for auto mode.
+    ///
+    /// Only meaningful when `mode = "auto"`. When set, uses this image instead
+    /// of auto-detecting from hyprpaper. Supports PNG and JPEG.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wallpaper: Option<String>,
 
     /// Accent color configuration: "gtk", "none", or a hex color like "#3584e4".
     /// - "gtk": use the GTK theme's accent color (don't override @accent_color)
@@ -1009,6 +1022,7 @@ pub struct ThemeConfig {
     /// - "#rrggbb": use this specific color as the accent
     ///
     /// When not specified, defaults to "gtk" if mode is "gtk", otherwise "#adabe0".
+    /// Ignored when mode is "auto" (accent is derived from wallpaper).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accent: Option<String>,
 
@@ -1045,7 +1059,10 @@ pub struct ThemeConfig {
 impl Default for ThemeConfig {
     fn default() -> Self {
         Self {
+            // "auto" here; the shipped config.toml overrides to "dark" via deep-merge
             mode: "auto".to_string(),
+            light: false,
+            wallpaper: None,
             accent: None,
             animations: true,
             ripple: true,

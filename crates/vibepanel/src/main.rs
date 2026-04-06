@@ -20,7 +20,7 @@ use gtk4::prelude::*;
 use tracing::{debug, error, info, warn};
 
 use services::bar_manager;
-use vibepanel_core::{Config, ThemePalette, logging};
+use vibepanel_core::{Config, logging};
 
 use crate::services::bar_manager::BarManager;
 use crate::services::compositor::CompositorManager;
@@ -607,7 +607,7 @@ fn run_gtk_app(config: Config, config_source: Option<PathBuf>) -> ExitCode {
         );
 
         // Initialize theming-related services with theme-derived styles
-        let palette = ThemePalette::from_config(&config_for_activate);
+        let palette = ConfigManager::global().palette();
         let surface_styles = palette.surface_styles();
         services::surfaces::SurfaceStyleManager::init_global_with_config(
             surface_styles.clone(),

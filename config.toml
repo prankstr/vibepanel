@@ -70,7 +70,11 @@ background_opacity = 1.0
 
 [theme]
 mode = "dark" # "auto", "dark", "light", "gtk"
-#accent = "#adabe0" # "gtk", "none", or hex color
+               # "auto" = wallpaper-adaptive Material You theming (detects from hyprpaper)
+               # Multi-monitor: uses wallpaper from first bar.outputs entry, or first monitor if unset
+#light = false           # Use light Material You scheme in auto mode (default: false/dark)
+#wallpaper = "/path/to/image.png"  # Explicit wallpaper for auto mode (default: auto-detect from hyprpaper)
+#accent = "#adabe0" # "gtk", "none", or hex color (ignored in auto mode)
 #animations = true  # Enable/disable all CSS transitions and animations
 #ripple = true      # Enable/disable Material Design ripple effect on click
 

@@ -37,6 +37,8 @@ sysinfo = { workspace = true }
 nvml-wrapper = { workspace = true }
 parking_lot = { workspace = true }
 minreq = { workspace = true }
+material-colors = { workspace = true }
+image = { workspace = true }
 
 [dev-dependencies]
 cargo-husky = { version = "1.5.0", default-features = false, features = [

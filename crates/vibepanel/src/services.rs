@@ -47,6 +47,7 @@ pub mod tray;
 pub mod updates;
 pub mod vpn;
 pub mod vpn_secret_agent;
+pub mod wallpaper;
 pub mod window_list;
 pub mod window_title;
 pub mod workspace;
