@@ -332,6 +332,17 @@ impl Config {
             }
         }
 
+        // Warn about auto-mode-only fields set when mode != "auto"
+        if self.theme.mode != "auto" {
+            if self.theme.light {
+                warnings.push("theme.light: has no effect when mode is not \"auto\"".to_string());
+            }
+            if self.theme.wallpaper.is_some() {
+                warnings
+                    .push("theme.wallpaper: has no effect when mode is not \"auto\"".to_string());
+            }
+        }
+
         warnings
     }
 
@@ -998,7 +1009,8 @@ impl Default for ThemeIconsConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct ThemeConfig {
     /// Theme mode: "auto", "dark", "light", "gtk".
-    /// - "auto": wallpaper-adaptive Material You theming (auto-detects from hyprpaper)
+    /// - "auto": wallpaper-adaptive Material You theming
+    ///   (detects from hyprpaper, awww/swww, wpaperd, or waypaper)
     /// - "dark": forces dark mode (light text on dark backgrounds)
     /// - "light": forces light mode (dark text on light backgrounds)
     /// - "gtk": derive colors from GTK theme where possible
@@ -1012,7 +1024,7 @@ pub struct ThemeConfig {
     /// Explicit wallpaper image path for auto mode.
     ///
     /// Only meaningful when `mode = "auto"`. When set, uses this image instead
-    /// of auto-detecting from hyprpaper. Supports PNG and JPEG.
+    /// of auto-detecting from wallpaper daemons. Supports PNG and JPEG.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wallpaper: Option<String>,
 

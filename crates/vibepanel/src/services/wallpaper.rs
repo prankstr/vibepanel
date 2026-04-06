@@ -1,11 +1,12 @@
 //! Wallpaper detection and Material You color extraction.
 //!
-//! Handles IPC with wallpaper daemons (hyprpaper) and extracts a
-//! `material_colors::theme::Theme` from a wallpaper image for use by
-//! the theming system in `vibepanel-core`.
+//! Handles IPC with wallpaper daemons (hyprpaper, awww/swww, wpaperd, waypaper)
+//! and extracts a `material_colors::theme::Theme` from a wallpaper image for
+//! use by the theming system in `vibepanel-core`.
 
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
+use std::process::Command;
 use std::time::Duration;
 
 use material_colors::color::Argb;
@@ -71,6 +72,174 @@ pub fn detect_hyprpaper_wallpaper(monitor: Option<&str>) -> Option<String> {
         let path = path.trim().to_string();
         (!path.is_empty()).then_some(path)
     })
+}
+
+/// Detect the current wallpaper path from awww (or legacy swww) via CLI.
+///
+/// Output format: `{namespace}: {output}: {w}x{h}, scale: {s}, currently displaying: image: {path}`
+fn detect_awww_wallpaper(monitor: Option<&str>) -> Option<String> {
+    let output = Command::new("awww")
+        .arg("query")
+        .output()
+        .or_else(|_| Command::new("swww").arg("query").output())
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Try to match the target monitor first
+    if let Some(target) = monitor {
+        for line in stdout.lines() {
+            // Output name is after the first `: ` and before the resolution
+            let after_ns = line.split_once(": ").map(|(_, rest)| rest)?;
+            let (output_name, _) = after_ns.split_once(':')?;
+            if output_name.trim() != target {
+                continue;
+            }
+            return extract_awww_image_path(line);
+        }
+    }
+
+    // Fall back to first line with an image path
+    stdout.lines().find_map(extract_awww_image_path)
+}
+
+/// Extract the image path from a single awww/swww query output line.
+fn extract_awww_image_path(line: &str) -> Option<String> {
+    let marker = "currently displaying: image: ";
+    let idx = line.find(marker)?;
+    let path = line[idx + marker.len()..].trim();
+    (!path.is_empty()).then(|| path.to_string())
+}
+
+/// Detect the current wallpaper path from wpaperd via its state symlinks.
+///
+/// wpaperd creates symlinks at `$XDG_STATE_HOME/wpaperd/wallpapers/<OUTPUT>`
+/// pointing to the current wallpaper image.
+fn detect_wpaperd_wallpaper(monitor: Option<&str>) -> Option<String> {
+    let state_dir = std::env::var("XDG_STATE_HOME").unwrap_or_else(|_| {
+        std::env::var("HOME")
+            .map(|h| format!("{}/.local/state", h))
+            .unwrap_or_default()
+    });
+    if state_dir.is_empty() {
+        return None;
+    }
+
+    let wallpapers_dir = std::path::PathBuf::from(&state_dir).join("wpaperd/wallpapers");
+
+    // Try the target monitor symlink first
+    if let Some(target) = monitor {
+        let symlink = wallpapers_dir.join(target);
+        if let Ok(path) = std::fs::read_link(&symlink) {
+            return Some(path.to_string_lossy().into_owned());
+        }
+    }
+
+    // Fall back to first symlink in the directory
+    let entries = std::fs::read_dir(&wallpapers_dir).ok()?;
+    for entry in entries.flatten() {
+        if let Ok(path) = std::fs::read_link(entry.path()) {
+            return Some(path.to_string_lossy().into_owned());
+        }
+    }
+    None
+}
+
+/// Detect the current wallpaper path from waypaper's INI config.
+///
+/// Parses `wallpaper = ` under `[Settings]` in `~/.config/waypaper/config.ini`.
+/// Handles per-monitor parallel lists and `~` path expansion.
+fn detect_waypaper_wallpaper(monitor: Option<&str>) -> Option<String> {
+    let home = std::env::var("HOME").ok()?;
+    let config_path =
+        std::env::var("XDG_CONFIG_HOME").unwrap_or_else(|_| format!("{}/.config", home));
+    let ini_path = std::path::PathBuf::from(&config_path).join("waypaper/config.ini");
+
+    let content = std::fs::read_to_string(&ini_path).ok()?;
+
+    let mut in_settings = false;
+    let mut wallpaper = None;
+    let mut monitors_line = None;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            in_settings = trimmed.eq_ignore_ascii_case("[settings]");
+            continue;
+        }
+        if !in_settings {
+            continue;
+        }
+
+        if let Some((key, value)) = trimmed.split_once('=') {
+            let key = key.trim();
+            let value = value.trim();
+            match key {
+                "wallpaper" => wallpaper = Some(value.to_string()),
+                "monitors" => monitors_line = Some(value.to_string()),
+                _ => {}
+            }
+        }
+    }
+
+    let wallpaper = wallpaper?;
+
+    // waypaper supports per-monitor parallel lists: monitors = eDP-1,DP-1 / wallpaper = path1,path2
+    if let Some(target) = monitor
+        && let Some(ref monitors_csv) = monitors_line
+    {
+        let monitors: Vec<&str> = monitors_csv.split(',').map(|s| s.trim()).collect();
+        let paths: Vec<&str> = wallpaper.split(',').map(|s| s.trim()).collect();
+        if let Some(idx) = monitors.iter().position(|m| *m == target)
+            && let Some(path) = paths.get(idx)
+        {
+            return Some(expand_tilde(path, &home));
+        }
+    }
+
+    // Single wallpaper or no monitor match — use the first (or only) path
+    let first_path = wallpaper.split(',').next()?.trim();
+    Some(expand_tilde(first_path, &home))
+}
+
+/// Expand a leading `~` to `$HOME`.
+fn expand_tilde(path: &str, home: &str) -> String {
+    if let Some(rest) = path.strip_prefix("~/") {
+        format!("{}/{}", home, rest)
+    } else if path == "~" {
+        home.to_string()
+    } else {
+        path.to_string()
+    }
+}
+
+/// Detect the current wallpaper from any supported daemon.
+///
+/// Cascade order: hyprpaper → awww/swww → wpaperd → waypaper.
+pub fn detect_wallpaper(monitor: Option<&str>) -> Option<String> {
+    if let Some(path) = detect_hyprpaper_wallpaper(monitor) {
+        debug!("Wallpaper detected via hyprpaper: {}", path);
+        return Some(path);
+    }
+    if let Some(path) = detect_awww_wallpaper(monitor) {
+        debug!("Wallpaper detected via awww/swww: {}", path);
+        return Some(path);
+    }
+    if let Some(path) = detect_wpaperd_wallpaper(monitor) {
+        debug!("Wallpaper detected via wpaperd: {}", path);
+        return Some(path);
+    }
+    if let Some(path) = detect_waypaper_wallpaper(monitor) {
+        debug!("Wallpaper detected via waypaper: {}", path);
+        return Some(path);
+    }
+
+    debug!("No wallpaper daemon detected");
+    None
 }
 
 /// Rebuild a Material You theme from a previously extracted source color.

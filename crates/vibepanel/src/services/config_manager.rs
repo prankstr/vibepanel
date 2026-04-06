@@ -32,15 +32,13 @@ use tracing::{debug, error, info, warn};
 use vibepanel_core::{Config, ThemePalette, ThemeSizes};
 
 use super::callbacks::{CallbackId, Callbacks};
-use super::wallpaper::{
-    detect_hyprpaper_wallpaper, extract_theme_from_image, theme_from_source_color,
-};
+use super::wallpaper::{detect_wallpaper, extract_theme_from_image, theme_from_source_color};
 
 /// Debounce interval (in ms) for file change events. Editors often trigger
 /// multiple events for a single save; this batches them into one reload.
 const FILE_CHANGE_DEBOUNCE_MS: u64 = 300;
 
-/// Polling interval (in seconds) for checking if hyprpaper's wallpaper changed.
+/// Polling interval (in seconds) for checking if the wallpaper changed.
 /// Only active when `mode = "auto"` and no explicit wallpaper path is set.
 const WALLPAPER_POLL_INTERVAL_SECS: u32 = 5;
 
@@ -89,7 +87,7 @@ pub struct ConfigManager {
     /// Callbacks for theme/style changes (border radius, colors, etc.)
     /// that don't trigger a full bar rebuild.
     theme_callbacks: Callbacks<()>,
-    /// Last wallpaper path detected from hyprpaper (for change detection).
+    /// Last wallpaper path detected from wallpaper daemon (for change detection).
     wallpaper_path: RefCell<Option<String>>,
     /// Cached source color extracted from the wallpaper image. Rebuilding a
     /// `material_colors::theme::Theme` from the source color is cheap (pure math);
@@ -112,7 +110,7 @@ impl ConfigManager {
         let monitor_hint = config.bar.outputs.first().map(|s| s.as_str());
         let (initial_wallpaper, material_theme) =
             if config.theme.mode == "auto" && config.theme.wallpaper.is_none() {
-                let wp = detect_hyprpaper_wallpaper(monitor_hint);
+                let wp = detect_wallpaper(monitor_hint);
                 let theme = wp.as_deref().and_then(extract_theme_from_image);
                 (wp, theme)
             } else if config.theme.mode == "auto" {
@@ -563,7 +561,7 @@ impl ConfigManager {
             // Update the cached wallpaper path for the new mode
             if new_config.theme.mode == "auto" && new_config.theme.wallpaper.is_none() {
                 *self.wallpaper_path.borrow_mut() =
-                    detect_hyprpaper_wallpaper(new_config.bar.outputs.first().map(|s| s.as_str()));
+                    detect_wallpaper(new_config.bar.outputs.first().map(|s| s.as_str()));
             } else {
                 *self.wallpaper_path.borrow_mut() = None;
             }
@@ -587,7 +585,7 @@ impl ConfigManager {
         info!("Configuration applied successfully");
     }
 
-    /// Start polling hyprpaper for wallpaper changes.
+    /// Start polling for wallpaper changes from supported daemons.
     ///
     /// Only active when `mode = "auto"` and no explicit `wallpaper` path is set.
     /// Polls every 5 seconds, compares to the cached path, and triggers a theme
@@ -628,10 +626,10 @@ impl ConfigManager {
         }
     }
 
-    /// Check if the hyprpaper wallpaper path changed and rebuild the theme if so.
+    /// Check if the wallpaper path changed and rebuild the theme if so.
     ///
-    /// The IPC call and image processing run on a background thread to avoid
-    /// blocking the GTK main loop. Results are applied via `glib::idle_add_once`.
+    /// The IPC/detection call and image processing run on a background thread to
+    /// avoid blocking the GTK main loop. Results are applied via `glib::idle_add_once`.
     fn check_wallpaper_changed(&self) {
         if self.poll_in_progress.get() {
             return;
@@ -646,7 +644,7 @@ impl ConfigManager {
         let monitor_hint = config.bar.outputs.first().cloned();
 
         std::thread::spawn(move || {
-            let new_path = detect_hyprpaper_wallpaper(monitor_hint.as_deref());
+            let new_path = detect_wallpaper(monitor_hint.as_deref());
 
             if new_path == old_path {
                 glib::idle_add_once(|| {
