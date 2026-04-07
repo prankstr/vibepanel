@@ -210,12 +210,8 @@ overlay.workspace-indicator {{
    Loaded at USER+200 priority by load_transient_css() so user CSS can't defeat it. */
 
 /* ===== TASKBAR ===== */
-
-.taskbar-button {{
-    padding: 4px;
-    margin: -4px;
-    border-radius: calc(var(--radius-pill) * 1.5);
-}}
+/* padding + border-radius are applied per-button via CssProvider so they
+   can scale with icon_size and the theme's widget_radius_percent. */
 
 .taskbar-button.clickable:hover {{
     background-color: color-mix(in srgb, transparent 92%, var(--widget-hover-tint));
