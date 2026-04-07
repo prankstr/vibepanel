@@ -209,6 +209,27 @@ overlay.workspace-indicator {{
 /* Grow-in: forces zero width + no transition so container animation handles it.
    Loaded at USER+200 priority by load_transient_css() so user CSS can't defeat it. */
 
+/* ===== TASKBAR ===== */
+
+.taskbar-button {{
+    padding: 4px;
+    margin: -4px;
+    border-radius: calc(var(--radius-pill) * 1.5);
+}}
+
+.taskbar-button.clickable:hover {{
+    background-color: color-mix(in srgb, transparent 92%, var(--widget-hover-tint));
+}}
+
+.taskbar-button.active {{
+    background-color: var(--color-accent-primary);
+    color: var(--color-accent-text, #fff);
+}}
+
+.taskbar-button.active.clickable:hover {{
+    background-color: var(--color-accent-hover-bg);
+}}
+
 "#
     )
 }

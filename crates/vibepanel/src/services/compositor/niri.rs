@@ -83,6 +83,20 @@ struct WindowData {
     app_id: String,
     workspace_id: Option<u64>,
     is_focused: bool,
+    /// Column and tile position in the scrolling layout (niri-specific).
+    /// Used for ordering taskbar buttons to match visual window order.
+    layout_position: Option<(i32, i32)>,
+}
+
+/// Extract `pos_in_scrolling_layout` from a niri window JSON value.
+fn parse_layout_position(window: &Value) -> Option<(i32, i32)> {
+    let layout = window.get("layout")?;
+    let pos = layout.get("pos_in_scrolling_layout")?.as_array()?;
+    if pos.len() >= 2 {
+        Some((pos[0].as_i64()? as i32, pos[1].as_i64()? as i32))
+    } else {
+        None
+    }
 }
 
 impl NiriBackend {
@@ -147,24 +161,57 @@ impl NiriBackend {
     fn get_windows_from_shared(shared: &Arc<SharedState>) -> Vec<super::Window> {
         let windows = shared.windows.read();
         let id_to_output = shared.id_to_output.read();
+        let workspaces = shared.workspaces.read();
 
-        windows
+        // Build a map from workspace niri-ID to workspace display index for sorting.
+        let ws_id_to_idx: HashMap<u64, i32> =
+            workspaces.iter().map(|ws| (ws.id as u64, ws.idx)).collect();
+
+        // Collect windows with their sorting keys.
+        struct SortableWindow {
+            window: super::Window,
+            ws_idx: i32,
+            layout_pos: (i32, i32),
+        }
+
+        let mut sortable: Vec<SortableWindow> = windows
             .values()
             .map(|win| {
                 let output = win
                     .workspace_id
                     .and_then(|ws_id| id_to_output.get(&ws_id).cloned());
 
-                super::Window {
-                    id: win.id,
-                    title: win.title.clone(),
-                    app_id: win.app_id.clone(),
-                    workspace_id: win.workspace_id.map(|id| id as i32),
-                    output,
-                    is_focused: win.is_focused,
+                let ws_idx = win
+                    .workspace_id
+                    .and_then(|ws_id| ws_id_to_idx.get(&ws_id).copied())
+                    .unwrap_or(i32::MAX);
+
+                let layout_pos = win.layout_position.unwrap_or((i32::MAX, i32::MAX));
+
+                SortableWindow {
+                    window: super::Window {
+                        id: win.id,
+                        title: win.title.clone(),
+                        app_id: win.app_id.clone(),
+                        workspace_id: win.workspace_id.map(|id| id as i32),
+                        output,
+                        is_focused: win.is_focused,
+                    },
+                    ws_idx,
+                    layout_pos,
                 }
             })
-            .collect()
+            .collect();
+
+        // Sort by workspace display index, then layout position (column, tile), then window ID.
+        sortable.sort_by(|a, b| {
+            a.ws_idx
+                .cmp(&b.ws_idx)
+                .then(a.layout_pos.cmp(&b.layout_pos))
+                .then(a.window.id.cmp(&b.window.id))
+        });
+
+        sortable.into_iter().map(|s| s.window).collect()
     }
 
     /// Process workspace list and update internal state.
@@ -331,6 +378,7 @@ impl NiriBackend {
                     .get("is_focused")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false),
+                layout_position: parse_layout_position(win),
             };
 
             win_cache.insert(win_id, data);
@@ -457,6 +505,7 @@ impl NiriBackend {
             app_id,
             workspace_id,
             is_focused,
+            layout_position: parse_layout_position(window),
         };
 
         shared.windows.write().insert(win_id, data);
@@ -677,6 +726,36 @@ impl NiriBackend {
 
                 // Window opened/changed - update per-output windows
                 Self::update_per_output_windows(shared);
+                window_changed = true;
+            }
+        } else if let Some(layouts_changed) = event.get("WindowLayoutsChanged") {
+            // changes is Vec<(u64, WindowLayout)> which serializes as an array of tuples:
+            // [[window_id, {layout_obj}], ...]
+            if let Some(changes) = layouts_changed.get("changes").and_then(|v| v.as_array()) {
+                let mut win_cache = shared.windows.write();
+                for entry in changes {
+                    let entry = match entry.as_array() {
+                        Some(arr) if arr.len() >= 2 => arr,
+                        _ => continue,
+                    };
+                    let win_id = match entry[0].as_u64() {
+                        Some(id) => id,
+                        None => continue,
+                    };
+                    if let Some(win) = win_cache.get_mut(&win_id) {
+                        // entry[1] is a WindowLayout object with pos_in_scrolling_layout directly
+                        win.layout_position = entry[1]
+                            .get("pos_in_scrolling_layout")
+                            .and_then(|v| v.as_array())
+                            .and_then(|arr| {
+                                if arr.len() >= 2 {
+                                    Some((arr[0].as_i64()? as i32, arr[1].as_i64()? as i32))
+                                } else {
+                                    None
+                                }
+                            });
+                    }
+                }
                 window_changed = true;
             }
         } else if let Some(window_closed) = event.get("WindowClosed") {

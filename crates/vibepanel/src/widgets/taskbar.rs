@@ -92,9 +92,6 @@ impl TaskbarWidget {
         let base = BaseWidget::new(&[widget::TASKBAR]);
         let content = base.content().clone();
 
-        let sizes = ConfigManager::global().theme_sizes();
-        let content_gap = sizes.widget_content_gap;
-
         let window_buttons: Rc<RefCell<HashMap<u64, Widget>>> =
             Rc::new(RefCell::new(HashMap::new()));
         let current_window_ids: Rc<RefCell<Vec<u64>>> = Rc::new(RefCell::new(Vec::new()));
@@ -108,7 +105,6 @@ impl TaskbarWidget {
                 snapshot,
                 &config,
                 output_id.as_deref(),
-                content_gap as u16,
             );
         });
 
@@ -138,7 +134,6 @@ fn update_window_buttons(
     snapshot: &crate::services::compositor::WindowListSnapshot,
     config: &TaskbarConfig,
     output_id: Option<&str>,
-    content_gap: u16,
 ) {
     let windows: Vec<_> = snapshot
         .windows
@@ -171,16 +166,10 @@ fn update_window_buttons(
         }
         buttons.borrow_mut().clear();
 
-        for (i, window) in windows.iter().enumerate() {
+        for window in windows.iter() {
             let button = create_window_button(window, config);
             container.append(&button);
             buttons.borrow_mut().insert(window.id, button);
-
-            if i < windows.len() - 1 && content_gap > 0 {
-                let spacer = GtkBox::new(Orientation::Horizontal, 0);
-                spacer.set_width_request(content_gap as i32);
-                container.append(&spacer);
-            }
         }
 
         *current_ids.borrow_mut() = new_ids;
@@ -269,6 +258,23 @@ fn update_button_state(button: &Widget, window: &crate::services::compositor::Wi
         format!("{} - {}", window.app_id, window.title)
     };
     TooltipManager::global().set_styled_tooltip(button, &tooltip);
+
+    // Update the label text if present (title may have changed)
+    if let Some(container) = button.downcast_ref::<GtkBox>() {
+        let mut next = container.first_child();
+        while let Some(child_widget) = next {
+            if let Some(label) = child_widget.downcast_ref::<Label>() {
+                let title = if window.title.is_empty() {
+                    &window.app_id
+                } else {
+                    &window.title
+                };
+                label.set_label(title);
+                break;
+            }
+            next = child_widget.next_sibling();
+        }
+    }
 }
 
 #[cfg(test)]

@@ -566,20 +566,20 @@ pub mod widget {
     /// Window title app icon (`.window-title-app-icon`).
     pub const WINDOW_TITLE_APP_ICON: &str = "window-title-app-icon";
 
-    // Niri taskbar
-    /// Niri taskbar widget (`.taskbar`).
+    // Taskbar
+    /// Taskbar widget (`.taskbar`).
     pub const TASKBAR: &str = "taskbar";
 
-    /// Niri taskbar button wrapper (`.taskbar-button-wrapper`).
+    /// Taskbar button wrapper (`.taskbar-button-wrapper`).
     pub const TASKBAR_BUTTON_WRAPPER: &str = "taskbar-button-wrapper";
 
-    /// Niri taskbar button (`.taskbar-button`).
+    /// Taskbar button (`.taskbar-button`).
     pub const TASKBAR_BUTTON: &str = "taskbar-button";
 
-    /// Niri taskbar icon (`.taskbar-icon`).
+    /// Taskbar icon (`.taskbar-icon`).
     pub const TASKBAR_ICON: &str = "taskbar-icon";
 
-    /// Niri taskbar label (`.taskbar-label`).
+    /// Taskbar label (`.taskbar-label`).
     pub const TASKBAR_LABEL: &str = "taskbar-label";
 
     // Updates
