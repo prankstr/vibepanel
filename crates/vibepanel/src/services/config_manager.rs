@@ -40,7 +40,7 @@ const FILE_CHANGE_DEBOUNCE_MS: u64 = 300;
 
 /// Polling interval (in seconds) for checking if the wallpaper changed.
 /// Only active when `mode = "auto"` and no explicit wallpaper path is set.
-const WALLPAPER_POLL_INTERVAL_SECS: u32 = 5;
+const WALLPAPER_POLL_INTERVAL_SECS: u32 = 2;
 
 use crate::bar;
 use crate::services::bar_manager::BarManager;

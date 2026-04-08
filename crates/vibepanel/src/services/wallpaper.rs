@@ -221,14 +221,12 @@ fn expand_tilde(path: &str, home: &str) -> String {
 
 /// Detect the current wallpaper from any supported daemon.
 ///
-/// Cascade order: hyprpaper → awww/swww → wpaperd → waypaper.
+/// Cascade order: hyprpaper → wpaperd → waypaper → awww/swww.
+/// Lightweight checks (socket, filesystem) run first; subprocess-based
+/// detection (awww/swww CLI) is last to avoid unnecessary fork+exec.
 pub fn detect_wallpaper(monitor: Option<&str>) -> Option<String> {
     if let Some(path) = detect_hyprpaper_wallpaper(monitor) {
         debug!("Wallpaper detected via hyprpaper: {}", path);
-        return Some(path);
-    }
-    if let Some(path) = detect_awww_wallpaper(monitor) {
-        debug!("Wallpaper detected via awww/swww: {}", path);
         return Some(path);
     }
     if let Some(path) = detect_wpaperd_wallpaper(monitor) {
@@ -237,6 +235,10 @@ pub fn detect_wallpaper(monitor: Option<&str>) -> Option<String> {
     }
     if let Some(path) = detect_waypaper_wallpaper(monitor) {
         debug!("Wallpaper detected via waypaper: {}", path);
+        return Some(path);
+    }
+    if let Some(path) = detect_awww_wallpaper(monitor) {
+        debug!("Wallpaper detected via awww/swww: {}", path);
         return Some(path);
     }
 
