@@ -33,16 +33,12 @@ const VALID_OSD_POSITIONS: &[&str] = &["bottom", "left", "right", "top"];
 /// Embedded default configuration TOML, compiled into the binary.
 pub const DEFAULT_CONFIG_TOML: &str = include_str!("../../../config.toml");
 
-/// Expand a leading `~` to `$HOME` in a path string.
-fn expand_tilde(path: &str) -> String {
-    let home = match env::var("HOME") {
-        Ok(h) => h,
-        Err(_) => return path.to_string(),
-    };
+/// Expand a leading `~` to `home` in a path string.
+pub fn expand_tilde(path: &str, home: &str) -> String {
     if let Some(rest) = path.strip_prefix("~/") {
         format!("{}/{}", home, rest)
     } else if path == "~" {
-        home
+        home.to_string()
     } else {
         path.to_string()
     }
@@ -212,8 +208,10 @@ impl Config {
 
     /// Expand `~` in config fields that accept file paths.
     fn normalize_paths(&mut self) {
-        if let Some(ref mut wallpaper) = self.theme.wallpaper {
-            *wallpaper = expand_tilde(wallpaper);
+        if let Some(ref mut wallpaper) = self.theme.wallpaper
+            && let Ok(home) = env::var("HOME")
+        {
+            *wallpaper = expand_tilde(wallpaper, &home);
         }
     }
 
@@ -2243,27 +2241,28 @@ mod tests {
 
     #[test]
     fn test_expand_tilde_with_subpath() {
-        let home = env::var("HOME").unwrap();
         assert_eq!(
-            expand_tilde("~/Pictures/wall.png"),
-            format!("{}/Pictures/wall.png", home)
+            expand_tilde("~/Pictures/wall.png", "/home/user"),
+            "/home/user/Pictures/wall.png"
         );
     }
 
     #[test]
     fn test_expand_tilde_bare() {
-        let home = env::var("HOME").unwrap();
-        assert_eq!(expand_tilde("~"), home);
+        assert_eq!(expand_tilde("~", "/home/user"), "/home/user");
     }
 
     #[test]
     fn test_expand_tilde_absolute_unchanged() {
-        assert_eq!(expand_tilde("/usr/share/wall.png"), "/usr/share/wall.png");
+        assert_eq!(
+            expand_tilde("/usr/share/wall.png", "/home/user"),
+            "/usr/share/wall.png"
+        );
     }
 
     #[test]
     fn test_expand_tilde_no_slash_unchanged() {
-        assert_eq!(expand_tilde("~foo"), "~foo");
+        assert_eq!(expand_tilde("~foo", "/home/user"), "~foo");
     }
 
     #[test]

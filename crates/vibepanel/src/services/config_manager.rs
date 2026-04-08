@@ -598,7 +598,7 @@ impl ConfigManager {
     /// Start polling for wallpaper changes from supported daemons.
     ///
     /// Only active when `mode = "auto"` and no explicit `wallpaper` path is set.
-    /// Polls every 5 seconds, compares to the cached path, and triggers a theme
+    /// Polls every `WALLPAPER_POLL_INTERVAL_SECS` seconds, compares to the cached path, and triggers a theme
     /// rebuild if the wallpaper changed.
     pub fn start_wallpaper_polling(self: &Rc<Self>) {
         // Stop any existing poll timer first

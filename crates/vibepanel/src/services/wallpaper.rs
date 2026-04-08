@@ -15,6 +15,7 @@ use material_colors::quantize::{Quantizer, QuantizerCelebi};
 use material_colors::score::Score;
 use material_colors::theme::ThemeBuilder;
 use tracing::{debug, warn};
+use vibepanel_core::expand_tilde;
 
 /// Reject wallpaper images larger than this to avoid excessive memory use.
 const MAX_WALLPAPER_FILE_SIZE: u64 = 50 * 1024 * 1024; // 50 MB
@@ -208,17 +209,6 @@ fn detect_waypaper_wallpaper(monitor: Option<&str>) -> Option<String> {
     Some(expand_tilde(first_path, &home))
 }
 
-/// Expand a leading `~` to `$HOME`.
-fn expand_tilde(path: &str, home: &str) -> String {
-    if let Some(rest) = path.strip_prefix("~/") {
-        format!("{}/{}", home, rest)
-    } else if path == "~" {
-        home.to_string()
-    } else {
-        path.to_string()
-    }
-}
-
 /// Detect the current wallpaper from any supported daemon.
 ///
 /// Cascade order: hyprpaper → wpaperd → waypaper → awww/swww.
@@ -334,32 +324,5 @@ mod tests {
     fn test_extract_awww_image_path_empty_after_marker() {
         let line = "default: eDP-1: 1920x1080, scale: 1, currently displaying: image:   ";
         assert_eq!(extract_awww_image_path(line), None);
-    }
-
-    #[test]
-    fn test_expand_tilde_home_prefix() {
-        assert_eq!(
-            expand_tilde("~/Pictures/wall.png", "/home/user"),
-            "/home/user/Pictures/wall.png"
-        );
-    }
-
-    #[test]
-    fn test_expand_tilde_bare() {
-        assert_eq!(expand_tilde("~", "/home/user"), "/home/user");
-    }
-
-    #[test]
-    fn test_expand_tilde_absolute_unchanged() {
-        assert_eq!(
-            expand_tilde("/usr/share/wall.png", "/home/user"),
-            "/usr/share/wall.png"
-        );
-    }
-
-    #[test]
-    fn test_expand_tilde_no_slash_unchanged() {
-        // "~foo" is not expanded (only "~/" and bare "~")
-        assert_eq!(expand_tilde("~foo", "/home/user"), "~foo");
     }
 }

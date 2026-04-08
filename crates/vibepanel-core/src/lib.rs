@@ -11,6 +11,6 @@ pub mod error;
 pub mod logging;
 pub mod theme;
 
-pub use config::{Config, ConfigLoadResult, DEFAULT_CONFIG_TOML};
+pub use config::{Config, ConfigLoadResult, DEFAULT_CONFIG_TOML, expand_tilde};
 pub use error::{Error, Result};
 pub use theme::{AccentSource, SurfaceStyles, ThemePalette, ThemeSizes, parse_hex_color};
