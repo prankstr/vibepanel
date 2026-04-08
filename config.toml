@@ -12,7 +12,7 @@
 # =============================================================================
 
 [bar]
-position = "top" # "top" or "bottom"
+position = "top"         # "top" or "bottom"
 size = 32
 border_radius = 30
 background_opacity = 0.0 # 0.0 = transparent (islands), 1.0 = solid
@@ -70,9 +70,8 @@ background_opacity = 1.0
 
 [theme]
 mode = "dark" # "auto", "dark", "light", "gtk"
-               # "auto" = wallpaper-adaptive Material You theming
-               #          (detects from hyprpaper, awww/swww, wpaperd, waypaper)
-               # Multi-monitor: uses wallpaper from first bar.outputs entry, or first monitor if unset
+#               "auto" = wallpaper-adaptive theming
+#               (detects from hyprpaper, awww/swww, wpaperd, waypaper)
 #scheme = "dark"         # Material You polarity: "dark" or "light" (auto mode only)
 #wallpaper = "/path/to/image.png"  # Explicit wallpaper for auto mode (default: auto-detect)
 #accent = "#adabe0" # "gtk", "none", or hex color (ignored in auto mode)
