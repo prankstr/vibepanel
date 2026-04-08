@@ -500,6 +500,18 @@ impl ConfigManager {
         let theme_changed = config_theme_changed(&old_config, &new_config);
         let structure_changed = config_structure_changed(&old_config, &new_config);
 
+        // Update detected wallpaper path before theme rebuild so the palette
+        // can use it (e.g. when an explicit wallpaper is removed and we need
+        // to fall back to auto-detection).
+        if new_config.theme.mode == "auto"
+            && new_config.theme.wallpaper.is_none()
+            && (old_config.theme.mode != "auto"
+                || old_config.theme.wallpaper != new_config.theme.wallpaper)
+        {
+            *self.wallpaper_path.borrow_mut() =
+                detect_wallpaper(new_config.bar.outputs.first().map(|s| s.as_str()));
+        }
+
         // Update theme/palette if theme config changed
         if theme_changed {
             info!("Theme configuration changed, updating styles...");
@@ -559,11 +571,8 @@ impl ConfigManager {
             || old_config.theme.wallpaper != new_config.theme.wallpaper
         {
             self.start_wallpaper_polling();
-            // Update the cached wallpaper path for the new mode
-            if new_config.theme.mode == "auto" && new_config.theme.wallpaper.is_none() {
-                *self.wallpaper_path.borrow_mut() =
-                    detect_wallpaper(new_config.bar.outputs.first().map(|s| s.as_str()));
-            } else {
+            // Clear cached path when leaving auto mode or setting an explicit wallpaper
+            if new_config.theme.mode != "auto" || new_config.theme.wallpaper.is_some() {
                 *self.wallpaper_path.borrow_mut() = None;
             }
         }
