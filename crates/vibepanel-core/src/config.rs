@@ -33,6 +33,21 @@ const VALID_OSD_POSITIONS: &[&str] = &["bottom", "left", "right", "top"];
 /// Embedded default configuration TOML, compiled into the binary.
 pub const DEFAULT_CONFIG_TOML: &str = include_str!("../../../config.toml");
 
+/// Expand a leading `~` to `$HOME` in a path string.
+fn expand_tilde(path: &str) -> String {
+    let home = match env::var("HOME") {
+        Ok(h) => h,
+        Err(_) => return path.to_string(),
+    };
+    if let Some(rest) = path.strip_prefix("~/") {
+        format!("{}/{}", home, rest)
+    } else if path == "~" {
+        home
+    } else {
+        path.to_string()
+    }
+}
+
 /// Result of loading a configuration file.
 #[derive(Debug)]
 pub struct ConfigLoadResult {
@@ -108,7 +123,8 @@ impl Config {
 
         deep_merge_toml(&mut base, user);
 
-        let config: Config = base.try_into()?;
+        let mut config: Config = base.try_into()?;
+        config.normalize_paths();
         Ok(config)
     }
 
@@ -192,6 +208,13 @@ impl Config {
         paths.push(PathBuf::from("config.toml"));
 
         paths
+    }
+
+    /// Expand `~` in config fields that accept file paths.
+    fn normalize_paths(&mut self) {
+        if let Some(ref mut wallpaper) = self.theme.wallpaper {
+            *wallpaper = expand_tilde(wallpaper);
+        }
     }
 
     /// Validate the configuration, returning errors for invalid values.
@@ -2215,6 +2238,60 @@ mod tests {
             !warnings.iter().any(|w| w.contains("show_if_interval")),
             "unexpected warning: {:?}",
             warnings
+        );
+    }
+
+    #[test]
+    fn test_expand_tilde_with_subpath() {
+        let home = env::var("HOME").unwrap();
+        assert_eq!(
+            expand_tilde("~/Pictures/wall.png"),
+            format!("{}/Pictures/wall.png", home)
+        );
+    }
+
+    #[test]
+    fn test_expand_tilde_bare() {
+        let home = env::var("HOME").unwrap();
+        assert_eq!(expand_tilde("~"), home);
+    }
+
+    #[test]
+    fn test_expand_tilde_absolute_unchanged() {
+        assert_eq!(expand_tilde("/usr/share/wall.png"), "/usr/share/wall.png");
+    }
+
+    #[test]
+    fn test_expand_tilde_no_slash_unchanged() {
+        assert_eq!(expand_tilde("~foo"), "~foo");
+    }
+
+    #[test]
+    fn test_normalize_wallpaper_tilde() {
+        let toml = r#"
+            [theme]
+            mode = "auto"
+            wallpaper = "~/Pictures/wall.png"
+        "#;
+        let config = Config::load_with_defaults(toml).unwrap();
+        let home = env::var("HOME").unwrap();
+        assert_eq!(
+            config.theme.wallpaper,
+            Some(format!("{}/Pictures/wall.png", home))
+        );
+    }
+
+    #[test]
+    fn test_normalize_wallpaper_absolute_unchanged() {
+        let toml = r#"
+            [theme]
+            mode = "auto"
+            wallpaper = "/home/user/wall.png"
+        "#;
+        let config = Config::load_with_defaults(toml).unwrap();
+        assert_eq!(
+            config.theme.wallpaper,
+            Some("/home/user/wall.png".to_string())
         );
     }
 }
