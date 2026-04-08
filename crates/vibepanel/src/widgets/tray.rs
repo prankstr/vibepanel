@@ -43,7 +43,8 @@ pub struct TrayConfig {
 
 impl Default for TrayConfig {
     fn default() -> Self {
-        // Get pixmap_icon_size from theme, falling back to default if ConfigManager isn't initialized yet
+        // TODO: Remove catch_unwind — move pixmap_icon_size theme read to
+        // TrayWidget::new() (same pattern as TaskbarConfig/TaskbarLayout).
         let pixmap_icon_size = std::panic::catch_unwind(|| {
             ConfigManager::global().theme_sizes().pixmap_icon_size as i32
         })

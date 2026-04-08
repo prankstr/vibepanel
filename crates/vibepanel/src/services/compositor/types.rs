@@ -140,7 +140,6 @@ pub struct Window {
     /// Application ID (e.g., "firefox", "org.gnome.Nautilus").
     pub app_id: String,
     /// Workspace ID the window is on.
-    #[allow(dead_code)]
     pub workspace_id: Option<i32>,
     /// Output/monitor name the window is on.
     pub output: Option<String>,

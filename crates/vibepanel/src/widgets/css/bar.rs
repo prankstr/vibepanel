@@ -3,7 +3,7 @@
 //! Note: This module requires config values for screen_margin and spacing,
 //! so it returns a formatted String rather than a static str.
 
-use super::{WIDGET_BG_HOVER, WIDGET_BG_WITH_OPACITY};
+use super::{CONTENT_PADDING_X, WIDGET_BG_HOVER, WIDGET_BG_WITH_OPACITY};
 use crate::widgets::workspaces::{
     INDICATOR_ACTIVE_MULT, INDICATOR_HEIGHT_MULT, INDICATOR_INACTIVE_MULT, LONG_INDICATOR_HPAD,
 };
@@ -22,6 +22,8 @@ pub fn css(screen_margin: u32, spacing: u32, workspace_animations: bool) -> Stri
     let active_mult = INDICATOR_ACTIVE_MULT;
     let height_mult = INDICATOR_HEIGHT_MULT;
     let long_hpad = LONG_INDICATOR_HPAD;
+    let content_pad_x = CONTENT_PADDING_X;
+    let content_pad_x_double = 2 * CONTENT_PADDING_X;
     let workspace_transition = if workspace_animations {
         "transition: min-width 200ms linear, background-color 100ms ease;"
     } else {
@@ -79,7 +81,7 @@ sectioned-bar.bar {{
 .widget:not(.widget-group) .content,
 .widget-group > .content > .widget-item .content,
 .widget-item.passive > .content {{
-    padding: var(--widget-padding-y) 10px;
+    padding: var(--widget-padding-y) {content_pad_x}px;
 }}
 
 /* Widget groups - remove padding so hover can extend to edges */
@@ -92,12 +94,12 @@ sectioned-bar.bar {{
     background-color: {widget_bg_hover};
 }}
 
-/* Pull non-first items left to overlap adjacent .content padding (2 × 10px).
+/* Pull non-first items left to overlap adjacent .content padding (2 × {content_pad_x}px).
    Merge groups (.widget-merge-group) are also direct children of .content,
    so they need the same treatment when they follow another item. */
 .widget-group .content > .widget-item:not(:first-child),
 .widget-group .content > .widget-merge-group:not(:first-child) {{
-    margin-left: -20px;
+    margin-left: -{content_pad_x_double}px;
 }}
 
 /* Base border-radius for grouped items — must be present in the non-hover
@@ -138,9 +140,9 @@ sectioned-bar.bar {{
     background-color: transparent;
 }}
 
-/* Pull non-first items left to overlap adjacent .content padding (2 × 10px) */
+/* Pull non-first items left to overlap adjacent .content padding (2 × {content_pad_x}px) */
 .merge-group-content > .widget-item:not(:first-child) {{
-    margin-left: -20px;
+    margin-left: -{content_pad_x_double}px;
 }}
 
 /* Spacing between items inside widgets */
@@ -210,8 +212,36 @@ overlay.workspace-indicator {{
    Loaded at USER+200 priority by load_transient_css() so user CSS can't defeat it. */
 
 /* ===== TASKBAR ===== */
-/* padding + border-radius are applied per-button via CssProvider so they
-   can scale with icon_size and the theme's widget_radius_percent. */
+/* padding + border-radius are applied via a shared CssProvider so they
+   scale with icon_size and the theme's widget_radius_percent.
+   .content horizontal padding is reduced by `pad` so button padding fills
+   the widget edge exactly. Inter-button spacing comes from the buttons'
+   own padding — no inter-item margin is needed between buttons.
+   The selector targets .taskbar-button specifically so the separator
+   keeps its own symmetric margins. */
+
+.taskbar .content > .taskbar-button:not(:last-child) {{
+    margin-right: 0;
+}}
+
+.taskbar .content > .taskbar-separator {{
+    background-color: currentColor;
+    opacity: 0.3;
+    min-width: 1px;
+    margin-top: 4px;
+    margin-bottom: 4px;
+    margin-left: 3px;
+    margin-right: 3px;
+}}
+
+.taskbar .content > .taskbar-output-separator {{
+    min-width: 1px;
+    opacity: 0.45;
+    margin-top: 2px;
+    margin-bottom: 2px;
+    margin-left: 5px;
+    margin-right: 5px;
+}}
 
 .taskbar-button.clickable:hover {{
     background-color: color-mix(in srgb, transparent 92%, var(--widget-hover-tint));

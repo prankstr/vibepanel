@@ -570,9 +570,6 @@ pub mod widget {
     /// Taskbar widget (`.taskbar`).
     pub const TASKBAR: &str = "taskbar";
 
-    /// Taskbar button wrapper (`.taskbar-button-wrapper`).
-    pub const TASKBAR_BUTTON_WRAPPER: &str = "taskbar-button-wrapper";
-
     /// Taskbar button (`.taskbar-button`).
     pub const TASKBAR_BUTTON: &str = "taskbar-button";
 
@@ -581,6 +578,12 @@ pub mod widget {
 
     /// Taskbar label (`.taskbar-label`).
     pub const TASKBAR_LABEL: &str = "taskbar-label";
+
+    /// Taskbar workspace separator (`.taskbar-separator`).
+    pub const TASKBAR_SEPARATOR: &str = "taskbar-separator";
+
+    /// Taskbar output/monitor separator (`.taskbar-output-separator`).
+    pub const TASKBAR_OUTPUT_SEPARATOR: &str = "taskbar-output-separator";
 
     // Updates
     /// Updates widget (`.updates`).

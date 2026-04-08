@@ -170,6 +170,7 @@ impl NiriBackend {
         // Collect windows with their sorting keys.
         struct SortableWindow {
             window: super::Window,
+            output_name: String,
             ws_idx: i32,
             layout_pos: (i32, i32),
         }
@@ -188,6 +189,8 @@ impl NiriBackend {
 
                 let layout_pos = win.layout_position.unwrap_or((i32::MAX, i32::MAX));
 
+                let output_name = output.clone().unwrap_or_default();
+
                 SortableWindow {
                     window: super::Window {
                         id: win.id,
@@ -197,16 +200,21 @@ impl NiriBackend {
                         output,
                         is_focused: win.is_focused,
                     },
+                    output_name,
                     ws_idx,
                     layout_pos,
                 }
             })
             .collect();
 
-        // Sort by workspace display index, then layout position (column, tile), then window ID.
+        // Sort by output name, then workspace display index, then layout position,
+        // then window ID.  This mirrors the workspace sort order (output → idx)
+        // so multi-monitor taskbars with filter_by_output=false group windows by
+        // monitor first.
         sortable.sort_by(|a, b| {
-            a.ws_idx
-                .cmp(&b.ws_idx)
+            a.output_name
+                .cmp(&b.output_name)
+                .then(a.ws_idx.cmp(&b.ws_idx))
                 .then(a.layout_pos.cmp(&b.layout_pos))
                 .then(a.window.id.cmp(&b.window.id))
         });
@@ -508,7 +516,15 @@ impl NiriBackend {
             layout_position: parse_layout_position(window),
         };
 
-        shared.windows.write().insert(win_id, data);
+        {
+            let mut win_cache = shared.windows.write();
+            if is_focused {
+                for win in win_cache.values_mut() {
+                    win.is_focused = false;
+                }
+            }
+            win_cache.insert(win_id, data);
+        }
 
         // Update window counts
         Self::update_window_counts(shared);
@@ -942,7 +958,9 @@ impl NiriBackend {
                                     kb_cb(info.clone());
                                 }
 
-                                if win_changed && let Some(ref wl_cb) = window_list_callback {
+                                if (win_changed || ws_changed)
+                                    && let Some(ref wl_cb) = window_list_callback
+                                {
                                     let windows = Self::get_windows_from_shared(&shared);
                                     wl_cb(super::WindowListSnapshot { windows });
                                 }
