@@ -4,7 +4,7 @@ use gtk4::prelude::*;
 use gtk4::{Application, ApplicationWindow, GestureClick, Overlay, gdk};
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use std::cell::RefCell;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use tracing::{debug, info, warn};
 
@@ -585,7 +585,7 @@ pub fn load_css(config: &Config) {
         load_transient_css(&display);
 
         // Load user's custom style.css if it exists
-        load_user_css(&display);
+        replace_user_css();
     } else {
         warn!("No default display available, CSS styling not applied");
     }
@@ -617,31 +617,69 @@ thread_local! {
     static TRANSIENT_CSS_PROVIDER: RefCell<Option<gtk4::CssProvider>> = const { RefCell::new(None) };
 }
 
-/// Search paths for user style.css, following XDG conventions.
-fn user_css_search_paths() -> Vec<PathBuf> {
+/// Search paths for user style.css.
+///
+/// If `config_dir` is provided (the parent directory of the active config file),
+/// it takes highest priority — this ensures `--config /custom/path/config.toml`
+/// also picks up `/custom/path/style.css`. For the normal XDG case this is a
+/// harmless duplicate that gets deduplicated.
+///
+/// Search order:
+/// 1. `<config_dir>/style.css` (next to active config file, if known)
+/// 2. `$XDG_CONFIG_HOME/vibepanel/style.css`
+/// 3. `~/.config/vibepanel/style.css`
+/// 4. `./style.css` (current working directory)
+fn user_css_search_paths_from_env(
+    config_dir: Option<&Path>,
+    xdg_config_home: Option<&Path>,
+    home_dir: Option<&Path>,
+) -> Vec<PathBuf> {
     let mut paths = Vec::new();
+    let mut seen = std::collections::HashSet::new();
 
-    // 1. $XDG_CONFIG_HOME/vibepanel/style.css
-    if let Ok(xdg_config) = std::env::var("XDG_CONFIG_HOME") {
-        paths.push(PathBuf::from(xdg_config).join("vibepanel/style.css"));
+    let mut push_unique = |p: PathBuf| {
+        if seen.insert(p.clone()) {
+            paths.push(p);
+        }
+    };
+
+    // 1. Next to the active config file (highest priority)
+    if let Some(dir) = config_dir {
+        push_unique(dir.join("style.css"));
     }
 
-    // 2. ~/.config/vibepanel/style.css
-    if let Ok(home) = std::env::var("HOME") {
-        paths.push(PathBuf::from(home).join(".config/vibepanel/style.css"));
+    // 2. $XDG_CONFIG_HOME/vibepanel/style.css
+    if let Some(xdg_config) = xdg_config_home {
+        push_unique(xdg_config.join("vibepanel/style.css"));
     }
 
-    // 3. ./style.css (current working directory)
-    paths.push(PathBuf::from("style.css"));
+    // 3. ~/.config/vibepanel/style.css
+    if let Some(home) = home_dir {
+        push_unique(home.join(".config/vibepanel/style.css"));
+    }
+
+    // 4. ./style.css (current working directory)
+    push_unique(PathBuf::from("style.css"));
 
     paths
 }
 
+pub(crate) fn user_css_search_paths(config_dir: Option<&Path>) -> Vec<PathBuf> {
+    let xdg_config_home = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from);
+    let home_dir = std::env::var_os("HOME").map(PathBuf::from);
+    user_css_search_paths_from_env(config_dir, xdg_config_home.as_deref(), home_dir.as_deref())
+}
+
+fn find_existing_path(paths: impl IntoIterator<Item = PathBuf>) -> Option<PathBuf> {
+    paths.into_iter().find(|path| path.exists())
+}
+
 /// Find user's style.css file if it exists.
-fn find_user_css() -> Option<PathBuf> {
-    user_css_search_paths()
-        .into_iter()
-        .find(|path| path.exists())
+///
+/// Searches the unified path list (config-adjacent first, then XDG/HOME/CWD)
+/// and returns the first path that exists on disk.
+pub(crate) fn find_user_css(config_dir: Option<&Path>) -> Option<PathBuf> {
+    find_existing_path(user_css_search_paths(config_dir))
 }
 
 /// Load transient CSS rules at high priority (above user CSS).
@@ -676,10 +714,31 @@ fn load_transient_css(display: &gtk4::gdk::Display) {
     });
 }
 
-/// Load user's custom CSS from style.css with highest priority.
-fn load_user_css(display: &gtk4::gdk::Display) {
-    let Some(path) = find_user_css() else {
-        debug!("No user style.css found");
+/// Replace user's custom CSS provider (fail-safe).
+///
+/// This is the single function for both initial load and hot-reload of user
+/// `style.css`. It reads and builds the new provider *before* removing the old
+/// one, so a read failure keeps the current CSS intact rather than leaving the
+/// bar un-styled.
+///
+/// Called from:
+/// - `load_css()` after theme CSS is applied
+/// - `handle_config_message(StyleCssChanged)` when the file watcher detects a change
+pub(crate) fn replace_user_css() {
+    let Some(display) = gtk4::gdk::Display::default() else {
+        warn!("No default display available for CSS reload");
+        return;
+    };
+
+    let config_dir = ConfigManager::global().config_dir();
+    let Some(path) = find_user_css(config_dir.as_deref()) else {
+        // No style.css found anywhere — remove old provider if any
+        USER_CSS_PROVIDER.with(|cell| {
+            if let Some(old) = cell.borrow_mut().take() {
+                gtk4::style_context_remove_provider_for_display(&display, &old);
+                debug!("Removed user CSS provider (no style.css found)");
+            }
+        });
         return;
     };
 
@@ -688,9 +747,15 @@ fn load_user_css(display: &gtk4::gdk::Display) {
             let provider = gtk4::CssProvider::new();
             provider.load_from_string(&css);
 
-            gtk4::style_context_add_provider_for_display(display, &provider, USER_CSS_PRIORITY);
+            // Success — swap: remove old provider first, then add new
+            USER_CSS_PROVIDER.with(|cell| {
+                if let Some(old) = cell.borrow_mut().take() {
+                    gtk4::style_context_remove_provider_for_display(&display, &old);
+                }
+            });
 
-            // Store the provider so we can remove it later on reload
+            gtk4::style_context_add_provider_for_display(&display, &provider, USER_CSS_PRIORITY);
+
             USER_CSS_PROVIDER.with(|cell| {
                 *cell.borrow_mut() = Some(provider);
             });
@@ -702,28 +767,14 @@ fn load_user_css(display: &gtk4::gdk::Display) {
             );
         }
         Err(e) => {
-            warn!("Failed to read user CSS from {}: {}", path.display(), e);
+            // Read failed — keep the old provider intact
+            warn!(
+                "Failed to read user CSS from {}: {} — keeping current CSS",
+                path.display(),
+                e
+            );
         }
     }
-}
-
-/// Reload user's custom CSS (called when style.css file changes).
-pub fn reload_user_css() {
-    let Some(display) = gtk4::gdk::Display::default() else {
-        warn!("No default display available for CSS reload");
-        return;
-    };
-
-    // Remove the old provider if it exists
-    USER_CSS_PROVIDER.with(|cell| {
-        if let Some(old_provider) = cell.borrow_mut().take() {
-            gtk4::style_context_remove_provider_for_display(&display, &old_provider);
-            debug!("Removed old user CSS provider");
-        }
-    });
-
-    // Load the new CSS
-    load_user_css(&display);
 }
 
 /// Generate CSS string from configuration and theme palette.
@@ -759,6 +810,36 @@ fn generate_css(
 mod tests {
     use super::*;
     use crate::widgets::PopoverKind::{System, Unmergeable};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    struct TestDir(PathBuf);
+
+    impl TestDir {
+        fn new(name: &str) -> Self {
+            let unique = format!(
+                "{}_{}_{}",
+                name,
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            );
+            let path = std::env::temp_dir().join(unique);
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
 
     #[test]
     fn merge_runs_empty() {
@@ -792,5 +873,87 @@ mod tests {
         );
         // Single System is its own run
         assert_eq!(compute_merge_runs(&[System]), vec![(System, 0, 1)]);
+    }
+
+    #[test]
+    fn user_css_search_paths_config_dir_first() {
+        let dir = std::path::Path::new("/custom/config/dir");
+        let paths = user_css_search_paths_from_env(
+            Some(dir),
+            Some(Path::new("/xdg-home")),
+            Some(Path::new("/home/test")),
+        );
+        assert_eq!(
+            paths,
+            vec![
+                dir.join("style.css"),
+                PathBuf::from("/xdg-home/vibepanel/style.css"),
+                PathBuf::from("/home/test/.config/vibepanel/style.css"),
+                PathBuf::from("style.css"),
+            ]
+        );
+    }
+
+    #[test]
+    fn user_css_search_paths_deduplicates() {
+        let paths = user_css_search_paths_from_env(
+            Some(Path::new("/home/test/.config/vibepanel")),
+            Some(Path::new("/home/test/.config")),
+            Some(Path::new("/home/test")),
+        );
+        assert_eq!(
+            paths,
+            vec![
+                PathBuf::from("/home/test/.config/vibepanel/style.css"),
+                PathBuf::from("style.css"),
+            ]
+        );
+    }
+
+    #[test]
+    fn user_css_search_paths_none_config_dir_still_has_entries() {
+        let paths = user_css_search_paths_from_env(None, None, None);
+        assert_eq!(
+            paths,
+            vec![PathBuf::from("style.css")],
+            "without config/XDG/HOME, only the CWD fallback remains"
+        );
+    }
+
+    #[test]
+    fn user_css_search_paths_xdg_dedup_with_home() {
+        let paths = user_css_search_paths_from_env(
+            None,
+            Some(Path::new("/home/test/.config")),
+            Some(Path::new("/home/test")),
+        );
+        assert_eq!(
+            paths,
+            vec![
+                PathBuf::from("/home/test/.config/vibepanel/style.css"),
+                PathBuf::from("style.css"),
+            ]
+        );
+    }
+
+    #[test]
+    fn find_existing_path_returns_none_when_candidates_do_not_exist() {
+        let tmp = TestDir::new("vibepanel_test_missing_css");
+        let candidates = vec![
+            tmp.path().join("missing-1/style.css"),
+            tmp.path().join("missing-2/style.css"),
+        ];
+
+        assert_eq!(find_existing_path(candidates), None);
+    }
+
+    #[test]
+    fn find_user_css_finds_existing_file() {
+        let tmp = TestDir::new("vibepanel_test_css");
+        let style_path = tmp.path().join("style.css");
+        std::fs::write(&style_path, "/* test */").unwrap();
+
+        let result = find_existing_path(vec![tmp.path().join("missing.css"), style_path.clone()]);
+        assert_eq!(result, Some(style_path.clone()));
     }
 }
