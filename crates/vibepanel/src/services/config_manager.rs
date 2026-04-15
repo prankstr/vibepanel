@@ -516,6 +516,14 @@ impl ConfigManager {
         );
 
         for watch_dir in style_watch_dirs {
+            if !watch_dir.is_dir() {
+                debug!(
+                    "Skipping style.css watch for non-directory path: {}",
+                    watch_dir.display()
+                );
+                continue;
+            }
+
             if let Err(e) = debouncer
                 .watcher()
                 .watch(&watch_dir, RecursiveMode::NonRecursive)
@@ -964,6 +972,19 @@ mod tests {
     use super::*;
     use std::ffi::OsStr;
     use std::path::Path;
+
+    #[test]
+    fn test_make_absolute_passthrough_for_absolute_path() {
+        let absolute = Path::new("/tmp/vibepanel-style.css");
+        assert_eq!(make_absolute(absolute), absolute.to_path_buf());
+    }
+
+    #[test]
+    fn test_make_absolute_joins_current_dir_for_relative_path() {
+        let relative = Path::new("style.css");
+        let expected = std::env::current_dir().unwrap().join(relative);
+        assert_eq!(make_absolute(relative), expected);
+    }
 
     #[test]
     fn test_is_style_change_path_matches_style_css() {
