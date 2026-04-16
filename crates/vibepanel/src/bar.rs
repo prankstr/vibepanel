@@ -670,16 +670,14 @@ pub(crate) fn user_css_search_paths(config_dir: Option<&Path>) -> Vec<PathBuf> {
     user_css_search_paths_from_env(config_dir, xdg_config_home.as_deref(), home_dir.as_deref())
 }
 
-fn find_existing_path(paths: impl IntoIterator<Item = PathBuf>) -> Option<PathBuf> {
-    paths.into_iter().find(|path| path.exists())
-}
-
 /// Find user's style.css file if it exists.
 ///
 /// Searches the unified path list (config-adjacent first, then XDG/HOME/CWD)
 /// and returns the first path that exists on disk.
 pub(crate) fn find_user_css(config_dir: Option<&Path>) -> Option<PathBuf> {
-    find_existing_path(user_css_search_paths(config_dir))
+    user_css_search_paths(config_dir)
+        .into_iter()
+        .find(|path| path.exists())
 }
 
 /// Load transient CSS rules at high priority (above user CSS).
@@ -937,23 +935,33 @@ mod tests {
     }
 
     #[test]
-    fn find_existing_path_returns_none_when_candidates_do_not_exist() {
+    fn find_user_css_returns_none_when_no_file_exists() {
+        // Pass a config_dir that does not contain style.css; without HOME/XDG
+        // overrides the CWD fallback is unlikely to exist either, but we use an
+        // empty tmp dir as config_dir so that slot is definitely absent.
         let tmp = TestDir::new("vibepanel_test_missing_css");
-        let candidates = vec![
-            tmp.path().join("missing-1/style.css"),
-            tmp.path().join("missing-2/style.css"),
-        ];
-
-        assert_eq!(find_existing_path(candidates), None);
+        // An empty directory: none of the candidate paths will exist.
+        let result =
+            user_css_search_paths_from_env(Some(tmp.path()), Some(tmp.path()), Some(tmp.path()))
+                .into_iter()
+                .find(|p| p.exists());
+        assert_eq!(result, None);
     }
 
     #[test]
     fn find_user_css_finds_existing_file() {
+        // Create a real style.css in a temp directory and point config_dir at
+        // it so find_user_css returns the config-adjacent path (highest priority).
         let tmp = TestDir::new("vibepanel_test_css");
         let style_path = tmp.path().join("style.css");
         std::fs::write(&style_path, "/* test */").unwrap();
 
-        let result = find_existing_path(vec![tmp.path().join("missing.css"), style_path.clone()]);
-        assert_eq!(result, Some(style_path.clone()));
+        // Use the injected-env helper so we don't depend on real HOME/XDG.
+        let found =
+            user_css_search_paths_from_env(Some(tmp.path()), Some(tmp.path()), Some(tmp.path()))
+                .into_iter()
+                .find(|p| p.exists());
+
+        assert_eq!(found, Some(style_path));
     }
 }

@@ -80,13 +80,17 @@ fn send_config_message(msg: ConfigMessage) {
 }
 
 /// Return true when an event path should trigger user CSS reload.
+///
+/// Matches `style.css` by name (for direct writes to the logical path), or an
+/// exact match against the full canonical symlink target path (to avoid false
+/// positives when another watched directory coincidentally contains a file with
+/// the same basename).
 fn is_style_change_path(
     path: &std::path::Path,
-    style_target_name: Option<&std::ffi::OsStr>,
+    symlink_canonical_target: Option<&std::path::Path>,
 ) -> bool {
-    let file_name = path.file_name();
-    file_name == Some(std::ffi::OsStr::new("style.css"))
-        || style_target_name.is_some_and(|target_name| file_name == Some(target_name))
+    path.file_name() == Some(std::ffi::OsStr::new("style.css"))
+        || symlink_canonical_target.is_some_and(|target| path == target)
 }
 
 /// Manages configuration state and live reload.
@@ -395,25 +399,59 @@ impl ConfigManager {
         });
     }
 
+    /// Compute the set of directories to watch for `style.css` changes, and
+    /// (if the active `style.css` is a symlink) the full canonical path of the
+    /// symlink target.
+    ///
+    /// `search_paths` and `style_css_logical` are passed in so the function
+    /// can be unit-tested without touching global env vars.
+    ///
+    /// `config_watch_dir` is excluded from the returned set because it is
+    /// already covered by the config file watcher.
+    fn compute_style_watch_info(
+        search_paths: Vec<PathBuf>,
+        style_css_logical: Option<PathBuf>,
+        config_watch_dir: &std::path::Path,
+    ) -> (HashSet<PathBuf>, Option<PathBuf>) {
+        let mut watch_dirs: HashSet<PathBuf> = search_paths
+            .into_iter()
+            .map(|path| make_absolute(&path))
+            .filter_map(|path| path.parent().map(|dir| dir.to_path_buf()))
+            .collect();
+        watch_dirs.remove(config_watch_dir);
+
+        let mut symlink_canonical_target: Option<PathBuf> = None;
+
+        if let Some(logical) = style_css_logical
+            && let Ok(meta) = std::fs::symlink_metadata(&logical)
+            && meta.file_type().is_symlink()
+            && let Ok(canonical) = logical.canonicalize()
+            && let Some(target_dir) = canonical.parent()
+        {
+            info!(
+                "style.css is a symlink: {} -> {}",
+                logical.display(),
+                canonical.display()
+            );
+            watch_dirs.insert(target_dir.to_path_buf());
+            symlink_canonical_target = Some(canonical);
+        }
+
+        (watch_dirs, symlink_canonical_target)
+    }
+
     /// Run the file watcher loop (called on a background thread).
     ///
-    /// Watches for changes to both `config.toml` and user `style.css`. The
-    /// `config_dir` is used by the unified CSS resolver to build the same
-    /// search chain as the CSS loader (config-adjacent first, then XDG/HOME/CWD).
+    /// Watches `config.toml` and user `style.css`, including the symlink target's
+    /// parent directory so direct writes (e.g. Matugen) are detected.
     ///
-    /// The watcher registers every candidate parent directory from that search
-    /// chain, then reloads CSS whenever a `style.css` event appears in any of
-    /// them. This keeps runtime priority changes aligned with `find_user_css()`.
-    ///
-    /// If the currently active `style.css` is a symlink, the resolved target's
-    /// parent directory is also watched so direct writes to the target file are
-    /// detected (e.g. Matugen regenerating CSS in another directory).
-    ///
-    /// **Limitation:** Watch directories are resolved once at startup. If a
-    /// symlink is later re-pointed to a target in a *different* directory, the
-    /// re-point event itself is detected (triggering a CSS reload), but
-    /// subsequent edits to the new target may be missed because the watcher
-    /// does not re-register directories at runtime.
+    /// **Limitation:** watch directories are resolved once at startup. Changes
+    /// within already-watched directories (including a new higher-priority
+    /// `style.css` appearing there) are detected normally. Writes will be
+    /// missed until restart in two cases: if `style.css` becomes a symlink
+    /// after startup (or an existing symlink is re-pointed to a directory not
+    /// already watched), or if a candidate directory that did not exist at
+    /// startup is created later.
     fn run_file_watcher(
         config_path: PathBuf,
         config_dir: Option<PathBuf>,
@@ -437,31 +475,11 @@ impl ConfigManager {
             .unwrap_or(&config_canonical)
             .to_path_buf();
 
-        let mut style_watch_dirs: HashSet<PathBuf> =
-            crate::bar::user_css_search_paths(config_dir.as_deref())
-                .into_iter()
-                .map(|path| make_absolute(&path))
-                .filter_map(|path| path.parent().map(|dir| dir.to_path_buf()))
-                .collect();
-        style_watch_dirs.remove(&config_watch_dir);
-
-        let mut style_target_name: Option<std::ffi::OsString> = None;
-
-        if let Some(style_css_logical) = crate::bar::find_user_css(config_dir.as_deref())
-            && let Ok(meta) = std::fs::symlink_metadata(&style_css_logical)
-            && meta.file_type().is_symlink()
-            && let Ok(canonical) = style_css_logical.canonicalize()
-            && let Some(target_dir) = canonical.parent()
-        {
-            info!(
-                "style.css is a symlink: {} -> {}",
-                style_css_logical.display(),
-                canonical.display()
-            );
-            style_watch_dirs.insert(target_dir.to_path_buf());
-
-            style_target_name = canonical.file_name().map(|name| name.to_os_string());
-        }
+        let (style_watch_dirs, symlink_canonical_target) = Self::compute_style_watch_info(
+            crate::bar::user_css_search_paths(config_dir.as_deref()),
+            crate::bar::find_user_css(config_dir.as_deref()),
+            &config_watch_dir,
+        );
 
         debug!(
             "Style CSS watch directories: {:?}",
@@ -482,9 +500,9 @@ impl ConfigManager {
                             Self::reload_and_send(&config_canonical);
                         }
 
-                        let style_changed = events
-                            .iter()
-                            .any(|e| is_style_change_path(&e.path, style_target_name.as_deref()));
+                        let style_changed = events.iter().any(|e| {
+                            is_style_change_path(&e.path, symlink_canonical_target.as_deref())
+                        });
                         if style_changed {
                             debug!("User style.css change detected");
                             send_config_message(ConfigMessage::StyleCssChanged);
@@ -970,7 +988,6 @@ fn widget_names(config: &Config) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::ffi::OsStr;
     use std::path::Path;
 
     #[test]
@@ -992,24 +1009,75 @@ mod tests {
     }
 
     #[test]
-    fn test_is_style_change_path_matches_target_name() {
-        assert!(is_style_change_path(
-            Path::new("/tmp/colors.css"),
-            Some(OsStr::new("colors.css"))
-        ));
+    fn test_is_style_change_path_matches_exact_canonical_target() {
+        // Only the exact canonical path triggers a reload — not a same-named
+        // file in a different directory.
+        let target = Path::new("/run/matugen/colors.css");
+        assert!(is_style_change_path(target, Some(target)));
     }
 
     #[test]
-    fn test_is_style_change_path_rejects_unrelated_file() {
-        assert!(!is_style_change_path(
-            Path::new("/tmp/other.css"),
-            Some(OsStr::new("colors.css"))
-        ));
+    fn test_is_style_change_path_rejects_same_name_different_dir() {
+        // A file named "colors.css" in a different directory must NOT match,
+        // unlike the old basename-only comparison which would have fired.
+        let target = Path::new("/run/matugen/colors.css");
+        let unrelated = Path::new("/home/user/.cache/colors.css");
+        assert!(!is_style_change_path(unrelated, Some(target)));
     }
 
     #[test]
     fn test_is_style_change_path_target_name_none() {
         assert!(!is_style_change_path(Path::new("/tmp/colors.css"), None));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_compute_style_watch_info_adds_symlink_target_dir() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        // Create two temp dirs: one for the "config" dir (where style.css lives
+        // as a symlink) and one for the "target" dir (where the real file lives).
+        let unique = format!(
+            "vibepanel_test_symlink_{}_{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let config_dir = std::env::temp_dir().join(format!("{}_config", unique));
+        let target_dir = std::env::temp_dir().join(format!("{}_target", unique));
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::create_dir_all(&target_dir).unwrap();
+
+        let target_file = target_dir.join("colors.css");
+        std::fs::write(&target_file, "/* target */").unwrap();
+
+        let symlink_path = config_dir.join("style.css");
+        std::os::unix::fs::symlink(&target_file, &symlink_path).unwrap();
+
+        let canonical_target = target_file.canonicalize().unwrap();
+
+        let search_paths = vec![symlink_path.clone()];
+        let (watch_dirs, symlink_canonical_target) = ConfigManager::compute_style_watch_info(
+            search_paths,
+            Some(symlink_path),
+            // Exclude config_dir to mirror the real usage.
+            &config_dir,
+        );
+
+        // The symlink target's parent directory must be added for direct-write detection.
+        assert!(
+            watch_dirs.contains(&target_dir),
+            "expected target_dir {:?} in watch_dirs {:?}",
+            target_dir,
+            watch_dirs,
+        );
+        // The returned canonical target must be the exact target file path.
+        assert_eq!(symlink_canonical_target, Some(canonical_target));
+
+        let _ = std::fs::remove_dir_all(&config_dir);
+        let _ = std::fs::remove_dir_all(&target_dir);
     }
 
     #[test]
