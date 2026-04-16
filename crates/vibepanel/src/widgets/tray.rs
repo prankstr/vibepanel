@@ -101,6 +101,9 @@ struct WidgetState {
     config: TrayConfig,
     buttons: HashMap<String, Button>,
     pixmap_cache: HashMap<String, gdk::Texture>,
+    /// Cache for file-backed icons (theme path or absolute path) after contrast adjustment.
+    /// Keyed by `"<path>:<mtime_nanos>"` to detect in-place file replacements.
+    file_icon_cache: HashMap<String, gdk::Texture>,
     menu: Option<MenuState>,
     /// Track the current button order to avoid unnecessary rebuilds.
     /// This prevents menu flickering when animated icons update rapidly.
@@ -144,6 +147,7 @@ impl TrayWidget {
             config,
             buttons: HashMap::new(),
             pixmap_cache: HashMap::new(),
+            file_icon_cache: HashMap::new(),
             menu: None,
             button_order: Vec::new(),
             contrast_params: compute_contrast_params(),
@@ -188,6 +192,7 @@ impl TrayWidget {
                     let mut st = state.borrow_mut();
                     st.contrast_params = compute_contrast_params();
                     st.pixmap_cache.clear();
+                    st.file_icon_cache.clear();
                 }
                 let state = state.clone();
                 let content = content.clone();
@@ -407,7 +412,7 @@ fn update_button(state: &Rc<RefCell<WidgetState>>, button: &Button, snapshot: &T
         && !name.is_empty()
         && let Some(theme_path) = &snapshot.icon_theme_path
         && !theme_path.is_empty()
-        && let Some(texture) = load_icon_from_theme_path(theme_path, name)
+        && let Some(texture) = load_icon_from_theme_path(state, theme_path, name)
     {
         image.set_paintable(Some(&texture));
         return;
@@ -417,9 +422,10 @@ fn update_button(state: &Rc<RefCell<WidgetState>>, button: &Button, snapshot: &T
         && !name.is_empty()
     {
         // Some apps set IconName to an absolute file path rather than a theme
-        // name. Load it directly as a texture, falling back to theme lookup.
+        // name. Load it through the contrast pipeline, falling back to theme lookup.
         if name.starts_with('/')
-            && let Ok(texture) = gdk::Texture::from_filename(name)
+            && let Some(texture) =
+                get_cached_file_texture(state, std::path::Path::new(name.as_str()))
         {
             image.set_paintable(Some(&texture));
             return;
@@ -487,12 +493,27 @@ fn texture_from_pixmap(pixmap: &TrayPixmap, params: &ContrastParams) -> Option<g
         return None;
     }
 
-    let stride = pixmap.width * 4;
-
     let mut rgba_data = argb_to_rgba(&pixmap.buffer);
 
-    // Adjust low-contrast grayscale icons toward theme text color
-    if let Some(edge_analysis) = analyze_edge_pixels(&rgba_data, pixmap.width, pixmap.height) {
+    apply_contrast_adjustment(&mut rgba_data, pixmap.width, pixmap.height, params);
+
+    Some(texture_from_rgba_data(
+        rgba_data,
+        pixmap.width,
+        pixmap.height,
+    ))
+}
+
+/// Adjust low-contrast grayscale icons toward the theme text color.
+///
+/// Shared by both the pixmap path and the file-backed icon path.
+fn apply_contrast_adjustment(
+    rgba_data: &mut [u8],
+    width: i32,
+    height: i32,
+    params: &ContrastParams,
+) {
+    if let Some(edge_analysis) = analyze_edge_pixels(rgba_data, width, height) {
         let contrast = calculate_contrast_ratio(edge_analysis.avg_luminance, params.bg_luminance);
 
         if edge_analysis.is_grayscale {
@@ -503,23 +524,10 @@ fn texture_from_pixmap(pixmap: &TrayPixmap, params: &ContrastParams) -> Option<g
                     "Adjusting grayscale tray icon: contrast={:.2}:1 -> gray {}",
                     contrast, params.target_gray
                 );
-                adjust_grayscale_icon(&mut rgba_data, params.target_gray);
+                adjust_grayscale_icon(rgba_data, params.target_gray);
             }
         }
     }
-
-    let gbytes = glib::Bytes::from_owned(rgba_data);
-    let pixbuf = Pixbuf::from_bytes(
-        &gbytes,
-        Colorspace::Rgb,
-        true, // has_alpha
-        8,    // bits_per_sample
-        pixmap.width,
-        pixmap.height,
-        stride,
-    );
-
-    Some(gdk::Texture::for_pixbuf(&pixbuf))
 }
 
 /// Convert ARGB pixel data to RGBA format.
@@ -678,10 +686,117 @@ fn calculate_contrast_ratio(lum1: f64, lum2: f64) -> f64 {
     (lighter + 0.05) / (darker + 0.05)
 }
 
-/// Load an icon from a custom theme path provided by the application.
+/// Normalize a `Pixbuf` to a packed RGBA `Vec<u8>`, handling rowstride padding
+/// and RGB (no alpha) pixbufs.
+fn normalize_pixbuf_to_rgba(pixbuf: &Pixbuf) -> Vec<u8> {
+    let width = pixbuf.width() as usize;
+    let height = pixbuf.height() as usize;
+    let rowstride = pixbuf.rowstride() as usize;
+    let n_channels = pixbuf.n_channels() as usize;
+    let has_alpha = pixbuf.has_alpha();
+
+    let raw = pixbuf.read_pixel_bytes();
+    let raw = raw.as_ref();
+
+    let mut result = Vec::with_capacity(width * height * 4);
+
+    for row in 0..height {
+        let row_start = row * rowstride;
+        for col in 0..width {
+            let px = row_start + col * n_channels;
+            let r = raw[px];
+            let g = raw[px + 1];
+            let b = raw[px + 2];
+            let a = if has_alpha { raw[px + 3] } else { 255 };
+            result.push(r);
+            result.push(g);
+            result.push(b);
+            result.push(a);
+        }
+    }
+
+    result
+}
+
+/// Build a `gdk::Texture` from packed RGBA bytes and dimensions.
+fn texture_from_rgba_data(rgba_data: Vec<u8>, width: i32, height: i32) -> gdk::Texture {
+    let stride = width * 4;
+    let gbytes = glib::Bytes::from_owned(rgba_data);
+    let pixbuf = Pixbuf::from_bytes(&gbytes, Colorspace::Rgb, true, 8, width, height, stride);
+    gdk::Texture::for_pixbuf(&pixbuf)
+}
+
+/// Decode a file-backed icon, run contrast adjustment, and return a texture.
+///
+/// `icon_size` is used to rasterize SVGs at the correct display resolution rather than
+/// their intrinsic/default size, which avoids blurry or oversized icons at tray scale.
+fn texture_from_file(
+    path: &std::path::Path,
+    params: &ContrastParams,
+    icon_size: i32,
+) -> Option<gdk::Texture> {
+    let is_svg = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("svg"))
+        .unwrap_or(false);
+
+    let pixbuf = if is_svg {
+        Pixbuf::from_file_at_scale(path, icon_size, icon_size, true).ok()?
+    } else {
+        Pixbuf::from_file(path).ok()?
+    };
+
+    let width = pixbuf.width();
+    let height = pixbuf.height();
+
+    let mut rgba_data = normalize_pixbuf_to_rgba(&pixbuf);
+    apply_contrast_adjustment(&mut rgba_data, width, height, params);
+
+    Some(texture_from_rgba_data(rgba_data, width, height))
+}
+
+/// Load a contrast-adjusted texture for a file-backed icon, using a cache keyed by
+/// `"<path>:<mtime_nanos>"`. The mtime component ensures that in-place file replacements
+/// (same path, new content) produce a cache miss and re-decode correctly.
+/// The cache is cleared entirely on theme/contrast changes.
+fn get_cached_file_texture(
+    state: &Rc<RefCell<WidgetState>>,
+    path: &std::path::Path,
+) -> Option<gdk::Texture> {
+    let mtime_nanos = std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .map(|t| {
+            t.duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        })
+        .unwrap_or(0);
+    let cache_key = format!("{}:{}", path.display(), mtime_nanos);
+
+    if let Some(texture) = state.borrow().file_icon_cache.get(&cache_key).cloned() {
+        return Some(texture);
+    }
+
+    let contrast_params = state.borrow().contrast_params;
+    let icon_size = state.borrow().config.pixmap_icon_size;
+    let texture = texture_from_file(path, &contrast_params, icon_size)?;
+
+    {
+        let mut st = state.borrow_mut();
+        if st.file_icon_cache.len() >= 50 {
+            st.file_icon_cache.clear();
+        }
+        st.file_icon_cache.insert(cache_key, texture.clone());
+    }
+
+    Some(texture)
+}
+
+/// Resolve an icon file path from a custom theme path provided by the application.
 ///
 /// Tries common image extensions (.png, .svg, .xpm) to find the icon file.
-fn load_icon_from_theme_path(theme_path: &str, icon_name: &str) -> Option<gdk::Texture> {
+fn resolve_icon_from_theme_path(theme_path: &str, icon_name: &str) -> Option<std::path::PathBuf> {
     use std::path::Path;
 
     let base_path = Path::new(theme_path);
@@ -692,27 +807,30 @@ fn load_icon_from_theme_path(theme_path: &str, icon_name: &str) -> Option<gdk::T
     // Try common extensions
     for ext in &["png", "svg", "xpm"] {
         let icon_path = base_path.join(format!("{}.{}", icon_name, ext));
-        if icon_path.exists()
-            && let Ok(texture) = gdk::Texture::from_filename(&icon_path)
-        {
-            debug!("Loaded tray icon from custom path: {}", icon_path.display());
-            return Some(texture);
+        if icon_path.exists() {
+            return Some(icon_path);
         }
     }
 
     // Also try without extension (in case icon_name already has it)
     let direct_path = base_path.join(icon_name);
-    if direct_path.exists()
-        && let Ok(texture) = gdk::Texture::from_filename(&direct_path)
-    {
-        debug!(
-            "Loaded tray icon from custom path: {}",
-            direct_path.display()
-        );
-        return Some(texture);
+    if direct_path.exists() {
+        return Some(direct_path);
     }
 
     None
+}
+
+/// Load and contrast-adjust an icon from a custom theme path provided by the application.
+fn load_icon_from_theme_path(
+    state: &Rc<RefCell<WidgetState>>,
+    theme_path: &str,
+    icon_name: &str,
+) -> Option<gdk::Texture> {
+    let path = resolve_icon_from_theme_path(theme_path, icon_name)?;
+    let texture = get_cached_file_texture(state, &path)?;
+    debug!("Loaded tray icon from custom path: {}", path.display());
+    Some(texture)
 }
 
 fn on_button_clicked(state: &Rc<RefCell<WidgetState>>, button: &Button, identifier: &str) {
