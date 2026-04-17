@@ -242,7 +242,7 @@ impl TooltipManager {
     ///
     /// Should be called during application startup after loading config:
     /// ```ignore
-    /// let palette = ThemePalette::from_config(&config);
+    /// let palette = ThemePalette::from_config(&config, None, None);
     /// TooltipManager::init_global(palette.surface_styles());
     /// ```
     pub fn init_global(styles: SurfaceStyles) {

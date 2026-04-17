@@ -15,7 +15,7 @@ use material_colors::quantize::{Quantizer, QuantizerCelebi};
 use material_colors::score::Score;
 use material_colors::theme::ThemeBuilder;
 use tracing::{debug, warn};
-use vibepanel_core::expand_tilde;
+use vibepanel_core::{expand_tilde, theme::relative_luminance};
 
 /// Reject wallpaper images larger than this to avoid excessive memory use.
 const MAX_WALLPAPER_FILE_SIZE: u64 = 50 * 1024 * 1024; // 50 MB
@@ -244,11 +244,20 @@ pub fn theme_from_source_color(source: Argb) -> material_colors::theme::Theme {
     ThemeBuilder::with_source(source).build()
 }
 
-/// Extract a Material You theme from a wallpaper image.
+/// Extract a Material You theme and average relative luminance from a wallpaper image.
 ///
-/// Returns the full `Theme` (with light/dark schemes, tonal palettes, and source color)
-/// using the default Material variant, or `None` on failure.
-pub fn extract_theme_from_image(path: &str) -> Option<material_colors::theme::Theme> {
+/// Returns `(Theme, luminance)` where:
+/// - `Theme` has light/dark schemes, tonal palettes, and source color
+/// - `luminance` is the average relative luminance of the image (0.0 = black, 1.0 = white),
+///   used to auto-derive the light/dark scheme polarity when `scheme` is not set in config.
+///
+/// Returns `None` on failure (file too large, I/O error, decode error).
+/// On success, the inner `Option<Theme>` is `None` when no high-chroma colour
+/// survived quantisation (e.g. a fully-greyscale wallpaper), but luminance is
+/// still returned so auto-scheme derivation works correctly in that case.
+pub fn extract_theme_from_image(
+    path: &str,
+) -> Option<(Option<material_colors::theme::Theme>, f64)> {
     let file_size = std::fs::metadata(path)
         .inspect_err(|e| warn!("Failed to stat wallpaper '{}': {}", path, e))
         .ok()?
@@ -282,20 +291,72 @@ pub fn extract_theme_from_image(path: &str) -> Option<material_colors::theme::Th
         .filter(|argb| argb.alpha == 255)
         .collect();
 
+    // Compute average relative luminance from all opaque pixels for scheme auto-derivation.
+    // Uses the same pixel buffer already loaded for color extraction — no extra I/O.
+    let luminance = if pixels.is_empty() {
+        0.0
+    } else {
+        let total: f64 = pixels
+            .iter()
+            .map(|argb| relative_luminance(argb.red, argb.green, argb.blue))
+            .sum();
+        total / pixels.len() as f64
+    };
+
     let mut result = QuantizerCelebi::quantize(&pixels, 128);
     result
         .color_to_count
         .retain(|&argb, _| Cam16::from(argb).chroma >= 5.0);
 
     let ranked = Score::score(&result.color_to_count, None, None, None);
-    let source_color = *ranked.first()?;
+    let theme = ranked
+        .first()
+        .map(|&source_color| ThemeBuilder::with_source(source_color).build());
 
-    Some(ThemeBuilder::with_source(source_color).build())
+    Some((theme, luminance))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression test: a fully-greyscale wallpaper has no high-chroma colours,
+    /// so after the chroma retain filter `color_to_count` is empty. Before the
+    /// fix in `09a36d7`, the `?` on `ranked.first()` caused the whole function
+    /// to return `None`, silently discarding the luminance that had already been
+    /// computed and forcing auto mode to dark regardless of actual brightness.
+    ///
+    /// After the fix the outer `Option` reflects decode success/failure only;
+    /// luminance is always returned when image decode succeeds.
+    #[test]
+    fn test_extract_theme_grayscale_preserves_luminance() {
+        use image::{GrayImage, ImageFormat};
+        use std::io::Cursor;
+
+        // 4×4 mid-gray image — all pixels have chroma ≈ 0, well below the 5.0
+        // retain threshold, so the quantiser colour map will be empty or
+        // produce only Score's built-in fallback colour.
+        let img = GrayImage::from_pixel(4, 4, image::Luma([128u8]));
+        let mut buf = Cursor::new(Vec::new());
+        img.write_to(&mut buf, ImageFormat::Png)
+            .expect("failed to encode test PNG");
+
+        let path = std::env::temp_dir().join("vibepanel_test_grayscale.png");
+        std::fs::write(&path, buf.into_inner()).expect("write tempfile");
+
+        let result = extract_theme_from_image(path.to_str().expect("valid utf-8 path"));
+        let _ = std::fs::remove_file(&path);
+
+        // The outer Option must be Some — a valid image is not a decode failure.
+        // Before the fix this returned None, discarding luminance entirely.
+        let (_theme, luminance) = result.expect("extraction must succeed for a valid image");
+
+        // Luminance must be in (0, 1) — mid-gray luma 128 gives ~0.216.
+        assert!(
+            luminance > 0.0 && luminance < 1.0,
+            "luminance should be in (0, 1), got {luminance}"
+        );
+    }
 
     #[test]
     fn test_extract_awww_image_path_standard() {

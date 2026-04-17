@@ -8,6 +8,7 @@ use material_colors::scheme::Scheme;
 use tracing::warn;
 
 use crate::Config;
+use crate::config::SchemePolarity;
 
 // Overlay opacities: base values for card backgrounds.
 // Dark mode uses lower opacity (0.06) since white overlays on dark are more visible.
@@ -51,6 +52,13 @@ const FOREGROUND_FAINT_OPACITY: f64 = 0.3;
 
 // Toast critical background blend weight
 const TOAST_CRITICAL_URGENT_WEIGHT: f64 = 0.35;
+
+/// Perceptual dark/light boundary in WCAG linear relative luminance.
+///
+/// CIELAB L*=50 (perceptual midpoint) ⇒ Y = ((50+16)/116)³ ≈ 0.184187.
+/// Aligned with Material You's HCT tone axis (CIELAB-derived), which the
+/// rest of the theme pipeline already uses.
+const PERCEPTUAL_LIGHT_DARK_THRESHOLD: f64 = 0.184_187;
 
 // Default colors (based on typical dark/light theme surface colors)
 const DEFAULT_BAR_BG_DARK: &str = "#1a1a1f";
@@ -126,9 +134,29 @@ pub fn relative_luminance(r: u8, g: u8, b: u8) -> f64 {
     0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
 }
 
+/// Resolve the effective scheme polarity for `mode = "auto"`.
+///
+/// Returns `true` if light mode should be used. When `scheme` is `None`, derives
+/// polarity from average wallpaper luminance using the perceptual midpoint
+/// threshold (`PERCEPTUAL_LIGHT_DARK_THRESHOLD` ≈ CIELAB L*=50):
+/// `>= threshold` → light, `< threshold` → dark.
+pub(crate) fn effective_scheme(scheme: Option<SchemePolarity>, luminance: Option<f64>) -> bool {
+    match scheme {
+        Some(SchemePolarity::Light) => true,
+        Some(SchemePolarity::Dark) => false,
+        None => luminance
+            .map(|l| l >= PERCEPTUAL_LIGHT_DARK_THRESHOLD)
+            .unwrap_or(false),
+    }
+}
+
 /// Return true if the color is considered dark (low luminance).
+///
+/// Uses the perceptual light/dark midpoint (`PERCEPTUAL_LIGHT_DARK_THRESHOLD`).
+/// Returns `true` for unparseable color strings (conservative fallback — the
+/// caller treats the color as dark and reacts accordingly).
 pub fn is_dark_color(color: &str) -> bool {
-    is_dark_color_with_threshold(color, 0.179)
+    is_dark_color_with_threshold(color, PERCEPTUAL_LIGHT_DARK_THRESHOLD)
 }
 
 /// Return true if the color is considered dark, with custom threshold.
@@ -263,7 +291,7 @@ pub struct SurfaceStyles {
 
 /// Single source of truth for all theme values.
 ///
-/// Constructed via `ThemePalette::from_config(&config, None)`.
+/// Constructed via `ThemePalette::from_config(&config, None, None)`.
 #[derive(Debug, Clone)]
 pub struct ThemePalette {
     // Mode
@@ -368,9 +396,10 @@ impl ThemePalette {
     pub fn from_config(
         config: &Config,
         material_theme: Option<&material_colors::theme::Theme>,
+        luminance: Option<f64>,
     ) -> Self {
         let mut palette = Self::default();
-        palette.parse_config(config, material_theme);
+        palette.parse_config(config, material_theme, luminance);
         palette.compute_derived_values();
         palette
     }
@@ -387,6 +416,7 @@ impl ThemePalette {
     pub fn popover_palette(
         config: &Config,
         material_theme: Option<&material_colors::theme::Theme>,
+        luminance: Option<f64>,
     ) -> Option<Self> {
         let popover_mode = config.theme.popover.as_deref()?;
 
@@ -398,7 +428,7 @@ impl ThemePalette {
         // Check if the popover polarity actually differs from the bar's
         let bar_is_dark = match config.theme.mode.as_str() {
             "light" => false,
-            "auto" => config.theme.scheme != "light",
+            "auto" => !effective_scheme(config.theme.scheme, luminance),
             _ => true,
         };
         if bar_is_dark == (popover_mode == "dark") {
@@ -409,12 +439,20 @@ impl ThemePalette {
         let mut popover_config = config.clone();
 
         if config.theme.mode == "auto" {
-            popover_config.theme.scheme = popover_mode.to_string();
+            popover_config.theme.scheme = Some(if popover_mode == "light" {
+                SchemePolarity::Light
+            } else {
+                SchemePolarity::Dark
+            });
         } else {
             popover_config.theme.mode = popover_mode.to_string();
         }
 
-        Some(Self::from_config(&popover_config, material_theme))
+        Some(Self::from_config(
+            &popover_config,
+            material_theme,
+            luminance,
+        ))
     }
 
     /// Generate CSS variable overrides scoped to `.vp-surface-popover`.
@@ -802,6 +840,7 @@ impl ThemePalette {
         &mut self,
         config: &Config,
         material_theme: Option<&material_colors::theme::Theme>,
+        luminance: Option<f64>,
     ) {
         // Check if GTK mode is requested
         self.is_gtk_mode = config.theme.mode == "gtk";
@@ -819,7 +858,7 @@ impl ThemePalette {
         // since it sets backgrounds, foregrounds, accent, and state colors directly.
         if config.theme.mode == "auto" {
             if let Some(theme) = material_theme {
-                let is_light = config.theme.scheme == "light";
+                let is_light = effective_scheme(config.theme.scheme, luminance);
                 let scheme = if is_light {
                     &theme.schemes.light
                 } else {
@@ -843,18 +882,31 @@ impl ThemePalette {
                 // Apply full Material You palette
                 self.apply_wallpaper_theme(scheme, config);
             } else {
-                warn!("Auto mode: no wallpaper theme provided, falling back to dark defaults");
-                self.is_dark_mode = true;
-                self.bar_background = config
-                    .bar
-                    .background_color
-                    .clone()
-                    .unwrap_or_else(|| DEFAULT_BAR_BG_DARK.to_string());
-                self.widget_background = config
-                    .widgets
-                    .background_color
-                    .clone()
-                    .unwrap_or_else(|| DEFAULT_WIDGET_BG_DARK.to_string());
+                // No material theme available (extraction failed or was skipped).
+                // Still honour config.theme.scheme and derived luminance so that an
+                // explicit `scheme = "light"` or a bright wallpaper that failed
+                // colour-extraction doesn't silently fall back to dark mode.
+                let is_light = effective_scheme(config.theme.scheme, luminance);
+                warn!(
+                    "Auto mode: no wallpaper theme provided, falling back to {} defaults",
+                    if is_light { "light" } else { "dark" }
+                );
+                self.is_dark_mode = !is_light;
+                self.bar_background = config.bar.background_color.clone().unwrap_or_else(|| {
+                    if is_light {
+                        DEFAULT_BAR_BG_LIGHT.to_string()
+                    } else {
+                        DEFAULT_BAR_BG_DARK.to_string()
+                    }
+                });
+                self.widget_background =
+                    config.widgets.background_color.clone().unwrap_or_else(|| {
+                        if is_light {
+                            DEFAULT_WIDGET_BG_LIGHT.to_string()
+                        } else {
+                            DEFAULT_WIDGET_BG_DARK.to_string()
+                        }
+                    });
 
                 self.accent_source = AccentSource::Custom("#adabe0".to_string());
                 self.accent_primary = "#adabe0".to_string();
@@ -1411,6 +1463,31 @@ mod tests {
     }
 
     #[test]
+    fn test_is_dark_color_boundary_near_perceptual_midpoint() {
+        // Concept-anchored: pin the semantics, not the literal value.
+        // Colors whose linear luminance sits just below the perceptual midpoint
+        // (≈0.184187) should read as dark; just above should read as light.
+        //
+        // Mid-grey #757575 has linear luminance ≈ 0.1779 (below threshold).
+        // Mid-grey #787878 has linear luminance ≈ 0.1878 (above threshold).
+        assert!(
+            is_dark_color("#757575"),
+            "#757575 sits below the perceptual midpoint and should read as dark"
+        );
+        assert!(
+            !is_dark_color("#787878"),
+            "#787878 sits above the perceptual midpoint and should read as light"
+        );
+    }
+
+    #[test]
+    fn test_is_dark_color_unparseable_falls_back_to_dark() {
+        // Documented fallback: unparseable color strings are treated as dark.
+        assert!(is_dark_color("not a color"));
+        assert!(is_dark_color(""));
+    }
+
+    #[test]
     fn test_blend_colors() {
         // 50/50 blend of black and white should be gray
         let result = blend_colors("#000000", "#ffffff", 0.5);
@@ -1438,7 +1515,7 @@ mod tests {
     fn test_theme_palette_default_is_dark() {
         let mut config = Config::default();
         config.theme.mode = "dark".to_string();
-        let palette = ThemePalette::from_config(&config, None);
+        let palette = ThemePalette::from_config(&config, None, None);
         assert!(palette.is_dark_mode);
     }
 
@@ -1446,7 +1523,7 @@ mod tests {
     fn test_theme_palette_light_mode() {
         let mut config = Config::default();
         config.theme.mode = "light".to_string();
-        let palette = ThemePalette::from_config(&config, None);
+        let palette = ThemePalette::from_config(&config, None, None);
         assert!(!palette.is_dark_mode);
         assert_eq!(palette.foreground_primary, "#1a1a1a");
     }
@@ -1454,7 +1531,7 @@ mod tests {
     #[test]
     fn test_theme_palette_css_vars_contains_expected_vars() {
         let config = Config::default();
-        let palette = ThemePalette::from_config(&config, None);
+        let palette = ThemePalette::from_config(&config, None, None);
         let css = palette.css_vars_block();
 
         assert!(css.contains("--color-background-bar:"));
@@ -1541,7 +1618,7 @@ mod tests {
         let mut config = Config::default();
         config.bar.size = 48;
         // bar_height is the content height (bar.size), CSS padding adds the visual padding
-        let palette = ThemePalette::from_config(&config, None);
+        let palette = ThemePalette::from_config(&config, None, None);
 
         assert_eq!(palette.sizes.bar_height, 48);
         assert!(palette.sizes.widget_height > 0);
@@ -1553,7 +1630,7 @@ mod tests {
         // Default accent = None with mode = "dark" means use "#adabe0" as custom hex color
         let mut config = Config::default();
         config.theme.mode = "dark".to_string();
-        let palette = ThemePalette::from_config(&config, None);
+        let palette = ThemePalette::from_config(&config, None, None);
 
         assert_eq!(
             palette.accent_source,
@@ -1568,7 +1645,7 @@ mod tests {
         config.theme.mode = "gtk".to_string();
         // accent remains None
 
-        let palette = ThemePalette::from_config(&config, None);
+        let palette = ThemePalette::from_config(&config, None, None);
 
         assert_eq!(palette.accent_source, AccentSource::Gtk);
         // Verify derived values for GTK accent in GTK mode
@@ -1594,7 +1671,7 @@ mod tests {
         config.theme.mode = "dark".to_string();
         config.theme.accent = Some("#ff0000".to_string());
 
-        let palette = ThemePalette::from_config(&config, None);
+        let palette = ThemePalette::from_config(&config, None, None);
 
         assert_eq!(
             palette.accent_source,
@@ -1613,7 +1690,7 @@ mod tests {
         config.theme.mode = "dark".to_string();
         config.theme.accent = Some("none".to_string());
 
-        let palette = ThemePalette::from_config(&config, None);
+        let palette = ThemePalette::from_config(&config, None, None);
 
         assert_eq!(palette.accent_source, AccentSource::None);
         // In dark mode, monochrome uses foreground color
@@ -1627,7 +1704,7 @@ mod tests {
         config.theme.mode = "light".to_string();
         config.theme.accent = Some("none".to_string());
 
-        let palette = ThemePalette::from_config(&config, None);
+        let palette = ThemePalette::from_config(&config, None, None);
 
         assert_eq!(palette.accent_source, AccentSource::None);
         // In light mode, monochrome uses foreground color
@@ -1640,7 +1717,7 @@ mod tests {
         let mut config = Config::default();
         config.theme.mode = "gtk".to_string();
 
-        let palette = ThemePalette::from_config(&config, None);
+        let palette = ThemePalette::from_config(&config, None, None);
 
         assert!(palette.is_gtk_mode);
         // is_dark_mode remains true as a fallback for shadow opacity etc.
@@ -1652,7 +1729,7 @@ mod tests {
         let mut config = Config::default();
         config.theme.mode = "gtk".to_string();
 
-        let palette = ThemePalette::from_config(&config, None);
+        let palette = ThemePalette::from_config(&config, None, None);
 
         assert_eq!(palette.foreground_primary, "@window_fg_color");
         // Verify exact computed value to catch arithmetic bugs
@@ -1677,7 +1754,7 @@ mod tests {
         let mut config = Config::default();
         config.theme.mode = "gtk".to_string();
 
-        let palette = ThemePalette::from_config(&config, None);
+        let palette = ThemePalette::from_config(&config, None, None);
         let css = palette.css_vars_block();
 
         // Foreground should reference GTK theme color
@@ -1704,7 +1781,7 @@ mod tests {
         let mut config = Config::default();
         config.theme.mode = "gtk".to_string();
 
-        let palette = ThemePalette::from_config(&config, None);
+        let palette = ThemePalette::from_config(&config, None, None);
 
         // Borders
         assert!(
@@ -1767,7 +1844,7 @@ mod tests {
         config.theme.mode = "gtk".to_string();
         config.theme.accent = Some("none".to_string());
 
-        let palette = ThemePalette::from_config(&config, None);
+        let palette = ThemePalette::from_config(&config, None, None);
 
         assert_eq!(palette.accent_source, AccentSource::None);
         assert!(
@@ -1787,13 +1864,13 @@ mod tests {
         // Verify that dark/light modes still use hardcoded colors (no regression)
         let mut dark_config = Config::default();
         dark_config.theme.mode = "dark".to_string();
-        let dark = ThemePalette::from_config(&dark_config, None);
+        let dark = ThemePalette::from_config(&dark_config, None, None);
         assert_eq!(dark.foreground_primary, "#ffffff");
         assert!(!dark.foreground_muted.contains("@window_fg_color"));
 
         let mut light_config = Config::default();
         light_config.theme.mode = "light".to_string();
-        let light = ThemePalette::from_config(&light_config, None);
+        let light = ThemePalette::from_config(&light_config, None, None);
         assert_eq!(light.foreground_primary, "#1a1a1a");
         assert!(!light.foreground_muted.contains("@window_fg_color"));
     }
@@ -1806,7 +1883,7 @@ mod tests {
         config.theme.mode = "gtk".to_string();
         config.theme.shadows = false;
 
-        let palette = ThemePalette::from_config(&config, None);
+        let palette = ThemePalette::from_config(&config, None, None);
 
         assert!(
             palette.border_subtle.contains("@window_fg_color"),
@@ -1825,7 +1902,7 @@ mod tests {
         config.theme.mode = "gtk".to_string();
         config.theme.accent = Some("#ff0000".to_string());
 
-        let palette = ThemePalette::from_config(&config, None);
+        let palette = ThemePalette::from_config(&config, None, None);
 
         assert_eq!(
             palette.accent_source,
@@ -1845,11 +1922,11 @@ mod tests {
         // Test that sizes scale up proportionally with bar size
         let mut config_small = Config::default();
         config_small.bar.size = 24;
-        let palette_small = ThemePalette::from_config(&config_small, None);
+        let palette_small = ThemePalette::from_config(&config_small, None, None);
 
         let mut config_large = Config::default();
         config_large.bar.size = 48;
-        let palette_large = ThemePalette::from_config(&config_large, None);
+        let palette_large = ThemePalette::from_config(&config_large, None, None);
 
         // Larger bar should have proportionally larger sizes
         assert!(palette_large.sizes.widget_height > palette_small.sizes.widget_height);
@@ -1865,7 +1942,7 @@ mod tests {
         for bar_size in [36, 48, 60, 72] {
             let mut config = Config::default();
             config.bar.size = bar_size;
-            let palette = ThemePalette::from_config(&config, None);
+            let palette = ThemePalette::from_config(&config, None, None);
 
             // widget_height + 2*padding + 2*margin = widget_height + 4*widget_padding_y
             let total_widget_footprint =
@@ -1887,7 +1964,7 @@ mod tests {
         // Even with small bar, sizes should have sensible minimums
         let mut config = Config::default();
         config.bar.size = 16; // Very small bar
-        let palette = ThemePalette::from_config(&config, None);
+        let palette = ThemePalette::from_config(&config, None, None);
 
         assert!(
             palette.sizes.widget_padding_y >= 1,
@@ -1906,7 +1983,7 @@ mod tests {
             let mut config = Config::default();
             config.bar.size = bar_size;
             config.bar.border_radius = 100; // Request maximum radius
-            let palette = ThemePalette::from_config(&config, None);
+            let palette = ThemePalette::from_config(&config, None, None);
 
             // Bar radius is computed from rendered height (bar_size + 2*padding config)
             // With default padding=4, max radius = (bar_size + 8) / 2
@@ -1938,7 +2015,7 @@ mod tests {
     #[test]
     fn test_popover_palette_none_when_not_configured() {
         let config = Config::default(); // popover = None
-        assert!(ThemePalette::popover_palette(&config, None).is_none());
+        assert!(ThemePalette::popover_palette(&config, None, None).is_none());
     }
 
     #[test]
@@ -1946,7 +2023,7 @@ mod tests {
         let mut config = Config::default();
         config.theme.mode = "gtk".to_string();
         config.theme.popover = Some("light".to_string());
-        assert!(ThemePalette::popover_palette(&config, None).is_none());
+        assert!(ThemePalette::popover_palette(&config, None, None).is_none());
     }
 
     #[test]
@@ -1955,12 +2032,12 @@ mod tests {
         let mut config = Config::default();
         config.theme.mode = "dark".to_string();
         config.theme.popover = Some("dark".to_string());
-        assert!(ThemePalette::popover_palette(&config, None).is_none());
+        assert!(ThemePalette::popover_palette(&config, None, None).is_none());
 
         // Light mode with light popover = no-op
         config.theme.mode = "light".to_string();
         config.theme.popover = Some("light".to_string());
-        assert!(ThemePalette::popover_palette(&config, None).is_none());
+        assert!(ThemePalette::popover_palette(&config, None, None).is_none());
     }
 
     #[test]
@@ -1969,13 +2046,13 @@ mod tests {
         config.theme.mode = "dark".to_string();
         config.theme.popover = Some("light".to_string());
 
-        let popover = ThemePalette::popover_palette(&config, None);
+        let popover = ThemePalette::popover_palette(&config, None, None);
         assert!(popover.is_some(), "should produce a light popover palette");
         let popover = popover.unwrap();
         assert!(!popover.is_dark_mode, "popover should be light mode");
 
         // Bar palette should be dark
-        let bar = ThemePalette::from_config(&config, None);
+        let bar = ThemePalette::from_config(&config, None, None);
         assert!(bar.is_dark_mode, "bar should be dark mode");
     }
 
@@ -1985,13 +2062,13 @@ mod tests {
         config.theme.mode = "light".to_string();
         config.theme.popover = Some("dark".to_string());
 
-        let popover = ThemePalette::popover_palette(&config, None);
+        let popover = ThemePalette::popover_palette(&config, None, None);
         assert!(popover.is_some(), "should produce a dark popover palette");
         let popover = popover.unwrap();
         assert!(popover.is_dark_mode, "popover should be dark mode");
 
         // Bar palette should be light
-        let bar = ThemePalette::from_config(&config, None);
+        let bar = ThemePalette::from_config(&config, None, None);
         assert!(!bar.is_dark_mode, "bar should be light mode");
     }
 
@@ -2005,10 +2082,10 @@ mod tests {
 
         let mut config = Config::default();
         config.theme.mode = "auto".to_string();
-        config.theme.scheme = "dark".to_string();
+        config.theme.scheme = Some(SchemePolarity::Dark);
         config.theme.popover = Some("light".to_string());
 
-        let popover = ThemePalette::popover_palette(&config, Some(&material_theme));
+        let popover = ThemePalette::popover_palette(&config, Some(&material_theme), None);
         assert!(
             popover.is_some(),
             "auto mode should produce popover palette"
@@ -2019,7 +2096,7 @@ mod tests {
             "popover should be light (scheme flipped)"
         );
 
-        let bar = ThemePalette::from_config(&config, Some(&material_theme));
+        let bar = ThemePalette::from_config(&config, Some(&material_theme), None);
         assert!(bar.is_dark_mode, "bar should be dark (scheme=dark)");
     }
 
@@ -2029,7 +2106,7 @@ mod tests {
         config.theme.mode = "dark".to_string();
         config.theme.popover = Some("light".to_string());
 
-        let popover = ThemePalette::popover_palette(&config, None).unwrap();
+        let popover = ThemePalette::popover_palette(&config, None, None).unwrap();
         let css = popover.css_popover_vars_block();
 
         // Should be scoped under .vp-surface-popover
@@ -2051,5 +2128,122 @@ mod tests {
         assert!(!css.contains("--font-size:"));
         assert!(!css.contains("--spacing:"));
         assert!(!css.contains("--border-radius:"));
+    }
+
+    // -------------------------------------------------------------------------
+    // effective_scheme() tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_effective_scheme_explicit_light_wins_regardless_of_luminance() {
+        // Explicit light override — luminance is dark but scheme wins
+        assert!(effective_scheme(
+            Some(crate::config::SchemePolarity::Light),
+            Some(0.1)
+        ));
+    }
+
+    #[test]
+    fn test_effective_scheme_explicit_dark_wins_regardless_of_luminance() {
+        // Explicit dark override — luminance is bright but scheme wins
+        assert!(!effective_scheme(
+            Some(crate::config::SchemePolarity::Dark),
+            Some(0.9)
+        ));
+    }
+
+    #[test]
+    fn test_effective_scheme_none_derives_light_from_high_luminance() {
+        // No override — luminance >= perceptual midpoint → light
+        assert!(effective_scheme(None, Some(0.7)));
+    }
+
+    #[test]
+    fn test_effective_scheme_none_derives_dark_from_low_luminance() {
+        // No override — luminance < perceptual midpoint → dark
+        assert!(!effective_scheme(None, Some(0.1)));
+    }
+
+    #[test]
+    fn test_effective_scheme_boundary_at_threshold_is_light() {
+        // Boundary: exactly at threshold → light (>= rule)
+        assert!(effective_scheme(
+            None,
+            Some(PERCEPTUAL_LIGHT_DARK_THRESHOLD)
+        ));
+    }
+
+    #[test]
+    fn test_effective_scheme_just_below_boundary_is_dark() {
+        // Just below threshold → dark
+        assert!(!effective_scheme(
+            None,
+            Some(PERCEPTUAL_LIGHT_DARK_THRESHOLD - 0.001)
+        ));
+    }
+
+    #[test]
+    fn test_effective_scheme_no_luminance_falls_back_to_dark() {
+        // No override, no luminance → fallback dark
+        assert!(!effective_scheme(None, None));
+    }
+
+    #[test]
+    fn test_from_config_auto_mode_derives_light_from_high_luminance() {
+        use material_colors::theme::ThemeBuilder;
+
+        // Build a real Material You theme so the auto branch has schemes to select from
+        let source_color = Argb::new(255, 53, 132, 228); // blue-ish
+        let material_theme = ThemeBuilder::with_source(source_color).build();
+
+        let mut config = Config::default();
+        config.theme.mode = "auto".to_string();
+        config.theme.scheme = None; // rely on luminance auto-derivation
+
+        // High luminance (0.8) → light scheme → is_dark_mode should be false
+        let palette = ThemePalette::from_config(&config, Some(&material_theme), Some(0.8));
+        assert!(
+            !palette.is_dark_mode,
+            "high luminance wallpaper should auto-select light scheme"
+        );
+
+        // Low luminance (0.1) → dark scheme → is_dark_mode should be true
+        let palette = ThemePalette::from_config(&config, Some(&material_theme), Some(0.1));
+        assert!(
+            palette.is_dark_mode,
+            "low luminance wallpaper should auto-select dark scheme"
+        );
+    }
+
+    #[test]
+    fn test_auto_mode_fallback_respects_scheme_and_luminance_when_no_material_theme() {
+        // material_theme = None simulates wallpaper extraction failure.
+        // effective_scheme should still be consulted for the fallback branch.
+
+        let mut config = Config::default();
+        config.theme.mode = "auto".to_string();
+
+        // Explicit scheme = Light → light fallback, even with no material theme
+        config.theme.scheme = Some(SchemePolarity::Light);
+        let palette = ThemePalette::from_config(&config, None, None);
+        assert!(
+            !palette.is_dark_mode,
+            "explicit scheme=light should produce light fallback when material_theme is None"
+        );
+
+        // High luminance + no explicit scheme → light fallback
+        config.theme.scheme = None;
+        let palette = ThemePalette::from_config(&config, None, Some(0.8));
+        assert!(
+            !palette.is_dark_mode,
+            "high luminance should produce light fallback when material_theme is None"
+        );
+
+        // Low luminance + no explicit scheme → dark fallback
+        let palette = ThemePalette::from_config(&config, None, Some(0.1));
+        assert!(
+            palette.is_dark_mode,
+            "low luminance should produce dark fallback when material_theme is None"
+        );
     }
 }

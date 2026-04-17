@@ -72,7 +72,7 @@ impl SurfaceStyleManager {
     ///
     /// Should be called during application startup after loading config:
     /// ```ignore
-    /// let palette = ThemePalette::from_config(&config);
+    /// let palette = ThemePalette::from_config(&config, None, None);
     /// SurfaceStyleManager::init_global(palette.surface_styles());
     /// ```
     #[allow(dead_code)]
@@ -84,7 +84,7 @@ impl SurfaceStyleManager {
     ///
     /// Should be called during application startup after loading config:
     /// ```ignore
-    /// let palette = ThemePalette::from_config(&config);
+    /// let palette = ThemePalette::from_config(&config, None, None);
     /// SurfaceStyleManager::init_global_with_config(
     ///     palette.surface_styles(),
     ///     config.advanced.pango_font_rendering,

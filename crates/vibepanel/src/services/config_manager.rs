@@ -123,6 +123,9 @@ pub struct ConfigManager {
     /// `material_colors::theme::Theme` from the source color is cheap (pure math);
     /// the expensive part is image I/O + quantization, which this cache avoids.
     cached_source_color: Cell<Option<material_colors::color::Argb>>,
+    /// Average relative luminance of the last extracted wallpaper image (0.0–1.0).
+    /// Used to auto-derive light/dark polarity when `theme.scheme` is not set.
+    cached_luminance: Cell<Option<f64>>,
     /// Source ID for the wallpaper polling timer (so we can cancel it).
     wallpaper_poll_source: RefCell<Option<glib::SourceId>>,
     /// Guard against overlapping wallpaper polls (IPC + image processing is async).
@@ -138,26 +141,32 @@ impl ConfigManager {
     fn new(config: Config, config_path: Option<PathBuf>) -> Rc<Self> {
         // Detect wallpaper and extract Material You theme if in auto mode
         let monitor_hint = config.bar.outputs.first().map(|s| s.as_str());
-        let (initial_wallpaper, material_theme) =
+        let (initial_wallpaper, material_theme, initial_luminance) =
             if config.theme.mode == "auto" && config.theme.wallpaper.is_none() {
                 let wp = detect_wallpaper(monitor_hint);
-                let theme = wp.as_deref().and_then(extract_theme_from_image);
-                (wp, theme)
+                let result = wp.as_deref().and_then(extract_theme_from_image);
+                let luminance = result.as_ref().map(|(_, l)| *l);
+                let theme = result.and_then(|(t, _)| t);
+                (wp, theme, luminance)
             } else if config.theme.mode == "auto" {
                 // Explicit wallpaper path set
-                let theme = config
+                let result = config
                     .theme
                     .wallpaper
                     .as_deref()
                     .and_then(extract_theme_from_image);
-                (None, theme)
+                let luminance = result.as_ref().map(|(_, l)| *l);
+                let theme = result.and_then(|(t, _)| t);
+                (None, theme, luminance)
             } else {
-                (None, None)
+                (None, None, None)
             };
 
         let source_color = material_theme.as_ref().map(|t| t.source);
-        let palette = ThemePalette::from_config(&config, material_theme.as_ref());
-        let popover_palette = ThemePalette::popover_palette(&config, material_theme.as_ref());
+        let palette =
+            ThemePalette::from_config(&config, material_theme.as_ref(), initial_luminance);
+        let popover_palette =
+            ThemePalette::popover_palette(&config, material_theme.as_ref(), initial_luminance);
 
         Rc::new(Self {
             config: RefCell::new(config),
@@ -168,6 +177,7 @@ impl ConfigManager {
             theme_callbacks: Callbacks::new(),
             wallpaper_path: RefCell::new(initial_wallpaper),
             cached_source_color: Cell::new(source_color),
+            cached_luminance: Cell::new(initial_luminance),
             wallpaper_poll_source: RefCell::new(None),
             poll_in_progress: Cell::new(false),
         })
@@ -664,14 +674,17 @@ impl ConfigManager {
                     || old_config.theme.wallpaper != new_config.theme.wallpaper;
 
                 if wallpaper_source_changed {
-                    let theme = new_config
+                    let result = new_config
                         .theme
                         .wallpaper
                         .as_deref()
                         .or(self.wallpaper_path.borrow().as_deref())
                         .and_then(extract_theme_from_image);
+                    let luminance = result.as_ref().map(|(_, l)| *l);
+                    let theme = result.and_then(|(t, _)| t);
                     self.cached_source_color
                         .set(theme.as_ref().map(|t| t.source));
+                    self.cached_luminance.set(luminance);
                     theme
                 } else {
                     self.cached_source_color.get().map(theme_from_source_color)
@@ -680,10 +693,12 @@ impl ConfigManager {
                 None
             };
 
+            let luminance = self.cached_luminance.get();
             // Rebuild the cached palette once
-            let palette = ThemePalette::from_config(&new_config, material_theme.as_ref());
+            let palette =
+                ThemePalette::from_config(&new_config, material_theme.as_ref(), luminance);
             let popover_palette =
-                ThemePalette::popover_palette(&new_config, material_theme.as_ref());
+                ThemePalette::popover_palette(&new_config, material_theme.as_ref(), luminance);
             let surface_styles = palette.surface_styles();
 
             // Update surface style manager
@@ -808,7 +823,9 @@ impl ConfigManager {
             );
 
             // Heavy work: image I/O + quantization on background thread
-            let material_theme = new_path.as_deref().and_then(extract_theme_from_image);
+            let result = new_path.as_deref().and_then(extract_theme_from_image);
+            let new_luminance = result.as_ref().map(|(_, l)| *l);
+            let material_theme = result.and_then(|(t, _)| t);
             let source_color = material_theme.as_ref().map(|t| t.source);
 
             // Palette construction uses live config on the main thread
@@ -826,10 +843,12 @@ impl ConfigManager {
 
                 *mgr.wallpaper_path.borrow_mut() = new_path;
                 mgr.cached_source_color.set(source_color);
+                mgr.cached_luminance.set(new_luminance);
 
-                let palette = ThemePalette::from_config(&config, material_theme.as_ref());
+                let palette =
+                    ThemePalette::from_config(&config, material_theme.as_ref(), new_luminance);
                 let popover_palette =
-                    ThemePalette::popover_palette(&config, material_theme.as_ref());
+                    ThemePalette::popover_palette(&config, material_theme.as_ref(), new_luminance);
                 let surface_styles = palette.surface_styles();
 
                 SurfaceStyleManager::global()

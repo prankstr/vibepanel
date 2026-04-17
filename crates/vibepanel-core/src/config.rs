@@ -21,8 +21,16 @@ const VALID_COMPOSITORS: &[&str] = &[
 /// Known valid values for theme.mode.
 const VALID_THEME_MODES: &[&str] = &["auto", "dark", "light", "gtk"];
 
-/// Known valid values for theme.scheme.
-const VALID_THEME_SCHEMES: &[&str] = &["dark", "light"];
+/// Light or dark polarity for the Material You color scheme.
+///
+/// Used as `theme.scheme` in config — omit to auto-derive from wallpaper luminance
+/// when `mode = "auto"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SchemePolarity {
+    Dark,
+    Light,
+}
 
 /// Known valid values for theme.popover.
 const VALID_POPOVER_MODES: &[&str] = &["dark", "light"];
@@ -251,15 +259,6 @@ impl Config {
             ));
         }
 
-        // Validate theme.scheme
-        if !VALID_THEME_SCHEMES.contains(&self.theme.scheme.as_str()) {
-            errors.push(format!(
-                "theme.scheme: invalid value '{}', expected one of: {}",
-                self.theme.scheme,
-                VALID_THEME_SCHEMES.join(", ")
-            ));
-        }
-
         // Validate theme.popover
         if let Some(ref popover) = self.theme.popover
             && !VALID_POPOVER_MODES.contains(&popover.as_str())
@@ -381,7 +380,7 @@ impl Config {
 
         // Warn about auto-mode-only fields set when mode != "auto"
         if self.theme.mode != "auto" {
-            if self.theme.scheme != "dark" {
+            if self.theme.scheme.is_some() {
                 warnings.push("theme.scheme: has no effect when mode is not \"auto\"".to_string());
             }
             if self.theme.wallpaper.is_some() {
@@ -398,12 +397,18 @@ impl Config {
             );
         }
 
-        // Warn about popover set to the same polarity as the current mode
+        // Warn about popover set to the same polarity as the current mode.
+        // When mode = "auto" and scheme is omitted, the effective polarity depends on
+        // wallpaper luminance which is only known at runtime — skip the warning in that case
+        // to avoid false positives.
         if let Some(ref popover) = self.theme.popover {
             let effective_mode = match self.theme.mode.as_str() {
                 "dark" => Some("dark"),
                 "light" => Some("light"),
-                "auto" => Some(self.theme.scheme.as_str()),
+                "auto" => self.theme.scheme.map(|s| match s {
+                    SchemePolarity::Dark => "dark",
+                    SchemePolarity::Light => "light",
+                }),
                 _ => None,
             };
             if effective_mode == Some(popover.as_str()) {
@@ -1096,8 +1101,13 @@ pub struct ThemeConfig {
 
     /// Material You color scheme polarity: "dark" or "light".
     ///
-    /// Only meaningful when `mode = "auto"`. Default is "dark".
-    pub scheme: String,
+    /// Only meaningful when `mode = "auto"`. When omitted, the polarity is
+    /// automatically derived from the wallpaper's average WCAG relative
+    /// luminance, using the perceptual midpoint (CIELAB L*=50, linear ≈ 0.184)
+    /// as the threshold: bright wallpaper → light scheme, dark wallpaper →
+    /// dark scheme. Set explicitly to override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheme: Option<SchemePolarity>,
 
     /// Explicit wallpaper image path for auto mode.
     ///
@@ -1162,7 +1172,7 @@ impl Default for ThemeConfig {
         Self {
             // "auto" here; the shipped config.toml overrides to "dark" via deep-merge
             mode: "auto".to_string(),
-            scheme: "dark".to_string(),
+            scheme: None,
             wallpaper: None,
             popover: None,
             accent: None,
