@@ -833,11 +833,14 @@ impl ConfigManager {
                 let mgr = ConfigManager::global();
                 mgr.poll_in_progress.set(false);
 
-                // If we're no longer in auto mode, skip — a config change already
-                // triggered its own theme rebuild.
+                // If we're no longer in auto mode, or an explicit wallpaper has been
+                // set, skip — a config change already triggered its own theme rebuild.
+                // Mirrors the precondition in `start_wallpaper_polling`.
                 let config = mgr.config.borrow().clone();
-                if config.theme.mode != "auto" {
-                    debug!("No longer in auto mode, skipping wallpaper poll result");
+                if config.theme.mode != "auto" || config.theme.wallpaper.is_some() {
+                    debug!(
+                        "Wallpaper polling no longer applicable (mode/explicit wallpaper changed), skipping result"
+                    );
                     return;
                 }
 
