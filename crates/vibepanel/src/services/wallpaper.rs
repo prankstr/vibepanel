@@ -409,36 +409,6 @@ fn encode_varint(mut value: usize) -> Vec<u8> {
     out
 }
 
-/// Decode a VLQ varint from a byte slice, returning the value.
-///
-/// Mirrors `HyprwireClient::read_varint` but operates on an in-memory slice so
-/// the codec can be unit-tested without a socket. Caps at 5 bytes (u32 range),
-/// matching the stream-based reader.
-#[cfg(test)]
-fn decode_varint(data: &[u8]) -> Result<usize, String> {
-    let mut value = 0usize;
-    let mut shift = 0usize;
-
-    for (i, byte) in data.iter().enumerate() {
-        if shift == 28 && byte & 0x70 != 0 {
-            return Err("hyprwire varint exceeds u32 range".to_string());
-        }
-        value |= usize::from(byte & 0x7f) << shift;
-        if byte & 0x80 == 0 {
-            return Ok(value);
-        }
-        shift += 7;
-        if shift > 28 {
-            return Err("hyprwire varint too large".to_string());
-        }
-        if i + 1 >= data.len() {
-            return Err("hyprwire varint truncated".to_string());
-        }
-    }
-
-    Err("hyprwire varint truncated".to_string())
-}
-
 fn parse_new_object(message: &HyprwireMessage) -> Option<(u32, u32)> {
     match message.args.as_slice() {
         [HyprwireValue::Uint(id), HyprwireValue::Uint(seq)] => Some((*id, *seq)),
@@ -1052,15 +1022,15 @@ mod tests {
     #[test]
     fn test_varint_decode_truncated() {
         // Continuation bit set but no more bytes
-        assert!(decode_varint(&[0x80]).is_err());
-        assert!(decode_varint(&[]).is_err());
+        assert!(read_varint_from_bytes(&[0x80]).is_err());
+        assert!(read_varint_from_bytes(&[]).is_err());
     }
 
     #[test]
     fn test_varint_decode_u32_boundary() {
         // 0xFF,0xFF,0xFF,0xFF,0x0F -> u32::MAX (5th byte payload 0x0F, max valid)
         assert_eq!(
-            decode_varint(&[0xFF, 0xFF, 0xFF, 0xFF, 0x0F]).expect("u32::MAX decodes"),
+            read_varint_from_bytes(&[0xFF, 0xFF, 0xFF, 0xFF, 0x0F]).expect("u32::MAX decodes"),
             u32::MAX as usize
         );
     }
@@ -1068,14 +1038,21 @@ mod tests {
     #[test]
     fn test_varint_decode_rejects_above_u32() {
         // 5th byte payload 0x10 would set bit 32 -> exceeds u32 range
-        assert!(decode_varint(&[0xFF, 0xFF, 0xFF, 0xFF, 0x10]).is_err());
+        assert!(read_varint_from_bytes(&[0xFF, 0xFF, 0xFF, 0xFF, 0x10]).is_err());
         // Highest 5th-byte payload 0x7F is also out of range
-        assert!(decode_varint(&[0x80, 0x80, 0x80, 0x80, 0x7F]).is_err());
+        assert!(read_varint_from_bytes(&[0x80, 0x80, 0x80, 0x80, 0x7F]).is_err());
         // Continuation bit set on a 5th byte with oversized payload: rejected early
-        assert!(decode_varint(&[0x80, 0x80, 0x80, 0x80, 0x90, 0x01]).is_err());
+        assert!(read_varint_from_bytes(&[0x80, 0x80, 0x80, 0x80, 0x90, 0x01]).is_err());
     }
 
     // ----- allocation caps on hyprwire payload sizes -----
+
+    fn read_varint_from_bytes(bytes: &[u8]) -> Result<usize, String> {
+        let (a, mut b) = UnixStream::pair().expect("socketpair");
+        b.write_all(bytes).expect("write payload");
+        drop(b);
+        HyprwireClient::from_stream(a).read_varint()
+    }
 
     fn read_value_from_bytes(magic: u8, bytes: &[u8]) -> Result<HyprwireValue, String> {
         let (a, mut b) = UnixStream::pair().expect("socketpair");
