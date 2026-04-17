@@ -3,6 +3,21 @@
 //! Handles IPC with wallpaper daemons (hyprpaper, awww/swww, wpaperd, waypaper)
 //! and extracts a `material_colors::theme::Theme` from a wallpaper image for
 //! use by the theming system in `vibepanel-core`.
+//!
+//! ## hyprpaper version support
+//!
+//! | hyprpaper version | Detection method | Status |
+//! |-------------------|-----------------|--------|
+//! | < 0.8.0 | Legacy text IPC | Supported |
+//! | 0.8.0 – 0.8.3 | Neither (regression in released builds) | Soft-fail: no wallpaper detected |
+//! | main / >= 0.8.4 (unreleased) | hyprwire binary IPC (`hyprpaper_core@2`) | Supported, best-effort |
+//!
+//! The hyprwire path targets the `hyprpaper_core@2` protocol introduced in
+//! <https://github.com/hyprwm/hyprpaper/pull/313>. This protocol is available
+//! in hyprpaper built from `main` and is expected to ship in a future tagged
+//! release. Until then, support is best-effort: if upstream changes the wire
+//! contract before a stable release, detection will gracefully fall back to
+//! returning `None` (no wallpaper detected), without crashing or blocking.
 
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
@@ -617,11 +632,13 @@ fn parse_hyprpaper_active_response(response: &str, monitor: Option<&str>) -> Opt
     select_monitor_wallpaper(&entries, monitor)
 }
 
-/// Detect the wallpaper via the hyprwire binary protocol.
+/// Detect the wallpaper via the hyprwire binary protocol (`hyprpaper_core@2`).
 ///
 /// hyprpaper 0.8.x migrated away from the legacy text IPC to hyprwire. Released
-/// `hyprpaper_core@1` is write-only, while upstream `hyprpaper_core@2` adds a
-/// status object that emits `active_wallpaper(monitor, path)` events.
+/// `hyprpaper_core@1` (0.8.0–0.8.3) is write-only; upstream `hyprpaper_core@2`
+/// (main / future >= 0.8.4) adds a status object that emits
+/// `active_wallpaper(monitor, path)` events. Detection soft-fails to `None` if
+/// the server does not advertise `hyprpaper_core@2`.
 fn detect_hyprpaper_hyprwire(socket_path: &str, monitor: Option<&str>) -> Option<String> {
     let mut client = HyprwireClient::connect(socket_path)
         .inspect_err(|e| debug!("hyprwire: failed to connect: {}", e))
