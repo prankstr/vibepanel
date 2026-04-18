@@ -17,7 +17,7 @@ const MERGE_GROUP_SPACING: i32 = 10;
 
 use crate::popover_tracker::PopoverTracker;
 use crate::sectioned_bar::SectionedBar;
-use crate::services::config_manager::ConfigManager;
+use crate::services::config_manager::{ConfigManager, ThemeCallbackGuard};
 use crate::services::tooltip::TooltipManager;
 use crate::styles::{class, state, widget as style_widget};
 use crate::widgets::{
@@ -182,6 +182,7 @@ pub fn create_bar_window(
 
     let is_island_mode = config.bar.background_opacity == 0.0;
 
+    let bar_box_for_blur = bar_box.clone();
     window.connect_map(move |win| {
         win.set_default_size(target_width, bar_height);
         debug!(
@@ -196,7 +197,7 @@ pub fn create_bar_window(
             && let Some(blur) =
                 crate::services::background_effect::BackgroundEffectManager::global()
         {
-            blur.apply_bar_blur_region(win);
+            blur.apply_bar_blur_region(win, &bar_box_for_blur);
         }
     });
 
@@ -225,6 +226,8 @@ pub fn create_bar_window(
             let islands = collect_island_bounds(&bar_box_clone, &native);
             if !islands.is_empty() {
                 blur.apply_bar_island_blur_regions(&win, &islands);
+            } else {
+                blur.remove_blur_region(&win);
             }
         });
         if let Some(lm) = bar_box
@@ -247,7 +250,8 @@ pub fn create_bar_window(
     // blur on/off within the same mode (opaque or island).
     {
         let win_weak = window.downgrade();
-        ConfigManager::global().on_theme_change(move || {
+        let bar_box_for_theme = bar_box.clone();
+        let theme_cb_id = ConfigManager::global().on_theme_change(move || {
             let Some(win) = win_weak.upgrade() else {
                 return;
             };
@@ -259,7 +263,7 @@ pub fn create_bar_window(
                     crate::services::background_effect::BackgroundEffectManager::global()
                 {
                     // Opaque/translucent mode: re-apply whole-bar region.
-                    blur.apply_bar_blur_region(&win);
+                    blur.apply_bar_blur_region(&win, &bar_box_for_theme);
                 }
             } else if let Some(blur) =
                 crate::services::background_effect::BackgroundEffectManager::global()
@@ -267,6 +271,7 @@ pub fn create_bar_window(
                 blur.remove_blur_region(&win);
             }
         });
+        state.add_handle(Box::new(ThemeCallbackGuard(theme_cb_id)));
     }
 
     window.set_visible(true);

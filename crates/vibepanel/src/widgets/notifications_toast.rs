@@ -25,9 +25,9 @@ use crate::services::surfaces::SurfaceStyleManager;
 use crate::styles::{button, color, notification as notif};
 
 use super::notifications_common::{
-    POPOVER_WIDTH, TOAST_BAR_MARGIN, TOAST_ESTIMATED_HEIGHT, TOAST_GAP, TOAST_MARGIN_RIGHT,
-    TOAST_TIMEOUT_CRITICAL_MS, TOAST_TIMEOUT_MS, create_notification_image_widget,
-    sanitize_body_markup,
+    POPOVER_WIDTH, SURFACE_SHADOW_MARGIN, TOAST_BAR_MARGIN, TOAST_ESTIMATED_HEIGHT, TOAST_GAP,
+    TOAST_MARGIN_RIGHT, TOAST_TIMEOUT_CRITICAL_MS, TOAST_TIMEOUT_MS,
+    create_notification_image_widget, sanitize_body_markup,
 };
 
 /// Floating toast window for displaying a single notification.
@@ -84,7 +84,10 @@ impl NotificationToast {
         window.set_anchor(opposite_edge, false);
 
         window.set_margin(bar_edge, initial_margin);
-        window.set_margin(Edge::Right, TOAST_MARGIN_RIGHT);
+        let right_margin = (TOAST_MARGIN_RIGHT
+            - SurfaceStyleManager::global().shadow_margin(SURFACE_SHADOW_MARGIN))
+        .max(0);
+        window.set_margin(Edge::Right, right_margin);
 
         let notification_id = notification.id;
         let toast = Rc::new(Self {
@@ -163,6 +166,32 @@ impl NotificationToast {
             });
         });
 
+        // Apply blur region hint when the toast surface is mapped.
+        // The window's child (outer container) defines the blur bounds,
+        // excluding the CSS box-shadow expansion that GTK adds to the surface.
+        toast.window.connect_map(move |win| {
+            if ConfigManager::global().blur_enabled()
+                && let Some(blur) =
+                    crate::services::background_effect::BackgroundEffectManager::global()
+                && let Some(content) = win.child()
+            {
+                let radius = ConfigManager::global().surface_border_radius() as i32;
+                blur.apply_blur_surface(win, &content, radius);
+            }
+        });
+
+        // Remove the blur region as soon as the native surface is torn down.
+        // connect_destroy fires while the Wayland surface still exists, so
+        // remove_blur_region can reach SurfaceInfo::from_widget.  The Drop impl
+        // below is retained as a safety net for any path that skips destroy.
+        toast.window.connect_destroy(|win| {
+            if let Some(blur) =
+                crate::services::background_effect::BackgroundEffectManager::global()
+            {
+                blur.remove_blur_region(win);
+            }
+        });
+
         toast
     }
 
@@ -178,6 +207,16 @@ impl NotificationToast {
 
         // Apply surface styling
         SurfaceStyleManager::global().apply_surface_styles(&outer, false);
+
+        // Apply uniform shadow margins so the CSS box-shadow is not clipped at
+        // the layer-shell surface boundary.  Unlike popovers (which are flush
+        // against the bar on one side), the toast floats freely and needs equal
+        // margins on all four sides.
+        let sm = SurfaceStyleManager::global().shadow_margin(SURFACE_SHADOW_MARGIN);
+        outer.set_margin_top(sm);
+        outer.set_margin_bottom(sm);
+        outer.set_margin_start(sm);
+        outer.set_margin_end(sm);
 
         // Add urgency styling
         if notification.urgency == URGENCY_CRITICAL {
@@ -406,6 +445,11 @@ impl Drop for NotificationToast {
         if let Some(source_id) = self.timeout_source.borrow_mut().take() {
             source_id.remove();
         }
+        // Clean up the blur effect object so it doesn't leak in the
+        // BackgroundEffectManager's effects HashMap after the surface is gone.
+        if let Some(blur) = crate::services::background_effect::BackgroundEffectManager::global() {
+            blur.remove_blur_region(&self.window);
+        }
     }
 }
 
@@ -436,14 +480,19 @@ impl NotificationToastManager {
             self.remove_toast(notification.id);
         }
 
-        // Calculate initial margin from existing toasts
+        // Calculate initial margin from existing toasts.
+        // Each toast window includes shadow margins (sm on each side), making
+        // the window taller than the visible content.  Subtract the shadow
+        // margins from the height contribution so the visual gap between
+        // content boxes matches TOAST_GAP.
+        let sm = SurfaceStyleManager::global().shadow_margin(SURFACE_SHADOW_MARGIN);
         let initial_margin = {
             let order = self.toast_order.borrow();
             let toasts = self.toasts.borrow();
-            let mut y_offset = TOAST_BAR_MARGIN;
+            let mut y_offset = (TOAST_BAR_MARGIN - sm).max(0);
             for &id in order.iter() {
                 if let Some(toast) = toasts.get(&id) {
-                    y_offset += toast.height() + TOAST_GAP;
+                    y_offset += (toast.height() - 2 * sm).max(0) + TOAST_GAP;
                 }
             }
             y_offset
@@ -504,11 +553,12 @@ impl NotificationToastManager {
     fn reposition_toasts(&self) {
         let order = self.toast_order.borrow();
         let toasts = self.toasts.borrow();
-        let mut y_offset = TOAST_BAR_MARGIN;
+        let sm = SurfaceStyleManager::global().shadow_margin(SURFACE_SHADOW_MARGIN);
+        let mut y_offset = (TOAST_BAR_MARGIN - sm).max(0);
         for &id in order.iter() {
             if let Some(toast) = toasts.get(&id) {
                 toast.update_bar_margin(y_offset, ConfigManager::global().animations_enabled());
-                y_offset += toast.height() + TOAST_GAP;
+                y_offset += (toast.height() - 2 * sm).max(0) + TOAST_GAP;
             }
         }
     }

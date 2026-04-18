@@ -653,12 +653,9 @@ impl LayerShellPopover {
                 shell.set_scale(ANIM_SCALE_FROM);
                 shell.remove_child();
             }
-            if ConfigManager::global().blur_enabled()
-                && let Some(blur) =
-                    crate::services::background_effect::BackgroundEffectManager::global()
-            {
-                blur.clear_blur_region(&window);
-            }
+            // Blur removal is unnecessary here — set_visible(false) unmaps
+            // the wl_surface, so the compositor discards blur automatically.
+            // Blur is re-applied on next map via connect_map.
             window.set_visible(false);
             // Fire on_close now since there's no animation to wait for.
             if let Some(ref cb) = *self.on_close.borrow() {
@@ -671,13 +668,15 @@ impl LayerShellPopover {
         // may not have fired yet, leaving window.opacity at 0.0).
         window.set_opacity(1.0);
 
-        // Clear blur at the start of the close animation so the compositor
-        // stops drawing blur behind the surface while it fades out.
+        // Remove blur immediately so the compositor stops drawing it while the
+        // surface fades out.  Blur is a compositor effect independent of surface
+        // opacity — if left in place it would remain visible as the content
+        // becomes transparent.
         if ConfigManager::global().blur_enabled()
             && let Some(blur) =
                 crate::services::background_effect::BackgroundEffectManager::global()
         {
-            blur.clear_blur_region(&window);
+            blur.remove_blur_region(&window);
         }
 
         // Start (or reverse into) the close animation.
@@ -953,8 +952,12 @@ impl LayerShellPopover {
             });
         }
 
-        // Apply blur region hint when the popover surface is mapped.
-        // Inset by POPOVER_SHADOW_MARGIN to exclude shadow padding from blur.
+        // Apply blur on every map (first show and re-show).  Close calls
+        // set_visible(false) which unmaps the surface, so connect_map fires
+        // again when the window is re-shown.  On first map the surface has no
+        // size yet, so apply_blur_region defers via idle.  On re-show it sets
+        // the full-size region, which the animation tick overwrites with a
+        // scaled region within 1-2 frames.
         window.connect_map(move |win| {
             if ConfigManager::global().blur_enabled()
                 && let Some(blur) =
@@ -1073,8 +1076,9 @@ impl LayerShellPopover {
             let scale = ANIM_SCALE_FROM + (1.0 - ANIM_SCALE_FROM) * progress;
             shell_for_scale.set_scale(scale);
 
-            // During opening, update the blur region to match the ScaleBox clip
-            // so the compositor blur grows in sync with the visual.
+            // The compositor might draw blur at the final full size while the
+            // ScaleBox visual is still growing in, causing a brief flash of
+            // oversized blur. Shrink the blur region to match the current scale.
             if direction == AnimDirection::Opening
                 && ConfigManager::global().blur_enabled()
                 && let Some(blur) =
@@ -1191,6 +1195,13 @@ impl Drop for LayerShellPopover {
 
         if let Some(catcher) = self.click_catcher.borrow_mut().take() {
             catcher.close();
+        }
+        // Clean up the blur effect entry so it doesn't leak in the
+        // BackgroundEffectManager's effects HashMap after the surface is gone.
+        if let Some(blur) = crate::services::background_effect::BackgroundEffectManager::global()
+            && let Some(ref window) = *self.window.borrow()
+        {
+            blur.remove_blur_region(window);
         }
         if let Some(window) = self.window.borrow_mut().take() {
             window.close();

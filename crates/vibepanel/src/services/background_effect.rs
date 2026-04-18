@@ -5,6 +5,26 @@
 //! and transparent padding. This is a **zero-cost hint** — if the compositor
 //! has no blur configured, it is silently ignored.
 //!
+//! ## Surface scope
+//!
+//! Covers all vibepanel-managed surfaces with visible backgrounds:
+//! bar (opaque and island modes), layer-shell popovers, Quick Settings,
+//! notification toasts, OSD, tray menus, and the media pop-out window.
+//!
+//! Intentionally excluded:
+//! - **Quick Settings row sub-menus** (`gtk4::Popover` / `xdg_popup`) — wifi,
+//!   bluetooth, and power card context menus.  These are subordinate menus
+//!   inside an already-blurred layer-shell surface; the visual benefit is
+//!   negligible and they are not "top-level" surfaces in the user's view.
+//! - **Tooltips** (`services/tooltip.rs`) — layer-shell surfaces but tiny and
+//!   ephemeral; blur would not be visible behind a single-line label.
+//!
+//! Note: tray menus and the media pop-out are `xdg_popup` / XDG-toplevel
+//! surfaces respectively.  Whether the compositor actually renders blur for
+//! them depends on compositor support.  niri supports both as of PR #3483
+//! (`wip/branch`).  On compositors without support the hints are silently
+//! ignored — no harm done.
+//!
 //! ## Architecture
 //!
 //! The service bridges GDK's Wayland connection with `wayland-client` objects.
@@ -25,9 +45,9 @@ use gtk4::prelude::*;
 use tracing::{debug, trace, warn};
 use wayland_client::protocol::wl_compositor::WlCompositor;
 use wayland_client::protocol::wl_registry;
-use wayland_client::{Connection, Dispatch, EventQueue, QueueHandle, WEnum};
+use wayland_client::{Connection, Dispatch, EventQueue, QueueHandle};
 use wayland_protocols::ext::background_effect::v1::client::{
-    ext_background_effect_manager_v1::{self, Capability, ExtBackgroundEffectManagerV1},
+    ext_background_effect_manager_v1::{self, ExtBackgroundEffectManagerV1},
     ext_background_effect_surface_v1::{self, ExtBackgroundEffectSurfaceV1},
 };
 
@@ -43,8 +63,6 @@ struct BlurState {
     compositor: Option<WlCompositor>,
     /// Cached per-surface effect objects, keyed by `wl_surface` ObjectId.
     effects: HashMap<wayland_client::backend::ObjectId, ExtBackgroundEffectSurfaceV1>,
-    /// Whether the compositor advertised blur capability.
-    blur_capable: bool,
 }
 
 impl BlurState {
@@ -53,7 +71,6 @@ impl BlurState {
             manager: None,
             compositor: None,
             effects: HashMap::new(),
-            blur_capable: false,
         }
     }
 }
@@ -94,31 +111,14 @@ impl Dispatch<wl_registry::WlRegistry, ()> for BlurState {
 
 impl Dispatch<ExtBackgroundEffectManagerV1, ()> for BlurState {
     fn event(
-        state: &mut Self,
+        _state: &mut Self,
         _proxy: &ExtBackgroundEffectManagerV1,
-        event: ext_background_effect_manager_v1::Event,
+        _event: ext_background_effect_manager_v1::Event,
         _data: &(),
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
     ) {
-        if let ext_background_effect_manager_v1::Event::Capabilities { flags } = event {
-            let was_capable = state.blur_capable;
-            // flags is WEnum<Capability> — extract the inner value and check for Blur.
-            state.blur_capable = match flags {
-                WEnum::Value(cap) => cap.contains(Capability::Blur),
-                WEnum::Unknown(_) => false,
-            };
-            if state.blur_capable != was_capable {
-                debug!(
-                    "Background effect blur capability: {}",
-                    if state.blur_capable {
-                        "available"
-                    } else {
-                        "lost"
-                    }
-                );
-            }
-        }
+        // No events we need to handle.
     }
 }
 
@@ -171,8 +171,10 @@ impl Dispatch<wayland_client::protocol::wl_region::WlRegion, ()> for BlurState {
 /// are geometrically unavoidable (pigeonhole principle) but are imperceptible
 /// there since the circle is nearly vertical.
 ///
-/// If `radius` is zero or the radius is too large for the dimensions, falls
-/// back to a single rectangle.
+/// If `radius` is zero or the dimensions are too small to accommodate it,
+/// clamps to a pill shape or falls back to a plain rectangle.
+/// Non-positive `width` or `height` are silently ignored (no `wl_region.add`
+/// call is made — per Wayland protocol, non-positive dimensions are invalid).
 fn add_rounded_rect_to_region(
     region: &wayland_client::protocol::wl_region::WlRegion,
     x: i32,
@@ -181,14 +183,26 @@ fn add_rounded_rect_to_region(
     height: i32,
     radius: i32,
 ) {
-    if radius <= 0 || radius * 2 > width || radius * 2 > height {
+    if width <= 0 || height <= 0 {
+        return;
+    }
+    if radius <= 0 {
+        region.add(x, y, width, height);
+        return;
+    }
+    // Clamp to half the smallest dimension so oversized radii produce a
+    // pill shape instead of a plain rectangle.
+    let radius = radius.min(width / 2).min(height / 2);
+    if radius <= 0 {
         region.add(x, y, width, height);
         return;
     }
 
     // Central rectangle spanning the full width, excluding the top and bottom
     // radius strips.
-    region.add(x, y + radius, width, height - 2 * radius);
+    if height > 2 * radius {
+        region.add(x, y + radius, width, height - 2 * radius);
+    }
 
     let r = radius as f64;
     for i in 0..radius as usize {
@@ -204,6 +218,85 @@ fn add_rounded_rect_to_region(
     }
 }
 
+/// Compute effective shadow margins and border radius for a blur region.
+///
+/// Resolves the base `shadow_margin` through `SurfaceStyleManager` (respecting
+/// the `shadows_enabled` flag) and applies the asymmetric layout where the
+/// bar-adjacent side gets 0 margin.
+///
+/// Returns `(margin_top, margin_bottom, margin_start, margin_end, radius)`.
+fn compute_shadow_layout(shadow_margin: i32) -> (i32, i32, i32, i32, i32) {
+    let effective_margin = if shadow_margin > 0 {
+        crate::services::surfaces::SurfaceStyleManager::global().shadow_margin(shadow_margin)
+    } else {
+        0
+    };
+
+    let m = effective_margin;
+    let (margin_top, margin_bottom, margin_start, margin_end) = if m > 0 {
+        let is_bottom = crate::services::config_manager::ConfigManager::global().bar_is_bottom();
+        if is_bottom {
+            (m, 0, m, m) // bar at bottom → top/start/end get margin, bottom = 0
+        } else {
+            (0, m, m, m) // bar at top → bottom/start/end get margin, top = 0
+        }
+    } else {
+        (0, 0, 0, 0)
+    };
+
+    let radius = if shadow_margin > 0 {
+        crate::services::config_manager::ConfigManager::global().surface_border_radius() as i32
+    } else {
+        0
+    };
+
+    (margin_top, margin_bottom, margin_start, margin_end, radius)
+}
+
+// ── Surface info helper ─────────────────────────────────────────────────────
+
+/// Resolved Wayland surface info for a GTK widget.
+///
+/// Extracts the `wl_surface`, GDK `WaylandSurface`, and a stable `ObjectId`
+/// for use as a cache key.  Avoids duplicating the same 15-line lookup
+/// boilerplate across every method that needs to interact with a surface.
+struct SurfaceInfo {
+    wl_surface: wayland_client::protocol::wl_surface::WlSurface,
+    wayland_surface: gdk4_wayland::WaylandSurface,
+    surface_id: wayland_client::backend::ObjectId,
+}
+
+impl SurfaceInfo {
+    /// Resolve surface info from any widget that has a native surface.
+    fn from_widget(widget: &impl gtk4::prelude::IsA<gtk4::Widget>) -> Option<Self> {
+        let native = widget.as_ref().native()?;
+        let gdk_surface = native.surface()?;
+        let wayland_surface = gdk_surface
+            .downcast::<gdk4_wayland::WaylandSurface>()
+            .ok()?;
+        let wl_surface = wayland_surface.wl_surface()?;
+        let surface_id =
+            <wayland_client::protocol::wl_surface::WlSurface as wayland_client::Proxy>::id(
+                &wl_surface,
+            );
+        Some(Self {
+            wl_surface,
+            wayland_surface,
+            surface_id,
+        })
+    }
+
+    /// Surface width in logical pixels.
+    fn width(&self) -> i32 {
+        self.wayland_surface.width()
+    }
+
+    /// Surface height in logical pixels.
+    fn height(&self) -> i32 {
+        self.wayland_surface.height()
+    }
+}
+
 // ── Thread-local singleton ──────────────────────────────────────────────────
 
 thread_local! {
@@ -215,8 +308,6 @@ pub struct BackgroundEffectManager {
     state: RefCell<BlurState>,
     event_queue: RefCell<EventQueue<BlurState>>,
     qh: QueueHandle<BlurState>,
-    /// Whether the protocol is available on this compositor.
-    available: bool,
 }
 
 impl BackgroundEffectManager {
@@ -224,7 +315,7 @@ impl BackgroundEffectManager {
     ///
     /// Must be called on the main thread after `gtk4::gdk::Display::default()` is available.
     /// If the compositor does not advertise `ext_background_effect_manager_v1`, the
-    /// service becomes inert — all `apply_blur_region` calls are no-ops.
+    /// singleton remains `None` and all callers' `global()` checks become no-ops.
     pub fn init_global() {
         INSTANCE.with(|cell| {
             if cell.borrow().is_some() {
@@ -306,15 +397,8 @@ impl BackgroundEffectManager {
             return None;
         }
 
-        // Second roundtrip to receive the capabilities event.
-        if let Err(e) = event_queue.roundtrip(&mut state) {
-            warn!("Failed blur service capabilities roundtrip: {e}");
-            return None;
-        }
-
         debug!(
-            "Blur service initialized (blur_capable={}, compositor={:?})",
-            state.blur_capable,
+            "Blur service initialized (compositor={:?})",
             state.compositor.is_some()
         );
 
@@ -322,10 +406,9 @@ impl BackgroundEffectManager {
             state: RefCell::new(state),
             event_queue: RefCell::new(event_queue),
             qh,
-            available: true,
         };
 
-        // Install fd watcher to dispatch events (e.g. capability changes).
+        // Install fd watcher to dispatch incoming protocol events.
         mgr.install_event_dispatch();
 
         Some(mgr)
@@ -372,6 +455,65 @@ impl BackgroundEffectManager {
         });
     }
 
+    /// Get or create the per-surface effect object and return it alongside
+    /// a cloned compositor reference.
+    ///
+    /// The effect is cached by `wl_surface` `ObjectId` to avoid the protocol
+    /// error raised when creating duplicates.
+    fn get_or_create_effect(
+        &self,
+        info: &SurfaceInfo,
+    ) -> Option<(ExtBackgroundEffectSurfaceV1, WlCompositor)> {
+        let mut state = self.state.borrow_mut();
+        let (Some(manager), Some(compositor)) = (&state.manager, &state.compositor) else {
+            return None;
+        };
+        let manager = manager.clone();
+        let compositor = compositor.clone();
+
+        let effect = state
+            .effects
+            .entry(info.surface_id.clone())
+            .or_insert_with(|| {
+                debug!("Creating background effect object for surface");
+                manager.get_background_effect(&info.wl_surface, &self.qh, ())
+            })
+            .clone();
+
+        Some((effect, compositor))
+    }
+
+    /// Flush the event queue so requests reach the compositor promptly.
+    fn flush(&self) {
+        if let Ok(eq) = self.event_queue.try_borrow() {
+            let _ = eq.flush();
+        }
+    }
+
+    /// Install a one-shot resize watcher on a window's GDK surface.
+    ///
+    /// We watch only `width`, which is sufficient: GDK's internal
+    /// `_gdk_surface_update_size()` emits both `notify::width` and
+    /// `notify::height` whenever *any* dimension changes, so height-only
+    /// configures still fire `notify::width`.
+    ///
+    /// The watcher is installed at most once per `key` per window.
+    fn install_resize_watcher(
+        window: &gtk4::ApplicationWindow,
+        key: &'static str,
+        on_resize: impl Fn() + 'static,
+    ) {
+        unsafe {
+            if window.data::<bool>(key).is_some() {
+                return;
+            }
+            window.set_data(key, true);
+        }
+        if let Some(gdk_surface) = window.native().and_then(|n| n.surface()) {
+            gdk_surface.connect_notify_local(Some("width"), move |_, _| on_resize());
+        }
+    }
+
     /// Apply a blur region hint to the given window's surface.
     ///
     /// `shadow_margin` is the padding (in surface-local px) between the layer-shell
@@ -386,96 +528,44 @@ impl BackgroundEffectManager {
     /// This is fire-and-forget: the region is double-buffered and applied on
     /// GTK's next `wl_surface.commit`.
     pub fn apply_blur_region(&self, window: &gtk4::ApplicationWindow, shadow_margin: i32) {
-        if !self.available {
-            return;
-        }
-
-        // Get the wl_surface from the GDK surface.
-        let Some(native) = window.native() else {
-            trace!("No native for window, skipping blur");
-            return;
-        };
-        let Some(gdk_surface) = native.surface() else {
-            trace!("No GDK surface for window, skipping blur");
-            return;
-        };
-        let wayland_surface = match gdk_surface.downcast::<gdk4_wayland::WaylandSurface>() {
-            Ok(s) => s,
-            Err(_) => return,
-        };
-        let Some(wl_surface) = wayland_surface.wl_surface() else {
+        let Some(info) = SurfaceInfo::from_widget(window) else {
             trace!("No wl_surface for window, skipping blur");
             return;
         };
 
-        // Use fully-qualified syntax to avoid clash with gtk4::prelude's id() methods.
-        let surface_id =
-            <wayland_client::protocol::wl_surface::WlSurface as wayland_client::Proxy>::id(
-                &wl_surface,
-            );
-
-        // Get or create the effect object for this surface.
-        // Extract manager clone before entry API to avoid borrow conflict.
-        let mut state = self.state.borrow_mut();
-
-        let (Some(manager), Some(compositor)) = (&state.manager, &state.compositor) else {
-            return;
-        };
-        let manager = manager.clone();
-        let compositor = compositor.clone();
-
-        let effect = state
-            .effects
-            .entry(surface_id)
-            .or_insert_with(|| {
-                debug!("Creating background effect object for surface");
-                manager.get_background_effect(&wl_surface, &self.qh, ())
-            })
-            .clone();
-
-        drop(state);
-
-        // Get the surface dimensions from the WaylandSurface (which derefs to gdk::Surface).
-        let width = wayland_surface.width();
-        let height = wayland_surface.height();
+        let width = info.width();
+        let height = info.height();
 
         if width <= 0 || height <= 0 {
-            // Surface not sized yet (common on first map). Schedule an idle retry
-            // so we apply the region once GTK has committed actual dimensions.
+            // Surface not sized yet (common on first map). Schedule a one-shot
+            // idle retry so we apply the region once GTK has committed actual
+            // dimensions. A set_data guard prevents stacking multiple retries if
+            // this is called several times before the surface gets sized.
+            const RETRY_KEY: &str = "vibepanel-blur-region-retry-pending";
+            if unsafe { window.data::<bool>(RETRY_KEY) }.is_some() {
+                trace!("Idle retry already pending, skipping duplicate");
+                return;
+            }
+            unsafe { window.set_data(RETRY_KEY, true) };
             trace!("Surface has no size yet, deferring blur region to idle");
             let win_clone = window.clone();
             glib::idle_add_local_once(move || {
-                if let Some(blur) = Self::global() {
+                unsafe { win_clone.steal_data::<bool>(RETRY_KEY) };
+                if crate::services::config_manager::ConfigManager::global().blur_enabled()
+                    && let Some(blur) = Self::global()
+                {
                     blur.apply_blur_region(&win_clone, shadow_margin);
                 }
             });
             return;
         }
 
-        // Run the base margin through SurfaceStyleManager to respect the
-        // shadows_enabled flag — when shadows are off, the actual margin is 0
-        // even though the caller passes the base constant.
-        let effective_margin = if shadow_margin > 0 {
-            crate::services::surfaces::SurfaceStyleManager::global().shadow_margin(shadow_margin)
-        } else {
-            0
+        let Some((effect, compositor)) = self.get_or_create_effect(&info) else {
+            return;
         };
 
-        // Compute per-side margins matching `SurfaceStyleManager::apply_shadow_margins`:
-        // the bar-adjacent side gets 0 margin (content is flush against the bar),
-        // the other three sides get the full effective margin.
-        let m = effective_margin;
-        let (margin_top, margin_bottom, margin_start, margin_end) = if m > 0 {
-            let is_bottom =
-                crate::services::config_manager::ConfigManager::global().bar_is_bottom();
-            if is_bottom {
-                (m, 0, m, m) // bar at bottom → top/start/end get margin, bottom = 0
-            } else {
-                (0, m, m, m) // bar at top → bottom/start/end get margin, top = 0
-            }
-        } else {
-            (0, 0, 0, 0)
-        };
+        let (margin_top, margin_bottom, margin_start, margin_end, radius) =
+            compute_shadow_layout(shadow_margin);
 
         let region = compositor.create_region(&self.qh, ());
         let x = margin_start;
@@ -483,25 +573,11 @@ impl BackgroundEffectManager {
         let w = width - margin_start - margin_end;
         let h = height - margin_top - margin_bottom;
 
-        // Use rounded corners for surfaces with shadow margins (popovers, QS).
-        // The bar (shadow_margin == 0) has no visible border-radius for blur.
-        let radius = if shadow_margin > 0 {
-            crate::services::config_manager::ConfigManager::global().surface_border_radius() as i32
-        } else {
-            0
-        };
-
         add_rounded_rect_to_region(&region, x, y, w, h, radius);
 
         effect.set_blur_region(Some(&region));
-
-        // The region object can be destroyed immediately (copy semantics).
         region.destroy();
-
-        // Flush to ensure the request reaches the compositor.
-        if let Ok(eq) = self.event_queue.try_borrow() {
-            let _ = eq.flush();
-        }
+        self.flush();
 
         debug!(
             "Applied blur region: {}x{} at ({},{}) r={} margins t={} b={} s={} e={} (surface {}x{})",
@@ -511,37 +587,34 @@ impl BackgroundEffectManager {
         // Install a resize watcher (once per window) so the blur region
         // is re-applied whenever the surface dimensions change — e.g. when
         // a Revealer expands and the layer-shell surface reconfigures.
-        const BLUR_RESIZE_WATCHED_KEY: &str = "vibepanel-blur-resize-watched";
-        unsafe {
-            if window.data::<bool>(BLUR_RESIZE_WATCHED_KEY).is_none() {
-                window.set_data(BLUR_RESIZE_WATCHED_KEY, true);
-                let win_clone = window.clone();
-                if let Some(gdk_surface) = window.native().and_then(|n| n.surface()) {
-                    gdk_surface.connect_notify_local(Some("width"), move |_, _| {
-                        if let Some(blur) = BackgroundEffectManager::global() {
-                            blur.apply_blur_region(&win_clone, shadow_margin);
-                        }
-                    });
-                }
+        let win_clone = window.clone();
+        Self::install_resize_watcher(window, "vibepanel-blur-resize-watched", move || {
+            if crate::services::config_manager::ConfigManager::global().blur_enabled()
+                && let Some(blur) = BackgroundEffectManager::global()
+            {
+                blur.apply_blur_region(&win_clone, shadow_margin);
             }
-        }
+        });
     }
 
     /// Apply a blur region for the bar surface.
     ///
     /// When the bar has a non-zero background opacity (translucent/opaque bar),
-    /// the entire bar surface is blurred as a single rounded rectangle.
+    /// the blur region is derived from `bar_box`'s allocation within the surface
+    /// via `compute_bounds`.  This correctly excludes the transparent
+    /// `.bar-margin-spacer` and `.bar-shell-inner` padding areas that surround
+    /// the visible bar background when `screen_margin > 0`.
     ///
     /// When the bar background is fully transparent (opacity == 0.0, islands mode),
     /// individual widget island regions are blurred instead via
     /// `apply_bar_island_blur_regions`.
     ///
-    /// Called from bar.rs on `connect_map` and from the layout allocate callback.
-    pub fn apply_bar_blur_region(&self, window: &gtk4::ApplicationWindow) {
-        if !self.available {
-            return;
-        }
-
+    /// Called from bar.rs on `connect_map` and from the `on_theme_change` handler.
+    pub fn apply_bar_blur_region(
+        &self,
+        window: &gtk4::ApplicationWindow,
+        bar_box: &impl gtk4::prelude::IsA<gtk4::Widget>,
+    ) {
         let bar_opacity =
             crate::services::config_manager::ConfigManager::global().bar_background_opacity();
 
@@ -551,12 +624,12 @@ impl BackgroundEffectManager {
             return;
         }
 
-        // Opaque/translucent bar: blur the entire surface as one rounded rect.
+        // Opaque/translucent bar: blur only the bar_box bounds, not the full surface.
+        // Using apply_blur_surface so compute_bounds accounts for any margin/padding.
         let radius =
             crate::services::config_manager::ConfigManager::global().bar_border_radius() as i32;
 
-        // Re-use apply_blur_region with shadow_margin=0 (bar has no shadow padding).
-        self.apply_blur_region_with_radius(window, 0, radius);
+        self.apply_blur_surface(window, bar_box, radius);
     }
 
     /// Apply blur regions for individual widget islands on a transparent bar.
@@ -571,46 +644,17 @@ impl BackgroundEffectManager {
         window: &gtk4::ApplicationWindow,
         islands: &[(i32, i32, i32, i32)],
     ) {
-        if !self.available || islands.is_empty() {
+        if islands.is_empty() {
             return;
         }
 
-        let Some(native) = window.native() else {
-            return;
-        };
-        let Some(gdk_surface) = native.surface() else {
-            return;
-        };
-        let wayland_surface = match gdk_surface.downcast::<gdk4_wayland::WaylandSurface>() {
-            Ok(s) => s,
-            Err(_) => return,
-        };
-        let Some(wl_surface) = wayland_surface.wl_surface() else {
+        let Some(info) = SurfaceInfo::from_widget(window) else {
             return;
         };
 
-        let surface_id =
-            <wayland_client::protocol::wl_surface::WlSurface as wayland_client::Proxy>::id(
-                &wl_surface,
-            );
-
-        let mut state = self.state.borrow_mut();
-        let (Some(manager), Some(compositor)) = (&state.manager, &state.compositor) else {
+        let Some((effect, compositor)) = self.get_or_create_effect(&info) else {
             return;
         };
-        let manager = manager.clone();
-        let compositor = compositor.clone();
-
-        let effect = state
-            .effects
-            .entry(surface_id)
-            .or_insert_with(|| {
-                debug!("Creating background effect object for bar island surface");
-                manager.get_background_effect(&wl_surface, &self.qh, ())
-            })
-            .clone();
-
-        drop(state);
 
         let radius =
             crate::services::config_manager::ConfigManager::global().widget_border_radius() as i32;
@@ -622,10 +666,7 @@ impl BackgroundEffectManager {
 
         effect.set_blur_region(Some(&region));
         region.destroy();
-
-        if let Ok(eq) = self.event_queue.try_borrow() {
-            let _ = eq.flush();
-        }
+        self.flush();
 
         debug!(
             "Applied bar island blur regions: {} islands, r={}",
@@ -634,132 +675,14 @@ impl BackgroundEffectManager {
         );
     }
 
-    /// Internal helper: apply a blur region for a window with an explicit radius,
-    /// bypassing the shadow_margin-derived radius logic in `apply_blur_region`.
-    fn apply_blur_region_with_radius(
-        &self,
-        window: &gtk4::ApplicationWindow,
-        shadow_margin: i32,
-        radius: i32,
-    ) {
-        if !self.available {
-            return;
-        }
-
-        let Some(native) = window.native() else {
-            return;
-        };
-        let Some(gdk_surface) = native.surface() else {
-            return;
-        };
-        let wayland_surface = match gdk_surface.downcast::<gdk4_wayland::WaylandSurface>() {
-            Ok(s) => s,
-            Err(_) => return,
-        };
-        let Some(wl_surface) = wayland_surface.wl_surface() else {
-            return;
-        };
-
-        let surface_id =
-            <wayland_client::protocol::wl_surface::WlSurface as wayland_client::Proxy>::id(
-                &wl_surface,
-            );
-
-        let width = wayland_surface.width();
-        let height = wayland_surface.height();
-
-        if width <= 0 || height <= 0 {
-            let win_clone = window.clone();
-            glib::idle_add_local_once(move || {
-                if let Some(blur) = Self::global() {
-                    blur.apply_bar_blur_region(&win_clone);
-                }
-            });
-            return;
-        }
-
-        let mut state = self.state.borrow_mut();
-        let (Some(manager), Some(compositor)) = (&state.manager, &state.compositor) else {
-            return;
-        };
-        let manager = manager.clone();
-        let compositor = compositor.clone();
-
-        let effect = state
-            .effects
-            .entry(surface_id)
-            .or_insert_with(|| {
-                debug!("Creating background effect object for bar surface");
-                manager.get_background_effect(&wl_surface, &self.qh, ())
-            })
-            .clone();
-
-        drop(state);
-
-        let m = shadow_margin;
-        let region = compositor.create_region(&self.qh, ());
-        add_rounded_rect_to_region(&region, m, m, width - 2 * m, height - 2 * m, radius);
-
-        effect.set_blur_region(Some(&region));
-        region.destroy();
-
-        if let Ok(eq) = self.event_queue.try_borrow() {
-            let _ = eq.flush();
-        }
-
-        debug!(
-            "Applied bar blur region: {}x{} r={} (surface {}x{})",
-            width - 2 * m,
-            height - 2 * m,
-            radius,
-            width,
-            height
-        );
-
-        // Install a resize watcher so the blur region tracks surface size changes.
-        const BLUR_BAR_RESIZE_WATCHED_KEY: &str = "vibepanel-blur-bar-resize-watched";
-        unsafe {
-            if window.data::<bool>(BLUR_BAR_RESIZE_WATCHED_KEY).is_none() {
-                window.set_data(BLUR_BAR_RESIZE_WATCHED_KEY, true);
-                let win_clone = window.clone();
-                if let Some(gdk_surf) = window.native().and_then(|n| n.surface()) {
-                    gdk_surf.connect_notify_local(Some("width"), move |_, _| {
-                        if let Some(blur) = BackgroundEffectManager::global() {
-                            blur.apply_bar_blur_region(&win_clone);
-                        }
-                    });
-                }
-            }
-        }
-    }
-
     /// Remove the blur region for a window (e.g. on destroy).
-    #[allow(dead_code)]
-    pub fn remove_blur_region(&self, window: &gtk4::ApplicationWindow) {
-        if !self.available {
-            return;
-        }
-
-        let Some(native) = window.native() else {
-            return;
-        };
-        let Some(gdk_surface) = native.surface() else {
-            return;
-        };
-        let wayland_surface = match gdk_surface.downcast::<gdk4_wayland::WaylandSurface>() {
-            Ok(s) => s,
-            Err(_) => return,
-        };
-        let Some(wl_surface) = wayland_surface.wl_surface() else {
+    pub fn remove_blur_region(&self, window: &impl gtk4::prelude::IsA<gtk4::Widget>) {
+        let Some(info) = SurfaceInfo::from_widget(window) else {
             return;
         };
 
-        let surface_id =
-            <wayland_client::protocol::wl_surface::WlSurface as wayland_client::Proxy>::id(
-                &wl_surface,
-            );
         let mut state = self.state.borrow_mut();
-        if let Some(effect) = state.effects.remove(&surface_id) {
+        if let Some(effect) = state.effects.remove(&info.surface_id) {
             effect.destroy();
             debug!("Removed blur region for surface");
         }
@@ -767,9 +690,7 @@ impl BackgroundEffectManager {
 
         // Flush so the destroy request reaches the compositor promptly.
         // The change takes effect on the next wl_surface.commit (driven by GTK).
-        if let Ok(eq) = self.event_queue.try_borrow() {
-            let _ = eq.flush();
-        }
+        self.flush();
     }
 
     /// Apply a blur region that tracks the ScaleBox grow-in animation.
@@ -786,70 +707,23 @@ impl BackgroundEffectManager {
         shadow_margin: i32,
         scale: f64,
     ) {
-        if !self.available {
-            return;
-        }
-
-        let Some(native) = window.native() else {
-            return;
-        };
-        let Some(gdk_surface) = native.surface() else {
-            return;
-        };
-        let wayland_surface = match gdk_surface.downcast::<gdk4_wayland::WaylandSurface>() {
-            Ok(s) => s,
-            Err(_) => return,
-        };
-        let Some(wl_surface) = wayland_surface.wl_surface() else {
+        let Some(info) = SurfaceInfo::from_widget(window) else {
             return;
         };
 
-        let surface_id =
-            <wayland_client::protocol::wl_surface::WlSurface as wayland_client::Proxy>::id(
-                &wl_surface,
-            );
-
-        let mut state = self.state.borrow_mut();
-        let (Some(manager), Some(compositor)) = (&state.manager, &state.compositor) else {
+        let Some((effect, compositor)) = self.get_or_create_effect(&info) else {
             return;
         };
-        let manager = manager.clone();
-        let compositor = compositor.clone();
 
-        let effect = state
-            .effects
-            .entry(surface_id)
-            .or_insert_with(|| manager.get_background_effect(&wl_surface, &self.qh, ()))
-            .clone();
-
-        drop(state);
-
-        let width = wayland_surface.width();
-        let height = wayland_surface.height();
+        let width = info.width();
+        let height = info.height();
 
         if width <= 0 || height <= 0 {
             return;
         }
 
-        // Compute effective shadow margins (same logic as apply_blur_region).
-        let effective_margin = if shadow_margin > 0 {
-            crate::services::surfaces::SurfaceStyleManager::global().shadow_margin(shadow_margin)
-        } else {
-            0
-        };
-
-        let m = effective_margin;
-        let (margin_top, margin_bottom, margin_start, margin_end) = if m > 0 {
-            let is_bottom =
-                crate::services::config_manager::ConfigManager::global().bar_is_bottom();
-            if is_bottom {
-                (m, 0, m, m)
-            } else {
-                (0, m, m, m)
-            }
-        } else {
-            (0, 0, 0, 0)
-        };
+        let (margin_top, margin_bottom, margin_start, margin_end, radius) =
+            compute_shadow_layout(shadow_margin);
 
         // Content area within shadow margins (= ScaleBox allocation).
         let content_w = (width - margin_start - margin_end) as f64;
@@ -865,12 +739,6 @@ impl BackgroundEffectManager {
         let x = margin_start as f64 + dx;
         let y = margin_top as f64 + dy;
 
-        let radius = if shadow_margin > 0 {
-            crate::services::config_manager::ConfigManager::global().surface_border_radius() as i32
-        } else {
-            0
-        };
-
         let region = compositor.create_region(&self.qh, ());
         add_rounded_rect_to_region(
             &region,
@@ -883,64 +751,118 @@ impl BackgroundEffectManager {
 
         effect.set_blur_region(Some(&region));
         region.destroy();
-
-        if let Ok(eq) = self.event_queue.try_borrow() {
-            let _ = eq.flush();
-        }
+        self.flush();
     }
 
-    /// Clear the blur region for a surface without destroying the effect object.
+    /// Apply a blur region matching a content widget's allocation within its surface.
     ///
-    /// Sets a minimal 1x1 blur region which is effectively invisible.  We cannot
-    /// send `set_blur_region(NULL)` because the protocol defines NULL as "blur the
-    /// entire surface".  The effect object is kept alive so it can be reused on
-    /// the next open without re-creation.
+    /// Designed for surfaces without explicit shadow margins (OSD, notification
+    /// toast, tray menu popover, media pop-out) where the surface may be
+    /// slightly larger than the visible content due to CSS box-shadow expansion.
+    /// The `content` widget's allocation provides the exact bounds to blur.
     ///
-    /// Called at the start of a close animation so the compositor stops drawing
-    /// blur behind the surface while it fades out.
-    pub fn clear_blur_region(&self, window: &gtk4::ApplicationWindow) {
-        if !self.available {
+    /// `surface_root` is any widget whose `GtkNative` owns the `wl_surface`
+    /// (a `gtk4::Window`, `gtk4::ApplicationWindow`, or `gtk4::Popover`);
+    /// `content` is the child widget whose allocation defines the blur region;
+    /// `radius` is the corner radius.
+    ///
+    /// On first map the Wayland surface may still be a 1×1 placeholder before
+    /// the compositor sends configure.  In that case, a one-shot watcher on
+    /// the GDK surface's `width` property defers the apply until configure
+    /// arrives and layout completes.
+    pub fn apply_blur_surface(
+        &self,
+        surface_root: &impl gtk4::prelude::IsA<gtk4::Widget>,
+        content: &impl gtk4::prelude::IsA<gtk4::Widget>,
+        radius: i32,
+    ) {
+        let Some(info) = SurfaceInfo::from_widget(surface_root) else {
+            debug!("apply_blur_surface: no wl_surface, skipping");
             return;
-        }
+        };
 
-        let Some(native) = window.native() else {
-            return;
-        };
-        let Some(gdk_surface) = native.surface() else {
-            return;
-        };
-        let wayland_surface = match gdk_surface.downcast::<gdk4_wayland::WaylandSurface>() {
-            Ok(s) => s,
-            Err(_) => return,
-        };
-        let Some(wl_surface) = wayland_surface.wl_surface() else {
-            return;
-        };
+        let width = info.width();
+        let height = info.height();
 
-        let surface_id =
-            <wayland_client::protocol::wl_surface::WlSurface as wayland_client::Proxy>::id(
-                &wl_surface,
+        let surface_root_widget = surface_root.as_ref();
+        let content_widget = content.as_ref();
+
+        // Validate that the surface has a real size (not the initial 1×1
+        // placeholder) and that compute_bounds returns sensible values.
+        let surface_ready = width > 1 && height > 1;
+        let bounds = content_widget.compute_bounds(surface_root_widget);
+        let bounds_valid = bounds
+            .as_ref()
+            .is_some_and(|b| b.x() >= 0.0 && b.y() >= 0.0 && b.width() > 0.0 && b.height() > 0.0);
+
+        if !surface_ready || !bounds_valid {
+            debug!(
+                "apply_blur_surface: not ready (surface {}x{}, bounds {:?}), deferring",
+                width, height, bounds
             );
-        let state = self.state.borrow();
-        let Some(compositor) = state.compositor.clone() else {
+            // Watch `width` (covers height-only changes too — see
+            // install_resize_watcher doc).  Defer to idle so the GTK layout
+            // pass completes before we read compute_bounds.
+            if let Some(gdk_surface) = surface_root_widget.native().and_then(|n| n.surface()) {
+                let key = "vibepanel-blur-surface-watched";
+                unsafe {
+                    if gdk_surface.data::<bool>(key).is_some() {
+                        return; // watcher already installed
+                    }
+                    gdk_surface.set_data(key, true);
+                }
+                // Clone as gtk4::Widget (the common base) so the closure can
+                // hold the value regardless of the concrete surface_root type.
+                let root_clone = surface_root_widget.clone();
+                let content_clone = content_widget.clone();
+                gdk_surface.connect_notify_local(Some("width"), move |_, _| {
+                    let rc = root_clone.clone();
+                    let cc = content_clone.clone();
+                    glib::idle_add_local_once(move || {
+                        if crate::services::config_manager::ConfigManager::global().blur_enabled()
+                            && let Some(blur) = Self::global()
+                        {
+                            blur.apply_blur_surface(&rc, &cc, radius);
+                        }
+                    });
+                });
+            }
+            return;
+        }
+
+        let bounds = bounds.unwrap();
+        let bx = bounds.x().round() as i32;
+        let by = bounds.y().round() as i32;
+        let bw = bounds.width().round() as i32;
+        let bh = bounds.height().round() as i32;
+
+        let Some((effect, compositor)) = self.get_or_create_effect(&info) else {
             return;
         };
-        if let Some(effect) = state.effects.get(&surface_id) {
-            // Set a 1x1 empty region instead of NULL — NULL means "blur the
-            // entire surface" per the protocol spec, which is not what we want.
-            // A minimal region is effectively invisible and keeps the effect
-            // object alive for reuse on the next open.
-            let region = compositor.create_region(&self.qh, ());
-            region.add(0, 0, 1, 1);
-            effect.set_blur_region(Some(&region));
-            region.destroy();
-            wl_surface.commit();
-            debug!("Cleared blur region for surface (set to 1x1)");
-        }
-        drop(state);
 
-        if let Ok(eq) = self.event_queue.try_borrow() {
-            let _ = eq.flush();
-        }
+        let region = compositor.create_region(&self.qh, ());
+        add_rounded_rect_to_region(&region, bx, by, bw, bh, radius);
+
+        effect.set_blur_region(Some(&region));
+        region.destroy();
+        // Commit the surface so the double-buffered blur region takes effect
+        // immediately.  Without this, the region stays pending until GTK's
+        // next wl_surface.commit — which may never come for surfaces whose
+        // layout is already complete (e.g. tray popovers reached via the
+        // deferred idle path).
+        info.wl_surface.commit();
+        self.flush();
+
+        // No dedicated resize watcher is installed here beyond the readiness
+        // watcher above.  That watcher remains connected and will re-apply the
+        // blur region on subsequent resizes, which is correct behaviour.
+        // Current consumers have stable content bounds after initial layout,
+        // so re-applies are infrequent.  A future consumer with dynamically-
+        // resizing content gets automatic re-apply for free via the same
+        // watcher.
+        debug!(
+            "Applied blur surface: {}x{} at ({},{}) r={} (surface {}x{})",
+            bw, bh, bx, by, radius, width, height
+        );
     }
 }

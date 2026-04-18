@@ -26,6 +26,7 @@ use vibepanel_core::config::OsdConfig;
 
 use crate::services::audio::AudioSnapshot;
 use crate::services::brightness::BrightnessSnapshot;
+use crate::services::config_manager::ConfigManager;
 use crate::services::icons::IconsService;
 use crate::services::ipc::IpcMessage;
 use crate::services::surfaces::SurfaceStyleManager;
@@ -246,6 +247,33 @@ impl OsdOverlay {
 
         // Anchor window according to position.
         Self::apply_position(&window, &position);
+
+        // Apply blur region hint when the OSD surface is mapped.
+        // The container's allocation defines the blur bounds, excluding the
+        // CSS box-shadow expansion that GTK adds to the surface.
+        let blur_container = container.clone();
+        window.connect_map(move |win| {
+            if ConfigManager::global().blur_enabled()
+                && let Some(blur) =
+                    crate::services::background_effect::BackgroundEffectManager::global()
+            {
+                // Same as `--radius-widget-lg: calc(widget-radius * 2)` in theme CSS.
+                let radius = ConfigManager::global().widget_border_radius() as i32 * 2;
+                blur.apply_blur_surface(win, &blur_container, radius);
+            }
+        });
+
+        // Remove the blur region as soon as the native surface is torn down.
+        // connect_destroy fires while the Wayland surface still exists, so
+        // remove_blur_region can reach SurfaceInfo::from_widget.  The Drop impl
+        // below is retained as a safety net for any path that skips destroy.
+        window.connect_destroy(|win| {
+            if let Some(blur) =
+                crate::services::background_effect::BackgroundEffectManager::global()
+            {
+                blur.remove_blur_region(win);
+            }
+        });
 
         let overlay = Rc::new(Self {
             window,
@@ -545,6 +573,11 @@ impl Drop for OsdOverlay {
         }
         if let Some(id) = self.audio_callback_id.take() {
             AudioService::global().disconnect(id);
+        }
+        // Clean up the blur effect entry so it doesn't leak in the
+        // BackgroundEffectManager's effects HashMap after the surface is gone.
+        if let Some(blur) = crate::services::background_effect::BackgroundEffectManager::global() {
+            blur.remove_blur_region(&self.window);
         }
     }
 }

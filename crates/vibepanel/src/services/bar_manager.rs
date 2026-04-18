@@ -47,6 +47,11 @@ struct BarInstance {
 
 impl Drop for BarInstance {
     fn drop(&mut self) {
+        // Clean up the blur effect entry so it doesn't leak in the
+        // BackgroundEffectManager's effects HashMap after the surface is gone.
+        if let Some(blur) = crate::services::background_effect::BackgroundEffectManager::global() {
+            blur.remove_blur_region(&self.window);
+        }
         // Automatically close the window when this instance is dropped.
         // This handles explicit removal, HashMap replacements, and potential panics.
         self.window.close();

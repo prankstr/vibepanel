@@ -332,7 +332,7 @@ impl ConfigManager {
     /// Check if compositor background blur is enabled.
     ///
     /// When true, vibepanel sends ext-background-effect-v1 blur region hints
-    /// for popovers, quick settings, and the bar.
+    /// for popovers, quick settings, notification toasts, OSD, and the bar.
     pub fn blur_enabled(&self) -> bool {
         self.config.borrow().theme.blur
     }
@@ -767,8 +767,12 @@ impl ConfigManager {
             if let Some(display) = gtk4::gdk::Display::default() {
                 BarManager::global().reconfigure_all(&display, &new_config);
             }
-        } else if theme_changed {
-            // Theme-only changes: notify callbacks for programmatic styling updates
+        }
+
+        if theme_changed {
+            // Notify theme callbacks even during structural rebuild, because
+            // non-bar surfaces (e.g. media pop-out) persist across bar rebuilds
+            // and need to react to theme changes independently.
             self.theme_callbacks.notify(&());
         }
 
@@ -893,6 +897,19 @@ impl ConfigManager {
         self.shutdown_flag.store(true, Ordering::Relaxed);
         self.stop_wallpaper_polling();
         debug!("Config watcher stopped");
+    }
+}
+
+/// Drop guard that disconnects a theme callback when dropped.
+///
+/// Wrap a `CallbackId` from [`ConfigManager::on_theme_change`] in this guard
+/// to ensure the callback is automatically unregistered when the owning
+/// widget is destroyed.
+pub struct ThemeCallbackGuard(pub CallbackId);
+
+impl Drop for ThemeCallbackGuard {
+    fn drop(&mut self) {
+        ConfigManager::global().disconnect_theme_callback(self.0);
     }
 }
 

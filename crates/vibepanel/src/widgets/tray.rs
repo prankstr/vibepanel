@@ -17,6 +17,7 @@ use tracing::debug;
 use vibepanel_core::config::WidgetEntry;
 use vibepanel_core::{parse_hex_color, theme::relative_luminance};
 
+use crate::services::background_effect::BackgroundEffectManager;
 use crate::services::callbacks::CallbackId;
 use crate::services::config_manager::ConfigManager;
 use crate::services::surfaces::SurfaceStyleManager;
@@ -961,10 +962,28 @@ fn toggle_menu(state: &Rc<RefCell<WidgetState>>, identifier: &str, parent: &Widg
         let state_for_close = state_clone.clone();
         let parent_for_close = parent_clone.clone();
         popover.connect_closed(move |p| {
+            // Remove blur effect object for this popup surface.
+            if let Some(blur) = BackgroundEffectManager::global() {
+                blur.remove_blur_region(p);
+            }
             state_for_close.borrow_mut().menu = None;
             parent_for_close.remove_css_class(widget::TRAY_ITEM_MENU_OPEN);
             if p.parent().is_some() {
                 p.unparent();
+            }
+        });
+
+        // Apply blur hint to the popup surface.  Must be connected before
+        // popup() — GTK4 fires the map signal synchronously during popup(),
+        // so a handler registered after popup() is never invoked.
+        let popover_for_blur = popover.clone();
+        let container_for_blur = container.clone();
+        popover.connect_map(move |_| {
+            if ConfigManager::global().blur_enabled()
+                && let Some(blur) = BackgroundEffectManager::global()
+            {
+                let radius = ConfigManager::global().surface_border_radius() as i32;
+                blur.apply_blur_surface(&popover_for_blur, &container_for_blur, radius);
             }
         });
 

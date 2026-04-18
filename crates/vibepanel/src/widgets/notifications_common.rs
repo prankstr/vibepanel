@@ -23,6 +23,11 @@ pub const TOAST_MARGIN_RIGHT: i32 = 10;
 /// Popover dimensions
 pub const POPOVER_WIDTH: i32 = 400;
 
+/// Shadow margin for freely-floating surfaces (toast, OSD).
+/// Applied uniformly on all four sides so the CSS `box-shadow` is not clipped
+/// at the layer-shell surface boundary.
+pub const SURFACE_SHADOW_MARGIN: i32 = 8;
+
 /// Threshold for body text length before we show the expand button.
 /// Bodies shorter than this are shown in full without expand/collapse UI.
 pub const BODY_TRUNCATE_THRESHOLD: usize = 80;

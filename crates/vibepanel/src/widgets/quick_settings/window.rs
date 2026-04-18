@@ -302,8 +302,10 @@ impl QuickSettingsWindow {
             });
         }
 
-        // Apply blur region hint when the QS surface is mapped.
-        // Inset by QUICK_SETTINGS_OUTER_MARGIN to exclude shadow padding from blur.
+        // Apply blur when mapped.  On first map the surface has no size yet
+        // so apply_blur_region defers via idle.  On re-show, anim_shell is at
+        // opacity 0 (transparent) until the animation tick overwrites the region
+        // with a scaled version within 1-2 frames.
         window.connect_map(move |win| {
             if ConfigManager::global().blur_enabled()
                 && let Some(blur) =
@@ -1623,12 +1625,9 @@ impl QuickSettingsWindow {
             self.anim_shell.set_scale(ANIM_SCALE_FROM);
             self.is_animating_out.set(false);
             self.reset_ui_state();
-            if ConfigManager::global().blur_enabled()
-                && let Some(blur) =
-                    crate::services::background_effect::BackgroundEffectManager::global()
-            {
-                blur.clear_blur_region(&self.window);
-            }
+            // Blur removal is unnecessary here — set_visible(false) unmaps
+            // the wl_surface, so the compositor discards blur automatically.
+            // Blur is re-applied on next map via connect_map.
             self.window.set_visible(false);
             return;
         }
@@ -1637,13 +1636,15 @@ impl QuickSettingsWindow {
         // may not have fired yet, leaving window.opacity at 0.0).
         self.window.set_opacity(1.0);
 
-        // Clear blur at the start of the close animation so the compositor
-        // stops drawing blur behind the surface while it fades out.
+        // Remove blur immediately so the compositor stops drawing it while the
+        // surface fades out.  Blur is a compositor effect independent of surface
+        // opacity — if left in place it would remain visible as the content
+        // becomes transparent.
         if ConfigManager::global().blur_enabled()
             && let Some(blur) =
                 crate::services::background_effect::BackgroundEffectManager::global()
         {
-            blur.clear_blur_region(&self.window);
+            blur.remove_blur_region(&self.window);
         }
 
         // Start (or reverse into) the close animation.
@@ -1734,8 +1735,9 @@ impl QuickSettingsWindow {
                 let scale = ANIM_SCALE_FROM + (1.0 - ANIM_SCALE_FROM) * progress;
                 shell_clone.set_scale(scale);
 
-                // During opening, update the blur region to match the ScaleBox clip
-                // so the compositor blur grows in sync with the visual.
+                // The compositor might draw blur at the final full size while the
+                // ScaleBox visual is still growing in, causing a brief flash of
+                // oversized blur. Shrink the blur region to match the current scale.
                 if direction == AnimDirection::Opening
                     && ConfigManager::global().blur_enabled()
                     && let Some(blur) =
@@ -1841,6 +1843,12 @@ impl Drop for QuickSettingsWindow {
         // Destroy click-catcher if still alive
         if let Some(catcher) = self.click_catcher.borrow_mut().take() {
             catcher.close();
+        }
+
+        // Clean up the blur effect entry so it doesn't leak in the
+        // BackgroundEffectManager's effects HashMap after the surface is gone.
+        if let Some(blur) = crate::services::background_effect::BackgroundEffectManager::global() {
+            blur.remove_blur_region(&self.window);
         }
 
         // Destroy the GTK window

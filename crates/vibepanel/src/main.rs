@@ -633,9 +633,10 @@ fn run_gtk_app(config: Config, config_source: Option<PathBuf>) -> ExitCode {
             }
         };
 
-        // Initialize background effect (blur) service.
-        // This is a zero-cost hint — if the compositor doesn't support
-        // ext-background-effect-v1, the service becomes inert.
+        // Initialize background effect (blur) service unconditionally so that
+        // hot-reloading `theme.blur = true` at runtime works.  The service is
+        // cheap when the compositor lacks ext-background-effect support, and
+        // call-sites already gate on `blur_enabled()`.
         services::background_effect::BackgroundEffectManager::init_global();
         debug!("Background effect (blur) service initialized");
 
