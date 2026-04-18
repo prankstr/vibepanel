@@ -22,6 +22,7 @@
 //! - **media**: MPRIS media player control and monitoring
 
 pub mod audio;
+pub mod background_effect;
 pub mod bar_manager;
 pub mod battery;
 pub mod bluetooth;

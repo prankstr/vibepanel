@@ -315,6 +315,14 @@ impl ConfigManager {
             .and_then(|p| p.parent().map(|d| d.to_path_buf()))
     }
 
+    /// Check if compositor background blur is enabled.
+    ///
+    /// When true, vibepanel sends ext-background-effect-v1 blur region hints
+    /// for popovers, quick settings, and the bar.
+    pub fn blur_enabled(&self) -> bool {
+        self.config.borrow().theme.blur
+    }
+
     /// Get a widget option value from the current configuration.
     ///
     /// Returns `None` if the widget has no config section or the option doesn't exist.

@@ -78,6 +78,7 @@ mode = "dark" # "auto", "dark", "light", "gtk"
 #accent = "#adabe0" # "gtk", "none", or hex color (overrides wallpaper accent in auto mode)
 #animations = true  # Enable/disable all CSS transitions and animations
 #ripple = true      # Enable/disable Material Design ripple effect on click
+#blur = false       # Enable compositor blur via ext-background-effect-v1 (requires niri with blur)
 
 [theme.icons]
 theme = "material" # "material" or "gtk"

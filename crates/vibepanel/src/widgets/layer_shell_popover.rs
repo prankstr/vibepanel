@@ -871,6 +871,14 @@ impl LayerShellPopover {
                 popover.update_position();
                 if let Some(ref window) = *popover.window.borrow() {
                     window.set_opacity(1.0);
+
+                    // Apply blur region now that the surface is mapped and sized.
+                    if ConfigManager::global().blur_enabled()
+                        && let Some(blur) =
+                            crate::services::background_effect::BackgroundEffectManager::global()
+                    {
+                        blur.apply_blur_region(window, POPOVER_SHADOW_MARGIN);
+                    }
                 }
 
                 if ConfigManager::global().animations_enabled() {
@@ -928,6 +936,17 @@ impl LayerShellPopover {
                 }
             });
         }
+
+        // Apply blur region hint when the popover surface is mapped.
+        // Inset by POPOVER_SHADOW_MARGIN to exclude shadow padding from blur.
+        window.connect_map(move |win| {
+            if ConfigManager::global().blur_enabled()
+                && let Some(blur) =
+                    crate::services::background_effect::BackgroundEffectManager::global()
+            {
+                blur.apply_blur_region(win, POPOVER_SHADOW_MARGIN);
+            }
+        });
 
         *self.window.borrow_mut() = Some(window.clone());
         window

@@ -302,6 +302,17 @@ impl QuickSettingsWindow {
             });
         }
 
+        // Apply blur region hint when the QS surface is mapped.
+        // Inset by QUICK_SETTINGS_OUTER_MARGIN to exclude shadow padding from blur.
+        window.connect_map(move |win| {
+            if ConfigManager::global().blur_enabled()
+                && let Some(blur) =
+                    crate::services::background_effect::BackgroundEffectManager::global()
+            {
+                blur.apply_blur_region(win, QUICK_SETTINGS_OUTER_MARGIN);
+            }
+        });
+
         // Subscribe to services
         Self::subscribe_to_services(&qs);
 
@@ -1436,6 +1447,14 @@ impl QuickSettingsWindow {
                     }
                     let snapshot = NetworkService::global().snapshot();
                     network_card::on_network_changed(&qs.network, &snapshot, &qs.window);
+
+                    // Apply blur region (re-show: surface is already sized).
+                    if ConfigManager::global().blur_enabled()
+                        && let Some(blur) =
+                            crate::services::background_effect::BackgroundEffectManager::global()
+                    {
+                        blur.apply_blur_region(&qs.window, QUICK_SETTINGS_OUTER_MARGIN);
+                    }
                 }
             });
         } else {
@@ -1470,6 +1489,14 @@ impl QuickSettingsWindow {
 
                     let snapshot = NetworkService::global().snapshot();
                     network_card::on_network_changed(&qs.network, &snapshot, &qs.window);
+
+                    // Apply blur region (first show: surface is now sized after update_position).
+                    if ConfigManager::global().blur_enabled()
+                        && let Some(blur) =
+                            crate::services::background_effect::BackgroundEffectManager::global()
+                    {
+                        blur.apply_blur_region(&qs.window, QUICK_SETTINGS_OUTER_MARGIN);
+                    }
                 }
             });
         }

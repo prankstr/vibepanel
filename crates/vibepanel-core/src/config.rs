@@ -1157,6 +1157,20 @@ pub struct ThemeConfig {
     /// Default: true
     pub shadows: bool,
 
+    /// Enable compositor background blur via ext-background-effect-v1.
+    ///
+    /// When true, vibepanel sends blur region hints to the compositor for
+    /// popovers, quick settings, and the bar. Requires a compositor that
+    /// supports the ext-background-effect-v1 protocol (e.g. niri with blur
+    /// enabled). Has no effect on compositors that do not support the protocol.
+    ///
+    /// For the bar: if bar.background_opacity > 0, the entire bar surface is
+    /// blurred. If bar.background_opacity == 0 (transparent/islands mode),
+    /// individual widget island regions are blurred instead.
+    ///
+    /// Default: false
+    pub blur: bool,
+
     /// State colors (success, warning, urgent).
     pub states: ThemeStates,
 
@@ -1179,6 +1193,7 @@ impl Default for ThemeConfig {
             animations: true,
             ripple: true,
             shadows: true,
+            blur: false,
             states: ThemeStates::default(),
             typography: ThemeTypography::default(),
             icons: ThemeIconsConfig::default(),

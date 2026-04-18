@@ -633,6 +633,12 @@ fn run_gtk_app(config: Config, config_source: Option<PathBuf>) -> ExitCode {
             }
         };
 
+        // Initialize background effect (blur) service.
+        // This is a zero-cost hint — if the compositor doesn't support
+        // ext-background-effect-v1, the service becomes inert.
+        services::background_effect::BackgroundEffectManager::init_global();
+        debug!("Background effect (blur) service initialized");
+
         // Initialize bar manager and sync bars to current monitors
         let bar_manager = BarManager::global();
         bar_manager.init(app);
