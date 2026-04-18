@@ -180,13 +180,94 @@ pub fn create_bar_window(
     let target_geometry = monitor.geometry();
     let target_width = target_geometry.width();
 
+    let is_island_mode = config.bar.background_opacity == 0.0;
+
     window.connect_map(move |win| {
         win.set_default_size(target_width, bar_height);
         debug!(
             "Set window width to target monitor size: {}px",
             target_width
         );
+
+        // Apply bar blur region on map (opaque/translucent bar path).
+        // The islands path is handled by the layout allocate callback below.
+        if !is_island_mode
+            && ConfigManager::global().blur_enabled()
+            && let Some(blur) =
+                crate::services::background_effect::BackgroundEffectManager::global()
+        {
+            blur.apply_bar_blur_region(win);
+        }
     });
+
+    // Install layout callback for island blur (transparent bar mode).
+    // When bar.background_opacity == 0.0, we blur per-widget-island instead of
+    // the whole surface. The callback fires after every layout pass so the blur
+    // region stays in sync as widgets move or resize (tray changes, title width, etc).
+    //
+    // We also keep a shared clone of the island-apply closure so the theme-change
+    // hot-reload handler can trigger an immediate re-apply when blur is toggled on.
+    let island_apply: Option<Rc<dyn Fn()>> = if is_island_mode {
+        let win_weak = window.downgrade();
+        let bar_box_clone = bar_box.clone();
+        let closure: Rc<dyn Fn()> = Rc::new(move || {
+            if !ConfigManager::global().blur_enabled() {
+                return;
+            }
+            let Some(win) = win_weak.upgrade() else {
+                return;
+            };
+            let Some(blur) = crate::services::background_effect::BackgroundEffectManager::global()
+            else {
+                return;
+            };
+            let Some(native) = win.native() else { return };
+            let islands = collect_island_bounds(&bar_box_clone, &native);
+            if !islands.is_empty() {
+                blur.apply_bar_island_blur_regions(&win, &islands);
+            }
+        });
+        if let Some(lm) = bar_box
+            .layout_manager()
+            .and_downcast::<crate::sectioned_bar::CenterPriorityLayout>()
+        {
+            let closure_clone = Rc::clone(&closure);
+            lm.set_on_allocate(move || closure_clone());
+        }
+        Some(closure)
+    } else {
+        None
+    };
+
+    // Hot-reload: re-apply or remove bar blur when the theme config changes
+    // (e.g. user toggles `theme.blur` or changes `bar.border_radius`).
+    //
+    // Note: `background_opacity` is a startup-time value — it cannot change at
+    // runtime without recreating the bar — so we only need to handle toggling
+    // blur on/off within the same mode (opaque or island).
+    {
+        let win_weak = window.downgrade();
+        ConfigManager::global().on_theme_change(move || {
+            let Some(win) = win_weak.upgrade() else {
+                return;
+            };
+            if ConfigManager::global().blur_enabled() {
+                if let Some(apply) = &island_apply {
+                    // Island mode: re-apply per-island regions immediately.
+                    apply();
+                } else if let Some(blur) =
+                    crate::services::background_effect::BackgroundEffectManager::global()
+                {
+                    // Opaque/translucent mode: re-apply whole-bar region.
+                    blur.apply_bar_blur_region(&win);
+                }
+            } else if let Some(blur) =
+                crate::services::background_effect::BackgroundEffectManager::global()
+            {
+                blur.remove_blur_region(&win);
+            }
+        });
+    }
 
     window.set_visible(true);
 
@@ -199,6 +280,47 @@ pub fn create_bar_window(
     );
 
     window
+}
+
+/// Collect the surface-local bounds of every visible widget island in the bar.
+///
+/// Walks the children of each section in the `SectionedBar`, finds all
+/// `.widget-wrapper` boxes that are visible, and returns their
+/// `(x, y, width, height)` in surface-local logical coordinates via
+/// `Widget::compute_bounds()`.
+fn collect_island_bounds(
+    bar_box: &SectionedBar,
+    native: &gtk4::Native,
+) -> Vec<(i32, i32, i32, i32)> {
+    use crate::styles::class;
+    let mut result = Vec::new();
+
+    for section_name in &["left", "center", "right"] {
+        let Some(section) = bar_box.section(section_name) else {
+            continue;
+        };
+        if !section.is_visible() {
+            continue;
+        }
+        let mut child = section.first_child();
+        while let Some(widget) = child {
+            if widget.is_visible()
+                && widget.has_css_class(class::WIDGET_WRAPPER)
+                && let Some(bounds) = widget.compute_bounds(native.upcast_ref::<gtk4::Widget>())
+            {
+                let x = bounds.x().round() as i32;
+                let y = bounds.y().round() as i32;
+                let w = bounds.width().round() as i32;
+                let h = bounds.height().round() as i32;
+                if w > 0 && h > 0 {
+                    result.push((x, y, w, h));
+                }
+            }
+            child = widget.next_sibling();
+        }
+    }
+
+    result
 }
 
 /// Build a single widget or a group of widgets sharing one island.

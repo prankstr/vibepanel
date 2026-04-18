@@ -1448,8 +1448,10 @@ impl QuickSettingsWindow {
                     let snapshot = NetworkService::global().snapshot();
                     network_card::on_network_changed(&qs.network, &snapshot, &qs.window);
 
-                    // Apply blur region (re-show: surface is already sized).
-                    if ConfigManager::global().blur_enabled()
+                    // When animations are disabled, apply blur region immediately
+                    // (the tick callback won't run to animate it in).
+                    if !ConfigManager::global().animations_enabled()
+                        && ConfigManager::global().blur_enabled()
                         && let Some(blur) =
                             crate::services::background_effect::BackgroundEffectManager::global()
                     {
@@ -1490,8 +1492,10 @@ impl QuickSettingsWindow {
                     let snapshot = NetworkService::global().snapshot();
                     network_card::on_network_changed(&qs.network, &snapshot, &qs.window);
 
-                    // Apply blur region (first show: surface is now sized after update_position).
-                    if ConfigManager::global().blur_enabled()
+                    // When animations are disabled, apply blur region immediately
+                    // (the tick callback won't run to animate it in).
+                    if !ConfigManager::global().animations_enabled()
+                        && ConfigManager::global().blur_enabled()
                         && let Some(blur) =
                             crate::services::background_effect::BackgroundEffectManager::global()
                     {
@@ -1619,6 +1623,12 @@ impl QuickSettingsWindow {
             self.anim_shell.set_scale(ANIM_SCALE_FROM);
             self.is_animating_out.set(false);
             self.reset_ui_state();
+            if ConfigManager::global().blur_enabled()
+                && let Some(blur) =
+                    crate::services::background_effect::BackgroundEffectManager::global()
+            {
+                blur.clear_blur_region(&self.window);
+            }
             self.window.set_visible(false);
             return;
         }
@@ -1626,6 +1636,15 @@ impl QuickSettingsWindow {
         // Ensure the window is fully visible (the idle callback from show_panel
         // may not have fired yet, leaving window.opacity at 0.0).
         self.window.set_opacity(1.0);
+
+        // Clear blur at the start of the close animation so the compositor
+        // stops drawing blur behind the surface while it fades out.
+        if ConfigManager::global().blur_enabled()
+            && let Some(blur) =
+                crate::services::background_effect::BackgroundEffectManager::global()
+        {
+            blur.clear_blur_region(&self.window);
+        }
 
         // Start (or reverse into) the close animation.
         self.start_animation(AnimDirection::Closing, generation);
@@ -1715,6 +1734,17 @@ impl QuickSettingsWindow {
                 let scale = ANIM_SCALE_FROM + (1.0 - ANIM_SCALE_FROM) * progress;
                 shell_clone.set_scale(scale);
 
+                // During opening, update the blur region to match the ScaleBox clip
+                // so the compositor blur grows in sync with the visual.
+                if direction == AnimDirection::Opening
+                    && ConfigManager::global().blur_enabled()
+                    && let Some(blur) =
+                        crate::services::background_effect::BackgroundEffectManager::global()
+                    && let Some(window) = window_weak.upgrade()
+                {
+                    blur.apply_blur_region_animated(&window, QUICK_SETTINGS_OUTER_MARGIN, scale);
+                }
+
                 if complete {
                     anim_state.borrow_mut().active = false;
 
@@ -1731,6 +1761,16 @@ impl QuickSettingsWindow {
                     } else {
                         shell.set_opacity(1.0);
                         shell_clone.set_scale(1.0);
+                        // Set final full-size blur region (scale == 1.0) to
+                        // install the resize watcher.
+                        if ConfigManager::global().blur_enabled()
+                            && let Some(blur) =
+                                crate::services::background_effect::BackgroundEffectManager::global(
+                                )
+                            && let Some(window) = window_weak.upgrade()
+                        {
+                            blur.apply_blur_region(&window, QUICK_SETTINGS_OUTER_MARGIN);
+                        }
                     }
                     return ControlFlow::Break;
                 }

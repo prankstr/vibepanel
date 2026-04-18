@@ -237,6 +237,20 @@ impl ConfigManager {
         self.palette.borrow().surface_border_radius
     }
 
+    /// Get the computed bar border radius in pixels.
+    pub fn bar_border_radius(&self) -> u32 {
+        self.palette.borrow().bar_border_radius
+    }
+
+    /// Get the computed widget border radius in pixels.
+    ///
+    /// This is the radius applied to individual widget islands (`.widget` elements).
+    /// Use this for blur regions on widget islands — not `bar_border_radius`, which
+    /// includes bar padding and applies to the whole bar surface.
+    pub fn widget_border_radius(&self) -> u32 {
+        self.palette.borrow().widget_border_radius
+    }
+
     /// Get the pill radius (used for rounded indicators, thumbnails, etc.).
     ///
     /// This is derived from the widget border radius configuration.

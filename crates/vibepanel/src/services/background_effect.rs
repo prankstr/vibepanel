@@ -527,6 +527,212 @@ impl BackgroundEffectManager {
         }
     }
 
+    /// Apply a blur region for the bar surface.
+    ///
+    /// When the bar has a non-zero background opacity (translucent/opaque bar),
+    /// the entire bar surface is blurred as a single rounded rectangle.
+    ///
+    /// When the bar background is fully transparent (opacity == 0.0, islands mode),
+    /// individual widget island regions are blurred instead via
+    /// `apply_bar_island_blur_regions`.
+    ///
+    /// Called from bar.rs on `connect_map` and from the layout allocate callback.
+    pub fn apply_bar_blur_region(&self, window: &gtk4::ApplicationWindow) {
+        if !self.available {
+            return;
+        }
+
+        let bar_opacity =
+            crate::services::config_manager::ConfigManager::global().bar_background_opacity();
+
+        if bar_opacity == 0.0 {
+            // Islands mode: defer to per-island path (called separately by the
+            // layout allocate callback once island bounds are known).
+            return;
+        }
+
+        // Opaque/translucent bar: blur the entire surface as one rounded rect.
+        let radius =
+            crate::services::config_manager::ConfigManager::global().bar_border_radius() as i32;
+
+        // Re-use apply_blur_region with shadow_margin=0 (bar has no shadow padding).
+        self.apply_blur_region_with_radius(window, 0, radius);
+    }
+
+    /// Apply blur regions for individual widget islands on a transparent bar.
+    ///
+    /// `islands` is a slice of `(x, y, width, height)` tuples in surface-local
+    /// logical coordinates, one per visible `.widget-wrapper` island. Each island
+    /// gets a rounded rectangle region matching the widget border radius.
+    ///
+    /// Called from bar.rs via the `CenterPriorityLayout` allocate callback.
+    pub fn apply_bar_island_blur_regions(
+        &self,
+        window: &gtk4::ApplicationWindow,
+        islands: &[(i32, i32, i32, i32)],
+    ) {
+        if !self.available || islands.is_empty() {
+            return;
+        }
+
+        let Some(native) = window.native() else {
+            return;
+        };
+        let Some(gdk_surface) = native.surface() else {
+            return;
+        };
+        let wayland_surface = match gdk_surface.downcast::<gdk4_wayland::WaylandSurface>() {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let Some(wl_surface) = wayland_surface.wl_surface() else {
+            return;
+        };
+
+        let surface_id =
+            <wayland_client::protocol::wl_surface::WlSurface as wayland_client::Proxy>::id(
+                &wl_surface,
+            );
+
+        let mut state = self.state.borrow_mut();
+        let (Some(manager), Some(compositor)) = (&state.manager, &state.compositor) else {
+            return;
+        };
+        let manager = manager.clone();
+        let compositor = compositor.clone();
+
+        let effect = state
+            .effects
+            .entry(surface_id)
+            .or_insert_with(|| {
+                debug!("Creating background effect object for bar island surface");
+                manager.get_background_effect(&wl_surface, &self.qh, ())
+            })
+            .clone();
+
+        drop(state);
+
+        let radius =
+            crate::services::config_manager::ConfigManager::global().widget_border_radius() as i32;
+
+        let region = compositor.create_region(&self.qh, ());
+        for &(x, y, w, h) in islands {
+            add_rounded_rect_to_region(&region, x, y, w, h, radius);
+        }
+
+        effect.set_blur_region(Some(&region));
+        region.destroy();
+
+        if let Ok(eq) = self.event_queue.try_borrow() {
+            let _ = eq.flush();
+        }
+
+        debug!(
+            "Applied bar island blur regions: {} islands, r={}",
+            islands.len(),
+            radius
+        );
+    }
+
+    /// Internal helper: apply a blur region for a window with an explicit radius,
+    /// bypassing the shadow_margin-derived radius logic in `apply_blur_region`.
+    fn apply_blur_region_with_radius(
+        &self,
+        window: &gtk4::ApplicationWindow,
+        shadow_margin: i32,
+        radius: i32,
+    ) {
+        if !self.available {
+            return;
+        }
+
+        let Some(native) = window.native() else {
+            return;
+        };
+        let Some(gdk_surface) = native.surface() else {
+            return;
+        };
+        let wayland_surface = match gdk_surface.downcast::<gdk4_wayland::WaylandSurface>() {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let Some(wl_surface) = wayland_surface.wl_surface() else {
+            return;
+        };
+
+        let surface_id =
+            <wayland_client::protocol::wl_surface::WlSurface as wayland_client::Proxy>::id(
+                &wl_surface,
+            );
+
+        let width = wayland_surface.width();
+        let height = wayland_surface.height();
+
+        if width <= 0 || height <= 0 {
+            let win_clone = window.clone();
+            glib::idle_add_local_once(move || {
+                if let Some(blur) = Self::global() {
+                    blur.apply_bar_blur_region(&win_clone);
+                }
+            });
+            return;
+        }
+
+        let mut state = self.state.borrow_mut();
+        let (Some(manager), Some(compositor)) = (&state.manager, &state.compositor) else {
+            return;
+        };
+        let manager = manager.clone();
+        let compositor = compositor.clone();
+
+        let effect = state
+            .effects
+            .entry(surface_id)
+            .or_insert_with(|| {
+                debug!("Creating background effect object for bar surface");
+                manager.get_background_effect(&wl_surface, &self.qh, ())
+            })
+            .clone();
+
+        drop(state);
+
+        let m = shadow_margin;
+        let region = compositor.create_region(&self.qh, ());
+        add_rounded_rect_to_region(&region, m, m, width - 2 * m, height - 2 * m, radius);
+
+        effect.set_blur_region(Some(&region));
+        region.destroy();
+
+        if let Ok(eq) = self.event_queue.try_borrow() {
+            let _ = eq.flush();
+        }
+
+        debug!(
+            "Applied bar blur region: {}x{} r={} (surface {}x{})",
+            width - 2 * m,
+            height - 2 * m,
+            radius,
+            width,
+            height
+        );
+
+        // Install a resize watcher so the blur region tracks surface size changes.
+        const BLUR_BAR_RESIZE_WATCHED_KEY: &str = "vibepanel-blur-bar-resize-watched";
+        unsafe {
+            if window.data::<bool>(BLUR_BAR_RESIZE_WATCHED_KEY).is_none() {
+                window.set_data(BLUR_BAR_RESIZE_WATCHED_KEY, true);
+                let win_clone = window.clone();
+                if let Some(gdk_surf) = window.native().and_then(|n| n.surface()) {
+                    gdk_surf.connect_notify_local(Some("width"), move |_, _| {
+                        if let Some(blur) = BackgroundEffectManager::global() {
+                            blur.apply_bar_blur_region(&win_clone);
+                        }
+                    });
+                }
+            }
+        }
+    }
+
     /// Remove the blur region for a window (e.g. on destroy).
     #[allow(dead_code)]
     pub fn remove_blur_region(&self, window: &gtk4::ApplicationWindow) {
@@ -556,6 +762,185 @@ impl BackgroundEffectManager {
         if let Some(effect) = state.effects.remove(&surface_id) {
             effect.destroy();
             debug!("Removed blur region for surface");
+        }
+        drop(state);
+
+        // Flush so the destroy request reaches the compositor promptly.
+        // The change takes effect on the next wl_surface.commit (driven by GTK).
+        if let Ok(eq) = self.event_queue.try_borrow() {
+            let _ = eq.flush();
+        }
+    }
+
+    /// Apply a blur region that tracks the ScaleBox grow-in animation.
+    ///
+    /// During the open animation the ScaleBox clips its child to a centered rect
+    /// whose size is `content_size * scale`.  This method sets the blur region to
+    /// match that clip so the compositor blur grows in sync with the visual.
+    ///
+    /// `scale` should be the current ScaleBox scale (ANIM_SCALE_FROM → 1.0).
+    /// At `scale == 1.0` this produces the same region as `apply_blur_region`.
+    pub fn apply_blur_region_animated(
+        &self,
+        window: &gtk4::ApplicationWindow,
+        shadow_margin: i32,
+        scale: f64,
+    ) {
+        if !self.available {
+            return;
+        }
+
+        let Some(native) = window.native() else {
+            return;
+        };
+        let Some(gdk_surface) = native.surface() else {
+            return;
+        };
+        let wayland_surface = match gdk_surface.downcast::<gdk4_wayland::WaylandSurface>() {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let Some(wl_surface) = wayland_surface.wl_surface() else {
+            return;
+        };
+
+        let surface_id =
+            <wayland_client::protocol::wl_surface::WlSurface as wayland_client::Proxy>::id(
+                &wl_surface,
+            );
+
+        let mut state = self.state.borrow_mut();
+        let (Some(manager), Some(compositor)) = (&state.manager, &state.compositor) else {
+            return;
+        };
+        let manager = manager.clone();
+        let compositor = compositor.clone();
+
+        let effect = state
+            .effects
+            .entry(surface_id)
+            .or_insert_with(|| manager.get_background_effect(&wl_surface, &self.qh, ()))
+            .clone();
+
+        drop(state);
+
+        let width = wayland_surface.width();
+        let height = wayland_surface.height();
+
+        if width <= 0 || height <= 0 {
+            return;
+        }
+
+        // Compute effective shadow margins (same logic as apply_blur_region).
+        let effective_margin = if shadow_margin > 0 {
+            crate::services::surfaces::SurfaceStyleManager::global().shadow_margin(shadow_margin)
+        } else {
+            0
+        };
+
+        let m = effective_margin;
+        let (margin_top, margin_bottom, margin_start, margin_end) = if m > 0 {
+            let is_bottom =
+                crate::services::config_manager::ConfigManager::global().bar_is_bottom();
+            if is_bottom {
+                (m, 0, m, m)
+            } else {
+                (0, m, m, m)
+            }
+        } else {
+            (0, 0, 0, 0)
+        };
+
+        // Content area within shadow margins (= ScaleBox allocation).
+        let content_w = (width - margin_start - margin_end) as f64;
+        let content_h = (height - margin_top - margin_bottom) as f64;
+
+        // ScaleBox clips to a centered rect of size content * scale.
+        let scaled_w = content_w * scale;
+        let scaled_h = content_h * scale;
+        let dx = (content_w - scaled_w) / 2.0;
+        let dy = (content_h - scaled_h) / 2.0;
+
+        // Final rect in surface coordinates.
+        let x = margin_start as f64 + dx;
+        let y = margin_top as f64 + dy;
+
+        let radius = if shadow_margin > 0 {
+            crate::services::config_manager::ConfigManager::global().surface_border_radius() as i32
+        } else {
+            0
+        };
+
+        let region = compositor.create_region(&self.qh, ());
+        add_rounded_rect_to_region(
+            &region,
+            x.round() as i32,
+            y.round() as i32,
+            scaled_w.round() as i32,
+            scaled_h.round() as i32,
+            radius,
+        );
+
+        effect.set_blur_region(Some(&region));
+        region.destroy();
+
+        if let Ok(eq) = self.event_queue.try_borrow() {
+            let _ = eq.flush();
+        }
+    }
+
+    /// Clear the blur region for a surface without destroying the effect object.
+    ///
+    /// Sets a minimal 1x1 blur region which is effectively invisible.  We cannot
+    /// send `set_blur_region(NULL)` because the protocol defines NULL as "blur the
+    /// entire surface".  The effect object is kept alive so it can be reused on
+    /// the next open without re-creation.
+    ///
+    /// Called at the start of a close animation so the compositor stops drawing
+    /// blur behind the surface while it fades out.
+    pub fn clear_blur_region(&self, window: &gtk4::ApplicationWindow) {
+        if !self.available {
+            return;
+        }
+
+        let Some(native) = window.native() else {
+            return;
+        };
+        let Some(gdk_surface) = native.surface() else {
+            return;
+        };
+        let wayland_surface = match gdk_surface.downcast::<gdk4_wayland::WaylandSurface>() {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let Some(wl_surface) = wayland_surface.wl_surface() else {
+            return;
+        };
+
+        let surface_id =
+            <wayland_client::protocol::wl_surface::WlSurface as wayland_client::Proxy>::id(
+                &wl_surface,
+            );
+        let state = self.state.borrow();
+        let Some(compositor) = state.compositor.clone() else {
+            return;
+        };
+        if let Some(effect) = state.effects.get(&surface_id) {
+            // Set a 1x1 empty region instead of NULL — NULL means "blur the
+            // entire surface" per the protocol spec, which is not what we want.
+            // A minimal region is effectively invisible and keeps the effect
+            // object alive for reuse on the next open.
+            let region = compositor.create_region(&self.qh, ());
+            region.add(0, 0, 1, 1);
+            effect.set_blur_region(Some(&region));
+            region.destroy();
+            wl_surface.commit();
+            debug!("Cleared blur region for surface (set to 1x1)");
+        }
+        drop(state);
+
+        if let Ok(eq) = self.event_queue.try_borrow() {
+            let _ = eq.flush();
         }
     }
 }

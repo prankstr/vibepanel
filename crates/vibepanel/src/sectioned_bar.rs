@@ -18,7 +18,7 @@ use crate::layout_math::{
 
 mod imp {
     use super::*;
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
 
     #[derive(Default)]
     pub struct CenterPriorityLayout {
@@ -33,6 +33,9 @@ mod imp {
         pub last_center_width: Cell<i32>,
         pub last_right_x: Cell<i32>,
         pub last_right_width: Cell<i32>,
+        /// Optional callback fired after every allocation pass.
+        /// Used by bar blur to recompute island regions when layout changes.
+        pub on_allocate: RefCell<Option<Box<dyn Fn()>>>,
     }
 
     #[glib::object_subclass]
@@ -172,6 +175,11 @@ mod imp {
                         baseline,
                     );
                 }
+
+                // Fire post-allocate callback (used by bar blur).
+                if let Some(cb) = self.on_allocate.borrow().as_ref() {
+                    cb();
+                }
                 return;
             }
 
@@ -242,6 +250,11 @@ mod imp {
                     baseline,
                 );
             }
+
+            // Fire post-allocate callback (used by bar blur).
+            if let Some(cb) = self.on_allocate.borrow().as_ref() {
+                cb();
+            }
         }
 
         fn create_layout_child(&self, widget: &Widget, for_child: &Widget) -> LayoutChild {
@@ -279,6 +292,13 @@ impl CenterPriorityLayout {
 
     pub fn set_right_expand(&self, expand: bool) {
         self.imp().right_expand.set(expand);
+    }
+
+    /// Set a callback to be fired after every layout allocation pass.
+    ///
+    /// Used by bar blur to recompute island regions when layout changes.
+    pub fn set_on_allocate<F: Fn() + 'static>(&self, cb: F) {
+        *self.imp().on_allocate.borrow_mut() = Some(Box::new(cb));
     }
 }
 

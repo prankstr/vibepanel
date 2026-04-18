@@ -653,6 +653,12 @@ impl LayerShellPopover {
                 shell.set_scale(ANIM_SCALE_FROM);
                 shell.remove_child();
             }
+            if ConfigManager::global().blur_enabled()
+                && let Some(blur) =
+                    crate::services::background_effect::BackgroundEffectManager::global()
+            {
+                blur.clear_blur_region(&window);
+            }
             window.set_visible(false);
             // Fire on_close now since there's no animation to wait for.
             if let Some(ref cb) = *self.on_close.borrow() {
@@ -664,6 +670,15 @@ impl LayerShellPopover {
         // Ensure the window is fully visible (the idle callback from show_internal
         // may not have fired yet, leaving window.opacity at 0.0).
         window.set_opacity(1.0);
+
+        // Clear blur at the start of the close animation so the compositor
+        // stops drawing blur behind the surface while it fades out.
+        if ConfigManager::global().blur_enabled()
+            && let Some(blur) =
+                crate::services::background_effect::BackgroundEffectManager::global()
+        {
+            blur.clear_blur_region(&window);
+        }
 
         // Start (or reverse into) the close animation.
         // on_close fires when the animation completes (in the tick callback).
@@ -871,14 +886,6 @@ impl LayerShellPopover {
                 popover.update_position();
                 if let Some(ref window) = *popover.window.borrow() {
                     window.set_opacity(1.0);
-
-                    // Apply blur region now that the surface is mapped and sized.
-                    if ConfigManager::global().blur_enabled()
-                        && let Some(blur) =
-                            crate::services::background_effect::BackgroundEffectManager::global()
-                    {
-                        blur.apply_blur_region(window, POPOVER_SHADOW_MARGIN);
-                    }
                 }
 
                 if ConfigManager::global().animations_enabled() {
@@ -888,6 +895,15 @@ impl LayerShellPopover {
                     if let Some(ref shell) = *popover.anim_shell.borrow() {
                         shell.set_opacity(1.0);
                         shell.set_scale(1.0);
+                    }
+                    // Apply blur region immediately (the tick callback won't
+                    // run to animate it in).
+                    if ConfigManager::global().blur_enabled()
+                        && let Some(blur) =
+                            crate::services::background_effect::BackgroundEffectManager::global()
+                        && let Some(ref window) = *popover.window.borrow()
+                    {
+                        blur.apply_blur_region(window, POPOVER_SHADOW_MARGIN);
                     }
                 }
             }
@@ -1057,6 +1073,17 @@ impl LayerShellPopover {
             let scale = ANIM_SCALE_FROM + (1.0 - ANIM_SCALE_FROM) * progress;
             shell_for_scale.set_scale(scale);
 
+            // During opening, update the blur region to match the ScaleBox clip
+            // so the compositor blur grows in sync with the visual.
+            if direction == AnimDirection::Opening
+                && ConfigManager::global().blur_enabled()
+                && let Some(blur) =
+                    crate::services::background_effect::BackgroundEffectManager::global()
+                && let Some(ref w) = window
+            {
+                blur.apply_blur_region_animated(w, POPOVER_SHADOW_MARGIN, scale);
+            }
+
             if complete {
                 anim_state.borrow_mut().active = false;
 
@@ -1076,6 +1103,15 @@ impl LayerShellPopover {
                     // Open complete — ensure we're at exactly 1.0.
                     shell.set_opacity(1.0);
                     shell_for_scale.set_scale(1.0);
+                    // Set final full-size blur region (scale == 1.0, same as
+                    // apply_blur_region) to install the resize watcher.
+                    if ConfigManager::global().blur_enabled()
+                        && let Some(blur) =
+                            crate::services::background_effect::BackgroundEffectManager::global()
+                        && let Some(ref w) = window
+                    {
+                        blur.apply_blur_region(w, POPOVER_SHADOW_MARGIN);
+                    }
                 }
                 return ControlFlow::Break;
             }
