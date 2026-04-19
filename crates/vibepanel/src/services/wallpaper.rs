@@ -18,6 +18,14 @@
 //! release. Until then, support is best-effort: if upstream changes the wire
 //! contract before a stable release, detection will gracefully fall back to
 //! returning `None` (no wallpaper detected), without crashing or blocking.
+//!
+//! Dispatch is decided per-connection by inspecting the daemon's loaded
+//! libraries via `SO_PEERCRED` + `/proc/<pid>/maps`: 0.8+ links
+//! `libhyprtoolkit` and uses the hyprwire path; older builds use the legacy
+//! text path. Best-effort: we avoid speaking the wrong protocol by
+//! classifying the daemon before sending any protocol bytes (a probe socket
+//! is opened for `SO_PEERCRED`, but nothing is written to it), since 0.7.x
+//! crashes when a polling client repeatedly sends hyprwire frames.
 
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
@@ -100,17 +108,24 @@ impl HyprwireClient {
 
     fn connect(socket_path: &str) -> Result<Self, String> {
         let stream = UnixStream::connect(socket_path).map_err(|e| e.to_string())?;
+        // Tight handshake budget; callers widen it for the snapshot phase.
         stream
-            .set_read_timeout(Some(Duration::from_millis(250)))
+            .set_read_timeout(Some(Duration::from_millis(100)))
             .map_err(|e| e.to_string())?;
         stream
-            .set_write_timeout(Some(Duration::from_millis(250)))
+            .set_write_timeout(Some(Duration::from_millis(100)))
             .map_err(|e| e.to_string())?;
 
         Ok(Self {
             stream,
             next_seq: 0,
         })
+    }
+
+    fn set_read_timeout(&self, duration: Duration) -> Result<(), String> {
+        self.stream
+            .set_read_timeout(Some(duration))
+            .map_err(|e| e.to_string())
     }
 
     fn next_sequence(&mut self) -> u32 {
@@ -520,40 +535,92 @@ fn resolve_hyprpaper_socket_path() -> Option<String> {
     Some(socket_path)
 }
 
+/// Discriminate hyprpaper 0.8+ (hyprwire) from < 0.8 (legacy text) without
+/// sending any bytes to the daemon.
+///
+/// Empirical findings on a live 0.7.6 daemon:
+/// - Sending the hyprwire SUP framing (`01 20 03 'V' 'A' 'X' 00`) once is
+///   handled (replies "invalid command"), but a second SUP from the same
+///   client crashes the daemon. So we cannot use any byte-level probe.
+/// - Sending legacy `listactive` to a 0.8 hyprwire server makes its binary
+///   parser log "malformed message" per byte every poll cycle.
+///
+/// Instead, use `SO_PEERCRED` to discover the daemon's pid and inspect
+/// `/proc/<pid>/maps` for a `libhyprtoolkit` mapping (0.8.0+ is a complete
+/// rewrite onto hyprtoolkit; 0.7.x does not link it).
+fn hyprpaper_uses_hyprwire(stream: &UnixStream) -> Option<bool> {
+    use std::os::fd::AsRawFd;
+
+    let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
+    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    let rc = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            &mut cred as *mut _ as *mut libc::c_void,
+            &mut len,
+        )
+    };
+    if rc != 0 {
+        let err = std::io::Error::last_os_error();
+        debug!("hyprpaper: SO_PEERCRED failed: {err}; skipping classification");
+        return None;
+    }
+    let pid = cred.pid;
+
+    let maps_path = format!("/proc/{pid}/maps");
+    let maps = match std::fs::read_to_string(&maps_path) {
+        Ok(m) => m,
+        Err(e) => {
+            debug!("hyprpaper: cannot read {maps_path}: {e}; skipping classification");
+            return None;
+        }
+    };
+    Some(maps_indicate_hyprwire(&maps))
+}
+
+/// Returns `true` if `maps` (contents of `/proc/<pid>/maps`) contains a
+/// `libhyprtoolkit` mapping, which indicates hyprpaper 0.8+ (hyprwire
+/// protocol). This is a best-effort heuristic — a false positive would route
+/// hyprwire bytes to a 0.7.x daemon and crash it. The match is on the mapped
+/// library basename to avoid matching unrelated paths that happen to contain
+/// "libhyprtoolkit" as a directory or binary name component.
+fn maps_indicate_hyprwire(maps: &str) -> bool {
+    maps.lines().any(|line| {
+        line.rsplit_once('/')
+            .map(|(_, name)| name.starts_with("libhyprtoolkit.so"))
+            .unwrap_or(false)
+    })
+}
+
 /// Detect the current wallpaper path from hyprpaper via its IPC socket.
 ///
-/// Tries the legacy text-based protocol first (hyprpaper < 0.8.0), then falls
-/// back to the hyprwire binary protocol (requires upstream main or a future
-/// release with `hyprpaper_core@2`; released 0.8.0-0.8.3 soft-fail).
-///
-/// The legacy probe is hardened to fast-fail (<150ms) when the server speaks
-/// hyprwire, so trying it unconditionally on every poll is cheap.
+/// Dispatches to either the hyprwire binary protocol (0.8+) or the legacy
+/// text protocol (< 0.8) based on `hyprpaper_uses_hyprwire`. Sending the
+/// wrong probe to a given version either crashes 0.7 or log-spams 0.8, so
+/// we never fall back from one to the other.
 ///
 /// If `monitor` is provided, returns that monitor's wallpaper. Falls back to the
 /// first listed monitor if the target isn't found (e.g. unplugged, name mismatch).
 fn detect_hyprpaper_wallpaper(monitor: Option<&str>) -> Option<String> {
     let socket_path = resolve_hyprpaper_socket_path()?;
+    let probe = UnixStream::connect(&socket_path).ok()?;
+    let uses_hyprwire = hyprpaper_uses_hyprwire(&probe)?;
+    drop(probe);
 
-    if let Some(path) = detect_hyprpaper_legacy(&socket_path, monitor) {
-        return Some(path);
+    if uses_hyprwire {
+        detect_hyprpaper_hyprwire(&socket_path, monitor)
+    } else {
+        detect_hyprpaper_legacy(&socket_path, monitor)
     }
-
-    if let Some(path) = detect_hyprpaper_hyprwire(&socket_path, monitor) {
-        return Some(path);
-    }
-
-    debug!("hyprpaper socket exists but neither text nor hyprwire protocol succeeded");
-    None
 }
 
 /// Detect the wallpaper via the legacy text-based IPC protocol (hyprpaper < 0.8.0).
 ///
 /// Sends the `listactive` command and parses lines of `MONITOR = /path/to/image`.
-///
-/// Optimised to fail fast when the server actually speaks hyprwire (binary).
-/// Legacy hyprpaper replies in a few ms on a local socket, so a 100ms timeout is
-/// ample; additionally, if the first response byte is non-printable we assume a
-/// hyprwire server and abort immediately rather than draining until timeout.
+/// Only called after `hyprpaper_uses_hyprwire` confirms a legacy daemon, so no
+/// fast-fail against a hyprwire server is needed.
 fn detect_hyprpaper_legacy(socket_path: &str, monitor: Option<&str>) -> Option<String> {
     let mut stream = UnixStream::connect(socket_path).ok()?;
     stream
@@ -565,24 +632,8 @@ fn detect_hyprpaper_legacy(socket_path: &str, monitor: Option<&str>) -> Option<S
     stream.write_all(b"listactive").ok()?;
     stream.shutdown(std::net::Shutdown::Write).ok();
 
-    // Peek the first byte of the reply. Legacy hyprpaper returns ASCII starting
-    // with a printable monitor-name char; hyprwire servers start a handshake
-    // with the binary `HW_HANDSHAKE_BEGIN` (0x02) or otherwise non-printable
-    // bytes. Bail out early to avoid waiting on the full read timeout.
-    let mut first = [0u8; 1];
-    if stream.read_exact(&mut first).is_err() {
-        return None;
-    }
-    if !first[0].is_ascii_graphic() && !first[0].is_ascii_whitespace() {
-        return None;
-    }
-
-    let mut rest = String::new();
-    stream.read_to_string(&mut rest).ok()?;
-
-    let mut response = String::with_capacity(rest.len() + 1);
-    response.push(first[0] as char);
-    response.push_str(&rest);
+    let mut response = String::new();
+    stream.read_to_string(&mut response).ok()?;
 
     parse_hyprpaper_active_response(&response, monitor)
 }
@@ -652,7 +703,13 @@ fn detect_hyprpaper_hyprwire(socket_path: &str, monitor: Option<&str>) -> Option
         .inspect_err(|e| debug!("hyprwire: failed to create status object: {}", e))
         .ok()?;
 
-    // The initial wallpaper snapshot is delivered asynchronously after binding.
+    // The initial wallpaper snapshot is delivered asynchronously after binding;
+    // a busy daemon may need more headroom than the handshake budget allows.
+    client
+        .set_read_timeout(Duration::from_millis(500))
+        .inspect_err(|e| debug!("hyprwire: failed to extend read timeout: {}", e))
+        .ok()?;
+
     let roundtrip_seq = client
         .send_roundtrip_request()
         .inspect_err(|e| debug!("hyprwire: failed to request roundtrip: {}", e))
@@ -1285,6 +1342,46 @@ mod tests {
         assert_eq!(select_monitor_wallpaper(&entries, Some("DP-1")), None);
     }
 
+    // ----- maps_indicate_hyprwire -----
+
+    #[test]
+    fn test_maps_indicate_hyprwire_matches_library_mapping() {
+        let maps = "\
+7f0000000000-7f0000010000 r-xp 00000000 fd:00 1 /usr/lib/libhyprtoolkit.so.0\n\
+7f0000020000-7f0000030000 r-xp 00000000 fd:00 2 /usr/lib/libhyprlang.so\n";
+        assert!(maps_indicate_hyprwire(maps));
+    }
+
+    #[test]
+    fn test_maps_indicate_hyprwire_rejects_hyprpaper_07_maps() {
+        let maps = "\
+55d000000000-55d000040000 r-xp 00000000 fd:00 10 /usr/bin/hyprpaper\n\
+7f0000000000-7f0000020000 r-xp 00000000 fd:00 20 /usr/lib/libhyprlang.so\n\
+7f0000030000-7f0000040000 r-xp 00000000 fd:00 21 /usr/lib/libwayland-client.so.0\n";
+        assert!(!maps_indicate_hyprwire(maps));
+    }
+
+    #[test]
+    fn test_maps_indicate_hyprwire_rejects_bare_hyprtoolkit_substring() {
+        let maps = "\
+55d000000000-55d000040000 r-xp 00000000 fd:00 10 /opt/hyprtoolkit-demo/bin/demo\n";
+        assert!(!maps_indicate_hyprwire(maps));
+    }
+
+    #[test]
+    fn test_maps_indicate_hyprwire_rejects_hyprtoolkit_helper_library() {
+        let maps = "\
+7f0000000000-7f0000010000 r-xp 00000000 fd:00 1 /usr/lib/libhyprtoolkit-helper.so.0\n";
+        assert!(!maps_indicate_hyprwire(maps));
+    }
+
+    #[test]
+    fn test_maps_indicate_hyprwire_rejects_hyprtoolkit_plugin_library() {
+        let maps = "\
+7f0000000000-7f0000010000 r-xp 00000000 fd:00 1 /usr/lib/libhyprtoolkit-plugin.so.1\n";
+        assert!(!maps_indicate_hyprwire(maps));
+    }
+
     // ----- is_hyprpaper_status_protocol_available -----
 
     #[test]
@@ -1460,53 +1557,5 @@ mod tests {
         let _ = std::fs::remove_file(&socket_path);
 
         assert_eq!(result, Some("/home/user/wall.png".to_string()));
-    }
-
-    /// Regression test: when the server speaks hyprwire (binary), the legacy
-    /// probe must abort quickly via the first-byte non-printable check rather
-    /// than waiting on the full read timeout. Before the fix, every startup on
-    /// hyprpaper 0.8+ paid ~500ms here.
-    #[test]
-    fn test_legacy_probe_fast_fails_against_hyprwire_server() {
-        use std::os::unix::net::UnixListener;
-        use std::time::Instant;
-
-        let socket_path = std::env::temp_dir().join(format!(
-            "vibepanel_test_legacy_fastfail_{}.sock",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_file(&socket_path);
-
-        let listener = UnixListener::bind(&socket_path).expect("bind");
-
-        // Server: read whatever the client sends, then emit a binary
-        // HW_HANDSHAKE_BEGIN — exactly what a real hyprwire server would do
-        // after receiving `listactive` (which it'd treat as SUP-ish bytes).
-        // Then keep the socket open to simulate a server that doesn't close.
-        let server_thread = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("accept");
-            let mut buf = [0u8; 32];
-            let _ = stream.read(&mut buf);
-            // Write binary handshake-begin magic byte
-            let _ =
-                stream.write_all(&[HW_HANDSHAKE_BEGIN, 0x21, 0x10, 0x01, 0x00, 0x00, 0x00, 0x00]);
-            // Keep socket open for a short while — the client must abort via
-            // non-printable detection, not wait for us to close.
-            std::thread::sleep(Duration::from_millis(300));
-        });
-
-        let start = Instant::now();
-        let result = detect_hyprpaper_legacy(socket_path.to_str().unwrap(), None);
-        let elapsed = start.elapsed();
-
-        let _ = std::fs::remove_file(&socket_path);
-        server_thread.join().expect("server thread");
-
-        assert_eq!(result, None, "binary response must not parse as legacy");
-        assert!(
-            elapsed < Duration::from_millis(150),
-            "legacy probe must fast-fail on binary response, took {:?}",
-            elapsed
-        );
     }
 }
