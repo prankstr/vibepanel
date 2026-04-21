@@ -9,7 +9,7 @@
 //! | hyprpaper version | Detection method | Status |
 //! |-------------------|-----------------|--------|
 //! | < 0.8.0 | Legacy text IPC | Supported |
-//! | 0.8.0 – 0.8.3 | Neither (regression in released builds) | Soft-fail: no wallpaper detected |
+//! | 0.8.0 – 0.8.3 | Neither (regression in released builds) | Soft-fail: hyprpaper detection unavailable (cascade continues) |
 //! | main / >= 0.8.4 (unreleased) | hyprwire binary IPC (`hyprpaper_core@2`) | Supported, best-effort |
 //!
 //! The hyprwire path targets the `hyprpaper_core@2` protocol introduced in
@@ -23,9 +23,10 @@
 //! libraries via `SO_PEERCRED` + `/proc/<pid>/maps`: 0.8+ links
 //! `libhyprtoolkit` and uses the hyprwire path; older builds use the legacy
 //! text path. Best-effort: we avoid speaking the wrong protocol by
-//! classifying the daemon before sending any protocol bytes (a probe socket
-//! is opened for `SO_PEERCRED`, but nothing is written to it), since 0.7.x
-//! crashes when a polling client repeatedly sends hyprwire frames.
+//! classifying the daemon before sending any protocol bytes (`SO_PEERCRED`
+//! is read on the protocol socket itself before anything is written to it,
+//! and that same socket is then handed to the chosen protocol path), since
+//! 0.7.x crashes when a polling client repeatedly sends hyprwire frames.
 
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
@@ -98,16 +99,7 @@ struct HyprwireClient {
 }
 
 impl HyprwireClient {
-    #[cfg(test)]
-    fn from_stream(stream: UnixStream) -> Self {
-        Self {
-            stream,
-            next_seq: 0,
-        }
-    }
-
-    fn connect(socket_path: &str) -> Result<Self, String> {
-        let stream = UnixStream::connect(socket_path).map_err(|e| e.to_string())?;
+    fn from_stream(stream: UnixStream) -> Result<Self, String> {
         // Tight handshake budget; callers widen it for the snapshot phase.
         stream
             .set_read_timeout(Some(Duration::from_millis(100)))
@@ -115,7 +107,6 @@ impl HyprwireClient {
         stream
             .set_write_timeout(Some(Duration::from_millis(100)))
             .map_err(|e| e.to_string())?;
-
         Ok(Self {
             stream,
             next_seq: 0,
@@ -605,14 +596,13 @@ fn maps_indicate_hyprwire(maps: &str) -> bool {
 /// first listed monitor if the target isn't found (e.g. unplugged, name mismatch).
 fn detect_hyprpaper_wallpaper(monitor: Option<&str>) -> Option<String> {
     let socket_path = resolve_hyprpaper_socket_path()?;
-    let probe = UnixStream::connect(&socket_path).ok()?;
-    let uses_hyprwire = hyprpaper_uses_hyprwire(&probe)?;
-    drop(probe);
+    let stream = UnixStream::connect(&socket_path).ok()?;
+    let uses_hyprwire = hyprpaper_uses_hyprwire(&stream)?;
 
     if uses_hyprwire {
-        detect_hyprpaper_hyprwire(&socket_path, monitor)
+        detect_hyprpaper_hyprwire(stream, monitor)
     } else {
-        detect_hyprpaper_legacy(&socket_path, monitor)
+        detect_hyprpaper_legacy(stream, monitor)
     }
 }
 
@@ -621,8 +611,8 @@ fn detect_hyprpaper_wallpaper(monitor: Option<&str>) -> Option<String> {
 /// Sends the `listactive` command and parses lines of `MONITOR = /path/to/image`.
 /// Only called after `hyprpaper_uses_hyprwire` confirms a legacy daemon, so no
 /// fast-fail against a hyprwire server is needed.
-fn detect_hyprpaper_legacy(socket_path: &str, monitor: Option<&str>) -> Option<String> {
-    let mut stream = UnixStream::connect(socket_path).ok()?;
+fn detect_hyprpaper_legacy(stream: UnixStream, monitor: Option<&str>) -> Option<String> {
+    let mut stream = stream;
     stream
         .set_read_timeout(Some(Duration::from_millis(100)))
         .ok();
@@ -660,8 +650,8 @@ fn parse_hyprpaper_active_response(response: &str, monitor: Option<&str>) -> Opt
 /// (main / future >= 0.8.4) adds a status object that emits
 /// `active_wallpaper(monitor, path)` events. Detection soft-fails to `None` if
 /// the server does not advertise `hyprpaper_core@2`.
-fn detect_hyprpaper_hyprwire(socket_path: &str, monitor: Option<&str>) -> Option<String> {
-    let mut client = HyprwireClient::connect(socket_path)
+fn detect_hyprpaper_hyprwire(stream: UnixStream, monitor: Option<&str>) -> Option<String> {
+    let mut client = HyprwireClient::from_stream(stream)
         .inspect_err(|e| debug!("hyprwire: failed to connect: {}", e))
         .ok()?;
 
@@ -1108,14 +1098,14 @@ mod tests {
         let (a, mut b) = UnixStream::pair().expect("socketpair");
         b.write_all(bytes).expect("write payload");
         drop(b);
-        HyprwireClient::from_stream(a).read_varint()
+        HyprwireClient::from_stream(a).unwrap().read_varint()
     }
 
     fn read_value_from_bytes(magic: u8, bytes: &[u8]) -> Result<HyprwireValue, String> {
         let (a, mut b) = UnixStream::pair().expect("socketpair");
         b.write_all(bytes).expect("write payload");
         drop(b);
-        let mut client = HyprwireClient::from_stream(a);
+        let mut client = HyprwireClient::from_stream(a).unwrap();
         client.read_value(magic)
     }
 
@@ -1451,7 +1441,7 @@ mod tests {
         let listener = UnixListener::bind(&socket_path).expect("bind temp socket");
         let server_thread = std::thread::spawn(move || {
             let (stream, _) = listener.accept().expect("accept");
-            let mut srv = HyprwireClient::from_stream(stream);
+            let mut srv = HyprwireClient::from_stream(stream).unwrap();
 
             let sup = srv.read_message().expect("read sup");
             assert_eq!(sup.code, HW_SUP);
@@ -1548,10 +1538,8 @@ mod tests {
             mock_send(&mut srv.stream, HW_ROUNDTRIP_DONE, &done);
         });
 
-        let result = detect_hyprpaper_hyprwire(
-            socket_path.to_str().expect("valid utf-8 socket path"),
-            Some("eDP-1"),
-        );
+        let stream = UnixStream::connect(&socket_path).expect("connect to mock server");
+        let result = detect_hyprpaper_hyprwire(stream, Some("eDP-1"));
 
         server_thread.join().expect("server thread");
         let _ = std::fs::remove_file(&socket_path);
