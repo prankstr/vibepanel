@@ -3,7 +3,7 @@
 //! Note: This module requires config values for screen_margin and spacing,
 //! so it returns a formatted String rather than a static str.
 
-use super::{CONTENT_PADDING_X, WIDGET_BG_HOVER, WIDGET_BG_WITH_OPACITY};
+use super::{CONTENT_PADDING_X, WIDGET_BG_WITH_OPACITY};
 use crate::widgets::workspaces::{
     INDICATOR_ACTIVE_MULT, INDICATOR_HEIGHT_MULT, INDICATOR_INACTIVE_MULT, LONG_INDICATOR_HPAD,
 };
@@ -17,7 +17,6 @@ use crate::widgets::workspaces::{
 /// alive even when `theme.animations = false`.
 pub fn css(screen_margin: u32, spacing: u32, workspace_animations: bool) -> String {
     let widget_bg = WIDGET_BG_WITH_OPACITY;
-    let widget_bg_hover = WIDGET_BG_HOVER;
     let inactive_mult = INDICATOR_INACTIVE_MULT;
     let active_mult = INDICATOR_ACTIVE_MULT;
     let height_mult = INDICATOR_HEIGHT_MULT;
@@ -91,7 +90,7 @@ sectioned-bar.bar {{
 
 /* Hover targets the wrapper but paints on the surface child */
 .widget-wrapper.clickable:hover > .widget:not(.widget-group) {{
-    background-color: {widget_bg_hover};
+    background-color: var(--color-widget-hover-bg);
 }}
 
 /* Pull non-first items left to overlap adjacent .content padding (2 × {content_pad_x}px).
@@ -118,7 +117,7 @@ sectioned-bar.bar {{
 
 /* Grouped item hover — tint only (group surface provides base background) */
 .widget-group .content > .widget-item.clickable:hover {{
-    background-color: color-mix(in srgb, transparent 92%, var(--widget-hover-tint));
+    background-color: var(--color-widget-group-hover-bg);
 }}
 
 /* ===== MERGE GROUP ===== */
@@ -132,7 +131,7 @@ sectioned-bar.bar {{
 
 /* Merge group hover — shared background for the entire merged button */
 .widget-merge-group.clickable:hover {{
-    background-color: color-mix(in srgb, transparent 92%, var(--widget-hover-tint));
+    background-color: var(--color-widget-group-hover-bg);
 }}
 
 /* Passive items in merge groups don't show their own hover */
@@ -179,19 +178,17 @@ overlay.workspace-indicator {{
     border-radius: calc(var(--radius-pill) * 1.2);
 }}
 
-/* Workspace indicator hover — background-color fades via the 100ms ease
-   transition above.  Accent state uses --color-accent-hover-bg (pre-computed in
-   the theme with luminance-aware tint direction and ratio). */
+/* Workspace hover backgrounds use scoped tokens so active hover can differ from global accent hover. */
 .workspace-indicator.clickable:hover {{
-    background-color: var(--color-card-overlay-hover);
+    background-color: var(--color-workspace-indicator-hover-bg);
 }}
 
 .workspace-indicator-minimal.clickable:hover {{
-    background-color: color-mix(in srgb, var(--color-foreground-faint) 80%, var(--widget-hover-tint));
+    background-color: var(--color-workspace-indicator-hover-bg);
 }}
 
 .workspace-indicator.active.clickable:hover {{
-    background-color: var(--color-accent-hover-bg);
+    background-color: var(--color-workspace-indicator-active-hover-bg);
 }}
 
 .workspace-indicator-minimal {{
@@ -244,7 +241,7 @@ overlay.workspace-indicator {{
 }}
 
 .taskbar-button.clickable:hover {{
-    background-color: color-mix(in srgb, transparent 92%, var(--widget-hover-tint));
+    background-color: var(--color-widget-group-hover-bg);
 }}
 
 .taskbar-button.active {{
@@ -253,7 +250,7 @@ overlay.workspace-indicator {{
 }}
 
 .taskbar-button.active.clickable:hover {{
-    background-color: var(--color-accent-hover-bg);
+    background-color: var(--color-taskbar-button-active-hover-bg);
 }}
 
 "#
