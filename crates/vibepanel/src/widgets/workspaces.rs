@@ -774,6 +774,8 @@ pub struct WorkspacesConfig {
     /// including each output's current workspace, but active styling still
     /// reflects the compositor's globally focused workspace.
     pub filter_by_output: bool,
+    /// Whether to show compositor-reported workspaces without windows.
+    pub show_unoccupied: bool,
 }
 
 impl WidgetConfig for WorkspacesConfig {
@@ -781,7 +783,13 @@ impl WidgetConfig for WorkspacesConfig {
         warn_unknown_options(
             "workspaces",
             entry,
-            &["label_type", "separator", "animate", "filter_by_output"],
+            &[
+                "label_type",
+                "separator",
+                "animate",
+                "filter_by_output",
+                "show_unoccupied",
+            ],
         );
 
         let label_type = entry
@@ -805,12 +813,18 @@ impl WidgetConfig for WorkspacesConfig {
             .get("filter_by_output")
             .and_then(|v| v.as_bool())
             .unwrap_or(defaults.filter_by_output);
+        let show_unoccupied = entry
+            .options
+            .get("show_unoccupied")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(defaults.show_unoccupied);
 
         Self {
             label_type,
             separator,
             animate,
             filter_by_output,
+            show_unoccupied,
         }
     }
 }
@@ -822,6 +836,7 @@ impl Default for WorkspacesConfig {
             separator: DEFAULT_SEPARATOR.to_string(),
             animate: None,
             filter_by_output: true,
+            show_unoccupied: false,
         }
     }
 }
@@ -850,6 +865,7 @@ impl WorkspacesWidget {
 
         let label_type = config.label_type;
         let filter_by_output = config.filter_by_output;
+        let show_unoccupied = config.show_unoccupied;
         // Per-widget animate flag takes precedence when explicitly set.
         // Falls back to the global theme.animations setting.
         let animate = config
@@ -891,6 +907,7 @@ impl WorkspacesWidget {
                 label_type,
                 &separator,
                 snapshot,
+                show_unoccupied,
                 if filter_by_output {
                     output_id.as_deref()
                 } else {
@@ -1195,11 +1212,12 @@ fn collect_display_ids(
     workspaces: &[Workspace],
     active_workspaces: &HashSet<i32>,
     snapshot: &WorkspaceServiceSnapshot,
+    show_unoccupied: bool,
     include_all_output_active: bool,
 ) -> HashSet<i32> {
     let mut display_ids: HashSet<i32> = workspaces
         .iter()
-        .filter(|ws| ws.occupied)
+        .filter(|ws| ws.occupied || (show_unoccupied && ws.window_count.is_some()))
         .map(|ws| ws.id)
         .collect();
 
@@ -1239,6 +1257,7 @@ fn update_indicators(
     label_type: LabelType,
     separator: &str,
     snapshot: &WorkspaceServiceSnapshot,
+    show_unoccupied: bool,
     output_id: Option<&str>,
 ) {
     let (workspaces, active_workspaces, source): (&[Workspace], &HashSet<i32>, &str) = if let Some(
@@ -1273,8 +1292,13 @@ fn update_indicators(
         source, output_id, active_workspaces
     );
 
-    let display_ids =
-        collect_display_ids(workspaces, active_workspaces, snapshot, output_id.is_none());
+    let display_ids = collect_display_ids(
+        workspaces,
+        active_workspaces,
+        snapshot,
+        show_unoccupied,
+        output_id.is_none(),
+    );
 
     trace!(
         "workspace widget: occupied_ids={:?}, adding active={:?}",
@@ -1703,6 +1727,7 @@ mod tests {
         assert_eq!(config.label_type, LabelType::None);
         assert_eq!(config.separator, "");
         assert!(config.filter_by_output);
+        assert!(!config.show_unoccupied);
     }
 
     #[test]
@@ -1773,6 +1798,15 @@ mod tests {
     }
 
     #[test]
+    fn test_workspace_config_show_unoccupied_enabled() {
+        let mut options = HashMap::new();
+        options.insert("show_unoccupied".to_string(), Value::Boolean(true));
+        let entry = make_widget_entry("workspaces", options);
+        let config = WorkspacesConfig::from_entry(&entry);
+        assert!(config.show_unoccupied);
+    }
+
+    #[test]
     fn test_global_display_includes_each_outputs_current_workspace() {
         let active_workspaces = HashSet::from([2]);
         let workspaces = vec![
@@ -1803,13 +1837,41 @@ mod tests {
             ]),
         };
 
-        let display_ids = collect_display_ids(&workspaces, &active_workspaces, &snapshot, true);
+        let display_ids =
+            collect_display_ids(&workspaces, &active_workspaces, &snapshot, false, true);
 
         assert!(display_ids.contains(&2));
         assert!(display_ids.contains(&4));
         assert!(display_ids.contains(&8));
         assert_eq!(active_workspaces, HashSet::from([2]));
         assert!(!workspaces.iter().find(|ws| ws.id == 8).unwrap().active);
+    }
+
+    #[test]
+    fn test_show_unoccupied_includes_reported_empty_workspaces() {
+        let active_workspaces = HashSet::from([1]);
+        let workspaces = vec![
+            make_workspace(1, "1", true, false, false, Some(0)),
+            make_workspace(2, "2", false, true, false, Some(1)),
+            make_workspace(3, "3", false, false, false, Some(0)),
+            make_workspace(4, "4", false, false, false, None),
+        ];
+        let snapshot = WorkspaceServiceSnapshot {
+            active_workspace: active_workspaces.clone(),
+            occupied_workspaces: HashSet::from([2]),
+            window_counts: HashMap::from([(1, 0), (2, 1), (3, 0)]),
+            workspaces: workspaces.clone(),
+            per_output: HashMap::new(),
+        };
+
+        let default_ids =
+            collect_display_ids(&workspaces, &active_workspaces, &snapshot, false, false);
+        assert_eq!(default_ids, HashSet::from([1, 2]));
+
+        let show_unoccupied_ids =
+            collect_display_ids(&workspaces, &active_workspaces, &snapshot, true, false);
+        assert_eq!(show_unoccupied_ids, HashSet::from([1, 2, 3]));
+        assert!(!show_unoccupied_ids.contains(&4));
     }
 
     // -- compute_left_count tests --
