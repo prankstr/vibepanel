@@ -563,7 +563,6 @@ impl ThemePalette {
         } else {
             0
         };
-
         format!(
             r#"
 :root {{
@@ -577,7 +576,7 @@ impl ThemePalette {
     --widget-hover-tint: {widget_hover_tint};
     /* Semantic hover backgrounds for user CSS overrides. */
     --color-widget-hover-bg: {widget_hover_bg_value};
-    --color-workspace-indicator-hover-bg: var(--color-card-overlay-hover);
+    --color-workspace-indicator-hover-default-bg: var(--color-card-overlay-hover);
     --color-workspace-indicator-active-hover-bg: var(--color-accent-hover-bg);
     --color-taskbar-button-hover-bg: color-mix(in srgb, transparent 92%, var(--widget-hover-tint));
     --color-taskbar-button-active-hover-bg: var(--color-accent-hover-bg);
@@ -1552,6 +1551,19 @@ mod tests {
         assert!(css.contains("--radius-bar:"));
         assert!(css.contains("--widget-height:"));
         assert!(css.contains("--font-family:"));
+    }
+
+    #[test]
+    fn test_workspace_indicator_hover_default_uses_internal_token() {
+        let config = Config::default();
+        let palette = ThemePalette::from_config(&config, None, None);
+        let css = palette.css_vars_block();
+
+        assert!(css.contains(
+            "--color-workspace-indicator-hover-default-bg: var(--color-card-overlay-hover);"
+        ));
+        assert!(!css.contains("--color-workspace-indicator-hover-bg:"));
+        assert!(!css.contains("--color-workspace-indicator-minimal-hover-bg"));
     }
 
     #[test]

@@ -269,11 +269,7 @@ overlay.workspace-indicator {{
 
 /* Workspace hover backgrounds use scoped tokens so active hover can differ from global accent hover. */
 .workspace-indicator.clickable:hover {{
-    background-color: var(--color-workspace-indicator-hover-bg);
-}}
-
-.workspace-indicator-minimal.clickable:hover {{
-    background-color: var(--color-workspace-indicator-hover-bg);
+    background-color: var(--color-workspace-indicator-hover-bg, var(--color-workspace-indicator-hover-default-bg));
 }}
 
 .workspace-indicator.active.clickable:hover {{
@@ -281,6 +277,7 @@ overlay.workspace-indicator {{
 }}
 
 .workspace-indicator-minimal {{
+    --color-workspace-indicator-hover-default-bg: color-mix(in srgb, var(--color-foreground-faint) 80%, var(--widget-hover-tint));
     background-color: var(--color-foreground-faint);
 }}
 
