@@ -6,10 +6,14 @@
 //! # Configuration
 //!
 //! - `label_type`: `"none"` (minimal dots, default), `"icons"` (●/○/◆ glyphs),
-//!   or `"numbers"` (workspace names).
+//!   or `"text"` (workspace names; legacy alias: `"numbers"`).
 //! - `separator`: string between indicators (non-minimal modes only).
 //! - `animate`: `true` (default) enables the `WorkspaceContainer` custom widget
 //!   for smooth transitions; `false` uses a plain GtkBox with no animation.
+//! - `filter_by_output`: `true` (default) uses this bar output's per-output
+//!   workspace state; `false` shows global/all-output workspace state, including
+//!   each output's current workspace. In all-output mode, active styling still
+//!   follows the compositor's globally focused workspace.
 //!
 //! # Architecture
 //!
@@ -709,8 +713,11 @@ fn compute_left_count(n: usize, active_idx: Option<usize>) -> usize {
 pub enum LabelType {
     /// Show icon glyphs (●, ○, ◆).
     Icons,
-    /// Show workspace numbers/names.
-    Numbers,
+    /// Show workspace labels/names.
+    ///
+    /// Historically configured as `label_type = "numbers"`; `"text"` is the
+    /// preferred value for new configs.
+    Text,
     /// Minimal - no text, just CSS styling.
     None,
 }
@@ -718,7 +725,7 @@ pub enum LabelType {
 impl LabelType {
     fn from_str(s: &str) -> Self {
         match s.to_lowercase().as_str() {
-            "numbers" => LabelType::Numbers,
+            "text" | "numbers" => LabelType::Text,
             "none" => LabelType::None,
             _ => LabelType::Icons,
         }
@@ -760,11 +767,22 @@ pub struct WorkspacesConfig {
     /// Whether to animate circle↔pill transitions.
     /// `None` = not explicitly set by user (inherits from global `theme.animations`).
     pub animate: Option<bool>,
+    /// Whether to use this bar output's per-output workspace state.
+    ///
+    /// When `true`, active styling reflects the workspace active on this bar's
+    /// output. When `false`, the widget shows global/all-output workspace state,
+    /// including each output's current workspace, but active styling still
+    /// reflects the compositor's globally focused workspace.
+    pub filter_by_output: bool,
 }
 
 impl WidgetConfig for WorkspacesConfig {
     fn from_entry(entry: &WidgetEntry) -> Self {
-        warn_unknown_options("workspaces", entry, &["label_type", "separator", "animate"]);
+        warn_unknown_options(
+            "workspaces",
+            entry,
+            &["label_type", "separator", "animate", "filter_by_output"],
+        );
 
         let label_type = entry
             .options
@@ -781,11 +799,18 @@ impl WidgetConfig for WorkspacesConfig {
             .to_string();
 
         let animate = entry.options.get("animate").and_then(|v| v.as_bool());
+        let defaults = Self::default();
+        let filter_by_output = entry
+            .options
+            .get("filter_by_output")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(defaults.filter_by_output);
 
         Self {
             label_type,
             separator,
             animate,
+            filter_by_output,
         }
     }
 }
@@ -796,6 +821,7 @@ impl Default for WorkspacesConfig {
             label_type: DEFAULT_LABEL_TYPE,
             separator: DEFAULT_SEPARATOR.to_string(),
             animate: None,
+            filter_by_output: true,
         }
     }
 }
@@ -817,11 +843,12 @@ impl WorkspacesWidget {
     /// * `output_id` - Optional output/monitor name. When set, the widget will:
     ///   - For Niri: only show workspaces belonging to this output.
     ///   - For MangoWC: show all workspaces but with per-output window counts.
-    ///   - For Hyprland: ignored (global workspace view).
+    ///   - For Hyprland: show workspaces associated with this output when available.
     pub fn new(config: WorkspacesConfig, output_id: Option<String>) -> Self {
         let base = BaseWidget::new(&[widget::WORKSPACES]);
 
         let label_type = config.label_type;
+        let filter_by_output = config.filter_by_output;
         // Per-widget animate flag takes precedence when explicitly set.
         // Falls back to the global theme.animations setting.
         let animate = config
@@ -863,7 +890,11 @@ impl WorkspacesWidget {
                 label_type,
                 &separator,
                 snapshot,
-                output_id.as_deref(),
+                if filter_by_output {
+                    output_id.as_deref()
+                } else {
+                    None
+                },
             );
         });
 
@@ -945,7 +976,7 @@ fn create_single_indicator(label_type: LabelType, workspace: &Workspace) -> Widg
     } else {
         let label_text = match label_type {
             LabelType::Icons => ICON_EMPTY,
-            LabelType::Numbers => &workspace.name,
+            LabelType::Text => &workspace.name,
             LabelType::None => unreachable!(),
         };
         let label = Label::new(Some(label_text));
@@ -1159,12 +1190,45 @@ fn classify_change(
     }
 }
 
+fn collect_display_ids(
+    workspaces: &[Workspace],
+    active_workspaces: &HashSet<i32>,
+    snapshot: &WorkspaceServiceSnapshot,
+    include_all_output_active: bool,
+) -> HashSet<i32> {
+    let mut display_ids: HashSet<i32> = workspaces
+        .iter()
+        .filter(|ws| ws.occupied)
+        .map(|ws| ws.id)
+        .collect();
+
+    // Include active workspaces (supports multi-tag view).
+    display_ids.extend(active_workspaces.iter());
+
+    if include_all_output_active {
+        // In all-output mode, show each output's current workspace even when it
+        // is empty. Styling still uses `active_workspaces`, so only the
+        // compositor's globally focused workspace gets the active class.
+        for per_output in snapshot.per_output.values() {
+            display_ids.extend(per_output.active_workspace.iter());
+        }
+    }
+
+    display_ids
+}
+
 /// Update workspace indicators based on the current snapshot.
 ///
-/// When `output_id` is provided:
+/// When `output_id` is provided (i.e. `filter_by_output = true`):
 /// - Uses per-output workspace data if available.
 /// - For Niri: only shows workspaces belonging to this output.
 /// - For MangoWC: shows all workspaces with per-output window counts.
+/// - For Hyprland: shows workspaces currently associated with this output.
+///
+/// When `output_id` is not provided (i.e. `filter_by_output = false`), uses
+/// global/all-output workspace data and also displays each output's current
+/// workspace. Active styling still follows the compositor's globally focused
+/// workspace.
 #[allow(clippy::too_many_arguments)]
 fn update_indicators(
     container: &GtkBox,
@@ -1208,20 +1272,13 @@ fn update_indicators(
         source, output_id, active_workspaces
     );
 
-    // Display occupied + active workspaces.
-    let mut display_ids: std::collections::HashSet<i32> = workspaces
-        .iter()
-        .filter(|ws| ws.occupied)
-        .map(|ws| ws.id)
-        .collect();
+    let display_ids =
+        collect_display_ids(workspaces, active_workspaces, snapshot, output_id.is_none());
 
     trace!(
         "workspace widget: occupied_ids={:?}, adding active={:?}",
         display_ids, active_workspaces
     );
-
-    // Include active workspaces (supports multi-tag view).
-    display_ids.extend(active_workspaces.iter());
 
     let display_workspaces: Vec<_> = workspaces
         .iter()
@@ -1455,7 +1512,7 @@ fn update_indicators(
             }
         }
 
-        // Update icon text (Icons/Numbers mode only).
+        // Update icon/text label (Icons/Text mode only).
         // The indicator is an Overlay wrapping the inner label.
         if let Some(label) = (label_type != LabelType::None)
             .then(|| {
@@ -1476,7 +1533,7 @@ fn update_indicators(
                         label.set_text(ICON_EMPTY);
                     }
                 }
-                LabelType::Numbers => {
+                LabelType::Text => {
                     label.set_text(&workspace.name);
                     let now_long = workspace.name.len() > 2;
                     let was_long = indicator.has_css_class(widget::WORKSPACE_INDICATOR_LONG);
@@ -1624,7 +1681,8 @@ fn build_tooltip(workspace: &Workspace) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
+    use crate::services::workspace::PerOutputWorkspaces;
+    use std::collections::{HashMap, HashSet};
     use toml::Value;
 
     fn make_widget_entry(name: &str, options: HashMap<String, Value>) -> WidgetEntry {
@@ -1640,6 +1698,7 @@ mod tests {
         let config = WorkspacesConfig::from_entry(&entry);
         assert_eq!(config.label_type, LabelType::None);
         assert_eq!(config.separator, "");
+        assert!(config.filter_by_output);
     }
 
     #[test]
@@ -1652,8 +1711,17 @@ mod tests {
         options.insert("separator".to_string(), Value::String("|".to_string()));
         let entry = make_widget_entry("workspaces", options);
         let config = WorkspacesConfig::from_entry(&entry);
-        assert_eq!(config.label_type, LabelType::Numbers);
+        assert_eq!(config.label_type, LabelType::Text);
         assert_eq!(config.separator, "|");
+    }
+
+    #[test]
+    fn test_workspace_config_text_alias() {
+        let mut options = HashMap::new();
+        options.insert("label_type".to_string(), Value::String("text".to_string()));
+        let entry = make_widget_entry("workspaces", options);
+        let config = WorkspacesConfig::from_entry(&entry);
+        assert_eq!(config.label_type, LabelType::Text);
     }
 
     #[test]
@@ -1669,7 +1737,8 @@ mod tests {
     fn test_label_type_from_str() {
         assert_eq!(LabelType::from_str("icons"), LabelType::Icons);
         assert_eq!(LabelType::from_str("ICONS"), LabelType::Icons);
-        assert_eq!(LabelType::from_str("numbers"), LabelType::Numbers);
+        assert_eq!(LabelType::from_str("text"), LabelType::Text);
+        assert_eq!(LabelType::from_str("numbers"), LabelType::Text);
         assert_eq!(LabelType::from_str("none"), LabelType::None);
         assert_eq!(LabelType::from_str("unknown"), LabelType::Icons); // default
     }
@@ -1688,6 +1757,55 @@ mod tests {
         let entry = make_widget_entry("workspaces", options);
         let config = WorkspacesConfig::from_entry(&entry);
         assert_eq!(config.animate, Some(false));
+    }
+
+    #[test]
+    fn test_workspace_config_filter_by_output_disabled() {
+        let mut options = HashMap::new();
+        options.insert("filter_by_output".to_string(), Value::Boolean(false));
+        let entry = make_widget_entry("workspaces", options);
+        let config = WorkspacesConfig::from_entry(&entry);
+        assert!(!config.filter_by_output);
+    }
+
+    #[test]
+    fn test_global_display_includes_each_outputs_current_workspace() {
+        let active_workspaces = HashSet::from([2]);
+        let workspaces = vec![
+            make_workspace(2, "2", true, false, false, None),
+            make_workspace(4, "4", false, true, false, Some(1)),
+            make_workspace(8, "8", false, false, false, None),
+        ];
+        let snapshot = WorkspaceServiceSnapshot {
+            active_workspace: active_workspaces.clone(),
+            occupied_workspaces: HashSet::from([4]),
+            window_counts: HashMap::from([(4, 1)]),
+            workspaces: workspaces.clone(),
+            per_output: HashMap::from([
+                (
+                    "eDP-1".to_string(),
+                    PerOutputWorkspaces {
+                        active_workspace: HashSet::from([2]),
+                        workspaces: vec![],
+                    },
+                ),
+                (
+                    "HDMI-A-1".to_string(),
+                    PerOutputWorkspaces {
+                        active_workspace: HashSet::from([8]),
+                        workspaces: vec![],
+                    },
+                ),
+            ]),
+        };
+
+        let display_ids = collect_display_ids(&workspaces, &active_workspaces, &snapshot, true);
+
+        assert!(display_ids.contains(&2));
+        assert!(display_ids.contains(&4));
+        assert!(display_ids.contains(&8));
+        assert_eq!(active_workspaces, HashSet::from([2]));
+        assert!(!workspaces.iter().find(|ws| ws.id == 8).unwrap().active);
     }
 
     // -- compute_left_count tests --
