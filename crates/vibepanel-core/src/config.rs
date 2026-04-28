@@ -502,8 +502,8 @@ impl Config {
 
         lines.push("\nOSD:".to_string());
         lines.push(format!(
-            "  enabled: {}, position: {}, timeout: {}ms",
-            self.osd.enabled, self.osd.position, self.osd.timeout_ms
+            "  enabled: {}, position: {}, timeout: {}ms, show_value: {}",
+            self.osd.enabled, self.osd.position, self.osd.timeout_ms, self.osd.show_value
         ));
 
         lines.join("\n")
@@ -1236,6 +1236,9 @@ pub struct OsdConfig {
     /// OSD position: "bottom", "left", "right".
     pub position: String,
 
+    /// Whether to show the current value as text next to the bar.
+    pub show_value: bool,
+
     /// How long the OSD stays visible (milliseconds).
     pub timeout_ms: u32,
 }
@@ -1245,6 +1248,7 @@ impl Default for OsdConfig {
         Self {
             enabled: true,
             position: "bottom".to_string(),
+            show_value: false,
             timeout_ms: 1500,
         }
     }

@@ -247,12 +247,14 @@ fn test_validation_accepts_valid_enum_values() {
         
         [osd]
         position = "bottom"
+        show_value = true
         
         [widgets]
         center = ["clock"]
     "#;
 
     let config: Config = toml::from_str(toml).unwrap();
+    assert!(config.osd.show_value, "OSD show_value should parse");
     config
         .validate()
         .expect("Valid config should pass validation");

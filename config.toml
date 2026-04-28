@@ -86,6 +86,7 @@ weight = 400       # Material icon stroke weight (100-700)
 [osd]
 enabled = true
 position = "bottom" # "bottom", "top", "left", "right"
+show_value = false  # Show current value after the bar
 
 [advanced]
 # compositor = "auto"  # "auto", "hyprland", "niri", "mango"
