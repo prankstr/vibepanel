@@ -330,7 +330,7 @@ overlay.workspace-indicator {{
 }}
 
 .taskbar-button.clickable:hover {{
-    background-color: var(--color-widget-group-hover-bg);
+    background-color: var(--color-taskbar-button-hover-bg);
 }}
 
 .taskbar-button.active {{

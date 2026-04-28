@@ -575,9 +575,9 @@ impl ThemePalette {
     --widget-hover-tint: {widget_hover_tint};
     /* Semantic hover backgrounds for user CSS overrides. */
     --color-widget-hover-bg: color-mix(in srgb, color-mix(in srgb, var(--widget-background-color) var(--widget-background-opacity), transparent) 92%, var(--widget-hover-tint));
-    --color-widget-group-hover-bg: color-mix(in srgb, transparent 92%, var(--widget-hover-tint));
     --color-workspace-indicator-hover-bg: var(--color-card-overlay-hover);
     --color-workspace-indicator-active-hover-bg: var(--color-accent-hover-bg);
+    --color-taskbar-button-hover-bg: color-mix(in srgb, transparent 92%, var(--widget-hover-tint));
     --color-taskbar-button-active-hover-bg: var(--color-accent-hover-bg);
 
     /* ===== Background Colors ===== */
