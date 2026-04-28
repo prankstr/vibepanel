@@ -50,6 +50,10 @@ pub mod class {
     /// Merges adjacent same-popover widgets into a single visual button.
     pub const WIDGET_MERGE_GROUP: &str = "widget-merge-group";
 
+    /// Merge group ripple clip (`.widget-merge-group-ripple-clip`).
+    /// Clips the ripple to the rounded inner hover pill.
+    pub const WIDGET_MERGE_GROUP_RIPPLE_CLIP: &str = "widget-merge-group-ripple-clip";
+
     /// Inner content box of a merge group (`.merge-group-content`).
     pub const MERGE_GROUP_CONTENT: &str = "merge-group-content";
 

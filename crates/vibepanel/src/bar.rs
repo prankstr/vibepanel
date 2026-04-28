@@ -237,23 +237,14 @@ fn build_widget_or_group(
             content.set_vexpand(true);
             content.set_valign(gtk4::Align::Fill);
 
-            // Visual surface — also carries .widget-group so user CSS
-            // targeting either class hits the background element, not the wrapper.
+            // Group surface — transparent in CSS. Direct children paint their
+            // own backgrounds so hover colors composite once over the bar.
             let surface = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
             surface.add_css_class(class::WIDGET);
             surface.add_css_class(class::WIDGET_GROUP);
             surface.set_overflow(gtk4::Overflow::Hidden);
             surface.set_hexpand(true);
             surface.set_vexpand(true);
-
-            // Add the first widget's name as a CSS class on the surface for
-            // per-widget CSS variable targeting.  Theme-generated selectors
-            // like `.widget.cpu` and user CSS like `.cpu { ... }` both hit
-            // the painted surface — not the transparent wrapper.
-            if let Some(first_entry) = group.first() {
-                let css_name = first_entry.name.replace('_', "-");
-                surface.add_css_class(&css_name);
-            }
 
             surface.append(&content);
             island.append(&surface);
@@ -288,6 +279,9 @@ fn build_widget_or_group(
                             // rule doesn't fire — per-item hover is handled by a
                             // group-scoped rule that paints on the .widget-item.
                             built.widget.remove_css_class(class::WIDGET_WRAPPER);
+                            built.widget.add_css_class(&entry.name.replace('_', "-"));
+                            // Grouped hover uses a large box-shadow spread to refill
+                            // the cell around the pill; this clips it to item bounds.
                             built.widget.set_overflow(gtk4::Overflow::Hidden);
                             content.append(&built.widget);
                             state.add_handle(built.handle);
@@ -363,6 +357,11 @@ fn build_merge_group(
     let wrapper = Overlay::new();
     wrapper.add_css_class(class::WIDGET_MERGE_GROUP);
     wrapper.add_css_class(state::CLICKABLE);
+    // Merged groups paint as a single button; only the leading widget's
+    // per-widget background class applies.
+    wrapper.add_css_class(&entries[0].name.replace('_', "-"));
+    // Required for the merge-group hover pill: its 9999px box-shadow
+    // refill is clipped here so it cannot bleed outside the group.
     wrapper.set_overflow(gtk4::Overflow::Hidden);
 
     let inner_content = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
@@ -378,7 +377,7 @@ fn build_merge_group(
     // group itself uses position-aware radius (square at seams in mixed
     // groups), which would otherwise leak the ripple into the corners.
     let ripple_clip = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
-    ripple_clip.add_css_class("widget-merge-group-ripple-clip");
+    ripple_clip.add_css_class(class::WIDGET_MERGE_GROUP_RIPPLE_CLIP);
     ripple_clip.set_overflow(gtk4::Overflow::Hidden);
     ripple_clip.append(ripple_handle.widget());
     wrapper.add_overlay(&ripple_clip);

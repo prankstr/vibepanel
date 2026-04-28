@@ -139,15 +139,15 @@ sectioned-bar.bar {{
 /* Position-aware pill shape: outer corners rounded only on the leading
    and trailing children; interior edges square so adjacent children meet
    flush. Applies to both plain items and merge wrappers. */
-.widget-group .content > .widget-item,
-.widget-group .content > .widget-merge-group {{
+.widget-group > .content > .widget-item,
+.widget-group > .content > .widget-merge-group {{
     border-radius: 0;
 }}
-.widget-group .content > :first-child {{
+.widget-group > .content > :first-child {{
     border-top-left-radius: var(--radius-widget);
     border-bottom-left-radius: var(--radius-widget);
 }}
-.widget-group .content > :last-child {{
+.widget-group > .content > :last-child {{
     border-top-right-radius: var(--radius-widget);
     border-bottom-right-radius: var(--radius-widget);
 }}
