@@ -277,36 +277,24 @@ fn build_widget_or_group(
             let mut count = 0;
 
             // Build entries individually (used for singletons and merge fallback).
-            let build_individually = |entries: &[WidgetEntry],
-                                      content: &gtk4::Box,
-                                      state: &mut BarState|
-             -> usize {
-                let mut n = 0;
-                for entry in entries {
-                    if let Some(built) = WidgetFactory::build(entry, Some(qs_handle), output_id) {
-                        // Group surface owns the background, so strip the
-                        // standalone wrapper class and force the inner .widget
-                        // surface transparent.  .widget is kept for border-radius
-                        // (ripple clipping); a scoped provider at transient
-                        // priority beats user CSS that also targets .widget.
-                        built.widget.remove_css_class(class::WIDGET_WRAPPER);
-                        if let Some(surface) = built.widget.first_child() {
-                            let provider = gtk4::CssProvider::new();
-                            provider.load_from_string(
-                                    ".widget { background-color: transparent; background-image: none; }",
-                                );
-                            #[allow(deprecated)]
-                            surface
-                                .style_context()
-                                .add_provider(&provider, TRANSIENT_CSS_PRIORITY);
+            // Each child paints its own background; the group surface is transparent.
+            let build_individually =
+                |entries: &[WidgetEntry], content: &gtk4::Box, state: &mut BarState| -> usize {
+                    let mut n = 0;
+                    for entry in entries {
+                        if let Some(built) = WidgetFactory::build(entry, Some(qs_handle), output_id)
+                        {
+                            // Strip the standalone wrapper class so the wrapper-hover
+                            // rule doesn't fire — per-item hover is handled by a
+                            // group-scoped rule that paints on the .widget-item.
+                            built.widget.remove_css_class(class::WIDGET_WRAPPER);
+                            content.append(&built.widget);
+                            state.add_handle(built.handle);
+                            n += 1;
                         }
-                        content.append(&built.widget);
-                        state.add_handle(built.handle);
-                        n += 1;
                     }
-                }
-                n
-            };
+                    n
+                };
 
             for (kind, start, end) in &runs {
                 let run_entries = &group[*start..*end];
