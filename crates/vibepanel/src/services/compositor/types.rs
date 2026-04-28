@@ -31,7 +31,9 @@ use std::sync::Arc;
 pub struct WorkspaceMeta {
     /// Stable unique identifier.
     /// - For Niri: the compositor's internal workspace ID (u64 cast to i32).
-    /// - For Hyprland/MangoWC: same as `idx` (sequential 1-based index).
+    /// - For Hyprland: the compositor's workspace ID, including negative IDs
+    ///   assigned to named workspaces.
+    /// - For MangoWC: same as `idx` (sequential 1-based tag index).
     pub id: i32,
     /// Positional display index (1-based, per-output for Niri).
     /// Used for display labels and ordering; not stable across workspace
@@ -50,7 +52,7 @@ pub struct WorkspaceMeta {
 /// This contains workspace state specific to a single output/monitor,
 /// used for compositors where workspace state varies per-output (like
 /// MangoWC's per-output window counts, or Niri's per-monitor workspaces).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PerOutputState {
     /// Active workspace IDs on this output.
     /// Most compositors have a single active workspace, but MangoWC/DWL
@@ -66,7 +68,7 @@ pub struct PerOutputState {
 ///
 /// This represents the current state across all workspaces,
 /// updated atomically when the compositor signals changes.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WorkspaceSnapshot {
     /// Currently active/focused workspace IDs.
     /// Most compositors have a single active workspace, but MangoWC/DWL
@@ -344,6 +346,20 @@ mod tests {
         assert!(!state.active_workspace.contains(&1));
         assert!(!state.active_workspace.contains(&3));
         assert_eq!(state.active_workspace.len(), 1);
+    }
+
+    #[test]
+    fn test_per_output_state_equality_tracks_output_changes() {
+        let mut first = PerOutputState::default();
+        first.active_workspace.insert(1);
+        first.occupied_workspaces.insert(1);
+        first.window_counts.insert(1, 2);
+
+        let mut second = first.clone();
+        assert_eq!(first, second);
+
+        second.window_counts.insert(1, 1);
+        assert_ne!(first, second);
     }
 
     #[test]

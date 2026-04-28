@@ -39,7 +39,7 @@ pub struct HyprlandBackend {
     event_socket_path: RwLock<Option<String>>,
     workspace_snapshot: RwLock<WorkspaceSnapshot>,
     focused_window: RwLock<Option<WindowInfo>>,
-    workspaces: RwLock<Vec<WorkspaceMeta>>,
+    workspaces: Arc<RwLock<Vec<WorkspaceMeta>>>,
     callbacks: Mutex<Option<(WorkspaceCallback, WindowCallback)>>,
     monitor_workspaces: RwLock<HashMap<String, i32>>,
     focused_monitor: RwLock<Option<String>>,
@@ -53,17 +53,6 @@ pub struct HyprlandBackend {
 
 impl HyprlandBackend {
     pub fn new(outputs: Option<Vec<String>>) -> Self {
-        // Pre-generate workspace metadata (Hyprland uses dynamic workspaces,
-        // but we expose 1-10 for consistent UI)
-        let workspaces: Vec<WorkspaceMeta> = (1..=DEFAULT_WORKSPACE_COUNT)
-            .map(|i| WorkspaceMeta {
-                id: i,
-                idx: i,
-                name: i.to_string(),
-                output: None, // Hyprland workspaces are global
-            })
-            .collect();
-
         Self {
             allowed_outputs: RwLock::new(outputs.unwrap_or_default()),
             running: Arc::new(AtomicBool::new(false)),
@@ -72,7 +61,7 @@ impl HyprlandBackend {
             event_socket_path: RwLock::new(None),
             workspace_snapshot: RwLock::new(WorkspaceSnapshot::default()),
             focused_window: RwLock::new(None),
-            workspaces: RwLock::new(workspaces),
+            workspaces: Arc::new(RwLock::new(Self::default_workspaces())),
             callbacks: Mutex::new(None),
             monitor_workspaces: RwLock::new(HashMap::new()),
             focused_monitor: RwLock::new(None),
@@ -168,6 +157,125 @@ impl HyprlandBackend {
         }
     }
 
+    fn default_workspaces() -> Vec<WorkspaceMeta> {
+        (1..=DEFAULT_WORKSPACE_COUNT)
+            .map(|i| WorkspaceMeta {
+                id: i,
+                idx: i,
+                name: i.to_string(),
+                output: None, // Hyprland workspaces are globally identified.
+            })
+            .collect()
+    }
+
+    fn workspace_identity(id: Option<i64>, raw_name: &str) -> Option<(i32, String)> {
+        if raw_name.starts_with("special:") {
+            return None;
+        }
+
+        if let Some(id) = id.and_then(|id| i32::try_from(id).ok())
+            && id != 0
+        {
+            // Hyprland IPC normally returns bare names (`web`). Accept the
+            // dispatcher form (`name:web`) defensively because callers use it
+            // when switching to named workspaces.
+            let name = if let Some(name) = raw_name.strip_prefix("name:")
+                && !name.is_empty()
+            {
+                name.to_string()
+            } else if raw_name.is_empty() {
+                id.to_string()
+            } else {
+                raw_name.to_string()
+            };
+            return Some((id, name));
+        }
+
+        None
+    }
+
+    fn workspace_identity_from_ipc(workspace: &Value) -> Option<(i32, String)> {
+        let raw_name = workspace.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        let id = workspace.get("id").and_then(|v| v.as_i64());
+        Self::workspace_identity(id, raw_name)
+    }
+
+    fn workspace_meta_from_ipc(workspaces: &[Value]) -> Vec<WorkspaceMeta> {
+        let mut merged: HashMap<i32, WorkspaceMeta> = Self::default_workspaces()
+            .into_iter()
+            .map(|ws| (ws.id, ws))
+            .collect();
+
+        for ws in workspaces {
+            let Some((id, name)) = Self::workspace_identity_from_ipc(ws) else {
+                continue;
+            };
+            merged.insert(
+                id,
+                WorkspaceMeta {
+                    id,
+                    idx: id,
+                    name,
+                    output: None,
+                },
+            );
+        }
+
+        let mut workspaces: Vec<_> = merged.into_values().collect();
+        workspaces.sort_by(|a, b| match (a.id > 0, b.id > 0) {
+            (true, true) => a.idx.cmp(&b.idx),
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            // Hyprland assigns named workspace IDs downward from -1337; values
+            // closer to zero were created earlier and should appear first.
+            (false, false) => b.idx.cmp(&a.idx),
+        });
+        workspaces
+    }
+
+    fn update_workspace_metadata(&self, workspaces: &[Value]) -> bool {
+        let new_workspaces = Self::workspace_meta_from_ipc(workspaces);
+        let mut current = self.workspaces.write();
+        if *current == new_workspaces {
+            return false;
+        }
+        *current = new_workspaces;
+        true
+    }
+
+    fn workspace_id_from_snapshot(workspace: &Value) -> Option<i32> {
+        let raw_name = workspace.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        let id = workspace.get("id").and_then(|v| v.as_i64());
+        Self::workspace_identity(id, raw_name).map(|(id, _)| id)
+    }
+
+    fn workspace_id_for_name(&self, name: &str) -> Option<i32> {
+        self.workspaces
+            .read()
+            .iter()
+            .find(|ws| ws.name == name)
+            .map(|ws| ws.id)
+    }
+
+    fn has_workspace_metadata(&self, workspace_id: i32) -> bool {
+        self.workspaces
+            .read()
+            .iter()
+            .any(|ws| ws.id == workspace_id)
+    }
+
+    fn workspace_switch_target(&self, workspace_id: i32) -> String {
+        if workspace_id < 0 {
+            let workspaces = self.workspaces.read();
+            if let Some(ws) = workspaces.iter().find(|ws| ws.id == workspace_id) {
+                return format!("name:{}", ws.name);
+            }
+            warn!("No Hyprland workspace found for named workspace id {workspace_id}");
+        }
+
+        workspace_id.to_string()
+    }
+
     /// Fetch monitor information from Hyprland.
     ///
     /// Updates `monitor_workspaces` with each monitor's active workspace,
@@ -185,15 +293,14 @@ impl HyprlandBackend {
                 let name = mon.get("name").and_then(|v| v.as_str());
                 let active_ws_id = mon
                     .get("activeWorkspace")
-                    .and_then(|ws| ws.get("id"))
-                    .and_then(|v| v.as_i64());
+                    .and_then(Self::workspace_id_from_snapshot);
                 let is_focused = mon
                     .get("focused")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
 
                 if let (Some(name), Some(ws_id)) = (name, active_ws_id) {
-                    monitor_ws.insert(name.to_string(), ws_id as i32);
+                    monitor_ws.insert(name.to_string(), ws_id);
                     if is_focused {
                         *focused_mon = Some(name.to_string());
                     }
@@ -219,6 +326,8 @@ impl HyprlandBackend {
         if let Some(workspaces) = self.query_json("workspaces")
             && let Some(workspaces) = workspaces.as_array()
         {
+            self.update_workspace_metadata(workspaces);
+
             let mut snapshot = self.workspace_snapshot.write();
             let monitor_ws = self.monitor_workspaces.read();
             let focused_mon = self.focused_monitor.read();
@@ -234,14 +343,11 @@ impl HyprlandBackend {
             }
 
             for ws in workspaces {
-                let id = ws.get("id").and_then(|v| v.as_i64());
+                let id = Self::workspace_id_from_snapshot(ws);
                 let windows = ws.get("windows").and_then(|v| v.as_i64());
                 let monitor = ws.get("monitor").and_then(|v| v.as_str());
 
-                if let (Some(id), Some(windows)) = (id, windows)
-                    && id > 0
-                {
-                    let id = id as i32;
+                if let (Some(id), Some(windows)) = (id, windows) {
                     let windows = windows as u32;
 
                     // Update global state
@@ -267,6 +373,7 @@ impl HyprlandBackend {
             if let Some(ref focused) = *focused_mon
                 && let Some(&active_ws) = monitor_ws.get(focused)
             {
+                snapshot.active_workspace.clear();
                 snapshot.active_workspace.insert(active_ws);
             }
         }
@@ -342,6 +449,8 @@ impl HyprlandBackend {
         if let Some(workspaces) = self.query_json("workspaces")
             && let Some(workspaces) = workspaces.as_array()
         {
+            let metadata_changed = self.update_workspace_metadata(workspaces);
+
             let mut snapshot = self.workspace_snapshot.write();
             let monitor_ws = self.monitor_workspaces.read();
             let focused_mon = self.focused_monitor.read();
@@ -349,6 +458,7 @@ impl HyprlandBackend {
             // Track previous state to detect changes
             let previous_active = snapshot.active_workspace.clone();
             let old_occupied = snapshot.occupied_workspaces.clone();
+            let old_per_output = snapshot.per_output.clone();
 
             snapshot.occupied_workspaces.clear();
             snapshot.window_counts.clear();
@@ -361,14 +471,11 @@ impl HyprlandBackend {
             }
 
             for ws in workspaces {
-                let id = ws.get("id").and_then(|v| v.as_i64());
+                let id = Self::workspace_id_from_snapshot(ws);
                 let windows = ws.get("windows").and_then(|v| v.as_i64());
                 let monitor = ws.get("monitor").and_then(|v| v.as_str());
 
-                if let (Some(id), Some(windows)) = (id, windows)
-                    && id > 0
-                {
-                    let id = id as i32;
+                if let (Some(id), Some(windows)) = (id, windows) {
                     let windows = windows as u32;
 
                     // Update global state
@@ -403,15 +510,21 @@ impl HyprlandBackend {
 
             let occupied_changed = snapshot.occupied_workspaces != old_occupied;
             let active_changed = snapshot.active_workspace != previous_active;
+            let per_output_changed = snapshot.per_output != old_per_output;
 
-            if occupied_changed || active_changed {
+            if metadata_changed || occupied_changed || active_changed || per_output_changed {
                 trace!(
-                    "refresh_occupied: occupied_changed={}, active_changed={} ({:?} -> {:?})",
-                    occupied_changed, active_changed, previous_active, snapshot.active_workspace
+                    "refresh_occupied: metadata_changed={}, occupied_changed={}, active_changed={} ({:?} -> {:?}), per_output_changed={}",
+                    metadata_changed,
+                    occupied_changed,
+                    active_changed,
+                    previous_active,
+                    snapshot.active_workspace,
+                    per_output_changed
                 );
             }
 
-            return occupied_changed || active_changed;
+            return metadata_changed || occupied_changed || active_changed || per_output_changed;
         }
         false
     }
@@ -482,9 +595,7 @@ impl HyprlandBackend {
                 .to_string();
             let workspace_id = active_window
                 .get("workspace")
-                .and_then(|ws| ws.get("id"))
-                .and_then(|v| v.as_i64())
-                .map(|id| id as i32);
+                .and_then(Self::workspace_id_from_snapshot);
             let output = active_window
                 .get("monitor")
                 .and_then(|v| v.as_str())
@@ -526,8 +637,16 @@ impl HyprlandBackend {
         match event {
             "workspace" => {
                 // workspace>>ID or workspace>>NAME
-                if let Ok(ws_id) = data.parse::<i32>() {
-                    workspace_changed = self.update_active_workspace(ws_id);
+                if let Some(ws_id) = data
+                    .parse::<i64>()
+                    .ok()
+                    .and_then(|id| i32::try_from(id).ok())
+                    .or_else(|| self.workspace_id_for_name(data))
+                {
+                    if !self.has_workspace_metadata(ws_id) {
+                        workspace_changed |= self.refresh_occupied();
+                    }
+                    workspace_changed |= self.update_active_workspace(ws_id);
                 } else {
                     // Named workspace - refetch state
                     debug!(
@@ -540,13 +659,21 @@ impl HyprlandBackend {
             }
             "workspacev2" => {
                 // workspacev2>>ID,NAME
-                if let Some(id_str) = data.split(',').next()
-                    && let Ok(ws_id) = id_str.parse::<i32>()
+                if let Some((id_str, name)) = data.split_once(',')
+                    && let Some(ws_id) = id_str
+                        .parse::<i64>()
+                        .ok()
+                        .and_then(|id| i32::try_from(id).ok())
+                        .or_else(|| self.workspace_id_for_name(name))
                 {
-                    workspace_changed = self.update_active_workspace(ws_id);
+                    if !self.has_workspace_metadata(ws_id) {
+                        workspace_changed |= self.refresh_occupied();
+                    }
+                    workspace_changed |= self.update_active_workspace(ws_id);
                 }
             }
-            "createworkspace" | "destroyworkspace" | "closewindow" | "movewindow" => {
+            "createworkspace" | "createworkspacev2" | "destroyworkspace" | "destroyworkspacev2"
+            | "renameworkspace" | "closewindow" | "movewindow" => {
                 workspace_changed = self.refresh_occupied();
             }
             "openwindow" => {
@@ -562,11 +689,10 @@ impl HyprlandBackend {
                         let addr = client.get("address").and_then(|v| v.as_str()).unwrap_or("");
                         if addr == data || addr == format!("0x{}", data) {
                             if let Some(ws) = client.get("workspace")
-                                && let Some(ws_id) = ws.get("id").and_then(|v| v.as_i64())
-                                && ws_id > 0
+                                && let Some(ws_id) = Self::workspace_id_from_snapshot(ws)
                             {
                                 let mut snapshot = self.workspace_snapshot.write();
-                                snapshot.urgent_workspaces.insert(ws_id as i32);
+                                snapshot.urgent_workspaces.insert(ws_id);
                                 workspace_changed = true;
                             }
                             break;
@@ -802,7 +928,8 @@ impl CompositorBackend for HyprlandBackend {
             .unwrap_or_else(|e| e.into_inner())
             .clone();
         let allowed_outputs = self.allowed_outputs.read().clone();
-        let workspaces = self.workspaces.read().clone();
+        // The manager-side backend uses this metadata for named workspace switching.
+        let workspaces = Arc::clone(&self.workspaces);
         let kb_callback = self
             .keyboard_layout_callback
             .lock()
@@ -824,7 +951,7 @@ impl CompositorBackend for HyprlandBackend {
             event_socket_path: RwLock::new(event_socket_path),
             workspace_snapshot: RwLock::new(WorkspaceSnapshot::default()),
             focused_window: RwLock::new(None),
-            workspaces: RwLock::new(workspaces),
+            workspaces,
             callbacks: Mutex::new(callbacks),
             monitor_workspaces: RwLock::new(HashMap::new()),
             focused_monitor: RwLock::new(None),
@@ -879,7 +1006,8 @@ impl CompositorBackend for HyprlandBackend {
     }
 
     fn switch_workspace(&self, workspace_id: i32) {
-        let _ = self.send_command(&format!("dispatch workspace {}", workspace_id));
+        let target = self.workspace_switch_target(workspace_id);
+        let _ = self.send_command(&format!("dispatch workspace {target}"));
     }
 
     fn quit_compositor(&self) {
@@ -928,5 +1056,122 @@ impl PartialEq for WindowInfo {
             && self.app_id == other.app_id
             && self.workspace_id == other.workspace_id
             && self.output == other.output
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn workspace_meta_from_ipc_merges_names_with_defaults() {
+        let ipc = vec![
+            json!({ "id": 2, "name": "web", "windows": 1, "monitor": "DP-1" }),
+            json!({ "id": 11, "name": "chat", "windows": 0, "monitor": "HDMI-A-1" }),
+        ];
+
+        let workspaces = HyprlandBackend::workspace_meta_from_ipc(&ipc);
+
+        assert_eq!(workspaces.iter().find(|ws| ws.id == 1).unwrap().name, "1");
+        assert_eq!(workspaces.iter().find(|ws| ws.id == 2).unwrap().name, "web");
+        assert_eq!(
+            workspaces.iter().find(|ws| ws.id == 11).unwrap().name,
+            "chat"
+        );
+        assert!(workspaces.iter().all(|ws| ws.output.is_none()));
+    }
+
+    #[test]
+    fn workspace_meta_from_ipc_skips_special_workspaces() {
+        let ipc = vec![
+            json!({ "id": -99, "name": "special:magic" }),
+            json!({ "id": 4, "name": "" }),
+        ];
+
+        let workspaces = HyprlandBackend::workspace_meta_from_ipc(&ipc);
+
+        assert!(workspaces.iter().all(|ws| ws.name != "special:magic"));
+        assert_eq!(workspaces.iter().find(|ws| ws.id == 4).unwrap().name, "4");
+    }
+
+    #[test]
+    fn workspace_meta_from_ipc_preserves_named_workspace_ids() {
+        let ipc = vec![json!({
+            "id": -1337,
+            "name": "name:web",
+            "windows": 0,
+            "monitor": "DP-1"
+        })];
+
+        let workspaces = HyprlandBackend::workspace_meta_from_ipc(&ipc);
+        let web = workspaces.iter().find(|ws| ws.name == "web").unwrap();
+
+        assert_eq!(web.id, -1337);
+        assert_eq!(web.idx, -1337);
+        assert_eq!(
+            HyprlandBackend::workspace_id_from_snapshot(&ipc[0]),
+            Some(web.id)
+        );
+    }
+
+    #[test]
+    fn workspace_meta_from_ipc_sorts_numbered_before_named_by_id() {
+        let ipc = vec![
+            json!({ "id": -1337, "name": "name:web" }),
+            json!({ "id": 2, "name": "2" }),
+            json!({ "id": -1338, "name": "name:chat" }),
+        ];
+
+        let workspaces = HyprlandBackend::workspace_meta_from_ipc(&ipc);
+        let workspace_10_pos = workspaces.iter().position(|ws| ws.id == 10).unwrap();
+        let first_named_pos = workspaces.iter().position(|ws| ws.id == -1337).unwrap();
+        let second_named_pos = workspaces.iter().position(|ws| ws.id == -1338).unwrap();
+
+        assert!(workspace_10_pos < first_named_pos);
+        assert!(first_named_pos < second_named_pos);
+    }
+
+    #[test]
+    fn workspace_id_for_name_finds_named_workspace_id() {
+        let backend = HyprlandBackend::new(None);
+        *backend.workspaces.write() = vec![WorkspaceMeta {
+            id: -1337,
+            idx: -1337,
+            name: "web".to_string(),
+            output: None,
+        }];
+
+        assert_eq!(backend.workspace_id_for_name("web"), Some(-1337));
+        assert_eq!(backend.workspace_id_for_name("chat"), None);
+    }
+
+    #[test]
+    fn workspace_switch_target_formats_named_workspaces() {
+        let backend = HyprlandBackend::new(None);
+        *backend.workspaces.write() = vec![WorkspaceMeta {
+            id: -1337,
+            idx: -1337,
+            name: "web".to_string(),
+            output: None,
+        }];
+
+        assert_eq!(backend.workspace_switch_target(-1337), "name:web");
+        assert_eq!(backend.workspace_switch_target(3), "3");
+        assert_eq!(backend.workspace_switch_target(-9999), "-9999");
+    }
+
+    #[test]
+    fn has_workspace_metadata_checks_workspace_id() {
+        let backend = HyprlandBackend::new(None);
+        *backend.workspaces.write() = vec![WorkspaceMeta {
+            id: -1337,
+            idx: -1337,
+            name: "web".to_string(),
+            output: None,
+        }];
+
+        assert!(backend.has_workspace_metadata(-1337));
+        assert!(!backend.has_workspace_metadata(-1338));
     }
 }

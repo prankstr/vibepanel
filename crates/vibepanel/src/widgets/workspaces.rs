@@ -840,7 +840,8 @@ impl WorkspacesWidget {
     /// # Arguments
     ///
     /// * `config` - Widget configuration (label type, separator).
-    /// * `output_id` - Optional output/monitor name. When set, the widget will:
+    /// * `output_id` - Optional output/monitor name. When set and
+    ///   `filter_by_output = true`, the widget will:
     ///   - For Niri: only show workspaces belonging to this output.
     ///   - For MangoWC: show all workspaces but with per-output window counts.
     ///   - For Hyprland: show workspaces associated with this output when available.
@@ -1652,9 +1653,12 @@ fn update_indicators(
 fn build_tooltip(workspace: &Workspace) -> String {
     let mut parts = Vec::new();
 
-    // Niri can have custom workspace names separate from the index.
+    // Negative IDs are synthetic/named workspaces (Sway/Hyprland); their IDs
+    // are implementation details, so show the name without an index prefix.
     let idx_str = workspace.idx.to_string();
-    if workspace.name != idx_str {
+    if workspace.id < 0 {
+        parts.push(format!("Workspace {}", workspace.name));
+    } else if workspace.name != idx_str {
         parts.push(format!("Workspace {}: {}", workspace.idx, workspace.name));
     } else {
         parts.push(format!("Workspace {}", workspace.name));
@@ -1917,6 +1921,12 @@ mod tests {
             build_tooltip(&ws),
             "Workspace 1: browser • Active • 5 windows"
         );
+    }
+
+    #[test]
+    fn test_build_tooltip_named_workspace_hides_negative_id() {
+        let ws = make_workspace(-1337, "web", true, true, false, Some(2));
+        assert_eq!(build_tooltip(&ws), "Workspace web • Active • 2 windows");
     }
 
     // -- classify_change tests --
