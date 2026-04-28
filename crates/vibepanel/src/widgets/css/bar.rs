@@ -111,6 +111,7 @@ sectioned-bar.bar {{
 }}
 .widget-group > .content > .widget-item > .widget {{
     background-color: transparent;
+    box-shadow: none;
 }}
 
 /* Halve the visible inter-item gap at every seam inside a group. Each
@@ -168,12 +169,18 @@ sectioned-bar.bar {{
     border-bottom-right-radius: var(--radius-widget);
 }}
 
-/* Grouped child hover — replaces the child's base so translucent values
-   composite over the bar background (matches standalone widget hover).
-   Applies to plain items (paint moved to .widget-item) and merge wrappers. */
-.widget-group .content > .widget-item.clickable:hover,
-.widget-group .content > .widget-merge-group.clickable:hover {{
+/* Grouped child hover — clears the cell base and paints a rounded hover
+   pill on the inner surface. The spread shadow restores the cell's base
+   color behind the rounded corners, clipped by the child allocation, so
+   translucent hover values composite over the bar background exactly once
+   without exposing wallpaper at mixed-group seams. */
+.widget-group > .content > .widget-item.clickable:hover {{
+    background-color: transparent;
+}}
+.widget-group > .content > .widget-item.clickable:hover > .widget {{
     background-color: var(--color-widget-hover-bg);
+    border-radius: var(--radius-widget);
+    box-shadow: 0 0 0 9999px {widget_bg};
 }}
 
 /* ===== MERGE GROUP ===== */
@@ -185,6 +192,27 @@ sectioned-bar.bar {{
 .widget-merge-group {{
     background-color: {widget_bg};
     border-radius: var(--radius-widget);
+}}
+.widget-merge-group > .merge-group-content {{
+    box-shadow: none;
+}}
+
+/* Ripple clip box (added in build_merge_group). Establishes a rounded clip
+   for the merge-group ripple so it matches the inner pill shape — the
+   merge-group itself uses position-aware radius and would otherwise leak
+   the ripple past rounded hover edges at mixed-group seams. */
+.widget-merge-group-ripple-clip {{
+    border-radius: var(--radius-widget);
+    background: transparent;
+}}
+
+.widget-group > .content > .widget-merge-group.clickable:hover {{
+    background-color: transparent;
+}}
+.widget-group > .content > .widget-merge-group.clickable:hover > .merge-group-content {{
+    background-color: var(--color-widget-hover-bg);
+    border-radius: var(--radius-widget);
+    box-shadow: 0 0 0 9999px {widget_bg};
 }}
 
 /* Passive items in merge groups don't show their own hover */

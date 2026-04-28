@@ -288,6 +288,7 @@ fn build_widget_or_group(
                             // rule doesn't fire — per-item hover is handled by a
                             // group-scoped rule that paints on the .widget-item.
                             built.widget.remove_css_class(class::WIDGET_WRAPPER);
+                            built.widget.set_overflow(gtk4::Overflow::Hidden);
                             content.append(&built.widget);
                             state.add_handle(built.handle);
                             n += 1;
@@ -372,8 +373,16 @@ fn build_merge_group(
     wrapper.set_child(Some(&inner_content));
 
     let ripple_handle = RippleHandle::new();
-    wrapper.add_overlay(ripple_handle.widget());
-    wrapper.set_measure_overlay(ripple_handle.widget(), true);
+    // Wrap the ripple DrawingArea in a Box that establishes a fully-rounded
+    // clip, so the ripple matches the inner pill shape on hover. The merge
+    // group itself uses position-aware radius (square at seams in mixed
+    // groups), which would otherwise leak the ripple into the corners.
+    let ripple_clip = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
+    ripple_clip.add_css_class("widget-merge-group-ripple-clip");
+    ripple_clip.set_overflow(gtk4::Overflow::Hidden);
+    ripple_clip.append(ripple_handle.widget());
+    wrapper.add_overlay(&ripple_clip);
+    wrapper.set_measure_overlay(&ripple_clip, true);
 
     let widget_name = entries[0].name.clone();
     let menu_handle = MenuHandle::new_placeholder(widget_name, wrapper.clone());
