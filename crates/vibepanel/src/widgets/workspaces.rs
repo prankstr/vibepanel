@@ -1705,10 +1705,10 @@ fn update_indicators(
 fn build_tooltip(workspace: &Workspace) -> String {
     let mut parts = Vec::new();
 
-    // Negative IDs are synthetic/named workspaces (Sway/Hyprland); their IDs
-    // are implementation details, so show the name without an index prefix.
+    // Negative indexes mean the compositor has no meaningful numeric label, so
+    // show the name without an index prefix.
     let idx_str = workspace.idx.to_string();
-    if workspace.id < 0 {
+    if workspace.idx < 0 {
         parts.push(format!("Workspace {}", workspace.name));
     } else if workspace.name != idx_str {
         parts.push(format!("Workspace {}: {}", workspace.idx, workspace.name));

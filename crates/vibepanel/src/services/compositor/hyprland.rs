@@ -590,11 +590,14 @@ impl HyprlandBackend {
     }
 
     fn workspace_id_from_event_name(&self, workspace_name: &str) -> Option<i32> {
-        workspace_name
-            .parse::<i64>()
+        let name = workspace_name
+            .strip_prefix("name:")
+            .unwrap_or(workspace_name);
+
+        name.parse::<i64>()
             .ok()
             .and_then(|id| i32::try_from(id).ok())
-            .or_else(|| self.workspace_id_for_name(workspace_name))
+            .or_else(|| self.workspace_id_for_name(name))
     }
 
     /// Refresh active window info from Hyprland.
@@ -1230,7 +1233,7 @@ mod tests {
             output: None,
         }];
 
-        backend.handle_event("focusedmon>>DP-1,web");
+        backend.handle_event("focusedmon>>DP-1,name:web");
 
         let snapshot = backend.workspace_snapshot.read();
         assert_eq!(snapshot.active_workspace, HashSet::from([-1337]));
@@ -1256,10 +1259,42 @@ mod tests {
             .write()
             .insert("DP-1".to_string(), 1);
 
-        backend.handle_event("focusedmon>>DP-1,web");
+        backend.handle_event("focusedmon>>DP-1,name:web");
 
         let snapshot = backend.workspace_snapshot.read();
         assert_eq!(snapshot.active_workspace, HashSet::from([-1337]));
         assert_eq!(backend.monitor_workspaces.read().get("DP-1"), Some(&-1337));
+    }
+
+    #[test]
+    fn workspace_event_resolves_prefixed_named_workspace() {
+        let backend = HyprlandBackend::new(None);
+        *backend.workspaces.write() = vec![WorkspaceMeta {
+            id: -1337,
+            idx: -1,
+            name: "web".to_string(),
+            output: None,
+        }];
+
+        backend.handle_event("workspace>>name:web");
+
+        let snapshot = backend.workspace_snapshot.read();
+        assert_eq!(snapshot.active_workspace, HashSet::from([-1337]));
+    }
+
+    #[test]
+    fn workspacev2_event_resolves_prefixed_named_workspace() {
+        let backend = HyprlandBackend::new(None);
+        *backend.workspaces.write() = vec![WorkspaceMeta {
+            id: -1337,
+            idx: -1,
+            name: "web".to_string(),
+            output: None,
+        }];
+
+        backend.handle_event("workspacev2>>-1337,name:web");
+
+        let snapshot = backend.workspace_snapshot.read();
+        assert_eq!(snapshot.active_workspace, HashSet::from([-1337]));
     }
 }
