@@ -8,9 +8,9 @@ use gtk4::glib::clone;
 use gtk4::prelude::*;
 use gtk4::{Align, ApplicationWindow, Box as GtkBox, GestureDrag, Orientation, Window};
 
-use crate::services::background_effect::BackgroundEffectManager;
+use crate::services::background_effect::attach_blur_surface_lifecycle;
 use crate::services::callbacks::CallbackId;
-use crate::services::config_manager::ConfigManager;
+use crate::services::config_manager::{ConfigManager, ThemeCallbackGuard};
 use crate::services::media::MediaService;
 use crate::services::surfaces::SurfaceStyleManager;
 use crate::styles::{media, surface};
@@ -26,12 +26,12 @@ const WINDOW_BLOB_MARGIN: i32 = 12;
 /// Smaller blob displacement for the compact window layout.
 const WINDOW_BLOB_MAX_DISPLACEMENT: f64 = 8.0;
 
-/// Handle to the media pop-out window. Drop this to close the window.
+/// Handle to the media pop-out window. Dropping disconnects the theme callback.
 pub struct MediaWindowHandle {
     window: Window,
     _callback_id: Rc<RefCell<Option<CallbackId>>>,
-    /// Theme-change callback ID; disconnected in `Drop`.
-    _theme_callback_id: Option<CallbackId>,
+    /// Theme-change callback guard; disconnected automatically on `Drop`.
+    _theme_callback_guard: ThemeCallbackGuard,
     opacity_provider: gtk4::CssProvider,
 }
 
@@ -49,14 +49,6 @@ impl MediaWindowHandle {
         let opacity = opacity.clamp(0.0, 1.0);
         let css = format!("box {{ opacity: {}; }}", opacity);
         self.opacity_provider.load_from_string(&css);
-    }
-}
-
-impl Drop for MediaWindowHandle {
-    fn drop(&mut self) {
-        if let Some(id) = self._theme_callback_id.take() {
-            ConfigManager::global().disconnect_theme_callback(id);
-        }
     }
 }
 
@@ -258,56 +250,23 @@ where
         *callback_id_cell.borrow_mut() = Some(callback_id);
     }
 
-    // Apply blur hint to the window surface.  connect_map fires every time
-    // the window is shown (present()); apply_blur_surface defers via idle if
-    // the surface has not yet been configured.
-    window.connect_map(clone!(
-        #[weak]
-        main_box,
-        move |win| {
-            if ConfigManager::global().blur_enabled()
-                && let Some(blur) = BackgroundEffectManager::global()
-            {
-                let radius = ConfigManager::global().surface_border_radius() as i32;
-                blur.apply_blur_surface(win, &main_box, radius);
-            }
-        }
-    ));
+    let theme_callback_guard = attach_blur_surface_lifecycle(
+        &window,
+        move |_| Some(main_box.clone().upcast::<gtk4::Widget>()),
+        || ConfigManager::global().surface_border_radius() as i32,
+    );
 
+    // Disconnect media updates when the GTK window is destroyed.
+    // Blur cleanup is handled by attach_blur_surface_lifecycle.
     window.connect_destroy(clone!(
         #[strong]
         callback_id_cell,
-        move |win| {
-            if let Some(blur) = BackgroundEffectManager::global() {
-                blur.remove_blur_region(win);
-            }
+        move |_| {
             if let Some(id) = callback_id_cell.borrow_mut().take() {
                 MediaService::global().disconnect(id);
             }
         }
     ));
-
-    // Hot-reload: re-apply or remove blur when the user toggles `theme.blur`
-    // while the media window is open.  Follows the same pattern as bar.rs.
-    let theme_callback_id = {
-        let win_weak = window.downgrade();
-        let main_box_weak = main_box.downgrade();
-        ConfigManager::global().on_theme_change(move || {
-            let Some(win) = win_weak.upgrade() else {
-                return;
-            };
-            if ConfigManager::global().blur_enabled() {
-                if let Some(blur) = BackgroundEffectManager::global()
-                    && let Some(main_box) = main_box_weak.upgrade()
-                {
-                    let radius = ConfigManager::global().surface_border_radius() as i32;
-                    blur.apply_blur_surface(&win, &main_box, radius);
-                }
-            } else if let Some(blur) = BackgroundEffectManager::global() {
-                blur.remove_blur_region(&win);
-            }
-        })
-    };
 
     window.connect_close_request(move |_| {
         on_close();
@@ -317,7 +276,7 @@ where
     MediaWindowHandle {
         window,
         _callback_id: callback_id_cell,
-        _theme_callback_id: Some(theme_callback_id),
+        _theme_callback_guard: theme_callback_guard,
         opacity_provider,
     }
 }

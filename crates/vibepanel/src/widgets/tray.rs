@@ -92,6 +92,17 @@ struct MenuState {
     stack: Vec<Vec<TrayMenuEntry>>,
 }
 
+impl Drop for MenuState {
+    fn drop(&mut self) {
+        // Safety net: remove the blur protocol object if this MenuState is
+        // dropped without going through the connect_closed handler (e.g.
+        // bar teardown on config reload, monitor disconnect, or shutdown).
+        if let Some(blur) = BackgroundEffectManager::global() {
+            blur.remove_blur_region(&self.popover);
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct ContrastParams {
     bg_luminance: f64,
@@ -870,7 +881,11 @@ fn toggle_menu(state: &Rc<RefCell<WidgetState>>, identifier: &str, parent: &Widg
     // Close existing menu if any - extract popover first to avoid borrow conflict
     let old_popover = {
         let mut st = state.borrow_mut();
-        st.menu.take().map(|m| m.popover)
+        st.menu.take().map(|m| {
+            let popover = m.popover.clone();
+            drop(m); // runs Drop → remove_blur_region
+            popover
+        })
     };
     if let Some(popover) = old_popover
         && popover.parent().is_some()
@@ -976,14 +991,14 @@ fn toggle_menu(state: &Rc<RefCell<WidgetState>>, identifier: &str, parent: &Widg
         // Apply blur hint to the popup surface.  Must be connected before
         // popup() — GTK4 fires the map signal synchronously during popup(),
         // so a handler registered after popup() is never invoked.
-        let popover_for_blur = popover.clone();
         let container_for_blur = container.clone();
-        popover.connect_map(move |_| {
+        popover.connect_map(move |p| {
             if ConfigManager::global().blur_enabled()
                 && let Some(blur) = BackgroundEffectManager::global()
             {
-                let radius = ConfigManager::global().surface_border_radius() as i32;
-                blur.apply_blur_surface(&popover_for_blur, &container_for_blur, radius);
+                blur.apply_blur_surface(p, &container_for_blur, || {
+                    ConfigManager::global().surface_border_radius() as i32
+                });
             }
         });
 

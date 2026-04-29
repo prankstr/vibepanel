@@ -332,7 +332,8 @@ impl ConfigManager {
     /// Check if compositor background blur is enabled.
     ///
     /// When true, vibepanel sends ext-background-effect-v1 blur region hints
-    /// for popovers, quick settings, notification toasts, OSD, and the bar.
+    /// for the bar, popovers, quick settings, notification toasts, OSD,
+    /// tray menus, and media pop-out windows.
     pub fn blur_enabled(&self) -> bool {
         self.config.borrow().theme.blur
     }
@@ -963,6 +964,14 @@ fn config_structure_changed(old: &Config, new: &Config) -> bool {
 
     if old.bar.inset != new.bar.inset {
         debug!("bar.inset changed ({} -> {})", old.bar.inset, new.bar.inset);
+        return true;
+    }
+
+    if old.bar.background_opacity != new.bar.background_opacity {
+        debug!(
+            "bar.background_opacity changed ({} -> {})",
+            old.bar.background_opacity, new.bar.background_opacity
+        );
         return true;
     }
 

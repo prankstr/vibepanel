@@ -1160,11 +1160,12 @@ pub struct ThemeConfig {
     /// Enable compositor background blur via ext-background-effect-v1.
     ///
     /// When true, vibepanel sends blur region hints to the compositor for
-    /// popovers, quick settings, notification toasts, OSD, and the bar. Requires a compositor that
+    /// the bar, popovers, quick settings, OSD, notification toasts, tray menus,
+    /// and the media pop-out window. Requires a compositor that
     /// supports the ext-background-effect-v1 protocol (e.g. niri with blur
     /// enabled). Has no effect on compositors that do not support the protocol.
     ///
-    /// For the bar: if bar.background_opacity > 0, the entire bar surface is
+    /// For the bar: if bar.background_opacity > 0, the visible bar background region is
     /// blurred. If bar.background_opacity == 0 (transparent/islands mode),
     /// individual widget island regions are blurred instead.
     ///

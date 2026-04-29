@@ -20,7 +20,8 @@ use crate::services::notification::{Notification, URGENCY_CRITICAL, URGENCY_LOW}
 type ToastCallback = Rc<dyn Fn(u32)>;
 /// Type alias for toast action callbacks.
 type ToastActionCallback = Rc<dyn Fn(u32, &str)>;
-use crate::services::config_manager::ConfigManager;
+use crate::services::background_effect::attach_blur_surface_lifecycle;
+use crate::services::config_manager::{ConfigManager, ThemeCallbackGuard};
 use crate::services::surfaces::SurfaceStyleManager;
 use crate::styles::{button, color, notification as notif};
 
@@ -40,6 +41,8 @@ pub(super) struct NotificationToast {
     bar_edge: Edge,
     /// Actual rendered height, measured after window is mapped
     height: Cell<i32>,
+    /// Theme-change callback guard; disconnected automatically on `Drop`.
+    theme_callback_guard: RefCell<Option<ThemeCallbackGuard>>,
 }
 
 impl NotificationToast {
@@ -98,6 +101,7 @@ impl NotificationToast {
             animation_source: RefCell::new(None),
             bar_edge,
             height: Cell::new(TOAST_ESTIMATED_HEIGHT),
+            theme_callback_guard: RefCell::new(None),
         });
 
         toast.build_content(notification, on_dismiss.clone(), on_action);
@@ -166,31 +170,15 @@ impl NotificationToast {
             });
         });
 
-        // Apply blur region hint when the toast surface is mapped.
-        // The window's child (outer container) defines the blur bounds,
-        // excluding the CSS box-shadow expansion that GTK adds to the surface.
-        toast.window.connect_map(move |win| {
-            if ConfigManager::global().blur_enabled()
-                && let Some(blur) =
-                    crate::services::background_effect::BackgroundEffectManager::global()
-                && let Some(content) = win.child()
-            {
-                let radius = ConfigManager::global().surface_border_radius() as i32;
-                blur.apply_blur_surface(win, &content, radius);
-            }
-        });
-
-        // Remove the blur region as soon as the native surface is torn down.
-        // connect_destroy fires while the Wayland surface still exists, so
-        // remove_blur_region can reach SurfaceInfo::from_widget.  The Drop impl
-        // below is retained as a safety net for any path that skips destroy.
-        toast.window.connect_destroy(|win| {
-            if let Some(blur) =
-                crate::services::background_effect::BackgroundEffectManager::global()
-            {
-                blur.remove_blur_region(win);
-            }
-        });
+        let theme_callback_guard = attach_blur_surface_lifecycle(
+            &toast.window,
+            |win: &Window| win.child(),
+            || ConfigManager::global().surface_border_radius() as i32,
+        );
+        toast
+            .theme_callback_guard
+            .borrow_mut()
+            .replace(theme_callback_guard);
 
         toast
     }
@@ -445,11 +433,8 @@ impl Drop for NotificationToast {
         if let Some(source_id) = self.timeout_source.borrow_mut().take() {
             source_id.remove();
         }
-        // Clean up the blur effect object so it doesn't leak in the
-        // BackgroundEffectManager's effects HashMap after the surface is gone.
-        if let Some(blur) = crate::services::background_effect::BackgroundEffectManager::global() {
-            blur.remove_blur_region(&self.window);
-        }
+        // ThemeCallbackGuard handles disconnect_theme_callback on drop.
+        drop(self.theme_callback_guard.borrow_mut().take());
     }
 }
 

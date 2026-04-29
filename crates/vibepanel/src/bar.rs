@@ -192,12 +192,32 @@ pub fn create_bar_window(
 
         // Apply bar blur region on map (opaque/translucent bar path).
         // The islands path is handled by the layout allocate callback below.
-        if !is_island_mode
-            && ConfigManager::global().blur_enabled()
-            && let Some(blur) =
+        //
+        // Island mode: allocation applies active blur regions. If blur was
+        // disabled while unmapped, clean up the stale protocol object now that
+        // the wl_surface is resolvable again.
+        //
+        // Opaque/translucent mode: apply blur on map.  The else-branch
+        // removes any stale protocol object left from a previous map cycle
+        // (blur enabled on last show, then disabled while bars were hidden).
+        // `remove_blur_region` is idempotent (no-op when no effect exists).
+        if is_island_mode {
+            if !ConfigManager::global().blur_enabled()
+                && let Some(blur) =
+                    crate::services::background_effect::BackgroundEffectManager::global()
+            {
+                blur.remove_blur_region(win);
+            }
+        } else if ConfigManager::global().blur_enabled() {
+            if let Some(blur) =
                 crate::services::background_effect::BackgroundEffectManager::global()
+            {
+                blur.apply_bar_blur_region(win, &bar_box_for_blur);
+            }
+        } else if let Some(blur) =
+            crate::services::background_effect::BackgroundEffectManager::global()
         {
-            blur.apply_bar_blur_region(win, &bar_box_for_blur);
+            blur.remove_blur_region(win);
         }
     });
 
@@ -208,26 +228,98 @@ pub fn create_bar_window(
     //
     // We also keep a shared clone of the island-apply closure so the theme-change
     // hot-reload handler can trigger an immediate re-apply when blur is toggled on.
+    //
+    // `prev_bounds` caches the last-applied island bounds to skip redundant
+    // Wayland protocol traffic.  It is hoisted here (rather than inside the
+    // closure) so the theme-change handler can clear it when blur is toggled off
+    // — otherwise the stale cache would short-circuit the next apply.
+    let prev_bounds = Rc::new(RefCell::new(Vec::<(i32, i32, i32, i32)>::new()));
+    // Clone for the theme-change handler so it can invalidate the cache on any
+    // theme change (the original `prev_bounds` is moved into the island closure).
+    let prev_bounds_for_theme = Rc::clone(&prev_bounds);
+
     let island_apply: Option<Rc<dyn Fn()>> = if is_island_mode {
         let win_weak = window.downgrade();
-        let bar_box_clone = bar_box.clone();
+        let bar_box_weak = bar_box.downgrade();
         let closure: Rc<dyn Fn()> = Rc::new(move || {
             if !ConfigManager::global().blur_enabled() {
+                // Clean up any stale blur effect left from before blur was
+                // disabled (e.g. ipc_hide -> blur-off -> ipc_show).
+                // Only do this once: if prev_bounds is already empty we've
+                // either already cleaned up or never had blur applied.
+                if !prev_bounds.borrow().is_empty() {
+                    prev_bounds.borrow_mut().clear();
+                    // Defer the remove out of the GTK allocate pass: it calls
+                    // wl_surface.commit() synchronously, and we'd rather not
+                    // do that mid-layout.  Re-check guard inside idle in case
+                    // a subsequent allocate flipped state back.
+                    let win_weak_idle = win_weak.clone();
+                    let prev_bounds_idle = Rc::clone(&prev_bounds);
+                    gtk4::glib::idle_add_local_once(move || {
+                        if !prev_bounds_idle.borrow().is_empty() {
+                            return;
+                        }
+                        if ConfigManager::global().blur_enabled() {
+                            return;
+                        }
+                        if let Some(win) = win_weak_idle.upgrade()
+                            && let Some(blur) =
+                                crate::services::background_effect::BackgroundEffectManager::global(
+                                )
+                        {
+                            blur.remove_blur_region(&win);
+                        }
+                    });
+                }
                 return;
             }
             let Some(win) = win_weak.upgrade() else {
                 return;
             };
+            // Bar is mapped but opacity-hidden (e.g. hide_all during monitor
+            // hotplug debounce).  Skip blur — it would be applied to an
+            // invisible surface.  reconfigure_all() rebuilds bars and
+            // connect_map re-applies blur when they are shown again.
+            if win.opacity() <= 0.0 {
+                return;
+            }
             let Some(blur) = crate::services::background_effect::BackgroundEffectManager::global()
             else {
                 return;
             };
             let Some(native) = win.native() else { return };
-            let islands = collect_island_bounds(&bar_box_clone, &native);
+            let Some(bar_box) = bar_box_weak.upgrade() else {
+                return;
+            };
+            let islands = collect_island_bounds(&bar_box, &native);
+            // Skip redundant Wayland protocol traffic when bounds haven't changed.
+            // The allocate callback fires on every layout pass (clock tick, tray
+            // icon change, etc.) but most passes produce identical island bounds.
+            if *prev_bounds.borrow() == islands {
+                return;
+            }
+            *prev_bounds.borrow_mut() = islands.clone();
             if !islands.is_empty() {
                 blur.apply_bar_island_blur_regions(&win, &islands);
             } else {
-                blur.remove_blur_region(&win);
+                // Defer the remove out of the GTK allocate pass: it calls
+                // wl_surface.commit() synchronously, and we'd rather not
+                // do that mid-layout.  Re-check inside idle so a fast
+                // allocate-then-allocate sequence can't clear blur that
+                // was just legitimately reapplied.
+                let win_weak_idle = win_weak.clone();
+                let prev_bounds_idle = Rc::clone(&prev_bounds);
+                gtk4::glib::idle_add_local_once(move || {
+                    if !prev_bounds_idle.borrow().is_empty() {
+                        return;
+                    }
+                    if let Some(win) = win_weak_idle.upgrade()
+                        && let Some(blur) =
+                            crate::services::background_effect::BackgroundEffectManager::global()
+                    {
+                        blur.remove_blur_region(&win);
+                    }
+                });
             }
         });
         if let Some(lm) = bar_box
@@ -245,9 +337,9 @@ pub fn create_bar_window(
     // Hot-reload: re-apply or remove bar blur when the theme config changes
     // (e.g. user toggles `theme.blur` or changes `bar.border_radius`).
     //
-    // Note: `background_opacity` is a startup-time value — it cannot change at
-    // runtime without recreating the bar — so we only need to handle toggling
-    // blur on/off within the same mode (opaque or island).
+    // Note: `background_opacity` changes trigger a structural rebuild
+    // (config_structure_changed), so this callback only needs to handle
+    // toggling blur on/off within the current mode (opaque or island).
     {
         let win_weak = window.downgrade();
         let bar_box_for_theme = bar_box.clone();
@@ -256,6 +348,9 @@ pub fn create_bar_window(
                 return;
             };
             if ConfigManager::global().blur_enabled() {
+                // Invalidate the island-bounds cache so radius/theme changes
+                // force a re-apply (the cache only tracks geometry, not radii).
+                prev_bounds_for_theme.borrow_mut().clear();
                 if let Some(apply) = &island_apply {
                     // Island mode: re-apply per-island regions immediately.
                     apply();

@@ -25,8 +25,9 @@ use tracing::{debug, warn};
 use vibepanel_core::config::OsdConfig;
 
 use crate::services::audio::AudioSnapshot;
+use crate::services::background_effect::attach_blur_surface_lifecycle;
 use crate::services::brightness::BrightnessSnapshot;
-use crate::services::config_manager::ConfigManager;
+use crate::services::config_manager::{ConfigManager, ThemeCallbackGuard};
 use crate::services::icons::IconsService;
 use crate::services::ipc::IpcMessage;
 use crate::services::surfaces::SurfaceStyleManager;
@@ -188,6 +189,7 @@ pub struct OsdOverlay {
     // Callback IDs for deterministic cleanup.
     brightness_callback_id: Cell<Option<CallbackId>>,
     audio_callback_id: Cell<Option<CallbackId>>,
+    theme_callback_guard: RefCell<Option<ThemeCallbackGuard>>,
 }
 
 impl OsdOverlay {
@@ -248,32 +250,14 @@ impl OsdOverlay {
         // Anchor window according to position.
         Self::apply_position(&window, &position);
 
-        // Apply blur region hint when the OSD surface is mapped.
-        // The container's allocation defines the blur bounds, excluding the
-        // CSS box-shadow expansion that GTK adds to the surface.
-        let blur_container = container.clone();
-        window.connect_map(move |win| {
-            if ConfigManager::global().blur_enabled()
-                && let Some(blur) =
-                    crate::services::background_effect::BackgroundEffectManager::global()
-            {
+        let theme_callback_guard = attach_blur_surface_lifecycle(
+            &window,
+            |win: &gtk4::Window| win.child(),
+            || {
                 // Same as `--radius-widget-lg: calc(widget-radius * 2)` in theme CSS.
-                let radius = ConfigManager::global().widget_border_radius() as i32 * 2;
-                blur.apply_blur_surface(win, &blur_container, radius);
-            }
-        });
-
-        // Remove the blur region as soon as the native surface is torn down.
-        // connect_destroy fires while the Wayland surface still exists, so
-        // remove_blur_region can reach SurfaceInfo::from_widget.  The Drop impl
-        // below is retained as a safety net for any path that skips destroy.
-        window.connect_destroy(|win| {
-            if let Some(blur) =
-                crate::services::background_effect::BackgroundEffectManager::global()
-            {
-                blur.remove_blur_region(win);
-            }
-        });
+                ConfigManager::global().widget_border_radius() as i32 * 2
+            },
+        );
 
         let overlay = Rc::new(Self {
             window,
@@ -287,6 +271,7 @@ impl OsdOverlay {
             last_muted: Cell::new(false),
             brightness_callback_id: Cell::new(None),
             audio_callback_id: Cell::new(None),
+            theme_callback_guard: RefCell::new(Some(theme_callback_guard)),
         });
 
         overlay.connect_brightness();
@@ -400,6 +385,9 @@ impl OsdOverlay {
 
         let source_id = glib::timeout_add_local(Duration::from_millis(timeout as u64), move || {
             if let Some(this) = this_weak.upgrade() {
+                // No explicit blur removal needed — unmapping suspends
+                // compositor-side blur while the protocol object persists.
+                // connect_map re-applies blur on next show.
                 this.window.set_visible(false);
                 *this.hide_source.borrow_mut() = None;
             }
@@ -574,10 +562,7 @@ impl Drop for OsdOverlay {
         if let Some(id) = self.audio_callback_id.take() {
             AudioService::global().disconnect(id);
         }
-        // Clean up the blur effect entry so it doesn't leak in the
-        // BackgroundEffectManager's effects HashMap after the surface is gone.
-        if let Some(blur) = crate::services::background_effect::BackgroundEffectManager::global() {
-            blur.remove_blur_region(&self.window);
-        }
+        // ThemeCallbackGuard handles disconnect_theme_callback on drop.
+        drop(self.theme_callback_guard.borrow_mut().take());
     }
 }

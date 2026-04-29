@@ -49,6 +49,3 @@ cargo-husky = { version = "1.5.0", default-features = false, features = [
     "run-cargo-fmt",
 ] }
 toml = { workspace = true }
-
-[build-dependencies]
-wayland-scanner = { workspace = true }

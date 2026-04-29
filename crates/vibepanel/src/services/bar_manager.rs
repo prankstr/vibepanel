@@ -47,8 +47,8 @@ struct BarInstance {
 
 impl Drop for BarInstance {
     fn drop(&mut self) {
-        // Clean up the blur effect entry so it doesn't leak in the
-        // BackgroundEffectManager's effects HashMap after the surface is gone.
+        // Best-effort blur cleanup; may no-op if the surface is already
+        // unmapped.  See BackgroundEffectManager::remove_blur_region docs.
         if let Some(blur) = crate::services::background_effect::BackgroundEffectManager::global() {
             blur.remove_blur_region(&self.window);
         }
@@ -304,6 +304,14 @@ impl BarManager {
     /// the delayed sync runs.
     pub fn hide_all(&self) {
         for instance in self.bars.borrow().values() {
+            // Remove blur before hiding — blur is compositor-side and persists
+            // even when the surface is at opacity 0.  The BarInstance::Drop impl
+            // also calls remove_blur_region, so this is idempotent.
+            if let Some(blur) =
+                crate::services::background_effect::BackgroundEffectManager::global()
+            {
+                blur.remove_blur_region(&instance.window);
+            }
             instance.window.set_opacity(0.0);
         }
         debug!("All bars hidden for monitor change");
@@ -313,6 +321,9 @@ impl BarManager {
     ///
     /// Called after sync_monitors to reveal bars that weren't removed.
     /// No-op if bars are IPC-hidden (the hidden state takes precedence).
+    ///
+    /// Blur regions are not restored here — `reconfigure_all()` rebuilds
+    /// bars before this call, and `connect_map` re-applies blur on map.
     pub fn show_all(&self) {
         if self.hidden.get() {
             debug!("show_all skipped: bars are IPC-hidden");
@@ -330,6 +341,14 @@ impl BarManager {
     /// exclusive zone. Uses `set_visible(false)` which unmaps the layer-shell
     /// surface at the compositor level — `set_opacity(0.0)` alone is not
     /// sufficient because the compositor still composites the surface.
+    ///
+    /// Blur regions are **not** removed here — unmapping suspends
+    /// compositor-side blur while the protocol object persists across
+    /// unmap/remap.  The compositor restores blur automatically on
+    /// `ipc_show()`.  This differs from `hide_all()` which uses
+    /// `set_opacity(0.0)` (surface stays mapped, blur must be explicitly
+    /// removed to avoid blurring an invisible surface).  See
+    /// `background_effect.rs` "Blur lifecycle" docs.
     pub fn ipc_hide(&self) {
         if self.hidden.get() {
             return;

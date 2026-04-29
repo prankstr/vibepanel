@@ -306,12 +306,27 @@ impl QuickSettingsWindow {
         // so apply_blur_region defers via idle.  On re-show, anim_shell is at
         // opacity 0 (transparent) until the animation tick overwrites the region
         // with a scaled version within 1-2 frames.
+        //
+        // The else-branch removes any stale protocol object left from a
+        // previous map cycle.  This handles the case where blur was enabled
+        // when QS was last shown, then disabled while QS was hidden (unmapped).
+        // `remove_blur_region` requires a mapped surface, so connect_map is
+        // the earliest reliable cleanup point.
+        //
+        // Known limitation: config changes to `theme.blur` or border radius
+        // while Quick Settings is open take effect on next open, not
+        // immediately.  QS grabs focus so config edits are unlikely while open.
         window.connect_map(move |win| {
-            if ConfigManager::global().blur_enabled()
-                && let Some(blur) =
+            if ConfigManager::global().blur_enabled() {
+                if let Some(blur) =
                     crate::services::background_effect::BackgroundEffectManager::global()
+                {
+                    blur.apply_blur_region(win, QUICK_SETTINGS_OUTER_MARGIN);
+                }
+            } else if let Some(blur) =
+                crate::services::background_effect::BackgroundEffectManager::global()
             {
-                blur.apply_blur_region(win, QUICK_SETTINGS_OUTER_MARGIN);
+                blur.remove_blur_region(win);
             }
         });
 
@@ -1449,16 +1464,6 @@ impl QuickSettingsWindow {
                     }
                     let snapshot = NetworkService::global().snapshot();
                     network_card::on_network_changed(&qs.network, &snapshot, &qs.window);
-
-                    // When animations are disabled, apply blur region immediately
-                    // (the tick callback won't run to animate it in).
-                    if !ConfigManager::global().animations_enabled()
-                        && ConfigManager::global().blur_enabled()
-                        && let Some(blur) =
-                            crate::services::background_effect::BackgroundEffectManager::global()
-                    {
-                        blur.apply_blur_region(&qs.window, QUICK_SETTINGS_OUTER_MARGIN);
-                    }
                 }
             });
         } else {
@@ -1493,16 +1498,6 @@ impl QuickSettingsWindow {
 
                     let snapshot = NetworkService::global().snapshot();
                     network_card::on_network_changed(&qs.network, &snapshot, &qs.window);
-
-                    // When animations are disabled, apply blur region immediately
-                    // (the tick callback won't run to animate it in).
-                    if !ConfigManager::global().animations_enabled()
-                        && ConfigManager::global().blur_enabled()
-                        && let Some(blur) =
-                            crate::services::background_effect::BackgroundEffectManager::global()
-                    {
-                        blur.apply_blur_region(&qs.window, QUICK_SETTINGS_OUTER_MARGIN);
-                    }
                 }
             });
         }
@@ -1625,8 +1620,8 @@ impl QuickSettingsWindow {
             self.anim_shell.set_scale(ANIM_SCALE_FROM);
             self.is_animating_out.set(false);
             self.reset_ui_state();
-            // Blur removal is unnecessary here — set_visible(false) unmaps
-            // the wl_surface, so the compositor discards blur automatically.
+            // No explicit blur removal needed — unmapping suspends
+            // compositor-side blur while the protocol object persists.
             // Blur is re-applied on next map via connect_map.
             self.window.set_visible(false);
             return;
@@ -1640,10 +1635,7 @@ impl QuickSettingsWindow {
         // surface fades out.  Blur is a compositor effect independent of surface
         // opacity — if left in place it would remain visible as the content
         // becomes transparent.
-        if ConfigManager::global().blur_enabled()
-            && let Some(blur) =
-                crate::services::background_effect::BackgroundEffectManager::global()
-        {
+        if let Some(blur) = crate::services::background_effect::BackgroundEffectManager::global() {
             blur.remove_blur_region(&self.window);
         }
 
@@ -1735,16 +1727,18 @@ impl QuickSettingsWindow {
                 let scale = ANIM_SCALE_FROM + (1.0 - ANIM_SCALE_FROM) * progress;
                 shell_clone.set_scale(scale);
 
-                // The compositor might draw blur at the final full size while the
-                // ScaleBox visual is still growing in, causing a brief flash of
-                // oversized blur. Shrink the blur region to match the current scale.
                 if direction == AnimDirection::Opening
                     && ConfigManager::global().blur_enabled()
                     && let Some(blur) =
                         crate::services::background_effect::BackgroundEffectManager::global()
                     && let Some(window) = window_weak.upgrade()
                 {
-                    blur.apply_blur_region_animated(&window, QUICK_SETTINGS_OUTER_MARGIN, scale);
+                    blur.apply_open_animation_blur(
+                        &window,
+                        QUICK_SETTINGS_OUTER_MARGIN,
+                        scale,
+                        complete,
+                    );
                 }
 
                 if complete {
@@ -1763,16 +1757,6 @@ impl QuickSettingsWindow {
                     } else {
                         shell.set_opacity(1.0);
                         shell_clone.set_scale(1.0);
-                        // Set final full-size blur region (scale == 1.0) to
-                        // install the resize watcher.
-                        if ConfigManager::global().blur_enabled()
-                            && let Some(blur) =
-                                crate::services::background_effect::BackgroundEffectManager::global(
-                                )
-                            && let Some(window) = window_weak.upgrade()
-                        {
-                            blur.apply_blur_region(&window, QUICK_SETTINGS_OUTER_MARGIN);
-                        }
                     }
                     return ControlFlow::Break;
                 }
@@ -1845,8 +1829,9 @@ impl Drop for QuickSettingsWindow {
             catcher.close();
         }
 
-        // Clean up the blur effect entry so it doesn't leak in the
-        // BackgroundEffectManager's effects HashMap after the surface is gone.
+        // Best-effort blur cleanup; primary removal happens at fade-start
+        // in hide_panel().  May no-op if already unmapped.
+        // See BackgroundEffectManager::remove_blur_region docs.
         if let Some(blur) = crate::services::background_effect::BackgroundEffectManager::global() {
             blur.remove_blur_region(&self.window);
         }
