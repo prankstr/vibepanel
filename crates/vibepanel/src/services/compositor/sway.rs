@@ -222,16 +222,22 @@ impl SwayBackend {
             return;
         };
 
-        let mut ws_list = shared.workspaces.write();
         let mut snapshot = shared.workspace_snapshot.write();
 
-        ws_list.clear();
         snapshot.active_workspace.clear();
         snapshot.occupied_workspaces.clear();
         snapshot.urgent_workspaces.clear();
         snapshot.window_counts.clear();
         snapshot.per_output.clear();
 
+        let ws_list = Self::workspace_meta_from_ipc(workspaces, &mut snapshot);
+        *shared.workspaces.write() = ws_list;
+    }
+
+    fn workspace_meta_from_ipc(
+        workspaces: &[Value],
+        snapshot: &mut WorkspaceSnapshot,
+    ) -> Vec<WorkspaceMeta> {
         let mut numbered: Vec<WorkspaceMeta> = Vec::new();
         let mut named: Vec<WorkspaceMeta> = Vec::new();
 
@@ -265,7 +271,7 @@ impl SwayBackend {
 
             let meta = WorkspaceMeta {
                 id: ws_id,
-                idx: 0, // Assigned below after sorting
+                idx: if num >= 0 { num } else { -1 },
                 name: if name.is_empty() {
                     num.to_string()
                 } else {
@@ -306,13 +312,11 @@ impl SwayBackend {
         numbered.sort_by_key(|ws| ws.id);
         named.sort_by(|a, b| a.name.cmp(&b.name));
 
+        let mut ws_list = Vec::with_capacity(numbered.len() + named.len());
         ws_list.extend(numbered);
         ws_list.extend(named);
 
-        // Assign 1-based positional index for display
-        for (i, ws) in ws_list.iter_mut().enumerate() {
-            ws.idx = (i + 1) as i32;
-        }
+        ws_list
     }
 
     /// Walk the tree to count windows per workspace and find the focused window.
@@ -947,5 +951,32 @@ impl CompositorBackend for SwayBackend {
 impl Drop for SwayBackend {
     fn drop(&mut self) {
         self.running.store(false, Ordering::SeqCst);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn numbered_workspace_indexes_use_compositor_numbers_after_sorting() {
+        let workspaces = vec![
+            serde_json::json!({ "num": 10, "name": "10" }),
+            serde_json::json!({ "num": -1, "name": "web" }),
+            serde_json::json!({ "num": 0, "name": "0" }),
+            serde_json::json!({ "num": 1, "name": "1" }),
+        ];
+        let mut snapshot = WorkspaceSnapshot::default();
+
+        let ws_list = SwayBackend::workspace_meta_from_ipc(&workspaces, &mut snapshot);
+
+        assert_eq!(ws_list[0].id, 0);
+        assert_eq!(ws_list[0].idx, 0);
+        assert_eq!(ws_list[1].id, 1);
+        assert_eq!(ws_list[1].idx, 1);
+        assert_eq!(ws_list[2].id, 10);
+        assert_eq!(ws_list[2].idx, 10);
+        assert_eq!(ws_list[3].name, "web");
+        assert_eq!(ws_list[3].idx, -1);
     }
 }

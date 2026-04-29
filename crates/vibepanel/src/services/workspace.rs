@@ -21,8 +21,10 @@ use super::compositor::{CompositorManager, WorkspaceMeta, WorkspaceSnapshot};
 pub struct Workspace {
     /// Stable unique workspace ID (for identity, switching, and HashMap keys).
     pub id: i32,
-    /// Positional display index (1-based, per-output for Niri).
-    /// Used for display labels, ordering, and tooltip text.
+    /// Meaningful user-facing numeric index when one exists.
+    ///
+    /// Negative values mean no meaningful index exists; widgets should then
+    /// fall back to `name`.
     pub idx: i32,
     /// Display name for the workspace.
     pub name: String,

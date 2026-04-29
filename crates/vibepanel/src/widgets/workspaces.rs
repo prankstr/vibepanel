@@ -6,7 +6,8 @@
 //! # Configuration
 //!
 //! - `label_type`: `"none"` (minimal dots, default), `"icons"` (●/○/◆ glyphs),
-//!   or `"text"` (workspace names; legacy alias: `"numbers"`).
+//!   `"name"` (workspace names; legacy alias: `"numbers"`), or `"index"`
+//!   (meaningful numeric index, falling back to name when none exists).
 //! - `separator`: string between indicators (non-minimal modes only).
 //! - `animate`: `true` (default) enables the `WorkspaceContainer` custom widget
 //!   for smooth transitions; `false` uses a plain GtkBox with no animation.
@@ -110,7 +111,7 @@ use gtk4::pango::EllipsizeMode;
 use gtk4::prelude::*;
 use gtk4::subclass::prelude::*;
 use gtk4::{Align, Box as GtkBox, CssProvider, GestureClick, Label, Overlay, Widget};
-use tracing::{debug, trace};
+use tracing::{debug, trace, warn};
 use vibepanel_core::config::WidgetEntry;
 
 use crate::services::callbacks::CallbackId;
@@ -715,9 +716,12 @@ pub enum LabelType {
     Icons,
     /// Show workspace labels/names.
     ///
-    /// Historically configured as `label_type = "numbers"`; `"text"` is the
+    /// Historically configured as `label_type = "numbers"`; `"name"` is the
     /// preferred value for new configs.
-    Text,
+    Name,
+    /// Show a meaningful workspace index when available, otherwise the
+    /// workspace name (e.g. for Hyprland named workspaces).
+    Index,
     /// Minimal - no text, just CSS styling.
     None,
 }
@@ -725,10 +729,33 @@ pub enum LabelType {
 impl LabelType {
     fn from_str(s: &str) -> Self {
         match s.to_lowercase().as_str() {
-            "text" | "numbers" => LabelType::Text,
+            "icons" => LabelType::Icons,
+            "name" | "numbers" => LabelType::Name,
+            "index" => LabelType::Index,
             "none" => LabelType::None,
-            _ => LabelType::Icons,
+            other => {
+                warn!(
+                    "unknown workspace label_type {:?}, falling back to {:?}",
+                    other, DEFAULT_LABEL_TYPE
+                );
+                DEFAULT_LABEL_TYPE
+            }
         }
+    }
+}
+
+fn workspace_label_text(label_type: LabelType, workspace: &Workspace) -> String {
+    match label_type {
+        LabelType::Icons => ICON_EMPTY.to_string(),
+        LabelType::Name => workspace.name.clone(),
+        LabelType::Index => {
+            if workspace.idx >= 0 {
+                workspace.idx.to_string()
+            } else {
+                workspace.name.clone()
+            }
+        }
+        LabelType::None => String::new(),
     }
 }
 
@@ -859,7 +886,8 @@ impl WorkspacesWidget {
     ///   `filter_by_output = true`, the widget will:
     ///   - For Niri: only show workspaces belonging to this output.
     ///   - For MangoWC: show all workspaces but with per-output window counts.
-    ///   - For Hyprland: show workspaces associated with this output when available.
+    ///   - For Hyprland: show the workspace currently active on this output,
+    ///     plus workspaces reported with windows on this output.
     pub fn new(config: WorkspacesConfig, output_id: Option<String>) -> Self {
         let base = BaseWidget::new(&[widget::WORKSPACES]);
 
@@ -992,19 +1020,15 @@ fn create_single_indicator(label_type: LabelType, workspace: &Workspace) -> Widg
         let (o, rh) = wrap_with_ripple(&dot);
         (o, rh, false)
     } else {
-        let label_text = match label_type {
-            LabelType::Icons => ICON_EMPTY,
-            LabelType::Text => &workspace.name,
-            LabelType::None => unreachable!(),
-        };
-        let label = Label::new(Some(label_text));
+        let label_text = workspace_label_text(label_type, workspace);
+        let label = Label::new(Some(&label_text));
         // Optical centering: glyphs ●/○/◆ appear left-heavy at 0.5;
         // 0.55 nudges them to look visually centered in the pill.
         label.set_xalign(0.55);
         label.set_ellipsize(EllipsizeMode::End);
         label.set_single_line_mode(true);
         let (o, rh) = wrap_with_ripple(&label);
-        (o, rh, label_text.len() > 2)
+        (o, rh, label_text.chars().count() > 2)
     };
 
     // Sizing, state, and visual classes go on the overlay — it is the
@@ -1217,6 +1241,8 @@ fn collect_display_ids(
 ) -> HashSet<i32> {
     let mut display_ids: HashSet<i32> = workspaces
         .iter()
+        // `window_count.is_some()` filters out synthetic placeholders and only
+        // includes empty workspaces explicitly reported by the compositor.
         .filter(|ws| ws.occupied || (show_unoccupied && ws.window_count.is_some()))
         .map(|ws| ws.id)
         .collect();
@@ -1242,7 +1268,8 @@ fn collect_display_ids(
 /// - Uses per-output workspace data if available.
 /// - For Niri: only shows workspaces belonging to this output.
 /// - For MangoWC: shows all workspaces with per-output window counts.
-/// - For Hyprland: shows workspaces currently associated with this output.
+/// - For Hyprland: shows the workspace currently active on this output,
+///   plus workspaces reported with windows on this output.
 ///
 /// When `output_id` is not provided (i.e. `filter_by_output = false`), uses
 /// global/all-output workspace data and also displays each output's current
@@ -1537,7 +1564,7 @@ fn update_indicators(
             }
         }
 
-        // Update icon/text label (Icons/Text mode only).
+        // Update icon/name/index label.
         // The indicator is an Overlay wrapping the inner label.
         if let Some(label) = (label_type != LabelType::None)
             .then(|| {
@@ -1558,9 +1585,10 @@ fn update_indicators(
                         label.set_text(ICON_EMPTY);
                     }
                 }
-                LabelType::Text => {
-                    label.set_text(&workspace.name);
-                    let now_long = workspace.name.len() > 2;
+                LabelType::Name | LabelType::Index => {
+                    let label_text = workspace_label_text(label_type, workspace);
+                    label.set_text(&label_text);
+                    let now_long = label_text.chars().count() > 2;
                     let was_long = indicator.has_css_class(widget::WORKSPACE_INDICATOR_LONG);
                     if now_long != was_long {
                         if now_long {
@@ -1740,17 +1768,26 @@ mod tests {
         options.insert("separator".to_string(), Value::String("|".to_string()));
         let entry = make_widget_entry("workspaces", options);
         let config = WorkspacesConfig::from_entry(&entry);
-        assert_eq!(config.label_type, LabelType::Text);
+        assert_eq!(config.label_type, LabelType::Name);
         assert_eq!(config.separator, "|");
     }
 
     #[test]
-    fn test_workspace_config_text_alias() {
+    fn test_workspace_config_name() {
         let mut options = HashMap::new();
-        options.insert("label_type".to_string(), Value::String("text".to_string()));
+        options.insert("label_type".to_string(), Value::String("name".to_string()));
         let entry = make_widget_entry("workspaces", options);
         let config = WorkspacesConfig::from_entry(&entry);
-        assert_eq!(config.label_type, LabelType::Text);
+        assert_eq!(config.label_type, LabelType::Name);
+    }
+
+    #[test]
+    fn test_workspace_config_index() {
+        let mut options = HashMap::new();
+        options.insert("label_type".to_string(), Value::String("index".to_string()));
+        let entry = make_widget_entry("workspaces", options);
+        let config = WorkspacesConfig::from_entry(&entry);
+        assert_eq!(config.label_type, LabelType::Index);
     }
 
     #[test]
@@ -1766,10 +1803,33 @@ mod tests {
     fn test_label_type_from_str() {
         assert_eq!(LabelType::from_str("icons"), LabelType::Icons);
         assert_eq!(LabelType::from_str("ICONS"), LabelType::Icons);
-        assert_eq!(LabelType::from_str("text"), LabelType::Text);
-        assert_eq!(LabelType::from_str("numbers"), LabelType::Text);
+        assert_eq!(LabelType::from_str("name"), LabelType::Name);
+        assert_eq!(LabelType::from_str("numbers"), LabelType::Name);
+        assert_eq!(LabelType::from_str("index"), LabelType::Index);
         assert_eq!(LabelType::from_str("none"), LabelType::None);
-        assert_eq!(LabelType::from_str("unknown"), LabelType::Icons); // default
+        assert_eq!(LabelType::from_str("unknown"), DEFAULT_LABEL_TYPE);
+    }
+
+    #[test]
+    fn test_workspace_label_text_name_and_index() {
+        let named = make_workspace(4, "Discord", false, true, false, Some(1));
+        assert_eq!(workspace_label_text(LabelType::Name, &named), "Discord");
+        assert_eq!(workspace_label_text(LabelType::Index, &named), "4");
+
+        let named_without_index = make_workspace(0, "web", false, false, false, Some(0));
+        assert_eq!(
+            workspace_label_text(LabelType::Index, &named_without_index),
+            "0"
+        );
+
+        let named_without_index = Workspace {
+            idx: -1,
+            ..named_without_index
+        };
+        assert_eq!(
+            workspace_label_text(LabelType::Index, &named_without_index),
+            "web"
+        );
     }
 
     #[test]

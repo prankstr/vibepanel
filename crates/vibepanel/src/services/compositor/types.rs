@@ -35,9 +35,12 @@ pub struct WorkspaceMeta {
     ///   assigned to named workspaces.
     /// - For MangoWC: same as `idx` (sequential 1-based tag index).
     pub id: i32,
-    /// Positional display index (1-based, per-output for Niri).
-    /// Used for display labels and ordering; not stable across workspace
-    /// destruction in compositors with dynamic workspaces (e.g. Niri).
+    /// Meaningful user-facing numeric index when one exists.
+    ///
+    /// Used for display labels and ordering. Negative values signal that the
+    /// workspace has no meaningful numeric index (for example, Hyprland named
+    /// workspaces). Widgets should treat `idx < 0` as unavailable and fall back
+    /// to `name`.
     pub idx: i32,
     /// Display name for the workspace.
     pub name: String,
