@@ -713,21 +713,27 @@ impl NotificationService {
     }
 
     /// Enforce the maximum notification limit by removing old notifications.
+    ///
+    /// Only history (non-transient) notifications count toward the limit and
+    /// are eligible for eviction. Transients are toast-only ephemera; they
+    /// must not push real history out, nor be evicted themselves (their
+    /// lifetime is owned by the toast manager).
     fn enforce_notification_limit(&self) {
         let mut notifications = self.notifications.borrow_mut();
-        if notifications.len() <= MAX_NOTIFICATIONS {
+
+        let history_count = notifications.values().filter(|n| !n.transient).count();
+        if history_count <= MAX_NOTIFICATIONS {
             return;
         }
 
-        // Collect (id, timestamp) pairs and sort by timestamp ascending (oldest first)
         let mut by_time: Vec<(u32, f64)> = notifications
             .iter()
+            .filter(|(_, n)| !n.transient)
             .map(|(id, n)| (*id, n.timestamp))
             .collect();
         by_time.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
 
-        // Remove oldest notifications until we're at the limit
-        let to_remove = notifications.len() - MAX_NOTIFICATIONS;
+        let to_remove = history_count - MAX_NOTIFICATIONS;
         for (id, _) in by_time.into_iter().take(to_remove) {
             notifications.remove(&id);
             debug!(
