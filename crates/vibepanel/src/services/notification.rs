@@ -12,10 +12,8 @@ use gtk4::gio::{self, prelude::*};
 use gtk4::glib::Variant;
 use tracing::{debug, error, info, warn};
 
+use super::callbacks::{CallbackId, Callbacks};
 use super::state::{self, PersistedNotification};
-
-/// Type alias for notification service callbacks.
-type NotificationCallback = Rc<dyn Fn(&NotificationService)>;
 
 const NOTIFICATIONS_NAME: &str = "org.freedesktop.Notifications";
 const NOTIFICATIONS_PATH: &str = "/org/freedesktop/Notifications";
@@ -172,7 +170,7 @@ pub struct NotificationService {
     muted: Cell<bool>,
 
     /// Callbacks for state changes
-    callbacks: RefCell<Vec<NotificationCallback>>,
+    callbacks: Callbacks<NotificationService>,
     /// Whether the service is ready
     ready: Cell<bool>,
 }
@@ -208,7 +206,7 @@ impl NotificationService {
             next_id: Cell::new(next_id),
             backend_available: Cell::new(false),
             muted: Cell::new(notification_state.muted),
-            callbacks: RefCell::new(Vec::new()),
+            callbacks: Callbacks::new(),
             ready: Cell::new(false),
         });
 
@@ -225,17 +223,26 @@ impl NotificationService {
     }
 
     /// Register a callback to be invoked when notification state changes.
-    pub fn connect<F>(&self, callback: F)
+    ///
+    /// Returns a `CallbackId` that can be passed to `disconnect` to unregister
+    /// the callback when the caller is dropped.
+    pub fn connect<F>(&self, callback: F) -> CallbackId
     where
         F: Fn(&NotificationService) + 'static,
     {
-        let cb = Rc::new(callback);
-        self.callbacks.borrow_mut().push(cb.clone());
+        let id = self.callbacks.register(callback);
 
         // Immediately send current state if ready
         if self.ready.get() {
-            cb(self);
+            self.callbacks.notify_single(id, self);
         }
+
+        id
+    }
+
+    /// Unregister a callback by its ID.
+    pub fn disconnect(&self, id: CallbackId) -> bool {
+        self.callbacks.unregister(id)
     }
 
     /// Check if we successfully own the D-Bus name.
@@ -782,10 +789,7 @@ impl NotificationService {
     }
 
     fn notify_listeners(&self) {
-        let callbacks: Vec<_> = self.callbacks.borrow().iter().cloned().collect();
-        for cb in callbacks {
-            cb(self);
-        }
+        self.callbacks.notify(self);
     }
 
     /// Save current notification state to disk.
@@ -852,7 +856,7 @@ mod tests {
             next_id: Cell::new(1),
             backend_available: Cell::new(false),
             muted: Cell::new(false),
-            callbacks: RefCell::new(Vec::new()),
+            callbacks: Callbacks::new(),
             ready: Cell::new(false),
         })
     }

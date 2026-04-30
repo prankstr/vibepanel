@@ -22,6 +22,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::debug;
 use vibepanel_core::config::WidgetEntry;
 
+use crate::services::callbacks::CallbackId;
 use crate::services::icons::IconHandle;
 use crate::services::notification::{NotificationService, URGENCY_CRITICAL};
 use crate::services::tooltip::TooltipManager;
@@ -303,7 +304,12 @@ impl NotificationsWidgetInner {
 /// Notification bell widget with popover showing notification list.
 pub struct NotificationsWidget {
     base: BaseWidget,
+    /// Kept for ownership: Weak references inside service/toast closures only
+    /// remain valid as long as this Rc is alive.
+    #[allow(dead_code)]
     inner: Rc<NotificationsWidgetInner>,
+    /// Callback ID for NotificationService, used to disconnect on drop.
+    service_callback_id: CallbackId,
 }
 
 impl NotificationsWidget {
@@ -351,64 +357,31 @@ impl NotificationsWidget {
             suppress_rebuild: Rc::new(Cell::new(false)),
         });
 
-        let widget = Self { base, inner };
-
-        widget.build_menu();
-
-        // Connect to notification service (using safe Rc pattern)
-        widget.bind_service();
-
-        widget
-    }
-
-    /// Get the root GTK widget for embedding in the bar.
-    pub fn widget(&self) -> &GtkBox {
-        self.base.widget()
-    }
-
-    fn build_menu(&self) {
-        let inner = Rc::clone(&self.inner);
-        let suppress_rebuild = Rc::clone(&self.inner.suppress_rebuild);
-
-        // Placeholder builder — replaced immediately below once we have the handle.
-        let menu_handle = self
-            .base
-            .create_menu(|| GtkBox::new(Orientation::Vertical, 0).into());
-
-        // Now that the handle exists, build the real builder with a Weak reference
-        // to it so the builder can create on_close callbacks that call handle.hide().
+        // Build menu before constructing Self so we can move base/inner cleanly.
+        let suppress_rebuild = Rc::clone(&inner.suppress_rebuild);
+        let inner_for_menu = Rc::clone(&inner);
+        let menu_handle = base.create_menu(|| GtkBox::new(Orientation::Vertical, 0).into());
         let handle_weak = Rc::downgrade(&menu_handle);
         menu_handle.set_builder(move || {
-            inner.mark_as_seen();
-
+            inner_for_menu.mark_as_seen();
             let on_close: Option<ClosePopoverCallback> = handle_weak
                 .upgrade()
                 .map(|handle| Rc::new(move || handle.hide()) as ClosePopoverCallback);
-
             build_popover_content(on_close, Rc::clone(&suppress_rebuild))
         });
+        *inner.menu_handle.borrow_mut() = Some(menu_handle);
 
-        *self.inner.menu_handle.borrow_mut() = Some(menu_handle);
-    }
-
-    fn bind_service(&self) {
+        // Seed known_ids with the persistence-restored set. DBus deliveries
+        // cannot arrive before bind time, so this is the full initial set.
         let service = NotificationService::global();
-
-        // Seed known_ids with whatever the service has at bind time (the
-        // persistence-restored set, since DBus deliveries can't run before this
-        // point). The persisted timestamps let later updates via replaces_id be
-        // detected as replacements.
-        *self.inner.known_ids.borrow_mut() = service
+        *inner.known_ids.borrow_mut() = service
             .notifications()
             .iter()
             .map(|n| (n.id, n.timestamp))
             .collect();
 
-        // Clone inner Rc for the callback - this is safe because Rc handles
-        // the reference counting properly
-        let inner = Rc::clone(&self.inner);
-
-        // Initialize toast manager with proper callbacks
+        // Initialize toast manager. Closures use Weak to avoid keeping inner
+        // alive after the widget is dropped.
         {
             let service_for_action = NotificationService::global();
             let on_action = move |id: u32, action_id: &str| {
@@ -423,22 +396,49 @@ impl NotificationsWidget {
             //
             // Instead, we use idle_add to defer the update to the next main loop iteration.
             // This breaks the synchronous call chain and prevents stack overflow.
-            let inner_for_callback = Rc::clone(&self.inner);
+            let inner_weak_for_toast = Rc::downgrade(&inner);
             let on_toast_removed = move || {
-                let inner_clone = Rc::clone(&inner_for_callback);
+                let inner_weak = inner_weak_for_toast.clone();
                 glib::idle_add_local_once(move || {
-                    let service = NotificationService::global();
-                    inner_clone.on_service_update(&service);
+                    if let Some(inner) = inner_weak.upgrade() {
+                        let service = NotificationService::global();
+                        inner.on_service_update(&service);
+                    }
                 });
             };
 
             let manager = NotificationToastManager::new(on_action, on_toast_removed);
-            *self.inner.toast_manager.borrow_mut() = Some(manager);
+            *inner.toast_manager.borrow_mut() = Some(manager);
         }
 
-        service.connect(move |svc| {
-            inner.on_service_update(svc);
-        });
+        // Connect to notification service using Weak to avoid keeping inner alive
+        // after the widget is dropped. The returned CallbackId is stored on the
+        // outer struct and disconnected in Drop.
+        let service_callback_id = {
+            let inner_weak = Rc::downgrade(&inner);
+            service.connect(move |svc| {
+                if let Some(inner) = inner_weak.upgrade() {
+                    inner.on_service_update(svc);
+                }
+            })
+        };
+
+        Self {
+            base,
+            inner,
+            service_callback_id,
+        }
+    }
+
+    /// Get the root GTK widget for embedding in the bar.
+    pub fn widget(&self) -> &GtkBox {
+        self.base.widget()
+    }
+}
+
+impl Drop for NotificationsWidget {
+    fn drop(&mut self) {
+        NotificationService::global().disconnect(self.service_callback_id);
     }
 }
 
