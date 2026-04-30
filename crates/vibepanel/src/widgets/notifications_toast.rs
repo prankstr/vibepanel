@@ -125,15 +125,16 @@ impl NotificationToast {
     }
 
     /// Refresh the toast's content, dismiss/action wiring, and timer to reflect a
-    /// notification that was replaced via `replaces_id`. Position and the height
-    /// the manager already measured are preserved; if the new content has a
-    /// different intrinsic height, repositioning happens on the next pass.
+    /// notification that was replaced via `replaces_id`. The on-screen position
+    /// is preserved; height is re-measured after layout so neighbour toasts can
+    /// reposition if the new content is a different size.
     pub fn update(
         self: &Rc<Self>,
         notification: &Notification,
         on_dismiss: ToastCallback,
         on_action: ToastActionCallback,
         on_timeout: ToastCallback,
+        on_height_measured: ToastCallback,
     ) {
         // Drop the existing timeout before scheduling a fresh one - replacement
         // resets the auto-dismiss countdown.
@@ -143,6 +144,21 @@ impl NotificationToast {
 
         self.build_content(notification, on_dismiss, on_action);
         self.schedule_timeout(notification, on_timeout);
+
+        // The window is already mapped, so connect_map won't fire again. Defer a
+        // re-measurement to the next idle so GTK has time to lay out the new
+        // child; if the height changed, the manager repositions the stack.
+        let toast_weak = Rc::downgrade(self);
+        let notification_id = notification.id;
+        glib::idle_add_local_once(move || {
+            if let Some(toast) = toast_weak.upgrade() {
+                let height = toast.window.height();
+                if height > 0 && height != toast.height.get() {
+                    toast.height.set(height);
+                    on_height_measured(notification_id);
+                }
+            }
+        });
     }
 
     fn schedule_timeout(self: &Rc<Self>, notification: &Notification, on_timeout: ToastCallback) {
@@ -478,6 +494,14 @@ impl NotificationToastManager {
             }
         });
 
+        // When toast height is measured, reposition all toasts. Constructed up
+        // front because both the in-place update path and the new-toast path
+        // need it.
+        let manager_for_height = Rc::clone(self);
+        let on_height_measured: Rc<dyn Fn(u32)> = Rc::new(move |_id| {
+            manager_for_height.reposition_toasts();
+        });
+
         // If a toast for this id is already on screen, mutate it in place so a
         // notification replaced via `replaces_id` updates the existing toast
         // (text, actions, timer) rather than stacking a new one on top.
@@ -488,6 +512,7 @@ impl NotificationToastManager {
                 on_dismiss,
                 Rc::clone(&self.on_action),
                 on_timeout,
+                on_height_measured,
             );
             return;
         }
@@ -504,12 +529,6 @@ impl NotificationToastManager {
             }
             y_offset
         };
-
-        // When toast height is measured, reposition all toasts
-        let manager_for_height = Rc::clone(self);
-        let on_height_measured: Rc<dyn Fn(u32)> = Rc::new(move |_id| {
-            manager_for_height.reposition_toasts();
-        });
 
         let toast = NotificationToast::new(
             app,
