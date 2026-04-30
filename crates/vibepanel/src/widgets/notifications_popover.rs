@@ -395,8 +395,7 @@ fn build_notification_row(
     if !notification.body.is_empty() {
         // Sanitize markup and clean up for display
         let body_markup = sanitize_body_markup(&notification.body);
-        let body_clean = body_markup.replace('\n', " ");
-        let body_clean = body_clean.trim();
+        let body_clean = body_markup.trim();
         let needs_expansion = body_clean.chars().count() > BODY_TRUNCATE_THRESHOLD;
 
         let body_label = Label::new(None);
