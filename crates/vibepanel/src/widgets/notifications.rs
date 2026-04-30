@@ -57,8 +57,10 @@ struct NotificationsWidgetInner {
     last_seen_timestamp: Cell<f64>,
     app: RefCell<Option<Application>>,
     menu_handle: RefCell<Option<Rc<MenuHandle>>>,
-    /// Last known notification IDs; used to skip popover rebuilds on mute-only changes.
-    last_notif_ids: RefCell<Vec<u32>>,
+    /// Last known (id, timestamp) snapshot. Used to skip popover rebuilds on
+    /// mute-only changes while still detecting replacements (same id, newer
+    /// timestamp via replaces_id) as a content change.
+    last_notif_ids: RefCell<Vec<(u32, f64)>>,
     /// When set, the popover dismiss handler already removed the row in-place,
     /// so `on_service_update` should skip `refresh_if_visible`.
     suppress_rebuild: Rc<Cell<bool>>,
@@ -137,8 +139,14 @@ impl NotificationsWidgetInner {
 
         // Only rebuild the popover when the notification list changed;
         // mute-only updates are handled in-place by the popover button.
-        let mut current_ids: Vec<u32> = service.notifications().iter().map(|n| n.id).collect();
-        current_ids.sort_unstable();
+        // Compare (id, timestamp) so a replaces_id update (same id, newer ts)
+        // is also treated as a content change.
+        let mut current_ids: Vec<(u32, f64)> = service
+            .notifications()
+            .iter()
+            .map(|n| (n.id, n.timestamp))
+            .collect();
+        current_ids.sort_unstable_by_key(|a| a.0);
         let list_changed = *self.last_notif_ids.borrow() != current_ids;
         *self.last_notif_ids.borrow_mut() = current_ids;
 
