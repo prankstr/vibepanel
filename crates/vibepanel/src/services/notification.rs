@@ -269,10 +269,7 @@ impl NotificationService {
         self.notifications.borrow().values().cloned().collect()
     }
 
-    /// Get history-facing notifications (excludes transients).
-    ///
-    /// Transients are toast-only per the freedesktop spec and must not appear in
-    /// the popover, the badge count, or any other persistent UI surface.
+    /// Notifications excluding transients (which are toast-only per spec).
     pub fn history_notifications(&self) -> Vec<Notification> {
         self.notifications
             .borrow()
@@ -282,7 +279,6 @@ impl NotificationService {
             .collect()
     }
 
-    /// Count of history-facing notifications (excludes transients).
     pub fn history_count(&self) -> usize {
         self.notifications
             .borrow()
@@ -664,12 +660,8 @@ impl NotificationService {
         // Return the notification ID
         invocation.return_value(Some(&(id,).to_variant()));
 
-        // Muted transients have nowhere to go: the popover never shows them and
-        // no toast is created to call back, so without this they would linger in
-        // the in-memory map forever, inflating counts and consuming a slot in
-        // the eviction limit. The ID is still returned to the caller (spec
-        // compliance) and a NotificationClosed signal is emitted via
-        // close_internal so well-behaved clients learn the notification is gone.
+        // Muted transients never get a toast and never appear in the popover,
+        // so without this they'd linger in the map until evicted.
         if is_transient && self.is_muted() {
             self.close_internal(id, CLOSE_REASON_DISMISSED);
         }
@@ -712,12 +704,8 @@ impl NotificationService {
         self.notify_listeners();
     }
 
-    /// Enforce the maximum notification limit by removing old notifications.
-    ///
-    /// Only history (non-transient) notifications count toward the limit and
-    /// are eligible for eviction. Transients are toast-only ephemera; they
-    /// must not push real history out, nor be evicted themselves (their
-    /// lifetime is owned by the toast manager).
+    /// Trim oldest history once the cap is exceeded. Transients are owned by
+    /// the toast manager — they don't count toward the cap and aren't evicted.
     fn enforce_notification_limit(&self) {
         let mut notifications = self.notifications.borrow_mut();
 
@@ -831,5 +819,177 @@ impl NotificationService {
 impl Drop for NotificationService {
     fn drop(&mut self) {
         debug!("NotificationService dropped");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Redirect XDG_STATE_HOME to a per-process tempdir so save_state writes
+    /// don't clobber the developer's real notification state.
+    fn redirect_state_home() {
+        use std::sync::Once;
+        static INIT: Once = Once::new();
+        INIT.call_once(|| {
+            let tmp =
+                std::env::temp_dir().join(format!("vibepanel-notif-test-{}", std::process::id()));
+            // SAFETY: This runs exactly once before any test reads the env var,
+            // and the redirect is harmless to any other test in this binary -
+            // they'll just see a clean per-process state file location.
+            unsafe {
+                std::env::set_var("XDG_STATE_HOME", &tmp);
+            }
+        });
+    }
+
+    fn make_service() -> Rc<NotificationService> {
+        redirect_state_home();
+        Rc::new(NotificationService {
+            bus: RefCell::new(None),
+            registration_id: RefCell::new(None),
+            notifications: RefCell::new(HashMap::new()),
+            next_id: Cell::new(1),
+            backend_available: Cell::new(false),
+            muted: Cell::new(false),
+            callbacks: RefCell::new(Vec::new()),
+            ready: Cell::new(false),
+        })
+    }
+
+    fn make_notification(id: u32, transient: bool, timestamp: f64) -> Notification {
+        Notification {
+            id,
+            app_name: "test".to_string(),
+            app_icon: String::new(),
+            summary: String::new(),
+            body: String::new(),
+            actions: Vec::new(),
+            urgency: URGENCY_NORMAL,
+            timestamp,
+            expire_timeout: -1,
+            desktop_entry: None,
+            image_path: None,
+            image_data: None,
+            transient,
+        }
+    }
+
+    /// Mirror of the post-insert tail in handle_notify, which we can't call
+    /// directly because it consumes D-Bus types.
+    fn simulate_handle_notify(svc: &NotificationService, n: Notification) {
+        let id = n.id;
+        let is_transient = n.transient;
+        svc.notifications.borrow_mut().insert(id, n);
+        svc.enforce_notification_limit();
+        svc.save_state();
+        svc.notify_listeners();
+        if is_transient && svc.is_muted() {
+            svc.close_internal(id, CLOSE_REASON_DISMISSED);
+        }
+    }
+
+    #[test]
+    fn muted_transient_is_dropped_from_map() {
+        let svc = make_service();
+        svc.muted.set(true);
+
+        simulate_handle_notify(&svc, make_notification(1, true, 1.0));
+
+        assert!(
+            !svc.notifications.borrow().contains_key(&1),
+            "muted transient should not linger in the map"
+        );
+    }
+
+    #[test]
+    fn unmuted_transient_remains_until_toast_lifecycle_ends() {
+        let svc = make_service();
+        // muted = false (default)
+
+        simulate_handle_notify(&svc, make_notification(1, true, 1.0));
+
+        assert!(
+            svc.notifications.borrow().contains_key(&1),
+            "unmuted transient must stay in the map - the toast manager closes it on dismiss/timeout"
+        );
+    }
+
+    #[test]
+    fn muted_non_transient_remains_in_map() {
+        let svc = make_service();
+        svc.muted.set(true);
+
+        simulate_handle_notify(&svc, make_notification(1, false, 1.0));
+
+        assert!(
+            svc.notifications.borrow().contains_key(&1),
+            "muted non-transients are stored as history (only toasts are suppressed)"
+        );
+    }
+
+    #[test]
+    fn enforce_limit_excludes_transients_from_count() {
+        let svc = make_service();
+        // Fill exactly to the cap with history, then add transients on top.
+        for i in 0..(MAX_NOTIFICATIONS as u32) {
+            svc.notifications
+                .borrow_mut()
+                .insert(i + 1, make_notification(i + 1, false, i as f64));
+        }
+        for i in 0..50u32 {
+            let id = MAX_NOTIFICATIONS as u32 + 100 + i;
+            svc.notifications
+                .borrow_mut()
+                .insert(id, make_notification(id, true, (1000 + i) as f64));
+        }
+
+        svc.enforce_notification_limit();
+
+        assert_eq!(
+            svc.notifications.borrow().len(),
+            MAX_NOTIFICATIONS + 50,
+            "transients should not trigger eviction even when total > cap"
+        );
+    }
+
+    #[test]
+    fn enforce_limit_evicts_oldest_history_only() {
+        let svc = make_service();
+        // 102 history (timestamps 0..102) + 5 transients with very old timestamps.
+        for i in 0..102u32 {
+            svc.notifications
+                .borrow_mut()
+                .insert(i + 1, make_notification(i + 1, false, i as f64));
+        }
+        for i in 0..5u32 {
+            let id = 1000 + i;
+            // Older than any history - would be first evicted if transients counted.
+            svc.notifications
+                .borrow_mut()
+                .insert(id, make_notification(id, true, -100.0 - i as f64));
+        }
+
+        svc.enforce_notification_limit();
+
+        let map = svc.notifications.borrow();
+        // History over the cap (ids 1, 2 = oldest two) should be evicted.
+        assert!(
+            !map.contains_key(&1),
+            "oldest history (id=1) should be evicted"
+        );
+        assert!(
+            !map.contains_key(&2),
+            "second-oldest history (id=2) should be evicted"
+        );
+        assert!(map.contains_key(&3), "third-oldest history must survive");
+        // All transients survive despite older timestamps.
+        for i in 0..5u32 {
+            assert!(
+                map.contains_key(&(1000 + i)),
+                "transient id={} must not be evicted",
+                1000 + i
+            );
+        }
     }
 }

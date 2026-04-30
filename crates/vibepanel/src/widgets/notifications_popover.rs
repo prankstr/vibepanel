@@ -210,8 +210,7 @@ fn build_header(on_close: Option<ClosePopoverCallback>) -> GtkBox {
 
     header.append(&mute_btn);
 
-    // Clear all button (only when there are history notifications - transients
-    // never appear in the popover, so they shouldn't gate the clear-all button).
+    // Clear all button (only when there are history notifications)
     let count = service.history_count();
 
     if count > 0 {

@@ -87,7 +87,6 @@ impl NotificationsWidgetInner {
             self.badge.set_visible(false);
         }
 
-        // Check for critical notifications among history (transients are toast-only)
         let has_critical = service
             .history_notifications()
             .iter()
@@ -137,11 +136,9 @@ impl NotificationsWidgetInner {
             }
         }
 
-        // Only rebuild the popover when the notification list changed;
-        // mute-only updates are handled in-place by the popover button.
-        // Compare (id, timestamp) so a replaces_id update (same id, newer ts)
-        // is also treated as a content change. Transients are excluded since
-        // the popover never shows them.
+        // Only rebuild the popover when the notification list changed; mute-only
+        // updates are handled in-place by the popover button. Compare (id, ts)
+        // so a replaces_id update (same id, newer ts) is also a content change.
         let mut current_ids: Vec<(u32, f64)> = service
             .history_notifications()
             .iter()
