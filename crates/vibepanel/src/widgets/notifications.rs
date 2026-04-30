@@ -16,7 +16,7 @@ use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4::{Align, Application, Box as GtkBox, Orientation, Overlay, Widget};
 use std::cell::{Cell, RefCell};
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::debug;
@@ -49,7 +49,10 @@ struct NotificationsWidgetInner {
     icon_handle: IconHandle,
     badge: Widget,
     container: GtkBox,
-    known_ids: RefCell<HashSet<u32>>,
+    /// Last-seen notification ids mapped to their timestamp. A bump in timestamp
+    /// for an existing id means the notification was replaced via replaces_id and
+    /// the toast should be re-shown with the new content.
+    known_ids: RefCell<HashMap<u32, f64>>,
     toast_manager: RefCell<Option<Rc<NotificationToastManager>>>,
     last_seen_timestamp: Cell<f64>,
     app: RefCell<Option<Application>>,
@@ -208,26 +211,42 @@ impl NotificationsWidgetInner {
             return;
         }
 
+        // Snapshot current id -> timestamp so we can detect both new notifications
+        // and replacements (same id, newer timestamp via replaces_id).
+        let current: HashMap<u32, f64> = service
+            .notifications()
+            .iter()
+            .map(|n| (n.id, n.timestamp))
+            .collect();
+
         // Don't show toasts when muted
         if service.is_muted() {
             // Still update known IDs so we don't show stale toasts when unmuted
-            let current_ids: HashSet<u32> = service.notifications().iter().map(|n| n.id).collect();
-            *self.known_ids.borrow_mut() = current_ids;
+            *self.known_ids.borrow_mut() = current;
             return;
         }
 
-        let current_ids: HashSet<u32> = service.notifications().iter().map(|n| n.id).collect();
-        let known_ids = self.known_ids.borrow().clone();
+        let known = self.known_ids.borrow().clone();
 
-        let new_ids: HashSet<u32> = current_ids.difference(&known_ids).cloned().collect();
+        // Identify ids to (re)toast: brand-new ids, plus replacements where the
+        // timestamp has advanced since we last toasted.
+        let to_toast: Vec<u32> = current
+            .iter()
+            .filter(|(id, ts)| match known.get(id) {
+                None => true,
+                Some(prev_ts) => *ts > prev_ts,
+            })
+            .map(|(id, _)| *id)
+            .collect();
+
         // Note: We intentionally do NOT close toasts when notifications are removed.
         // Some apps (like Telegram) send a notification and then immediately close it,
         // expecting the notification daemon to still show it briefly. If we closed the
         // toast here, users would never see the notification.
         // Toasts will close naturally via their timeout or user dismissal.
 
-        // Show toasts for new notifications
-        if !new_ids.is_empty() {
+        // Show toasts for new and replaced notifications
+        if !to_toast.is_empty() {
             // Try to get the application from the widget's root window
             let app = self.get_application();
 
@@ -236,7 +255,7 @@ impl NotificationsWidgetInner {
             // proper initialization with callbacks.
 
             if let (Some(toast_manager), Some(app)) = (&*self.toast_manager.borrow(), app) {
-                for id in &new_ids {
+                for id in &to_toast {
                     if let Some(notification) = service.get(*id) {
                         toast_manager.show(&app, &notification);
                     }
@@ -244,8 +263,8 @@ impl NotificationsWidgetInner {
             }
         }
 
-        // Update known IDs
-        *self.known_ids.borrow_mut() = current_ids;
+        // Update known IDs (with current timestamps)
+        *self.known_ids.borrow_mut() = current;
     }
 
     /// Get the GTK Application from the widget's root window.
@@ -317,7 +336,7 @@ impl NotificationsWidget {
             icon_handle,
             badge: badge.upcast(),
             container: base.widget().clone(),
-            known_ids: RefCell::new(HashSet::new()),
+            known_ids: RefCell::new(HashMap::new()),
             toast_manager: RefCell::new(None),
             last_seen_timestamp: Cell::new(0.0),
             app: RefCell::new(None),
@@ -369,8 +388,16 @@ impl NotificationsWidget {
     fn bind_service(&self) {
         let service = NotificationService::global();
 
-        // Initialize known_ids with restored notifications so they don't trigger toasts
-        *self.inner.known_ids.borrow_mut() = service.restored_ids();
+        // Initialize known_ids with restored notifications so they don't trigger toasts.
+        // We seed with their persisted timestamps so any later update (e.g. via
+        // replaces_id) is detected as a replacement.
+        let restored = service.restored_ids();
+        *self.inner.known_ids.borrow_mut() = service
+            .notifications()
+            .iter()
+            .filter(|n| restored.contains(&n.id))
+            .map(|n| (n.id, n.timestamp))
+            .collect();
 
         // Clone inner Rc for the callback - this is safe because Rc handles
         // the reference counting properly
