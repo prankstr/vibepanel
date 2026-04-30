@@ -648,6 +648,8 @@ impl NotificationService {
             notification.urgency
         );
 
+        let is_transient = notification.transient;
+
         self.notifications.borrow_mut().insert(id, notification);
 
         // Enforce notification limit to prevent unbounded memory growth.
@@ -661,6 +663,16 @@ impl NotificationService {
 
         // Return the notification ID
         invocation.return_value(Some(&(id,).to_variant()));
+
+        // Muted transients have nowhere to go: the popover never shows them and
+        // no toast is created to call back, so without this they would linger in
+        // the in-memory map forever, inflating counts and consuming a slot in
+        // the eviction limit. The ID is still returned to the caller (spec
+        // compliance) and a NotificationClosed signal is emitted via
+        // close_internal so well-behaved clients learn the notification is gone.
+        if is_transient && self.is_muted() {
+            self.close_internal(id, CLOSE_REASON_DISMISSED);
+        }
     }
 
     fn handle_close_notification(&self, params: &Variant, invocation: gio::DBusMethodInvocation) {
