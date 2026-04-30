@@ -4,6 +4,8 @@
 //! notifications_toast.rs and notifications_popover.rs.
 
 use gtk4::Image;
+use gtk4::gdk;
+use gtk4::gdk_pixbuf::Pixbuf;
 
 use crate::services::icons::get_app_icon_name;
 use crate::services::notification::{Notification, NotificationImage};
@@ -238,6 +240,23 @@ fn try_parse_tag(s: &str) -> Option<(String, usize, TagBalance)> {
     }
 }
 
+/// Load an Image widget from a filesystem path, decoding scaled to `size` so we
+/// never pull a multi-megapixel source (e.g. a 4K wallpaper passed as --icon)
+/// through the GTK main thread at full resolution.
+fn load_scaled_image_from_path(path: &str, size: i32) -> Image {
+    if let Ok(pixbuf) = Pixbuf::from_file_at_scale(path, size, size, true) {
+        let texture = gdk::Texture::for_pixbuf(&pixbuf);
+        let image = Image::from_paintable(Some(&texture));
+        image.set_pixel_size(size);
+        image
+    } else {
+        // Fall back to GTK's own loader; matches original behavior on failure.
+        let image = Image::from_file(path);
+        image.set_pixel_size(size);
+        image
+    }
+}
+
 /// Create an Image widget for a notification, preferring avatar data
 /// from image-data/image-path hints when available.
 pub fn create_notification_image_widget(notification: &Notification) -> Image {
@@ -255,19 +274,18 @@ pub fn create_notification_image_widget(notification: &Notification) -> Image {
 
     // Note: image-path can be either an actual file path OR an icon theme name
     if let Some(ref path) = notification.image_path {
-        let image = if let Some(file_path) = path.strip_prefix("file://") {
+        if let Some(file_path) = path.strip_prefix("file://") {
             // file:// URI - load from filesystem
-            Image::from_file(file_path)
+            return load_scaled_image_from_path(file_path, NOTIFICATION_ICON_SIZE);
         } else if path.starts_with('/') {
             // Absolute path - load from filesystem
-            Image::from_file(path)
+            return load_scaled_image_from_path(path, NOTIFICATION_ICON_SIZE);
         } else {
             // Icon theme name - use icon theme lookup
-            Image::from_icon_name(path)
-        };
-
-        image.set_pixel_size(NOTIFICATION_ICON_SIZE);
-        return image;
+            let image = Image::from_icon_name(path);
+            image.set_pixel_size(NOTIFICATION_ICON_SIZE);
+            return image;
+        }
     }
 
     // Finally, fall back to icon theme / desktop entry logic
@@ -350,16 +368,12 @@ fn create_notification_icon(app_icon: &str, app_name: &str, desktop_entry: Optio
 
     // Handle file:// URIs
     if let Some(file_path) = icon_name.strip_prefix("file://") {
-        let icon = Image::from_file(file_path);
-        icon.set_pixel_size(NOTIFICATION_ICON_SIZE);
-        return icon;
+        return load_scaled_image_from_path(file_path, NOTIFICATION_ICON_SIZE);
     }
 
     // Handle absolute file paths
     if icon_name.starts_with('/') {
-        let icon = Image::from_file(&icon_name);
-        icon.set_pixel_size(NOTIFICATION_ICON_SIZE);
-        return icon;
+        return load_scaled_image_from_path(&icon_name, NOTIFICATION_ICON_SIZE);
     }
 
     // It's an icon theme name
