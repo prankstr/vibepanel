@@ -396,14 +396,13 @@ impl NotificationsWidget {
     fn bind_service(&self) {
         let service = NotificationService::global();
 
-        // Initialize known_ids with restored notifications so they don't trigger toasts.
-        // We seed with their persisted timestamps so any later update (e.g. via
-        // replaces_id) is detected as a replacement.
-        let restored = service.restored_ids();
+        // Seed known_ids with whatever the service has at bind time (the
+        // persistence-restored set, since DBus deliveries can't run before this
+        // point). The persisted timestamps let later updates via replaces_id be
+        // detected as replacements.
         *self.inner.known_ids.borrow_mut() = service
             .notifications()
             .iter()
-            .filter(|n| restored.contains(&n.id))
             .map(|n| (n.id, n.timestamp))
             .collect();
 

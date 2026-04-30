@@ -5,7 +5,7 @@
 //! via the standard callback mechanism.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use gtk4::gio::{self, prelude::*};
@@ -175,9 +175,6 @@ pub struct NotificationService {
     callbacks: RefCell<Vec<NotificationCallback>>,
     /// Whether the service is ready
     ready: Cell<bool>,
-
-    /// IDs of notifications restored from persistence (should not trigger toasts)
-    restored_ids: RefCell<HashSet<u32>>,
 }
 
 impl NotificationService {
@@ -188,11 +185,9 @@ impl NotificationService {
 
         // Restore notifications from persisted state
         let mut notifications = HashMap::new();
-        let mut restored_ids = HashSet::new();
         let mut max_id: u32 = 0;
         for pn in &notification_state.history {
             max_id = max_id.max(pn.id);
-            restored_ids.insert(pn.id);
             notifications.insert(pn.id, Notification::from(pn.clone()));
         }
 
@@ -215,7 +210,6 @@ impl NotificationService {
             muted: Cell::new(notification_state.muted),
             callbacks: RefCell::new(Vec::new()),
             ready: Cell::new(false),
-            restored_ids: RefCell::new(restored_ids),
         });
 
         Self::init_dbus(&service);
@@ -283,14 +277,6 @@ impl NotificationService {
     /// Get a notification by ID.
     pub fn get(&self, id: u32) -> Option<Notification> {
         self.notifications.borrow().get(&id).cloned()
-    }
-
-    /// Get IDs of notifications that were restored from persistence.
-    ///
-    /// These notifications should not trigger toast popups since they were
-    /// already seen in a previous session.
-    pub fn restored_ids(&self) -> HashSet<u32> {
-        self.restored_ids.borrow().clone()
     }
 
     /// Close a notification by ID (user dismissed).
