@@ -474,24 +474,27 @@ impl NotificationToastManager {
 
     pub fn show(self: &Rc<Self>, app: &Application, notification: &Notification) {
         // Transient notifications must be removed from the service when their toast
-        // disappears (dismiss or timeout) so they never leak into the popover history.
+        // disappears (dismiss or timeout) so they never leak into the popover
+        // history. Close the service entry *before* tearing down the toast so the
+        // synchronous on_service_update fired by `service.close` does the work;
+        // the deferred update from `remove_toast` then sees no change and no-ops.
         let is_transient = notification.transient;
 
         let manager = Rc::clone(self);
         let on_dismiss: Rc<dyn Fn(u32)> = Rc::new(move |id| {
-            manager.remove_toast(id);
             if is_transient {
                 NotificationService::global().close(id);
             }
+            manager.remove_toast(id);
         });
 
         // When toast times out, we need to remove it and notify the widget to update badge
         let manager_for_timeout = Rc::clone(self);
         let on_timeout: Rc<dyn Fn(u32)> = Rc::new(move |id| {
-            manager_for_timeout.remove_toast(id);
             if is_transient {
                 NotificationService::global().close(id);
             }
+            manager_for_timeout.remove_toast(id);
         });
 
         // When toast height is measured, reposition all toasts. Constructed up
