@@ -97,6 +97,9 @@ pub struct Notification {
     pub image_path: Option<String>,
     /// Optional raw image data hint (e.g. freedesktop image-data)
     pub image_data: Option<NotificationImage>,
+    /// Whether the notification is transient: skip popover history and persistence,
+    /// only fire the toast.
+    pub transient: bool,
 }
 
 /// Raw image data for a notification, parsed from the
@@ -145,6 +148,7 @@ impl From<PersistedNotification> for Notification {
             desktop_entry: p.desktop_entry,
             image_path: p.image_path,
             image_data: None, // Binary data is not persisted
+            transient: false, // Transient notifications are never persisted
         }
     }
 }
@@ -521,6 +525,7 @@ impl NotificationService {
         let mut desktop_entry: Option<String> = None;
         let mut image_path: Option<String> = None;
         let mut image_data: Option<NotificationImage> = None;
+        let mut transient = false;
         for j in 0..hints_variant.n_children() {
             let entry = hints_variant.child_value(j);
             if entry.n_children() >= 2
@@ -575,6 +580,18 @@ impl NotificationService {
                             });
                         }
                     }
+                    "transient" => {
+                        // Spec allows boolean or numeric (any non-zero) values.
+                        if let Some(v) = actual_value.get::<bool>() {
+                            transient = v;
+                        } else if let Some(v) = actual_value.get::<u8>() {
+                            transient = v != 0;
+                        } else if let Some(v) = actual_value.get::<i32>() {
+                            transient = v != 0;
+                        } else if let Some(v) = actual_value.get::<u32>() {
+                            transient = v != 0;
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -616,6 +633,7 @@ impl NotificationService {
             desktop_entry,
             image_path,
             image_data,
+            transient,
         };
 
         debug!(
@@ -766,10 +784,13 @@ impl NotificationService {
         // Load existing state to preserve VPN state
         let mut persisted = state::load();
 
-        // Update notification state
+        // Update notification state. Transient notifications bypass persistence.
         let notifications = self.notifications.borrow();
-        let mut history: Vec<PersistedNotification> =
-            notifications.values().map(|n| n.to_persisted()).collect();
+        let mut history: Vec<PersistedNotification> = notifications
+            .values()
+            .filter(|n| !n.transient)
+            .map(|n| n.to_persisted())
+            .collect();
 
         // Sort by timestamp descending (most recent first)
         history.sort_by(|a, b| {

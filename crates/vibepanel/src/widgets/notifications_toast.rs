@@ -14,7 +14,9 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use tracing::debug;
 
-use crate::services::notification::{Notification, URGENCY_CRITICAL, URGENCY_LOW};
+use crate::services::notification::{
+    Notification, NotificationService, URGENCY_CRITICAL, URGENCY_LOW,
+};
 
 /// Type alias for toast notification callbacks.
 type ToastCallback = Rc<dyn Fn(u32)>;
@@ -455,15 +457,25 @@ impl NotificationToastManager {
     }
 
     pub fn show(self: &Rc<Self>, app: &Application, notification: &Notification) {
+        // Transient notifications must be removed from the service when their toast
+        // disappears (dismiss or timeout) so they never leak into the popover history.
+        let is_transient = notification.transient;
+
         let manager = Rc::clone(self);
         let on_dismiss: Rc<dyn Fn(u32)> = Rc::new(move |id| {
             manager.remove_toast(id);
+            if is_transient {
+                NotificationService::global().close(id);
+            }
         });
 
         // When toast times out, we need to remove it and notify the widget to update badge
         let manager_for_timeout = Rc::clone(self);
         let on_timeout: Rc<dyn Fn(u32)> = Rc::new(move |id| {
             manager_for_timeout.remove_toast(id);
+            if is_transient {
+                NotificationService::global().close(id);
+            }
         });
 
         // If a toast for this id is already on screen, mutate it in place so a

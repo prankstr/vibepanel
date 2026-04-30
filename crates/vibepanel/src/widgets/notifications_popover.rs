@@ -259,7 +259,12 @@ fn populate_notification_list(
         return;
     }
 
-    let mut notifications = service.notifications();
+    // Transient notifications bypass the popover history per the freedesktop spec.
+    let mut notifications: Vec<Notification> = service
+        .notifications()
+        .into_iter()
+        .filter(|n| !n.transient)
+        .collect();
 
     if notifications.is_empty() {
         add_empty_state(list, "No notifications");
