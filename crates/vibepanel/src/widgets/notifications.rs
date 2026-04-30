@@ -68,7 +68,7 @@ struct NotificationsWidgetInner {
 
 impl NotificationsWidgetInner {
     fn on_service_update(&self, service: &NotificationService) {
-        let count = service.count();
+        let count = service.history_count();
         debug!(
             "NotificationsWidget: on_service_update called, count={}",
             count
@@ -87,9 +87,9 @@ impl NotificationsWidgetInner {
             self.badge.set_visible(false);
         }
 
-        // Check for critical notifications
+        // Check for critical notifications among history (transients are toast-only)
         let has_critical = service
-            .notifications()
+            .history_notifications()
             .iter()
             .any(|n| n.urgency == URGENCY_CRITICAL);
 
@@ -140,9 +140,10 @@ impl NotificationsWidgetInner {
         // Only rebuild the popover when the notification list changed;
         // mute-only updates are handled in-place by the popover button.
         // Compare (id, timestamp) so a replaces_id update (same id, newer ts)
-        // is also treated as a content change.
+        // is also treated as a content change. Transients are excluded since
+        // the popover never shows them.
         let mut current_ids: Vec<(u32, f64)> = service
-            .notifications()
+            .history_notifications()
             .iter()
             .map(|n| (n.id, n.timestamp))
             .collect();
@@ -181,11 +182,11 @@ impl NotificationsWidgetInner {
             "NotificationsWidget: calculate_unread_count - active_toast_ids={:?}, last_seen={}, notifications_count={}",
             active_toast_ids,
             last_seen,
-            service.notifications().len()
+            service.history_count()
         );
 
         service
-            .notifications()
+            .history_notifications()
             .iter()
             .filter(|n| {
                 // Skip if currently shown as toast

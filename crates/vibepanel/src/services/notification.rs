@@ -243,11 +243,6 @@ impl NotificationService {
         self.backend_available.get()
     }
 
-    /// Get the number of active notifications.
-    pub fn count(&self) -> usize {
-        self.notifications.borrow().len()
-    }
-
     /// Check if notifications are muted (toasts suppressed).
     pub fn is_muted(&self) -> bool {
         self.muted.get()
@@ -272,6 +267,28 @@ impl NotificationService {
     /// Get all notifications as a list.
     pub fn notifications(&self) -> Vec<Notification> {
         self.notifications.borrow().values().cloned().collect()
+    }
+
+    /// Get history-facing notifications (excludes transients).
+    ///
+    /// Transients are toast-only per the freedesktop spec and must not appear in
+    /// the popover, the badge count, or any other persistent UI surface.
+    pub fn history_notifications(&self) -> Vec<Notification> {
+        self.notifications
+            .borrow()
+            .values()
+            .filter(|n| !n.transient)
+            .cloned()
+            .collect()
+    }
+
+    /// Count of history-facing notifications (excludes transients).
+    pub fn history_count(&self) -> usize {
+        self.notifications
+            .borrow()
+            .values()
+            .filter(|n| !n.transient)
+            .count()
     }
 
     /// Get a notification by ID.

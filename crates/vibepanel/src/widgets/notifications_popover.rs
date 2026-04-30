@@ -210,8 +210,9 @@ fn build_header(on_close: Option<ClosePopoverCallback>) -> GtkBox {
 
     header.append(&mute_btn);
 
-    // Clear all button (only when there are notifications)
-    let count = service.count();
+    // Clear all button (only when there are history notifications - transients
+    // never appear in the popover, so they shouldn't gate the clear-all button).
+    let count = service.history_count();
 
     if count > 0 {
         let clear_btn = crate::widgets::base::vp_button();
@@ -260,11 +261,7 @@ fn populate_notification_list(
     }
 
     // Transient notifications bypass the popover history per the freedesktop spec.
-    let mut notifications: Vec<Notification> = service
-        .notifications()
-        .into_iter()
-        .filter(|n| !n.transient)
-        .collect();
+    let mut notifications: Vec<Notification> = service.history_notifications();
 
     if notifications.is_empty() {
         add_empty_state(list, "No notifications");
