@@ -28,7 +28,7 @@ use crate::services::audio::AudioSnapshot;
 use crate::services::background_effect::attach_blur_surface_lifecycle;
 use crate::services::brightness::BrightnessSnapshot;
 use crate::services::config_manager::{ConfigManager, ThemeCallbackGuard};
-use crate::services::icons::IconsService;
+use crate::services::icons::{IconHandle, IconsService};
 use crate::services::ipc::IpcMessage;
 use crate::services::surfaces::SurfaceStyleManager;
 
@@ -57,7 +57,9 @@ pub struct OsdWidget {
     root: GtkBox,
     /// Normal content: icon + slider in a row
     normal_content: GtkBox,
+    icon_handle: IconHandle,
     scale: Scale,
+    value_label: Label,
     /// Unavailable content: big icon + message centered
     unavailable_content: GtkBox,
     unavailable_icon: Image,
@@ -65,7 +67,7 @@ pub struct OsdWidget {
 }
 
 impl OsdWidget {
-    pub fn new(orientation: Orientation, icon_size: i32) -> Self {
+    pub fn new(orientation: Orientation, icon_size: i32, show_value: bool) -> Self {
         let root = GtkBox::new(Orientation::Vertical, 0);
         root.add_css_class(osd::WIDGET);
 
@@ -73,12 +75,12 @@ impl OsdWidget {
         let normal_content = GtkBox::new(orientation, 4);
         normal_content.add_css_class(osd::NORMAL);
 
-        let icon_image = Image::from_icon_name("audio-volume-medium-symbolic");
-        icon_image.set_pixel_size(icon_size);
-        icon_image.add_css_class(osd::ICON);
-        icon_image.set_valign(Align::Center);
-        icon_image.set_halign(Align::Center);
-        normal_content.append(&icon_image);
+        let icon_handle =
+            IconsService::global().create_icon("audio-volume-medium-symbolic", &[osd::ICON]);
+        let icon_widget = icon_handle.widget();
+        icon_widget.set_size_request(icon_size, icon_size);
+        icon_widget.set_valign(Align::Center);
+        icon_widget.set_halign(Align::Center);
 
         // Slider (display only)
         let scale = Scale::with_range(orientation, 0.0, 100.0, 1.0);
@@ -96,7 +98,23 @@ impl OsdWidget {
             scale.set_inverted(true);
         }
 
-        normal_content.append(&scale);
+        let value_label = Label::new(Some("0"));
+        value_label.add_css_class(osd::VALUE);
+        value_label.set_valign(Align::Center);
+        value_label.set_halign(Align::Center);
+        value_label.set_visible(show_value);
+
+        // Vertical: value on top, icon on bottom. Horizontal: icon left, value right.
+        if orientation == Orientation::Vertical {
+            normal_content.append(&value_label);
+            normal_content.append(&scale);
+            normal_content.append(&icon_widget);
+        } else {
+            normal_content.append(&icon_widget);
+            normal_content.append(&scale);
+            normal_content.append(&value_label);
+        }
+
         root.append(&normal_content);
 
         // === Unavailable content: centered icon + label ===
@@ -122,7 +140,9 @@ impl OsdWidget {
         Self {
             root,
             normal_content,
+            icon_handle,
             scale,
+            value_label,
             unavailable_content,
             unavailable_icon,
             unavailable_label,
@@ -136,6 +156,7 @@ impl OsdWidget {
     pub fn set_value(&self, value: u32) {
         let v = value.clamp(0, 100) as f64;
         self.scale.set_value(v);
+        self.value_label.set_text(&(v as u32).to_string());
         // Show normal content, hide unavailable
         self.normal_content.set_visible(true);
         self.unavailable_content.set_visible(false);
@@ -152,15 +173,7 @@ impl OsdWidget {
     }
 
     pub fn set_icon(&self, icon_name: &str) {
-        // Try IconsService first (for theme integration).
-        let icons = IconsService::global();
-        let handle = icons.create_icon(icon_name, &[osd::ICON]);
-        // The icon handle sets size via CSS or internally, just use it
-        // Replace first child of normal_content with themed icon
-        if let Some(first_child) = self.normal_content.first_child() {
-            self.normal_content.remove(&first_child);
-        }
-        self.normal_content.prepend(&handle.widget());
+        self.icon_handle.set_icon(icon_name);
     }
 }
 
@@ -238,7 +251,7 @@ impl OsdOverlay {
         );
 
         // Child OSD widget.
-        let osd_widget = OsdWidget::new(orientation, 24);
+        let osd_widget = OsdWidget::new(orientation, 24, osd_config.show_value);
         container.append(osd_widget.widget());
         window.set_child(Some(&container));
 

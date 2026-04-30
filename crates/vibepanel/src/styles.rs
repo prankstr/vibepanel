@@ -906,6 +906,9 @@ pub mod osd {
     /// OSD slider (`.osd-slider`).
     pub const SLIDER: &str = "osd-slider";
 
+    /// OSD value label (`.osd-value`).
+    pub const VALUE: &str = "osd-value";
+
     /// Unavailable state content (`.osd-unavailable`).
     pub const UNAVAILABLE: &str = "osd-unavailable";
 

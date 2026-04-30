@@ -5,17 +5,15 @@
 //! via the standard callback mechanism.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use gtk4::gio::{self, prelude::*};
 use gtk4::glib::Variant;
 use tracing::{debug, error, info, warn};
 
+use super::callbacks::{CallbackId, Callbacks};
 use super::state::{self, PersistedNotification};
-
-/// Type alias for notification service callbacks.
-type NotificationCallback = Rc<dyn Fn(&NotificationService)>;
 
 const NOTIFICATIONS_NAME: &str = "org.freedesktop.Notifications";
 const NOTIFICATIONS_PATH: &str = "/org/freedesktop/Notifications";
@@ -97,6 +95,9 @@ pub struct Notification {
     pub image_path: Option<String>,
     /// Optional raw image data hint (e.g. freedesktop image-data)
     pub image_data: Option<NotificationImage>,
+    /// Whether the notification is transient: skip popover history and persistence,
+    /// only fire the toast.
+    pub transient: bool,
 }
 
 /// Raw image data for a notification, parsed from the
@@ -145,6 +146,7 @@ impl From<PersistedNotification> for Notification {
             desktop_entry: p.desktop_entry,
             image_path: p.image_path,
             image_data: None, // Binary data is not persisted
+            transient: false, // Transient notifications are never persisted
         }
     }
 }
@@ -168,12 +170,9 @@ pub struct NotificationService {
     muted: Cell<bool>,
 
     /// Callbacks for state changes
-    callbacks: RefCell<Vec<NotificationCallback>>,
+    callbacks: Callbacks<NotificationService>,
     /// Whether the service is ready
     ready: Cell<bool>,
-
-    /// IDs of notifications restored from persistence (should not trigger toasts)
-    restored_ids: RefCell<HashSet<u32>>,
 }
 
 impl NotificationService {
@@ -184,11 +183,9 @@ impl NotificationService {
 
         // Restore notifications from persisted state
         let mut notifications = HashMap::new();
-        let mut restored_ids = HashSet::new();
         let mut max_id: u32 = 0;
         for pn in &notification_state.history {
             max_id = max_id.max(pn.id);
-            restored_ids.insert(pn.id);
             notifications.insert(pn.id, Notification::from(pn.clone()));
         }
 
@@ -209,9 +206,8 @@ impl NotificationService {
             next_id: Cell::new(next_id),
             backend_available: Cell::new(false),
             muted: Cell::new(notification_state.muted),
-            callbacks: RefCell::new(Vec::new()),
+            callbacks: Callbacks::new(),
             ready: Cell::new(false),
-            restored_ids: RefCell::new(restored_ids),
         });
 
         Self::init_dbus(&service);
@@ -227,27 +223,31 @@ impl NotificationService {
     }
 
     /// Register a callback to be invoked when notification state changes.
-    pub fn connect<F>(&self, callback: F)
+    ///
+    /// Returns a `CallbackId` that can be passed to `disconnect` to unregister
+    /// the callback when the caller is dropped.
+    pub fn connect<F>(&self, callback: F) -> CallbackId
     where
         F: Fn(&NotificationService) + 'static,
     {
-        let cb = Rc::new(callback);
-        self.callbacks.borrow_mut().push(cb.clone());
+        let id = self.callbacks.register(callback);
 
         // Immediately send current state if ready
         if self.ready.get() {
-            cb(self);
+            self.callbacks.notify_single(id, self);
         }
+
+        id
+    }
+
+    /// Unregister a callback by its ID.
+    pub fn disconnect(&self, id: CallbackId) -> bool {
+        self.callbacks.unregister(id)
     }
 
     /// Check if we successfully own the D-Bus name.
     pub fn backend_available(&self) -> bool {
         self.backend_available.get()
-    }
-
-    /// Get the number of active notifications.
-    pub fn count(&self) -> usize {
-        self.notifications.borrow().len()
     }
 
     /// Check if notifications are muted (toasts suppressed).
@@ -276,17 +276,27 @@ impl NotificationService {
         self.notifications.borrow().values().cloned().collect()
     }
 
+    /// Notifications excluding transients (which are toast-only per spec).
+    pub fn history_notifications(&self) -> Vec<Notification> {
+        self.notifications
+            .borrow()
+            .values()
+            .filter(|n| !n.transient)
+            .cloned()
+            .collect()
+    }
+
+    pub fn history_count(&self) -> usize {
+        self.notifications
+            .borrow()
+            .values()
+            .filter(|n| !n.transient)
+            .count()
+    }
+
     /// Get a notification by ID.
     pub fn get(&self, id: u32) -> Option<Notification> {
         self.notifications.borrow().get(&id).cloned()
-    }
-
-    /// Get IDs of notifications that were restored from persistence.
-    ///
-    /// These notifications should not trigger toast popups since they were
-    /// already seen in a previous session.
-    pub fn restored_ids(&self) -> HashSet<u32> {
-        self.restored_ids.borrow().clone()
     }
 
     /// Close a notification by ID (user dismissed).
@@ -521,6 +531,7 @@ impl NotificationService {
         let mut desktop_entry: Option<String> = None;
         let mut image_path: Option<String> = None;
         let mut image_data: Option<NotificationImage> = None;
+        let mut transient = false;
         for j in 0..hints_variant.n_children() {
             let entry = hints_variant.child_value(j);
             if entry.n_children() >= 2
@@ -575,6 +586,18 @@ impl NotificationService {
                             });
                         }
                     }
+                    "transient" => {
+                        // Spec allows boolean or numeric (any non-zero) values.
+                        if let Some(v) = actual_value.get::<bool>() {
+                            transient = v;
+                        } else if let Some(v) = actual_value.get::<u8>() {
+                            transient = v != 0;
+                        } else if let Some(v) = actual_value.get::<i32>() {
+                            transient = v != 0;
+                        } else if let Some(v) = actual_value.get::<u32>() {
+                            transient = v != 0;
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -616,6 +639,7 @@ impl NotificationService {
             desktop_entry,
             image_path,
             image_data,
+            transient,
         };
 
         debug!(
@@ -626,6 +650,8 @@ impl NotificationService {
             notification.expire_timeout,
             notification.urgency
         );
+
+        let is_transient = notification.transient;
 
         self.notifications.borrow_mut().insert(id, notification);
 
@@ -640,6 +666,12 @@ impl NotificationService {
 
         // Return the notification ID
         invocation.return_value(Some(&(id,).to_variant()));
+
+        // Muted transients never get a toast and never appear in the popover,
+        // so without this they'd linger in the map until evicted.
+        if is_transient && self.is_muted() {
+            self.close_internal(id, CLOSE_REASON_DISMISSED);
+        }
     }
 
     fn handle_close_notification(&self, params: &Variant, invocation: gio::DBusMethodInvocation) {
@@ -679,22 +711,24 @@ impl NotificationService {
         self.notify_listeners();
     }
 
-    /// Enforce the maximum notification limit by removing old notifications.
+    /// Trim oldest history once the cap is exceeded. Transients are owned by
+    /// the toast manager — they don't count toward the cap and aren't evicted.
     fn enforce_notification_limit(&self) {
         let mut notifications = self.notifications.borrow_mut();
-        if notifications.len() <= MAX_NOTIFICATIONS {
+
+        let history_count = notifications.values().filter(|n| !n.transient).count();
+        if history_count <= MAX_NOTIFICATIONS {
             return;
         }
 
-        // Collect (id, timestamp) pairs and sort by timestamp ascending (oldest first)
         let mut by_time: Vec<(u32, f64)> = notifications
             .iter()
+            .filter(|(_, n)| !n.transient)
             .map(|(id, n)| (*id, n.timestamp))
             .collect();
         by_time.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
 
-        // Remove oldest notifications until we're at the limit
-        let to_remove = notifications.len() - MAX_NOTIFICATIONS;
+        let to_remove = history_count - MAX_NOTIFICATIONS;
         for (id, _) in by_time.into_iter().take(to_remove) {
             notifications.remove(&id);
             debug!(
@@ -755,10 +789,7 @@ impl NotificationService {
     }
 
     fn notify_listeners(&self) {
-        let callbacks: Vec<_> = self.callbacks.borrow().iter().cloned().collect();
-        for cb in callbacks {
-            cb(self);
-        }
+        self.callbacks.notify(self);
     }
 
     /// Save current notification state to disk.
@@ -766,10 +797,13 @@ impl NotificationService {
         // Load existing state to preserve VPN state
         let mut persisted = state::load();
 
-        // Update notification state
+        // Update notification state. Transient notifications bypass persistence.
         let notifications = self.notifications.borrow();
-        let mut history: Vec<PersistedNotification> =
-            notifications.values().map(|n| n.to_persisted()).collect();
+        let mut history: Vec<PersistedNotification> = notifications
+            .values()
+            .filter(|n| !n.transient)
+            .map(|n| n.to_persisted())
+            .collect();
 
         // Sort by timestamp descending (most recent first)
         history.sort_by(|a, b| {
@@ -789,5 +823,177 @@ impl NotificationService {
 impl Drop for NotificationService {
     fn drop(&mut self) {
         debug!("NotificationService dropped");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Redirect XDG_STATE_HOME to a per-process tempdir so save_state writes
+    /// don't clobber the developer's real notification state.
+    fn redirect_state_home() {
+        use std::sync::Once;
+        static INIT: Once = Once::new();
+        INIT.call_once(|| {
+            let tmp =
+                std::env::temp_dir().join(format!("vibepanel-notif-test-{}", std::process::id()));
+            // SAFETY: This runs exactly once before any test reads the env var,
+            // and the redirect is harmless to any other test in this binary -
+            // they'll just see a clean per-process state file location.
+            unsafe {
+                std::env::set_var("XDG_STATE_HOME", &tmp);
+            }
+        });
+    }
+
+    fn make_service() -> Rc<NotificationService> {
+        redirect_state_home();
+        Rc::new(NotificationService {
+            bus: RefCell::new(None),
+            registration_id: RefCell::new(None),
+            notifications: RefCell::new(HashMap::new()),
+            next_id: Cell::new(1),
+            backend_available: Cell::new(false),
+            muted: Cell::new(false),
+            callbacks: Callbacks::new(),
+            ready: Cell::new(false),
+        })
+    }
+
+    fn make_notification(id: u32, transient: bool, timestamp: f64) -> Notification {
+        Notification {
+            id,
+            app_name: "test".to_string(),
+            app_icon: String::new(),
+            summary: String::new(),
+            body: String::new(),
+            actions: Vec::new(),
+            urgency: URGENCY_NORMAL,
+            timestamp,
+            expire_timeout: -1,
+            desktop_entry: None,
+            image_path: None,
+            image_data: None,
+            transient,
+        }
+    }
+
+    /// Mirror of the post-insert tail in handle_notify, which we can't call
+    /// directly because it consumes D-Bus types.
+    fn simulate_handle_notify(svc: &NotificationService, n: Notification) {
+        let id = n.id;
+        let is_transient = n.transient;
+        svc.notifications.borrow_mut().insert(id, n);
+        svc.enforce_notification_limit();
+        svc.save_state();
+        svc.notify_listeners();
+        if is_transient && svc.is_muted() {
+            svc.close_internal(id, CLOSE_REASON_DISMISSED);
+        }
+    }
+
+    #[test]
+    fn muted_transient_is_dropped_from_map() {
+        let svc = make_service();
+        svc.muted.set(true);
+
+        simulate_handle_notify(&svc, make_notification(1, true, 1.0));
+
+        assert!(
+            !svc.notifications.borrow().contains_key(&1),
+            "muted transient should not linger in the map"
+        );
+    }
+
+    #[test]
+    fn unmuted_transient_remains_until_toast_lifecycle_ends() {
+        let svc = make_service();
+        // muted = false (default)
+
+        simulate_handle_notify(&svc, make_notification(1, true, 1.0));
+
+        assert!(
+            svc.notifications.borrow().contains_key(&1),
+            "unmuted transient must stay in the map - the toast manager closes it on dismiss/timeout"
+        );
+    }
+
+    #[test]
+    fn muted_non_transient_remains_in_map() {
+        let svc = make_service();
+        svc.muted.set(true);
+
+        simulate_handle_notify(&svc, make_notification(1, false, 1.0));
+
+        assert!(
+            svc.notifications.borrow().contains_key(&1),
+            "muted non-transients are stored as history (only toasts are suppressed)"
+        );
+    }
+
+    #[test]
+    fn enforce_limit_excludes_transients_from_count() {
+        let svc = make_service();
+        // Fill exactly to the cap with history, then add transients on top.
+        for i in 0..(MAX_NOTIFICATIONS as u32) {
+            svc.notifications
+                .borrow_mut()
+                .insert(i + 1, make_notification(i + 1, false, i as f64));
+        }
+        for i in 0..50u32 {
+            let id = MAX_NOTIFICATIONS as u32 + 100 + i;
+            svc.notifications
+                .borrow_mut()
+                .insert(id, make_notification(id, true, (1000 + i) as f64));
+        }
+
+        svc.enforce_notification_limit();
+
+        assert_eq!(
+            svc.notifications.borrow().len(),
+            MAX_NOTIFICATIONS + 50,
+            "transients should not trigger eviction even when total > cap"
+        );
+    }
+
+    #[test]
+    fn enforce_limit_evicts_oldest_history_only() {
+        let svc = make_service();
+        // 102 history (timestamps 0..102) + 5 transients with very old timestamps.
+        for i in 0..102u32 {
+            svc.notifications
+                .borrow_mut()
+                .insert(i + 1, make_notification(i + 1, false, i as f64));
+        }
+        for i in 0..5u32 {
+            let id = 1000 + i;
+            // Older than any history - would be first evicted if transients counted.
+            svc.notifications
+                .borrow_mut()
+                .insert(id, make_notification(id, true, -100.0 - i as f64));
+        }
+
+        svc.enforce_notification_limit();
+
+        let map = svc.notifications.borrow();
+        // History over the cap (ids 1, 2 = oldest two) should be evicted.
+        assert!(
+            !map.contains_key(&1),
+            "oldest history (id=1) should be evicted"
+        );
+        assert!(
+            !map.contains_key(&2),
+            "second-oldest history (id=2) should be evicted"
+        );
+        assert!(map.contains_key(&3), "third-oldest history must survive");
+        // All transients survive despite older timestamps.
+        for i in 0..5u32 {
+            assert!(
+                map.contains_key(&(1000 + i)),
+                "transient id={} must not be evicted",
+                1000 + i
+            );
+        }
     }
 }

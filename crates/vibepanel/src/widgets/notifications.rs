@@ -16,12 +16,13 @@ use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4::{Align, Application, Box as GtkBox, Orientation, Overlay, Widget};
 use std::cell::{Cell, RefCell};
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::debug;
 use vibepanel_core::config::WidgetEntry;
 
+use crate::services::callbacks::CallbackId;
 use crate::services::icons::IconHandle;
 use crate::services::notification::{NotificationService, URGENCY_CRITICAL};
 use crate::services::tooltip::TooltipManager;
@@ -49,13 +50,18 @@ struct NotificationsWidgetInner {
     icon_handle: IconHandle,
     badge: Widget,
     container: GtkBox,
-    known_ids: RefCell<HashSet<u32>>,
+    /// Last-seen notification ids mapped to their timestamp. A bump in timestamp
+    /// for an existing id means the notification was replaced via replaces_id and
+    /// the toast should be re-shown with the new content.
+    known_ids: RefCell<HashMap<u32, f64>>,
     toast_manager: RefCell<Option<Rc<NotificationToastManager>>>,
     last_seen_timestamp: Cell<f64>,
     app: RefCell<Option<Application>>,
     menu_handle: RefCell<Option<Rc<MenuHandle>>>,
-    /// Last known notification IDs; used to skip popover rebuilds on mute-only changes.
-    last_notif_ids: RefCell<Vec<u32>>,
+    /// Last known (id, timestamp) snapshot. Used to skip popover rebuilds on
+    /// mute-only changes while still detecting replacements (same id, newer
+    /// timestamp via replaces_id) as a content change.
+    last_notif_ids: RefCell<Vec<(u32, f64)>>,
     /// When set, the popover dismiss handler already removed the row in-place,
     /// so `on_service_update` should skip `refresh_if_visible`.
     suppress_rebuild: Rc<Cell<bool>>,
@@ -63,7 +69,7 @@ struct NotificationsWidgetInner {
 
 impl NotificationsWidgetInner {
     fn on_service_update(&self, service: &NotificationService) {
-        let count = service.count();
+        let count = service.history_count();
         debug!(
             "NotificationsWidget: on_service_update called, count={}",
             count
@@ -82,9 +88,8 @@ impl NotificationsWidgetInner {
             self.badge.set_visible(false);
         }
 
-        // Check for critical notifications
         let has_critical = service
-            .notifications()
+            .history_notifications()
             .iter()
             .any(|n| n.urgency == URGENCY_CRITICAL);
 
@@ -132,10 +137,15 @@ impl NotificationsWidgetInner {
             }
         }
 
-        // Only rebuild the popover when the notification list changed;
-        // mute-only updates are handled in-place by the popover button.
-        let mut current_ids: Vec<u32> = service.notifications().iter().map(|n| n.id).collect();
-        current_ids.sort_unstable();
+        // Only rebuild the popover when the notification list changed; mute-only
+        // updates are handled in-place by the popover button. Compare (id, ts)
+        // so a replaces_id update (same id, newer ts) is also a content change.
+        let mut current_ids: Vec<(u32, f64)> = service
+            .history_notifications()
+            .iter()
+            .map(|n| (n.id, n.timestamp))
+            .collect();
+        current_ids.sort_unstable_by_key(|a| a.0);
         let list_changed = *self.last_notif_ids.borrow() != current_ids;
         *self.last_notif_ids.borrow_mut() = current_ids;
 
@@ -170,11 +180,11 @@ impl NotificationsWidgetInner {
             "NotificationsWidget: calculate_unread_count - active_toast_ids={:?}, last_seen={}, notifications_count={}",
             active_toast_ids,
             last_seen,
-            service.notifications().len()
+            service.history_count()
         );
 
         service
-            .notifications()
+            .history_notifications()
             .iter()
             .filter(|n| {
                 // Skip if currently shown as toast
@@ -208,26 +218,42 @@ impl NotificationsWidgetInner {
             return;
         }
 
+        // Snapshot current id -> timestamp so we can detect both new notifications
+        // and replacements (same id, newer timestamp via replaces_id).
+        let current: HashMap<u32, f64> = service
+            .notifications()
+            .iter()
+            .map(|n| (n.id, n.timestamp))
+            .collect();
+
         // Don't show toasts when muted
         if service.is_muted() {
             // Still update known IDs so we don't show stale toasts when unmuted
-            let current_ids: HashSet<u32> = service.notifications().iter().map(|n| n.id).collect();
-            *self.known_ids.borrow_mut() = current_ids;
+            *self.known_ids.borrow_mut() = current;
             return;
         }
 
-        let current_ids: HashSet<u32> = service.notifications().iter().map(|n| n.id).collect();
-        let known_ids = self.known_ids.borrow().clone();
+        let known = self.known_ids.borrow().clone();
 
-        let new_ids: HashSet<u32> = current_ids.difference(&known_ids).cloned().collect();
+        // Identify ids to (re)toast: brand-new ids, plus replacements where the
+        // timestamp has advanced since we last toasted.
+        let to_toast: Vec<u32> = current
+            .iter()
+            .filter(|(id, ts)| match known.get(id) {
+                None => true,
+                Some(prev_ts) => *ts > prev_ts,
+            })
+            .map(|(id, _)| *id)
+            .collect();
+
         // Note: We intentionally do NOT close toasts when notifications are removed.
         // Some apps (like Telegram) send a notification and then immediately close it,
         // expecting the notification daemon to still show it briefly. If we closed the
         // toast here, users would never see the notification.
         // Toasts will close naturally via their timeout or user dismissal.
 
-        // Show toasts for new notifications
-        if !new_ids.is_empty() {
+        // Show toasts for new and replaced notifications
+        if !to_toast.is_empty() {
             // Try to get the application from the widget's root window
             let app = self.get_application();
 
@@ -236,7 +262,7 @@ impl NotificationsWidgetInner {
             // proper initialization with callbacks.
 
             if let (Some(toast_manager), Some(app)) = (&*self.toast_manager.borrow(), app) {
-                for id in &new_ids {
+                for id in &to_toast {
                     if let Some(notification) = service.get(*id) {
                         toast_manager.show(&app, &notification);
                     }
@@ -244,8 +270,8 @@ impl NotificationsWidgetInner {
             }
         }
 
-        // Update known IDs
-        *self.known_ids.borrow_mut() = current_ids;
+        // Update known IDs (with current timestamps)
+        *self.known_ids.borrow_mut() = current;
     }
 
     /// Get the GTK Application from the widget's root window.
@@ -278,7 +304,12 @@ impl NotificationsWidgetInner {
 /// Notification bell widget with popover showing notification list.
 pub struct NotificationsWidget {
     base: BaseWidget,
+    /// Kept for ownership: Weak references inside service/toast closures only
+    /// remain valid as long as this Rc is alive.
+    #[allow(dead_code)]
     inner: Rc<NotificationsWidgetInner>,
+    /// Callback ID for NotificationService, used to disconnect on drop.
+    service_callback_id: CallbackId,
 }
 
 impl NotificationsWidget {
@@ -317,7 +348,7 @@ impl NotificationsWidget {
             icon_handle,
             badge: badge.upcast(),
             container: base.widget().clone(),
-            known_ids: RefCell::new(HashSet::new()),
+            known_ids: RefCell::new(HashMap::new()),
             toast_manager: RefCell::new(None),
             last_seen_timestamp: Cell::new(0.0),
             app: RefCell::new(None),
@@ -326,57 +357,31 @@ impl NotificationsWidget {
             suppress_rebuild: Rc::new(Cell::new(false)),
         });
 
-        let widget = Self { base, inner };
-
-        widget.build_menu();
-
-        // Connect to notification service (using safe Rc pattern)
-        widget.bind_service();
-
-        widget
-    }
-
-    /// Get the root GTK widget for embedding in the bar.
-    pub fn widget(&self) -> &GtkBox {
-        self.base.widget()
-    }
-
-    fn build_menu(&self) {
-        let inner = Rc::clone(&self.inner);
-        let suppress_rebuild = Rc::clone(&self.inner.suppress_rebuild);
-
-        // Placeholder builder — replaced immediately below once we have the handle.
-        let menu_handle = self
-            .base
-            .create_menu(|| GtkBox::new(Orientation::Vertical, 0).into());
-
-        // Now that the handle exists, build the real builder with a Weak reference
-        // to it so the builder can create on_close callbacks that call handle.hide().
+        // Build menu before constructing Self so we can move base/inner cleanly.
+        let suppress_rebuild = Rc::clone(&inner.suppress_rebuild);
+        let inner_for_menu = Rc::clone(&inner);
+        let menu_handle = base.create_menu(|| GtkBox::new(Orientation::Vertical, 0).into());
         let handle_weak = Rc::downgrade(&menu_handle);
         menu_handle.set_builder(move || {
-            inner.mark_as_seen();
-
+            inner_for_menu.mark_as_seen();
             let on_close: Option<ClosePopoverCallback> = handle_weak
                 .upgrade()
                 .map(|handle| Rc::new(move || handle.hide()) as ClosePopoverCallback);
-
             build_popover_content(on_close, Rc::clone(&suppress_rebuild))
         });
+        *inner.menu_handle.borrow_mut() = Some(menu_handle);
 
-        *self.inner.menu_handle.borrow_mut() = Some(menu_handle);
-    }
-
-    fn bind_service(&self) {
+        // Seed known_ids with the persistence-restored set. DBus deliveries
+        // cannot arrive before bind time, so this is the full initial set.
         let service = NotificationService::global();
+        *inner.known_ids.borrow_mut() = service
+            .notifications()
+            .iter()
+            .map(|n| (n.id, n.timestamp))
+            .collect();
 
-        // Initialize known_ids with restored notifications so they don't trigger toasts
-        *self.inner.known_ids.borrow_mut() = service.restored_ids();
-
-        // Clone inner Rc for the callback - this is safe because Rc handles
-        // the reference counting properly
-        let inner = Rc::clone(&self.inner);
-
-        // Initialize toast manager with proper callbacks
+        // Initialize toast manager. Closures use Weak to avoid keeping inner
+        // alive after the widget is dropped.
         {
             let service_for_action = NotificationService::global();
             let on_action = move |id: u32, action_id: &str| {
@@ -391,22 +396,49 @@ impl NotificationsWidget {
             //
             // Instead, we use idle_add to defer the update to the next main loop iteration.
             // This breaks the synchronous call chain and prevents stack overflow.
-            let inner_for_callback = Rc::clone(&self.inner);
+            let inner_weak_for_toast = Rc::downgrade(&inner);
             let on_toast_removed = move || {
-                let inner_clone = Rc::clone(&inner_for_callback);
+                let inner_weak = inner_weak_for_toast.clone();
                 glib::idle_add_local_once(move || {
-                    let service = NotificationService::global();
-                    inner_clone.on_service_update(&service);
+                    if let Some(inner) = inner_weak.upgrade() {
+                        let service = NotificationService::global();
+                        inner.on_service_update(&service);
+                    }
                 });
             };
 
             let manager = NotificationToastManager::new(on_action, on_toast_removed);
-            *self.inner.toast_manager.borrow_mut() = Some(manager);
+            *inner.toast_manager.borrow_mut() = Some(manager);
         }
 
-        service.connect(move |svc| {
-            inner.on_service_update(svc);
-        });
+        // Connect to notification service using Weak to avoid keeping inner alive
+        // after the widget is dropped. The returned CallbackId is stored on the
+        // outer struct and disconnected in Drop.
+        let service_callback_id = {
+            let inner_weak = Rc::downgrade(&inner);
+            service.connect(move |svc| {
+                if let Some(inner) = inner_weak.upgrade() {
+                    inner.on_service_update(svc);
+                }
+            })
+        };
+
+        Self {
+            base,
+            inner,
+            service_callback_id,
+        }
+    }
+
+    /// Get the root GTK widget for embedding in the bar.
+    pub fn widget(&self) -> &GtkBox {
+        self.base.widget()
+    }
+}
+
+impl Drop for NotificationsWidget {
+    fn drop(&mut self) {
+        NotificationService::global().disconnect(self.service_callback_id);
     }
 }
 

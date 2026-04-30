@@ -45,6 +45,23 @@ pub fn css() -> &'static str {
     box-shadow: none;
 }
 
+.osd-value {
+    font-size: var(--font-size-base);
+    min-width: 2em;
+}
+
+.osd-horizontal .osd-value {
+    padding-top: 2px;
+}
+
+.osd-vertical .osd-value {
+    margin-top: 6px;
+}
+
+.osd-vertical .osd-icon {
+    margin-bottom: 4px;
+}
+
 /* OSD unavailable state - colors via vp-muted */
 .osd-unavailable-icon {
     color: var(--color-foreground-disabled);
