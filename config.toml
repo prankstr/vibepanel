@@ -16,6 +16,7 @@ position = "top"         # "top" or "bottom"
 size = 32
 border_radius = 30
 background_opacity = 0.0 # 0.0 = transparent (islands), 1.0 = solid
+# outline = true         # Override theme.outline for the bar (omit = inherit)
 
 [widgets]
 left = ["workspaces", "window_title"]
@@ -32,11 +33,13 @@ right = [
 border_radius = 40
 background_opacity = 1.0
 # popover_background_opacity = 0.9  # Override popover opacity (default: max of bar and widget opacity)
+# outline = true                    # Override theme.outline for widgets (omit = inherit)
 
 # Per-widget options use [widgets.<name>] sections.
 # Example:
 #   [widgets.clock]
 #   format = "%H:%M"
+#   outline_color = "accent"  # Per-widget outline color: "subtle" | "accent" | "foreground" | "#rrggbb"
 #
 #   [widgets.battery]
 #   disabled = true
@@ -79,6 +82,10 @@ mode = "dark" # "auto", "dark", "light", "gtk"
 #animations = true  # Enable/disable all CSS transitions and animations
 #ripple = true      # Enable/disable Material Design ripple effect on click
 #blur = false       # Enable compositor blur via ext-background-effect-v1 (requires niri with blur)
+#outline = false             # Decorative outline on bar, widgets, and surfaces (CSS border)
+#outline_width = 1           # Outline width in pixels (0..=4; 0 disables visibly)
+#outline_color = "accent"    # "subtle" | "accent" | "foreground" | "#rrggbb"
+#outline_opacity = 1.0        # 0.0 = transparent, 1.0 = opaque
 
 [theme.icons]
 theme = "material" # "material" or "gtk"

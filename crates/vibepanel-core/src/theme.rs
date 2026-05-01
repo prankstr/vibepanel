@@ -122,6 +122,28 @@ pub fn parse_hex_color(color: &str) -> Option<(u8, u8, u8)> {
     Some((r, g, b))
 }
 
+/// Resolve an outline color value to a CSS color expression.
+///
+/// Symbolic names map to existing theme tokens (`subtle` → `--color-border-subtle`,
+/// `accent` → `--color-accent-primary`, `foreground` → `--color-foreground-primary`)
+/// so the outline tracks the active theme polarity automatically. Hex colors
+/// (`#rgb` / `#rrggbb`) are normalized to the lowercase 6-character form.
+///
+/// Unrecognized values fall through unchanged — validation runs at config-load
+/// time, so unrecognized values shouldn't reach this function in practice.
+pub fn resolve_outline_color(value: &str) -> String {
+    match value {
+        "subtle" => "var(--color-border-subtle)".to_string(),
+        "accent" => "var(--color-accent-primary)".to_string(),
+        "foreground" => "var(--color-foreground-primary)".to_string(),
+        hex if hex.starts_with('#') => match parse_hex_color(hex) {
+            Some((r, g, b)) => format!("#{:02x}{:02x}{:02x}", r, g, b),
+            None => hex.to_string(),
+        },
+        other => other.to_string(),
+    }
+}
+
 /// Calculate relative luminance per WCAG formula (0.0 = black, 1.0 = white).
 pub fn relative_luminance(r: u8, g: u8, b: u8) -> f64 {
     fn channel(c: u8) -> f64 {
@@ -367,6 +389,25 @@ pub struct ThemePalette {
 
     // Sizes
     pub sizes: ThemeSizes,
+
+    // Outline (theme-level inputs, resolved for CSS emission)
+    /// Configured outline width in pixels (always present; per-scope visibility
+    /// is gated separately via the `*_outline_enabled` flags).
+    pub outline_width_px: u32,
+    /// Resolved outline color as a CSS color expression (e.g.,
+    /// `var(--color-border-subtle)` or `#aabbcc`).
+    pub outline_color_resolved: String,
+    /// Outline opacity as an integer percentage (0-100).
+    pub outline_opacity_pct: u32,
+    /// Effective outline state for the bar (theme default + `bar.outline` override).
+    pub bar_outline_enabled: bool,
+    /// Effective outline state for widgets/widget groups (theme default +
+    /// `widgets.outline` override).
+    pub widget_outline_enabled: bool,
+    /// Effective outline state for surfaces (popovers, OSD, toasts, tray, media,
+    /// Quick Settings). In v1 this just mirrors `theme.outline` — per-surface
+    /// overrides may be added later.
+    pub surface_outline_enabled: bool,
 
     // Internal: config values needed for computation
     bar_radius_percent: u32,
@@ -616,6 +657,25 @@ impl ThemePalette {
     --shadow-soft: {shadow_soft};
     --shadow-strong: {shadow_strong};
 
+    /* ===== Outlines =====
+     * Base values are theme-level. Per-scope `--*-outline-width` resolves
+     * to `var(--outline-width)` when the scope's outline is enabled, or
+     * `0px` when disabled. Color and opacity are simple aliases in v1;
+     * per-scope overrides can specialize them later without renaming.
+     */
+    --outline-width: {outline_width}px;
+    --outline-color: {outline_color};
+    --outline-opacity: {outline_opacity}%;
+    --bar-outline-width: {bar_outline_width};
+    --bar-outline-color: var(--outline-color);
+    --bar-outline-opacity: var(--outline-opacity);
+    --widget-outline-width: {widget_outline_width};
+    --widget-outline-color: var(--outline-color);
+    --widget-outline-opacity: var(--outline-opacity);
+    --surface-outline-width: {surface_outline_width};
+    --surface-outline-color: var(--outline-color);
+    --surface-outline-opacity: var(--outline-opacity);
+
     /* ===== Slider Tracks ===== */
     --color-slider-track: {slider_track};
     --color-slider-track-disabled: {slider_track_disabled};
@@ -722,6 +782,24 @@ impl ThemePalette {
             border_subtle = self.border_subtle,
             shadow_soft = self.shadow_soft,
             shadow_strong = self.shadow_strong,
+            outline_width = self.outline_width_px,
+            outline_color = self.outline_color_resolved,
+            outline_opacity = self.outline_opacity_pct,
+            bar_outline_width = if self.bar_outline_enabled {
+                "var(--outline-width)"
+            } else {
+                "0px"
+            },
+            widget_outline_width = if self.widget_outline_enabled {
+                "var(--outline-width)"
+            } else {
+                "0px"
+            },
+            surface_outline_width = if self.surface_outline_enabled {
+                "var(--outline-width)"
+            } else {
+                "0px"
+            },
             slider_track = self.slider_track,
             slider_track_disabled = self.slider_track_disabled,
             row_critical_bg = self.row_critical_background,
@@ -805,6 +883,12 @@ impl ThemePalette {
     ///
     /// Generates rules like `.widget.clock, .clock-popover { --widget-background-color: #f5c2e7; }`.
     /// Widget names are normalized to CSS conventions (underscores → hyphens).
+    ///
+    /// Per-widget `outline_color` is emitted as both `--widget-outline-color`
+    /// (for the in-bar widget body) and `--surface-outline-color` (for the
+    /// matching `.<name>-popover` surface, since GTK4 popovers render in
+    /// separate windows and a CSS-variable scope on `.widget.<name>` would
+    /// not propagate to them).
     pub fn generate_per_widget_css(config: &Config) -> String {
         let mut css = String::new();
 
@@ -823,6 +907,12 @@ impl ThemePalette {
                         widget_name
                     );
                 }
+            }
+
+            if let Some(ref color) = options.outline_color {
+                let resolved = resolve_outline_color(color);
+                rules.push(format!("--widget-outline-color: {};", resolved));
+                rules.push(format!("--surface-outline-color: {};", resolved));
             }
 
             if !rules.is_empty() {
@@ -863,6 +953,26 @@ impl ThemePalette {
         self.state_success = config.theme.states.success.clone();
         self.state_warning = config.theme.states.warning.clone();
         self.state_urgent = config.theme.states.urgent.clone();
+
+        // Outline configuration. Per-scope `Option<bool>` overrides inherit
+        // from `theme.outline` when omitted. Width and opacity are theme-level
+        // only in v1; effective visibility on a surface is `enabled && width > 0`.
+        //
+        // Bar outline in islands mode (`bar.background_opacity == 0.0`):
+        // when the user has not set an explicit `bar.outline`, suppress the
+        // outline so we don't draw a 1px rectangle around an invisible bar
+        // (an "outline framing nothing" surrounding the floating widgets).
+        // An explicit `bar.outline = true` still wins — users who want that
+        // framing look can opt in.
+        self.outline_width_px = config.theme.outline_width;
+        self.outline_color_resolved = resolve_outline_color(&config.theme.outline_color);
+        self.outline_opacity_pct = (config.theme.outline_opacity * 100.0).round() as u32;
+        self.bar_outline_enabled = config
+            .bar
+            .outline
+            .unwrap_or(config.theme.outline && config.bar.background_opacity > 0.0);
+        self.widget_outline_enabled = config.widgets.outline.unwrap_or(config.theme.outline);
+        self.surface_outline_enabled = config.theme.outline;
 
         // Handle auto mode (wallpaper-adaptive Material You theming) first,
         // since it sets backgrounds, foregrounds, accent, and state colors directly.
@@ -1427,6 +1537,12 @@ impl Default for ThemePalette {
             surface_border_radius: 0,
             radius_pill: 0,
             sizes: ThemeSizes::default(),
+            outline_width_px: 1,
+            outline_color_resolved: "var(--color-accent-primary)".to_string(),
+            outline_opacity_pct: 100,
+            bar_outline_enabled: false,
+            widget_outline_enabled: false,
+            surface_outline_enabled: false,
             bar_radius_percent: 30,
             widget_radius_percent: 40,
             bar_size: 32,
@@ -2283,6 +2399,196 @@ mod tests {
         assert!(
             palette.is_dark_mode,
             "low luminance should produce dark fallback when material_theme is None"
+        );
+    }
+
+    // ===== Outline =====
+
+    #[test]
+    fn test_resolve_outline_color_hex_normalizes_to_lowercase_six() {
+        // Real parsing logic: 3-char hex expands to 6-char, mixed case folds.
+        assert_eq!(resolve_outline_color("#FFF"), "#ffffff");
+        assert_eq!(resolve_outline_color("#3584E4"), "#3584e4");
+        assert_eq!(resolve_outline_color("#abc"), "#aabbcc");
+    }
+
+    #[test]
+    fn test_outline_enabled_propagates_to_all_scopes() {
+        // Catches "forgot to wire a scope" regressions in the cascade.
+        let mut config = Config::default();
+        config.theme.outline = true;
+        // Default bar opacity is 0.0 (islands mode), which suppresses the
+        // inherited bar outline; raise it to verify the propagation path.
+        config.bar.background_opacity = 1.0;
+        let palette = ThemePalette::from_config(&config, None, None);
+        assert!(palette.bar_outline_enabled);
+        assert!(palette.widget_outline_enabled);
+        assert!(palette.surface_outline_enabled);
+    }
+
+    #[test]
+    fn test_outline_override_matrix() {
+        // Per-section `Option<bool>` overrides must win over the theme default
+        // in either direction, and only affect their own scope. surface_outline
+        // has no per-section override in v1 so it always tracks theme.outline.
+        struct Case {
+            theme: bool,
+            bar_override: Option<bool>,
+            widgets_override: Option<bool>,
+            expect_bar: bool,
+            expect_widget: bool,
+            expect_surface: bool,
+        }
+        let cases = [
+            Case {
+                theme: true,
+                bar_override: Some(false),
+                widgets_override: None,
+                expect_bar: false,
+                expect_widget: true,
+                expect_surface: true,
+            },
+            Case {
+                theme: false,
+                bar_override: Some(true),
+                widgets_override: None,
+                expect_bar: true,
+                expect_widget: false,
+                expect_surface: false,
+            },
+            Case {
+                theme: true,
+                bar_override: None,
+                widgets_override: Some(false),
+                expect_bar: true,
+                expect_widget: false,
+                expect_surface: true,
+            },
+            Case {
+                theme: false,
+                bar_override: None,
+                widgets_override: Some(true),
+                expect_bar: false,
+                expect_widget: true,
+                expect_surface: false,
+            },
+        ];
+        for (i, c) in cases.iter().enumerate() {
+            let mut config = Config::default();
+            config.theme.outline = c.theme;
+            // Avoid islands-mode bar suppression contaminating the matrix —
+            // that interaction has its own dedicated test below.
+            config.bar.background_opacity = 1.0;
+            config.bar.outline = c.bar_override;
+            config.widgets.outline = c.widgets_override;
+            let p = ThemePalette::from_config(&config, None, None);
+            assert_eq!(p.bar_outline_enabled, c.expect_bar, "case {} bar", i);
+            assert_eq!(
+                p.widget_outline_enabled, c.expect_widget,
+                "case {} widget",
+                i
+            );
+            assert_eq!(
+                p.surface_outline_enabled, c.expect_surface,
+                "case {} surface",
+                i
+            );
+        }
+    }
+
+    #[test]
+    fn test_islands_mode_outline_suppression() {
+        // In islands mode (bar.background_opacity == 0) the bar surface is
+        // invisible, so an inherited bar outline would frame nothing — suppress
+        // it. Explicit `bar.outline = Some(true)` must still win for users who
+        // want a framing look around their islands. Other scopes inherit
+        // normally regardless.
+        let mut inherited = Config::default();
+        inherited.theme.outline = true;
+        inherited.bar.background_opacity = 0.0;
+        let p = ThemePalette::from_config(&inherited, None, None);
+        assert!(
+            !p.bar_outline_enabled,
+            "inherited bar outline must be suppressed"
+        );
+        assert!(p.widget_outline_enabled);
+        assert!(p.surface_outline_enabled);
+
+        let mut explicit = Config::default();
+        explicit.theme.outline = false;
+        explicit.bar.background_opacity = 0.0;
+        explicit.bar.outline = Some(true);
+        let p = ThemePalette::from_config(&explicit, None, None);
+        assert!(
+            p.bar_outline_enabled,
+            "explicit bar.outline = true must win"
+        );
+    }
+
+    #[test]
+    fn test_css_vars_block_emits_outline_variables() {
+        // CSS variable names are the contract with widgets/css/*.rs and
+        // services/surfaces.rs — there is no compile-time check across that
+        // boundary, so renames here would silently break the feature.
+        let mut config = Config::default();
+        config.theme.outline = true;
+        config.theme.outline_width = 2;
+        config.theme.outline_color = "accent".to_string();
+        config.theme.outline_opacity = 0.5;
+        config.bar.background_opacity = 1.0;
+        let css = ThemePalette::from_config(&config, None, None).css_vars_block();
+
+        for needle in [
+            "--outline-width: 2px;",
+            "--outline-color: var(--color-accent-primary);",
+            "--outline-opacity: 50%;",
+            "--bar-outline-width: var(--outline-width);",
+            "--widget-outline-width: var(--outline-width);",
+            "--surface-outline-width: var(--outline-width);",
+        ] {
+            assert!(css.contains(needle), "missing CSS var: {}", needle);
+        }
+    }
+
+    #[test]
+    fn test_css_vars_block_outline_disabled_emits_zero_width() {
+        // When a scope is disabled its `--*-outline-width` resolves to 0px so
+        // the consumer's `border: var(--*-outline-width) ...` renders nothing.
+        let css = ThemePalette::from_config(&Config::default(), None, None).css_vars_block();
+        for needle in [
+            "--bar-outline-width: 0px;",
+            "--widget-outline-width: 0px;",
+            "--surface-outline-width: 0px;",
+        ] {
+            assert!(css.contains(needle), "missing CSS var: {}", needle);
+        }
+    }
+
+    #[test]
+    fn test_per_widget_outline_color_emits_both_variables() {
+        // Widget popovers are separate GTK4 windows — CSS variables don't
+        // inherit across the window boundary, so a per-widget outline_color
+        // must be emitted on BOTH the bar-body selector (--widget-outline-color)
+        // and the popover selector (--surface-outline-color).
+        use crate::config::WidgetOptions;
+
+        let mut config = Config::default();
+        config.widgets.widget_configs.insert(
+            "clock".to_string(),
+            WidgetOptions {
+                outline_color: Some("accent".to_string()),
+                ..Default::default()
+            },
+        );
+
+        let css = ThemePalette::generate_per_widget_css(&config);
+        assert!(
+            css.contains("--widget-outline-color: var(--color-accent-primary);"),
+            "missing widget outline color"
+        );
+        assert!(
+            css.contains("--surface-outline-color: var(--color-accent-primary);"),
+            "missing surface outline color (popover would not pick up the override)"
         );
     }
 }

@@ -251,6 +251,24 @@ impl ConfigManager {
         self.palette.borrow().widget_border_radius
     }
 
+    /// Whether the bar outline is effectively visible.
+    pub fn bar_outline_visible(&self) -> bool {
+        let palette = self.palette.borrow();
+        palette.bar_outline_enabled && palette.outline_width_px > 0
+    }
+
+    /// Whether widget island outlines are effectively visible.
+    pub fn widget_outline_visible(&self) -> bool {
+        let palette = self.palette.borrow();
+        palette.widget_outline_enabled && palette.outline_width_px > 0
+    }
+
+    /// Whether floating surface outlines are effectively visible.
+    pub fn surface_outline_visible(&self) -> bool {
+        let palette = self.palette.borrow();
+        palette.surface_outline_enabled && palette.outline_width_px > 0
+    }
+
     /// Get the pill radius (used for rounded indicators, thumbnails, etc.).
     ///
     /// This is derived from the widget border radius configuration.
@@ -933,10 +951,12 @@ fn config_theme_changed(old: &Config, new: &Config) -> bool {
         || old.bar.background_opacity != new.bar.background_opacity
         || old.bar.border_radius != new.bar.border_radius
         || old.bar.size != new.bar.size
+        || old.bar.outline != new.bar.outline
         || old.widgets.background_color != new.widgets.background_color
         || old.widgets.background_opacity != new.widgets.background_opacity
         || old.widgets.popover_background_opacity != new.widgets.popover_background_opacity
         || old.widgets.border_radius != new.widgets.border_radius
+        || old.widgets.outline != new.widgets.outline
         || old.advanced.pango_font_rendering != new.advanced.pango_font_rendering
         // Per-widget style overrides (background_color, etc.)
         || per_widget_styles_changed(old, new)
@@ -1173,6 +1193,34 @@ mod tests {
 
         let mut new = old.clone();
         new.widgets.popover_background_opacity = Some(0.9);
+        assert!(config_theme_changed(&old, &new));
+    }
+
+    #[test]
+    fn test_config_theme_changed_detects_bar_outline_override() {
+        // bar.outline = Option<bool> override; toggling it must trigger a
+        // theme reload so the bar's --bar-outline-width updates live.
+        let old = Config::default();
+
+        let mut new = old.clone();
+        new.bar.outline = Some(true);
+        assert!(config_theme_changed(&old, &new));
+
+        let mut new = old.clone();
+        new.bar.outline = Some(false);
+        assert!(config_theme_changed(&old, &new));
+    }
+
+    #[test]
+    fn test_config_theme_changed_detects_widgets_outline_override() {
+        let old = Config::default();
+
+        let mut new = old.clone();
+        new.widgets.outline = Some(true);
+        assert!(config_theme_changed(&old, &new));
+
+        let mut new = old.clone();
+        new.widgets.outline = Some(false);
         assert!(config_theme_changed(&old, &new));
     }
 

@@ -41,6 +41,32 @@ const VALID_BAR_POSITIONS: &[&str] = &["top", "bottom"];
 /// Known valid values for osd.position.
 const VALID_OSD_POSITIONS: &[&str] = &["bottom", "left", "right", "top"];
 
+/// Known symbolic values for outline_color.
+///
+/// Symbolic names map to existing theme tokens at CSS render time (see
+/// `theme::resolve_outline_color`). Hex literals (`#rgb` / `#rrggbb`) are also
+/// accepted.
+const VALID_OUTLINE_COLOR_SYMBOLS: &[&str] = &["subtle", "accent", "foreground"];
+
+/// Maximum outline width in pixels.
+///
+/// Outlines are intended for visual edge definition (1px is the typical case);
+/// thicker decorative borders should be done via user CSS.
+const MAX_OUTLINE_WIDTH: u32 = 4;
+
+/// Validate an outline color value against the symbolic + hex contract.
+///
+/// Accepts: "subtle", "accent", "foreground", or a hex color (`#rgb` / `#rrggbb`).
+fn is_valid_outline_color(value: &str) -> bool {
+    if VALID_OUTLINE_COLOR_SYMBOLS.contains(&value) {
+        return true;
+    }
+    if let Some(hex) = value.strip_prefix('#') {
+        return (hex.len() == 3 || hex.len() == 6) && hex.chars().all(|c| c.is_ascii_hexdigit());
+    }
+    false
+}
+
 /// Embedded default configuration TOML, compiled into the binary.
 pub const DEFAULT_CONFIG_TOML: &str = include_str!("../../../config.toml");
 
@@ -331,6 +357,43 @@ impl Config {
             ));
         }
 
+        // Outline validation (theme-level)
+        if self.theme.outline_width > MAX_OUTLINE_WIDTH {
+            errors.push(format!(
+                "theme.outline_width: invalid value '{}', must be between 0 and {}",
+                self.theme.outline_width, MAX_OUTLINE_WIDTH
+            ));
+        }
+
+        if !(0.0..=1.0).contains(&self.theme.outline_opacity) {
+            errors.push(format!(
+                "theme.outline_opacity: invalid value '{}', must be between 0.0 and 1.0",
+                self.theme.outline_opacity
+            ));
+        }
+
+        if !is_valid_outline_color(&self.theme.outline_color) {
+            errors.push(format!(
+                "theme.outline_color: invalid value '{}', expected one of: {}, or a hex color like '#3584e4'",
+                self.theme.outline_color,
+                VALID_OUTLINE_COLOR_SYMBOLS.join(", ")
+            ));
+        }
+
+        // Per-widget outline_color validation
+        for (name, opts) in &self.widgets.widget_configs {
+            if let Some(ref color) = opts.outline_color
+                && !is_valid_outline_color(color)
+            {
+                errors.push(format!(
+                    "widgets.{}.outline_color: invalid value '{}', expected one of: {}, or a hex color like '#3584e4'",
+                    name,
+                    color,
+                    VALID_OUTLINE_COLOR_SYMBOLS.join(", ")
+                ));
+            }
+        }
+
         if errors.is_empty() {
             Ok(())
         } else {
@@ -574,6 +637,12 @@ pub struct BarConfig {
     /// Bar background opacity (0.0 = fully transparent, 1.0 = fully opaque).
     /// Default: 0.0 (transparent bar for "islands" look).
     pub background_opacity: f64,
+
+    /// Bar outline override. When omitted, inherits `theme.outline`.
+    /// `true` forces an outline on the bar; `false` suppresses it even when
+    /// the theme default is enabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outline: Option<bool>,
 }
 
 impl Default for BarConfig {
@@ -590,6 +659,7 @@ impl Default for BarConfig {
             outputs: Vec::new(),
             background_color: None,
             background_opacity: 0.0,
+            outline: None,
         }
     }
 }
@@ -654,6 +724,12 @@ pub struct WidgetsConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub popover_background_opacity: Option<f64>,
 
+    /// Widget outline override. When omitted, inherits `theme.outline`.
+    /// `true` forces outlines on widget islands/groups; `false` suppresses
+    /// them even when the theme default is enabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outline: Option<bool>,
+
     /// Per-widget configuration tables.
     /// Keys are widget names, values are widget-specific options.
     #[serde(flatten)]
@@ -670,6 +746,7 @@ impl Default for WidgetsConfig {
             background_color: None,
             background_opacity: 1.0,
             popover_background_opacity: None,
+            outline: None,
             widget_configs: HashMap::new(),
         }
     }
@@ -964,6 +1041,16 @@ pub struct WidgetOptions {
     #[serde(default)]
     pub background_color: Option<String>,
 
+    /// Outline color override for this widget.
+    ///
+    /// Accepts the same values as `theme.outline_color`: `"subtle"`,
+    /// `"accent"`, `"foreground"`, or a hex color (`#rgb` / `#rrggbb`).
+    /// Applies to the widget on the bar, the widget-item / merge-group
+    /// chrome, and the widget's popover. Width and opacity remain
+    /// theme-level only in v1.
+    #[serde(default)]
+    pub outline_color: Option<String>,
+
     /// Shell command to execute on right-click. Runs via `sh -c`.
     #[serde(default)]
     pub on_click_right: Option<String>,
@@ -1172,6 +1259,20 @@ pub struct ThemeConfig {
     /// Default: false
     pub blur: bool,
 
+    /// Decorative outline (CSS border) on the bar, widgets, and surfaces.
+    /// Per-section overrides: `bar.outline`, `widgets.outline`. Default: false.
+    pub outline: bool,
+
+    /// Outline width in pixels (0..=4). 0 disables visibly. Default: 1.
+    pub outline_width: u32,
+
+    /// Outline color: `"subtle"`, `"accent"`, `"foreground"`, or hex (`#rgb` /
+    /// `#rrggbb`). Default: "accent".
+    pub outline_color: String,
+
+    /// Outline opacity (0.0..=1.0). Default: 1.0.
+    pub outline_opacity: f64,
+
     /// State colors (success, warning, urgent).
     pub states: ThemeStates,
 
@@ -1195,6 +1296,10 @@ impl Default for ThemeConfig {
             ripple: true,
             shadows: true,
             blur: false,
+            outline: false,
+            outline_width: 1,
+            outline_color: "accent".to_string(),
+            outline_opacity: 1.0,
             states: ThemeStates::default(),
             typography: ThemeTypography::default(),
             icons: ThemeIconsConfig::default(),
@@ -2371,6 +2476,97 @@ mod tests {
         assert_eq!(
             config.theme.wallpaper,
             Some("/home/user/wall.png".to_string())
+        );
+    }
+
+    // ===== Outline configuration =====
+
+    #[test]
+    fn test_outline_section_overrides_round_trip() {
+        // Catches a regression in #[serde(default)] / field renames that
+        // would silently drop user overrides on parse.
+        let toml = r#"
+            [theme]
+            outline = true
+
+            [bar]
+            outline = false
+
+            [widgets]
+            outline = true
+        "#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert!(config.theme.outline);
+        assert_eq!(config.bar.outline, Some(false));
+        assert_eq!(config.widgets.outline, Some(true));
+    }
+
+    #[test]
+    fn test_is_valid_outline_color() {
+        // Symbolic + 3/6-char hex accepted; everything else rejected.
+        for ok in [
+            "subtle",
+            "accent",
+            "foreground",
+            "#fff",
+            "#ffffff",
+            "#3584e4",
+        ] {
+            assert!(is_valid_outline_color(ok), "expected '{}' to be valid", ok);
+        }
+        for bad in ["", "Subtle", "red", "#gg", "#12345", "ffffff"] {
+            assert!(
+                !is_valid_outline_color(bad),
+                "expected '{}' to be invalid",
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_outline_rejects_invalid_values() {
+        // One test per validated field; each asserts the error path mentions
+        // the field by name so user-facing messages don't silently regress.
+        let cases: &[(&dyn Fn(&mut Config), &str)] = &[
+            (&|c| c.theme.outline_width = 5, "outline_width"),
+            (&|c| c.theme.outline_opacity = 1.5, "outline_opacity"),
+            (
+                &|c| c.theme.outline_color = "rebeccapurple".to_string(),
+                "outline_color",
+            ),
+        ];
+        for (mutate, field) in cases {
+            let mut config = Config::default();
+            mutate(&mut config);
+            let err = config.validate().unwrap_err();
+            assert!(
+                format!("{:?}", err).contains(field),
+                "error for '{}' missing field name: {:?}",
+                field,
+                err
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_per_widget_outline_color_rejects_invalid() {
+        // Per-widget validation walks a different code path (loop over
+        // widget_configs); separate test so regressions there don't hide
+        // behind the theme-level cases above.
+        let mut config = Config::default();
+        config.widgets.widget_configs.insert(
+            "clock".to_string(),
+            WidgetOptions {
+                outline_color: Some("not-a-color".to_string()),
+                ..Default::default()
+            },
+        );
+        let err = config.validate().unwrap_err();
+        let msg = format!("{:?}", err);
+        assert!(
+            msg.contains("widgets.clock.outline_color"),
+            "error should mention widget path: {}",
+            msg
         );
     }
 }
