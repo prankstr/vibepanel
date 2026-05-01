@@ -56,6 +56,7 @@ sectioned-bar.bar {{
     padding-top: var(--bar-padding-y);
     padding-bottom: var(--bar-padding-y-bottom);
     background: var(--color-background-bar);
+    border: var(--bar-outline-width) solid color-mix(in srgb, var(--bar-outline-color) var(--bar-outline-opacity), transparent);
     border-radius: var(--radius-bar);
     font-family: var(--font-family);
     font-size: var(--font-size);
@@ -71,6 +72,7 @@ sectioned-bar.bar {{
 /* Widget — visual surface */
 .widget {{
     background-color: {widget_bg};
+    border: var(--widget-outline-width) solid color-mix(in srgb, var(--widget-outline-color) var(--widget-outline-opacity), transparent);
     border-radius: var(--radius-widget);
 }}
 
@@ -112,6 +114,7 @@ sectioned-bar.bar {{
 .widget-group > .content > .widget-item > .widget {{
     background-color: transparent;
     box-shadow: none;
+    border: none;
 }}
 
 /* Halve the visible inter-item gap at every seam inside a group. Each

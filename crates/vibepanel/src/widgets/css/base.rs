@@ -122,6 +122,7 @@ label link:active {{
 /* color-mix() is inline here so per-widget popover --widget-background-color overrides work via CSS scoping */
 .vp-surface-popover {{
     background-color: {popover_bg};
+    border: var(--surface-outline-width) solid color-mix(in srgb, var(--surface-outline-color) var(--surface-outline-opacity), transparent);
     border-radius: var(--radius-surface);
     box-shadow: var(--shadow-soft);
     padding: 16px;

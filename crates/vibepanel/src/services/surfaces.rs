@@ -405,7 +405,7 @@ popover.widget-menu.background > contents {{
     background-color: transparent;
     background: transparent;
     background-image: none;
-    border: none;
+    border: var(--surface-outline-width) solid color-mix(in srgb, var(--surface-outline-color) var(--surface-outline-opacity), transparent);
     border-radius: {radius};
     font-family: {font};
     font-size: var(--font-size);
@@ -472,6 +472,7 @@ popover.widget-menu.background * {{
 {selector} {{
     background-color: {bg};
     background-image: none;
+    border: var(--surface-outline-width) solid color-mix(in srgb, var(--surface-outline-color) var(--surface-outline-opacity), transparent);
     border-radius: {radius};
     font-family: {font};
     font-size: var(--font-size);
