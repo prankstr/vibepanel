@@ -325,12 +325,28 @@ impl Dispatch<wayland_client::protocol::wl_region::WlRegion, ()> for BlurState {
 /// clamps to a pill shape or falls back to a plain rectangle.
 /// Non-positive `width` or `height` return an empty vec (per Wayland protocol,
 /// non-positive dimensions are invalid for `wl_region.add`).
+#[cfg(test)]
 fn compute_rounded_rect_rects(
     x: i32,
     y: i32,
     width: i32,
     height: i32,
     radius: i32,
+) -> Vec<(i32, i32, i32, i32)> {
+    compute_rounded_rect_rects_with_corner_inset(x, y, width, height, radius, 0)
+}
+
+/// Compute rounded-rect scanlines, optionally trimming only the rounded corner
+/// rows inward.  Used when an outline is visible: the compositor blur region is
+/// made slightly more conservative at corners so rectangular scanline edges do
+/// not peek through semi-transparent CSS borders.
+fn compute_rounded_rect_rects_with_corner_inset(
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    radius: i32,
+    corner_inset: i32,
 ) -> Vec<(i32, i32, i32, i32)> {
     if width <= 0 || height <= 0 {
         return Vec::new();
@@ -355,6 +371,7 @@ fn compute_rounded_rect_rects(
         rects.push((x, y + radius, width, height - 2 * radius));
     }
 
+    let corner_inset = corner_inset.max(0);
     let r = radius as f64;
     for i in 0..radius as usize {
         let dy = r - 0.5 - i as f64;
@@ -363,6 +380,7 @@ fn compute_rounded_rect_rects(
         } else {
             (r - (r * r - dy * dy).sqrt()).round() as i32
         };
+        let inset = (inset + corner_inset).min((width - 1) / 2);
         let row_w = (width - 2 * inset).max(1);
         rects.push((x + inset, y + i as i32, row_w, 1));
         rects.push((x + inset, y + height - 1 - i as i32, row_w, 1));
@@ -371,19 +389,21 @@ fn compute_rounded_rect_rects(
     rects
 }
 
-/// Add a rounded rectangle to a `wl_region` using scanline rasterization.
-///
-/// Delegates to [`compute_rounded_rect_rects`] for the geometry, then feeds
-/// each rectangle to `region.add()`.
-fn add_rounded_rect_to_region(
+/// Add a rounded rectangle to a `wl_region`, trimming rounded corner rows
+/// inward by 1 logical pixel when an outline is visible.
+fn add_rounded_rect_to_region_with_outline(
     region: &wayland_client::protocol::wl_region::WlRegion,
     x: i32,
     y: i32,
     width: i32,
     height: i32,
     radius: i32,
+    outline_visible: bool,
 ) {
-    for (rx, ry, rw, rh) in compute_rounded_rect_rects(x, y, width, height, radius) {
+    let corner_inset = if outline_visible { 1 } else { 0 };
+    for (rx, ry, rw, rh) in
+        compute_rounded_rect_rects_with_corner_inset(x, y, width, height, radius, corner_inset)
+    {
         region.add(rx, ry, rw, rh);
     }
 }
@@ -722,6 +742,7 @@ impl BackgroundEffectManager {
         surface_root: &gtk4::Widget,
         content: &gtk4::Widget,
         radius_fn: impl Fn() -> i32 + Clone + 'static,
+        outline_visible_fn: impl Fn() -> bool + Clone + 'static,
     ) {
         let Some(gdk_surface) = surface_root.native().and_then(|n| n.surface()) else {
             return;
@@ -743,17 +764,24 @@ impl BackgroundEffectManager {
             let root_weak = root_weak.clone();
             let content_weak = content_weak.clone();
             let radius_fn = radius_fn.clone();
+            let outline_visible_fn = outline_visible_fn.clone();
             move |_: &gdk4_wayland::gdk::Surface, _: &glib::ParamSpec| {
                 let root_weak = root_weak.clone();
                 let content_weak = content_weak.clone();
                 let radius_fn = radius_fn.clone();
+                let outline_visible_fn = outline_visible_fn.clone();
                 glib::idle_add_local_once(move || {
                     if let Some(rc) = root_weak.upgrade()
                         && let Some(cc) = content_weak.upgrade()
                         && crate::services::config_manager::ConfigManager::global().blur_enabled()
                         && let Some(blur) = Self::global()
                     {
-                        blur.apply_blur_surface(&rc, &cc, radius_fn);
+                        blur.apply_blur_surface_with_outline(
+                            &rc,
+                            &cc,
+                            radius_fn,
+                            outline_visible_fn,
+                        );
                     }
                 });
             }
@@ -822,7 +850,15 @@ impl BackgroundEffectManager {
         let w = width - margin_start - margin_end;
         let h = height - margin_top - margin_bottom;
 
-        add_rounded_rect_to_region(&region, x, y, w, h, radius);
+        add_rounded_rect_to_region_with_outline(
+            &region,
+            x,
+            y,
+            w,
+            h,
+            radius,
+            crate::services::config_manager::ConfigManager::global().surface_outline_visible(),
+        );
 
         effect.set_blur_region(Some(&region));
         region.destroy();
@@ -879,9 +915,12 @@ impl BackgroundEffectManager {
 
         // Opaque/translucent bar: blur only the bar_box bounds, not the full surface.
         // Using apply_blur_surface so compute_bounds accounts for any margin/padding.
-        self.apply_blur_surface(window, bar_box, || {
-            crate::services::config_manager::ConfigManager::global().bar_border_radius() as i32
-        });
+        self.apply_blur_surface_with_outline(
+            window,
+            bar_box,
+            || crate::services::config_manager::ConfigManager::global().bar_border_radius() as i32,
+            || crate::services::config_manager::ConfigManager::global().bar_outline_visible(),
+        );
     }
 
     /// Apply blur regions for individual widget islands on a transparent bar.
@@ -911,9 +950,11 @@ impl BackgroundEffectManager {
         let radius =
             crate::services::config_manager::ConfigManager::global().widget_border_radius() as i32;
 
+        let outline_visible =
+            crate::services::config_manager::ConfigManager::global().widget_outline_visible();
         let region = compositor.create_region(&self.qh, ());
         for &(x, y, w, h) in islands {
-            add_rounded_rect_to_region(&region, x, y, w, h, radius);
+            add_rounded_rect_to_region_with_outline(&region, x, y, w, h, radius, outline_visible);
         }
 
         effect.set_blur_region(Some(&region));
@@ -1013,13 +1054,14 @@ impl BackgroundEffectManager {
         let y = margin_top as f64 + dy;
 
         let region = compositor.create_region(&self.qh, ());
-        add_rounded_rect_to_region(
+        add_rounded_rect_to_region_with_outline(
             &region,
             x.round() as i32,
             y.round() as i32,
             scaled_w.round() as i32,
             scaled_h.round() as i32,
             radius,
+            crate::services::config_manager::ConfigManager::global().surface_outline_visible(),
         );
 
         effect.set_blur_region(Some(&region));
@@ -1076,6 +1118,18 @@ impl BackgroundEffectManager {
         content: &impl gtk4::prelude::IsA<gtk4::Widget>,
         radius_fn: impl Fn() -> i32 + Clone + 'static,
     ) {
+        self.apply_blur_surface_with_outline(surface_root, content, radius_fn, || {
+            crate::services::config_manager::ConfigManager::global().surface_outline_visible()
+        });
+    }
+
+    fn apply_blur_surface_with_outline(
+        &self,
+        surface_root: &impl gtk4::prelude::IsA<gtk4::Widget>,
+        content: &impl gtk4::prelude::IsA<gtk4::Widget>,
+        radius_fn: impl Fn() -> i32 + Clone + 'static,
+        outline_visible_fn: impl Fn() -> bool + Clone + 'static,
+    ) {
         let Some(info) = SurfaceInfo::from_widget(surface_root) else {
             debug!("apply_blur_surface: no wl_surface, skipping");
             return;
@@ -1103,7 +1157,12 @@ impl BackgroundEffectManager {
             // Install a resize watcher so we re-try once the surface gets a
             // real size.  The watcher also handles subsequent resizes after
             // the initial apply succeeds.
-            Self::install_surface_resize_watcher(surface_root_widget, content_widget, radius_fn);
+            Self::install_surface_resize_watcher(
+                surface_root_widget,
+                content_widget,
+                radius_fn,
+                outline_visible_fn,
+            );
             return;
         }
 
@@ -1119,7 +1178,15 @@ impl BackgroundEffectManager {
 
         let region = compositor.create_region(&self.qh, ());
         let radius = radius_fn();
-        add_rounded_rect_to_region(&region, bx, by, bw, bh, radius);
+        add_rounded_rect_to_region_with_outline(
+            &region,
+            bx,
+            by,
+            bw,
+            bh,
+            radius,
+            outline_visible_fn(),
+        );
 
         effect.set_blur_region(Some(&region));
         region.destroy();
@@ -1136,7 +1203,12 @@ impl BackgroundEffectManager {
         // surface dimensions change after initial layout.  The idempotency
         // guard inside ensures this is a no-op when the deferred path
         // already installed one.
-        Self::install_surface_resize_watcher(surface_root_widget, content_widget, radius_fn);
+        Self::install_surface_resize_watcher(
+            surface_root_widget,
+            content_widget,
+            radius_fn,
+            outline_visible_fn,
+        );
 
         debug!(
             "Applied blur surface: {}x{} at ({},{}) r={} (surface {}x{})",
@@ -1147,7 +1219,7 @@ impl BackgroundEffectManager {
 
 #[cfg(test)]
 mod tests {
-    use super::compute_rounded_rect_rects;
+    use super::{compute_rounded_rect_rects, compute_rounded_rect_rects_with_corner_inset};
 
     /// Helper: compute total pixel area covered by non-overlapping scanline rects.
     fn total_area(rects: &[(i32, i32, i32, i32)]) -> i64 {
@@ -1304,6 +1376,33 @@ mod tests {
                     "overlap detected for {w}x{h} r={radius}: sum={sum_area} pixels={pixel_count}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn zero_corner_inset_matches_default_rasterization() {
+        let default = compute_rounded_rect_rects(3, 7, 40, 24, 8);
+        let inset_zero = compute_rounded_rect_rects_with_corner_inset(3, 7, 40, 24, 8, 0);
+        assert_eq!(default, inset_zero);
+    }
+
+    #[test]
+    fn corner_inset_trims_only_corner_scanlines() {
+        let base = compute_rounded_rect_rects(0, 0, 40, 30, 8);
+        let inset = compute_rounded_rect_rects_with_corner_inset(0, 0, 40, 30, 8, 1);
+
+        assert_eq!(base.len(), inset.len());
+        assert_eq!(base[0], inset[0], "central rect should remain unchanged");
+
+        for (before, after) in base.iter().skip(1).zip(inset.iter().skip(1)) {
+            assert_eq!(before.1, after.1, "y should not move");
+            assert_eq!(before.3, after.3, "scanline height should stay 1");
+            assert!(after.0 >= before.0, "left edge should move inward or stay");
+            assert!(
+                after.0 + after.2 <= before.0 + before.2,
+                "right edge should move inward or stay"
+            );
+            assert!(after.2 > 0, "scanline width must stay positive");
         }
     }
 
