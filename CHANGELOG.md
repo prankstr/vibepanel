@@ -5,6 +5,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.0](https://github.com/prankstr/vibepanel/compare/v0.13.0...v0.14.0) (2026-05-02)
+
+
+### Features
+
+* **blur:** add wayland ext-background-effect blur support ([#107](https://github.com/prankstr/vibepanel/issues/107)) ([3348828](https://github.com/prankstr/vibepanel/commit/3348828a23b0f038d0d7b0c904fe42387ca0a26f))
+* **osd:** add optional value label ([#114](https://github.com/prankstr/vibepanel/issues/114)) ([dfd0d08](https://github.com/prankstr/vibepanel/commit/dfd0d08d9739e61ecac027574f36c73acd666e6e))
+* **taskbar:** add taskbar widget with clickable window buttons ([#96](https://github.com/prankstr/vibepanel/issues/96)) ([9accd0c](https://github.com/prankstr/vibepanel/commit/9accd0c9dbde77c9759c05365d9b32a8784ea253))
+* **theme:** add contrast detection for image based icons ([#103](https://github.com/prankstr/vibepanel/issues/103)) ([d31568d](https://github.com/prankstr/vibepanel/commit/d31568d942182e8aa7d70e3a7f9e1f7bf8822f67))
+* **theme:** add outline support for bar, widgets and surfaces ([#118](https://github.com/prankstr/vibepanel/issues/118)) ([c67f6e1](https://github.com/prankstr/vibepanel/commit/c67f6e13108a09ac5af5ee2f552bff1bb7e762f0))
+* **theme:** add popover polarity override for hybrid light/dark themes ([f3f8b33](https://github.com/prankstr/vibepanel/commit/f3f8b33190f581b54c65cc117a438b1310c74807)), closes [#63](https://github.com/prankstr/vibepanel/issues/63)
+* **theme:** add semantic hover variables ([#110](https://github.com/prankstr/vibepanel/issues/110)) ([4b865d9](https://github.com/prankstr/vibepanel/commit/4b865d9cce0af6e74681673b5487859911db5735))
+* **theme:** derive scheme from wallpaper luminance in auto mode ([#105](https://github.com/prankstr/vibepanel/issues/105)) ([baf4a59](https://github.com/prankstr/vibepanel/commit/baf4a593f229ee7a47559100a0957b9e95194b1d))
+* **theme:** dynamic material theming from wallpaper ([#98](https://github.com/prankstr/vibepanel/issues/98)) ([a8edc92](https://github.com/prankstr/vibepanel/commit/a8edc92515f123bb71ef5273562d4e08bb01b402))
+* **wallpaper:** support hyprpaper wallpaper detection via hyprwire ([#106](https://github.com/prankstr/vibepanel/issues/106)) ([ee4f7ad](https://github.com/prankstr/vibepanel/commit/ee4f7ad3d06b1ed90876a13b4ec2656a1670838e))
+* **workspaces:** hyprland named workspaces and new config options ([#113](https://github.com/prankstr/vibepanel/issues/113)) ([982f924](https://github.com/prankstr/vibepanel/commit/982f9248ebc5dcd5472407ad1ec1becde38216d3))
+
+
+### Bug Fixes
+
+* **lint:** satisfy clippy 1.95 ([c19bb64](https://github.com/prankstr/vibepanel/commit/c19bb64ee8c90fd4d134160ea895e31e16dc7154))
+* **media:** use GestureDrag threshold to prevent hijacking clicks for popout ([68d9e31](https://github.com/prankstr/vibepanel/commit/68d9e31951b077be293b1f9b18bfc14bf95fe632))
+* **nix:** add host lib paths for GPU driver discovery ([f0d9f04](https://github.com/prankstr/vibepanel/commit/f0d9f04991940965f9ea6dab74c773af1bf3807a))
+* **notifications:** correctly disconnect callback to avoid multiple toasts ([#116](https://github.com/prankstr/vibepanel/issues/116)) ([e52d414](https://github.com/prankstr/vibepanel/commit/e52d414d7509a0133a47edf88bb83aa4ee1ab29c))
+* **notifications:** fix various notification bugs [#115](https://github.com/prankstr/vibepanel/issues/115)) ([a841cd2](https://github.com/prankstr/vibepanel/commit/a841cd2c71a51ff8fce3b291ca541ca3bc0537e2)), closes [#112](https://github.com/prankstr/vibepanel/issues/112)
+* **notifications:** honor transient hint ([a841cd2](https://github.com/prankstr/vibepanel/commit/a841cd2c71a51ff8fce3b291ca541ca3bc0537e2))
+* **notifications:** preserve newlines in popover body ([a841cd2](https://github.com/prankstr/vibepanel/commit/a841cd2c71a51ff8fce3b291ca541ca3bc0537e2))
+* **notifications:** refresh toast in place when notification is replaced ([a841cd2](https://github.com/prankstr/vibepanel/commit/a841cd2c71a51ff8fce3b291ca541ca3bc0537e2))
+* **theme:** allow accent override in the new auto mode ([c2503fc](https://github.com/prankstr/vibepanel/commit/c2503fc6c505fc98b519fef3f7f0ddcc9bd7e9b2))
+* **theme:** hot-reload even when style.css is a symlink ([#101](https://github.com/prankstr/vibepanel/issues/101)) ([b3f0bf3](https://github.com/prankstr/vibepanel/commit/b3f0bf36f81718763e08eccb3651c0f4d334d510))
+* **theme:** make color match matugen more closely with chroma filter ([ef24b4c](https://github.com/prankstr/vibepanel/commit/ef24b4c69495f4425ff60c8473a8e51b6f3e27d9))
+* **theme:** use foreground color when setting accent to "none" ([da3cd37](https://github.com/prankstr/vibepanel/commit/da3cd37f749ba22172c8bec4c70413ce2341a492))
+* **widgets:** focus ring applies to cards in QS when using keyboard nav ([3c05bfa](https://github.com/prankstr/vibepanel/commit/3c05bfaca621eea196521c0bcb84ed823271a75a))
+
 ## [0.13.0](https://github.com/prankstr/vibepanel/compare/v0.12.1...v0.13.0) (2026-04-01)
 
 
