@@ -400,6 +400,9 @@ fn add_rounded_rect_to_region_with_outline(
     radius: i32,
     outline_visible: bool,
 ) {
+    // 1px inset hides the staircase artifact at the anti-aliased rounded-corner
+    // edge. This doesn't scale with outline_width — the artifact is always at the
+    // outermost sub-pixel row; wider outlines simply cover more area inward.
     let corner_inset = if outline_visible { 1 } else { 0 };
     for (rx, ry, rw, rh) in
         compute_rounded_rect_rects_with_corner_inset(x, y, width, height, radius, corner_inset)

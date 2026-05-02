@@ -464,6 +464,11 @@ fn build_widget_or_group(
             let surface = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
             surface.add_css_class(class::WIDGET);
             surface.add_css_class(class::WIDGET_GROUP);
+            // First widget's per-widget style (outline_color, background_color)
+            // applies to the group surface so the shared border uses the right color.
+            if let Some(first) = group.first() {
+                surface.add_css_class(&first.name.replace('_', "-"));
+            }
             surface.set_overflow(gtk4::Overflow::Hidden);
             surface.set_hexpand(true);
             surface.set_vexpand(true);

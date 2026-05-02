@@ -254,19 +254,25 @@ impl ConfigManager {
     /// Whether the bar outline is effectively visible.
     pub fn bar_outline_visible(&self) -> bool {
         let palette = self.palette.borrow();
-        palette.bar_outline_enabled && palette.outline_width_px > 0
+        palette.bar_outline_enabled
+            && palette.outline_width_px > 0
+            && palette.outline_opacity_pct > 0
     }
 
     /// Whether widget island outlines are effectively visible.
     pub fn widget_outline_visible(&self) -> bool {
         let palette = self.palette.borrow();
-        palette.widget_outline_enabled && palette.outline_width_px > 0
+        palette.widget_outline_enabled
+            && palette.outline_width_px > 0
+            && palette.outline_opacity_pct > 0
     }
 
     /// Whether floating surface outlines are effectively visible.
     pub fn surface_outline_visible(&self) -> bool {
         let palette = self.palette.borrow();
-        palette.surface_outline_enabled && palette.outline_width_px > 0
+        palette.surface_outline_enabled
+            && palette.outline_width_px > 0
+            && palette.outline_opacity_pct > 0
     }
 
     /// Get the pill radius (used for rounded indicators, thumbnails, etc.).

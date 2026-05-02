@@ -1045,9 +1045,9 @@ pub struct WidgetOptions {
     ///
     /// Accepts the same values as `theme.outline_color`: `"subtle"`,
     /// `"accent"`, `"foreground"`, or a hex color (`#rgb` / `#rrggbb`).
-    /// Applies to the widget on the bar, the widget-item / merge-group
-    /// chrome, and the widget's popover. Width and opacity remain
-    /// theme-level only in v1.
+    /// Applies to standalone widgets on the bar and the widget's popover
+    /// surface. In merge groups, the group pill uses the first widget's
+    /// outline color. Width and opacity remain theme-level only in v1.
     #[serde(default)]
     pub outline_color: Option<String>,
 
@@ -2524,6 +2524,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::type_complexity)]
     fn test_validate_outline_rejects_invalid_values() {
         // One test per validated field; each asserts the error path mentions
         // the field by name so user-facing messages don't silently regress.
