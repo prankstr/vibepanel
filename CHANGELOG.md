@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.1](https://github.com/prankstr/vibepanel/compare/v0.14.0...v0.14.1) (2026-05-05)
+
+
+### Bug Fixes
+
+* **notifications:** toasts use same background as popovers instead of widgets ([e0d3d29](https://github.com/prankstr/vibepanel/commit/e0d3d29869d91d9126808cb3ca897bc7b3a0aa90))
+* **ui:** use popover opacity for floating overlays ([#122](https://github.com/prankstr/vibepanel/issues/122)) ([04d4679](https://github.com/prankstr/vibepanel/commit/04d4679536729ef6bada4c98f4785baa76c41494))
+* **widgets:** improve popover animation when using outline [#120](https://github.com/prankstr/vibepanel/issues/120)) ([f81d915](https://github.com/prankstr/vibepanel/commit/f81d9159341ab1e958d3f51f6bf428f485c7db6e))
+
 ## [0.14.0](https://github.com/prankstr/vibepanel/compare/v0.13.0...v0.14.0) (2026-05-02)
 
 
