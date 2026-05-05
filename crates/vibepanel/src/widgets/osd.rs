@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use tracing::trace;
 
-use crate::services::audio::AudioService;
+use crate::services::audio::{AudioService, valid_volume_percent};
 use crate::services::brightness::BrightnessService;
 use crate::services::callbacks::CallbackId;
 use crate::styles::{color, osd};
@@ -153,10 +153,13 @@ impl OsdWidget {
         &self.root
     }
 
-    pub fn set_value(&self, value: u32) {
-        let v = value.clamp(0, 100) as f64;
-        self.scale.set_value(v);
-        self.value_label.set_text(&(v as u32).to_string());
+    pub fn set_value(&self, value: u32, max_value: u32) {
+        let max_value = max_value.max(1);
+        // `max_value` is the recommended UI scale maximum. The actual audio
+        // value may exceed it; GTK saturates the bar while the label stays exact.
+        self.scale.set_range(0.0, max_value as f64);
+        self.scale.set_value(value as f64);
+        self.value_label.set_text(&value.to_string());
         // Show normal content, hide unavailable
         self.normal_content.set_visible(true);
         self.unavailable_content.set_visible(false);
@@ -294,9 +297,9 @@ impl OsdOverlay {
     }
 
     /// Show the overlay with a specific icon + value.
-    pub fn show_value(self: &Rc<Self>, icon_name: &str, value: u32) {
+    pub fn show_value(self: &Rc<Self>, icon_name: &str, value: u32, max_value: u32) {
         self.osd_widget.set_icon(icon_name);
-        self.osd_widget.set_value(value);
+        self.osd_widget.set_value(value, max_value);
 
         self.window.set_visible(true);
         self.reset_hide_timer();
@@ -313,11 +316,11 @@ impl OsdOverlay {
         } else {
             "display-brightness-high-symbolic"
         };
-        self.show_value(icon, value);
+        self.show_value(icon, value, 100);
     }
 
     /// Volume-specific helper: compute icon from volume/mute state and show.
-    pub fn show_volume(self: &Rc<Self>, volume: u32, muted: bool) {
+    pub fn show_volume(self: &Rc<Self>, volume: u32, muted: bool, max_volume: u32) {
         let icon = if muted || volume == 0 {
             "audio-volume-muted-symbolic"
         } else if volume < 33 {
@@ -327,8 +330,7 @@ impl OsdOverlay {
         } else {
             "audio-volume-high-symbolic"
         };
-        // Clamp to 100 for display, even though we allow overdrive internally.
-        self.show_value(icon, volume.min(100));
+        self.show_value(icon, volume, max_volume);
     }
 
     /// Show OSD indicating volume control is unavailable (device not ready).
@@ -523,7 +525,7 @@ impl OsdOverlay {
             return;
         }
 
-        self.show_volume(volume, muted);
+        self.show_volume(volume, muted, AudioService::global().user_max_percent());
     }
 
     // Public: IPC message handling (called by the panel-level IPC listener)
@@ -537,10 +539,11 @@ impl OsdOverlay {
         match msg {
             IpcMessage::Volume { percent, muted } => {
                 debug!("OSD: received volume {}% muted={}", percent, muted);
+                let percent = valid_volume_percent(*percent);
                 // Notify AudioService of the external volume request so
                 // behavioral detection can track whether the backend responded.
                 let audio = AudioService::global();
-                audio.note_external_volume_request(*percent);
+                audio.note_external_volume_request(percent);
 
                 // Check if control is available before showing normal volume OSD
                 let snapshot = audio.current();
@@ -548,7 +551,7 @@ impl OsdOverlay {
                     // Backend is up but not accepting volume changes
                     self.show_volume_unavailable();
                 } else {
-                    self.show_volume(*percent, *muted);
+                    self.show_volume(percent, *muted, AudioService::global().user_max_percent());
                 }
             }
             IpcMessage::VolumeUnavailable => {

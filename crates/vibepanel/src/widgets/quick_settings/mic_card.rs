@@ -108,7 +108,10 @@ pub fn build_mic_row() -> MicRowWidgets {
     let result = SliderRow::builder()
         .icon("microphone-sensitivity-high-symbolic")
         .interactive_icon(true) // Mute button is clickable
-        .range(0.0, 100.0)
+        // The slider is an interactive control, so keep its range capped to
+        // what Vibepanel is allowed to request. Programmatic updates are
+        // guarded to avoid writing external over-cap values back to Pulse.
+        .range(0.0, AudioService::global().user_max_percent() as f64)
         .step(1.0)
         .with_expander(true) // Source list expander
         .build();
@@ -121,6 +124,19 @@ pub fn build_mic_row() -> MicRowWidgets {
         expander_button: result.expander_button.expect("expander requested"),
         arrow_handle: result.expander_icon.expect("expander requested"),
     }
+}
+
+/// Update the slider from the backend state without causing write-back.
+///
+/// External mic volume can exceed Vibepanel's configured cap, but this is an
+/// interactive control: keep the range capped to the values Vibepanel may
+/// request. GTK will visually saturate over-cap values at the maximum, while
+/// the tooltip preserves the true backend volume.
+pub fn set_mic_slider_display(slider: &Scale, volume: u32) {
+    let max_percent = AudioService::global().user_max_percent().max(1);
+    slider.set_range(0.0, max_percent as f64);
+    slider.set_value(volume as f64);
+    slider.set_tooltip_text(Some(&format!("{volume}%")));
 }
 
 /// Container for mic details (source list) widgets.
@@ -311,7 +327,7 @@ pub fn on_mic_changed(state: &MicCardState, snapshot: &AudioSnapshot) {
     // Update volume slider (with flag to prevent feedback loop)
     if let Some(slider) = state.slider.borrow().as_ref() {
         state.updating.set(true);
-        slider.set_value(mic_volume as f64);
+        set_mic_slider_display(slider, mic_volume);
         slider.set_sensitive(control_ok);
         state.updating.set(false);
     }

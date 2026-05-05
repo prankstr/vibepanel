@@ -45,6 +45,7 @@ const FILE_CHANGE_DEBOUNCE_MS: u64 = 300;
 const WALLPAPER_POLL_INTERVAL_SECS: u32 = 2;
 
 use crate::bar;
+use crate::services::audio::AudioService;
 use crate::services::bar_manager::BarManager;
 use crate::services::icons::IconsService;
 use crate::services::network::NetworkService;
@@ -750,6 +751,7 @@ impl ConfigManager {
     pub(crate) fn handle_config_message(self: &Rc<Self>, msg: ConfigMessage) {
         match msg {
             ConfigMessage::Reloaded(new_config) => {
+                AudioService::global().set_allow_overdrive(new_config.audio.allow_overdrive);
                 self.apply_config(*new_config);
             }
             ConfigMessage::Error(err) => {

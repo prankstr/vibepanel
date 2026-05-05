@@ -109,6 +109,9 @@ pub struct Config {
     /// On-screen display configuration.
     pub osd: OsdConfig,
 
+    /// Audio configuration.
+    pub audio: AudioConfig,
+
     /// Advanced configuration options.
     pub advanced: AdvancedConfig,
 }
@@ -568,6 +571,9 @@ impl Config {
             "  enabled: {}, position: {}, timeout: {}ms, show_value: {}",
             self.osd.enabled, self.osd.position, self.osd.timeout_ms, self.osd.show_value
         ));
+
+        lines.push("\nAudio:".to_string());
+        lines.push(format!("  allow_overdrive: {}", self.audio.allow_overdrive));
 
         lines.join("\n")
     }
@@ -1375,6 +1381,14 @@ impl Default for OsdConfig {
     }
 }
 
+/// Audio configuration.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AudioConfig {
+    /// Allow output and microphone volume above 100%, capped at PulseAudio's recommended UI maximum.
+    pub allow_overdrive: bool,
+}
+
 /// Advanced configuration options.
 ///
 /// These settings are for power users and workarounds for specific
@@ -1422,6 +1436,7 @@ mod tests {
         assert_eq!(config.bar.screen_margin, 0);
         assert_eq!(config.bar.background_opacity, 0.0);
         assert_eq!(config.widgets.background_opacity, 1.0);
+        assert!(!config.audio.allow_overdrive);
         assert_eq!(config.advanced.compositor, "auto");
         assert_eq!(config.theme.mode, "auto");
         assert!(config.theme.accent.is_none());
@@ -1497,6 +1512,7 @@ mod tests {
 
         // Default values from embedded config should be inherited
         assert_eq!(config.bar.screen_margin, 0);
+        assert!(!config.audio.allow_overdrive);
 
         // Widgets should come from embedded defaults, not be empty
         assert!(
@@ -1559,6 +1575,17 @@ mod tests {
         assert_eq!(config.theme.icons.theme, "material");
         // bar.background_opacity comes from bar section defaults
         assert_eq!(config.bar.background_opacity, 0.0);
+    }
+
+    #[test]
+    fn test_load_with_defaults_audio_overdrive() {
+        let user_toml = r#"
+            [audio]
+            allow_overdrive = true
+        "#;
+
+        let config = Config::load_with_defaults(user_toml).unwrap();
+        assert!(config.audio.allow_overdrive);
     }
 
     #[test]

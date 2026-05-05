@@ -988,7 +988,7 @@ impl QuickSettingsWindow {
         let audio_service = AudioService::global();
         let audio_snapshot = audio_service.current();
 
-        audio_widgets.slider.set_value(audio_snapshot.volume as f64);
+        audio_card::set_volume_slider_display(&audio_widgets.slider, audio_snapshot.volume);
 
         let vol_icon = audio_card::volume_icon_name(audio_snapshot.volume, audio_snapshot.muted);
         audio_widgets.icon_handle.set_icon(vol_icon);
@@ -1084,7 +1084,7 @@ impl QuickSettingsWindow {
         let mic_volume = audio_snapshot.mic_volume.unwrap_or(0);
         let mic_muted = audio_snapshot.mic_muted.unwrap_or(false);
 
-        mic_widgets.slider.set_value(mic_volume as f64);
+        mic_card::set_mic_slider_display(&mic_widgets.slider, mic_volume);
 
         let mic_icon = mic_card::mic_icon_name(mic_volume, mic_muted);
         mic_widgets.icon_handle.set_icon(mic_icon);

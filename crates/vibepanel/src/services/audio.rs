@@ -80,13 +80,13 @@ pub struct SourceInfoSnapshot {
 /// Snapshot of audio service state for callbacks.
 #[derive(Debug, Clone)]
 pub struct AudioSnapshot {
-    /// Current volume as a percentage (0–150, allowing overdrive).
+    /// Current volume as a percentage, where values above 100 are overdrive.
     pub volume: u32,
     /// Whether the default sink is muted.
     pub muted: bool,
     /// Whether the default source (mic) is muted, if available.
     pub mic_muted: Option<bool>,
-    /// Current mic volume as a percentage (0–150), if available.
+    /// Current mic volume as a percentage, if available.
     pub mic_volume: Option<u32>,
     /// List of available sinks.
     pub sinks: Vec<SinkInfoSnapshot>,
@@ -147,22 +147,22 @@ impl AudioSnapshot {
 /// Commands sent from the main thread to the Pulse worker thread.
 ///
 /// These commands are processed asynchronously by the PulseAudio worker thread.
-/// Volume operations are clamped to [0, 150] before being sent.
+/// User-facing volume operations are clamped before being sent.
 #[derive(Debug)]
 enum AudioCommand {
-    /// Set volume to an absolute percentage (0–150).
+    /// Set volume to an absolute percentage.
     ///
-    /// Values are clamped to [0, 150] before sending. Values above 100 represent
-    /// overdrive/amplification. The command is silently ignored if no default
-    /// sink is available or if the sink's control is unavailable (e.g., 0 channels).
+    /// Values are clamped to the configured user-facing range before sending. The command is
+    /// silently ignored if no default sink is available or if the sink's control is unavailable
+    /// (e.g., 0 channels).
     SetVolume(u32),
 
-    /// Adjust volume relative to the current level.
+    /// Adjust output volume relative to the worker's latest known state.
     ///
-    /// The delta is added to the current volume percentage. The result is clamped
-    /// to [0, 150]. Positive values increase volume, negative values decrease it.
-    /// Example: `SetVolumeRelative(-5)` decreases volume by 5 percentage points.
-    SetVolumeRelative(i32),
+    /// Used by UI scroll controls so queued deltas compose deterministically while staying inside
+    /// the UI volume range. If the current volume is above `max_percent`, negative deltas snap back
+    /// to `max_percent` before applying further decreases.
+    SetVolumeRelative { delta: i32, max_percent: u32 },
 
     /// Set the mute state for the default audio output sink.
     ///
@@ -176,9 +176,9 @@ enum AudioCommand {
     /// The UI is notified immediately for responsiveness.
     ToggleMute,
 
-    /// Set microphone volume to an absolute percentage (0–150).
+    /// Set microphone volume to an absolute percentage.
     ///
-    /// Values are clamped to [0, 150] before sending. Silently ignored if
+    /// Values are clamped to the configured user-facing range before sending. Silently ignored if
     /// no default source is available or if mic control is unavailable.
     SetMicVolume(u32),
 
@@ -230,6 +230,59 @@ enum AudioCommand {
     Shutdown,
 }
 
+fn volume_to_percent(volume: Volume) -> u32 {
+    ((volume.0 as f64 / Volume::NORMAL.0 as f64) * 100.0).round() as u32
+}
+
+pub(crate) fn volume_ui_max_percent() -> u32 {
+    // Keep the UI usable if a backend reports a UI max below normal volume.
+    volume_to_percent(Volume::ui_max()).max(100)
+}
+
+pub(crate) fn volume_user_max_percent(allow_overdrive: bool) -> u32 {
+    if allow_overdrive {
+        volume_ui_max_percent()
+    } else {
+        100
+    }
+}
+
+fn percent_to_valid_volume(percent: u32) -> Volume {
+    let raw = (Volume::NORMAL.0 as f64 * percent as f64 / 100.0).round() as u32;
+    Volume(raw.min(Volume::MAX.0))
+}
+
+pub(crate) fn valid_volume_percent(percent: u32) -> u32 {
+    volume_to_percent(percent_to_valid_volume(percent))
+}
+
+pub(crate) fn user_volume_percent(percent: u32, max_percent: u32) -> u32 {
+    valid_volume_percent(percent).min(max_percent)
+}
+
+/// Apply a relative volume change within the user-facing cap.
+///
+/// If the backend volume is already above the cap, upward changes are ignored
+/// and the first downward change snaps back to the cap instead of also applying
+/// the decrement.
+fn bounded_relative_volume_target(current: u32, delta: i32, max_percent: u32) -> Option<u32> {
+    if delta > 0 {
+        if current >= max_percent {
+            None
+        } else {
+            Some(current.saturating_add(delta as u32).min(max_percent))
+        }
+    } else if delta < 0 {
+        if current > max_percent {
+            Some(max_percent)
+        } else {
+            Some(current.saturating_sub(delta.unsigned_abs()))
+        }
+    } else {
+        None
+    }
+}
+
 /// Internal state update sent from the Pulse thread to the main thread.
 #[derive(Debug, Clone)]
 struct AudioStateUpdate {
@@ -258,6 +311,8 @@ pub struct AudioService {
     ready_at: Cell<Option<Instant>>,
     /// Sender for commands to the Pulse worker thread.
     command_tx: Sender<AudioCommand>,
+    /// Maximum percentage Vibepanel is allowed to request from user-facing controls.
+    user_max_percent: Cell<u32>,
 }
 
 impl AudioService {
@@ -271,6 +326,7 @@ impl AudioService {
             ready: Cell::new(false),
             ready_at: Cell::new(None),
             command_tx,
+            user_max_percent: Cell::new(100),
         });
 
         // State updates come back via glib::idle_add_once() - no polling needed.
@@ -351,18 +407,35 @@ impl AudioService {
         self.current.borrow().available
     }
 
-    /// Set volume as a percentage (0–150).
+    /// Configure the user-facing volume cap from audio settings.
+    pub fn set_allow_overdrive(&self, allow_overdrive: bool) {
+        let max_percent = volume_user_max_percent(allow_overdrive);
+        if self.user_max_percent.replace(max_percent) != max_percent {
+            let snapshot = self.current.borrow().clone();
+            self.callbacks.notify(&snapshot);
+        }
+    }
+
+    /// Current user-facing volume cap.
+    pub fn user_max_percent(&self) -> u32 {
+        self.user_max_percent.get()
+    }
+
+    /// Set volume as a percentage.
     ///
-    /// Values are clamped to [0, 150]. This method is efficient for rapid
-    /// calls (e.g., holding volume keys).
+    /// Clamps user-originated volume requests to the configured user-facing range.
+    /// This method is efficient for rapid calls (e.g., holding volume keys).
     pub fn set_volume(&self, percent: u32) {
-        let percent = percent.clamp(0, 150);
+        let percent = user_volume_percent(percent, self.user_max_percent());
         let _ = self.command_tx.send(AudioCommand::SetVolume(percent));
     }
 
-    /// Adjust volume by a relative amount (e.g., +5 or -5 percentage points).
+    /// Adjust output volume relative to the worker's latest known state.
     pub fn set_volume_relative(&self, delta: i32) {
-        let _ = self.command_tx.send(AudioCommand::SetVolumeRelative(delta));
+        let max_percent = self.user_max_percent();
+        let _ = self
+            .command_tx
+            .send(AudioCommand::SetVolumeRelative { delta, max_percent });
     }
 
     /// Set the mute state for the default sink.
@@ -395,12 +468,12 @@ impl AudioService {
             .send(AudioCommand::SetDefaultSink(name.to_string()));
     }
 
-    /// Set mic volume as a percentage (0–150).
+    /// Set mic volume as a percentage.
     ///
-    /// Values are clamped to [0, 150]. This method is efficient for rapid
+    /// Values are clamped to the configured user-facing range. This method is efficient for rapid
     /// calls (e.g., dragging slider).
     pub fn set_mic_volume(&self, percent: u32) {
-        let percent = percent.clamp(0, 150);
+        let percent = user_volume_percent(percent, self.user_max_percent());
         let _ = self.command_tx.send(AudioCommand::SetMicVolume(percent));
     }
 
@@ -533,7 +606,7 @@ impl Drop for AudioService {
 #[derive(Default)]
 struct PulseWorkerState {
     // ===== Sink (Output Device) State =====
-    /// Current volume of the default sink as a percentage (0–150).
+    /// Current volume of the default sink as a percentage.
     ///
     /// Values above 100 represent overdrive/amplification. Updated whenever
     /// we receive sink info from PulseAudio. Not updated if the sink reports
@@ -589,7 +662,7 @@ struct PulseWorkerState {
     /// Once set, remains `Some` for the session lifetime.
     mic_muted: Option<bool>,
 
-    /// Current volume of the default source (microphone) as a percentage (0–150).
+    /// Current volume of the default source (microphone) as a percentage.
     ///
     /// `None` if we haven't yet received source info. Values above 100
     /// represent gain/amplification.
@@ -868,15 +941,16 @@ fn handle_command(
                 percent,
             );
         }
-        AudioCommand::SetVolumeRelative(delta) => {
+        AudioCommand::SetVolumeRelative { delta, max_percent } => {
             let current = state.lock().volume;
-            let new_volume = (current as i32 + delta).clamp(0, 150) as u32;
-            set_sink_volume(
-                Arc::clone(&mainloop),
-                Arc::clone(&context),
-                Arc::clone(&state),
-                new_volume,
-            );
+            if let Some(target) = bounded_relative_volume_target(current, delta, max_percent) {
+                set_sink_volume(
+                    Arc::clone(&mainloop),
+                    Arc::clone(&context),
+                    Arc::clone(&state),
+                    target,
+                );
+            }
         }
         AudioCommand::SetMuted(muted) => {
             set_sink_mute(
@@ -1348,7 +1422,7 @@ fn update_source_state(
     // Calculate volume as percentage (only if volume structure is valid)
     let volume_percent = if volume_valid && channel_count > 0 {
         let avg_volume = info.volume.avg();
-        ((avg_volume.0 as f64 / Volume::NORMAL.0 as f64) * 100.0).round() as u32
+        volume_to_percent(avg_volume)
     } else {
         st.mic_volume.unwrap_or(0) // Keep previous value if invalid
     };
@@ -1432,7 +1506,7 @@ fn update_sink_state(state: &Arc<Mutex<PulseWorkerState>>, info: &SinkInfo) {
     // Calculate volume as percentage (only if volume structure is valid)
     let volume_percent = if volume_valid && channel_count > 0 {
         let avg_volume = info.volume.avg();
-        ((avg_volume.0 as f64 / Volume::NORMAL.0 as f64) * 100.0).round() as u32
+        volume_to_percent(avg_volume)
     } else {
         st.volume // Keep previous value if invalid
     };
@@ -1554,8 +1628,8 @@ fn set_sink_volume(
     let ctx = context.lock();
     let mut introspect = ctx.introspect();
 
-    // Calculate the volume value.
-    let volume_value = Volume((Volume::NORMAL.0 as f64 * percent as f64 / 100.0) as u32);
+    let volume_value = percent_to_valid_volume(percent);
+    let percent = volume_to_percent(volume_value);
 
     // Use the actual channel count from the sink
     let mut cv = pulse::volume::ChannelVolumes::default();
@@ -1685,8 +1759,8 @@ fn set_source_volume(
     let ctx = context.lock();
     let mut introspect = ctx.introspect();
 
-    // Calculate the volume value.
-    let volume_value = Volume((Volume::NORMAL.0 as f64 * percent as f64 / 100.0) as u32);
+    let volume_value = percent_to_valid_volume(percent);
+    let percent = volume_to_percent(volume_value);
 
     // Use the actual channel count from the source
     let mut cv = pulse::volume::ChannelVolumes::default();
@@ -1773,13 +1847,15 @@ pub struct AudioCli {
     channel_count: u8,
     /// Whether volume control is currently available (sink not suspended).
     control_available: bool,
+    /// Maximum percentage Vibepanel CLI commands are allowed to request.
+    user_max_percent: u32,
 }
 
 impl AudioCli {
     /// Create a new CLI audio controller.
     ///
     /// Returns `None` if PulseAudio connection fails.
-    pub fn new() -> Option<Self> {
+    pub fn new(user_max_percent: u32) -> Option<Self> {
         let mut mainloop = StandardMainloop::new()?;
 
         let mut proplist = Proplist::new()?;
@@ -1830,6 +1906,7 @@ impl AudioCli {
             sink_index: None,
             channel_count: 2,         // Default to stereo, updated by refresh_state
             control_available: false, // Conservative default, updated by refresh_state
+            user_max_percent,
         };
 
         // Fetch initial state.
@@ -1848,7 +1925,7 @@ impl AudioCli {
         self.muted
     }
 
-    /// Set volume to a specific percentage (0-150).
+    /// Set volume to a specific percentage.
     pub fn set_volume(&mut self, percent: u32) -> Result<(), String> {
         let sink_index = self.sink_index.ok_or_else(|| {
             "no default sink found (is PulseAudio/pipewire-pulse running?)".to_string()
@@ -1866,12 +1943,11 @@ impl AudioCli {
             return Err("audio device not ready (try playing audio first)".to_string());
         }
 
-        let percent = percent.clamp(0, 150);
+        let percent = user_volume_percent(percent, self.user_max_percent);
 
         let mut introspect = self.context.introspect();
 
-        // Calculate the volume value.
-        let volume_value = Volume((Volume::NORMAL.0 as f64 * percent as f64 / 100.0) as u32);
+        let volume_value = percent_to_valid_volume(percent);
 
         // Use the actual channel count from the sink
         let mut cv = pulse::volume::ChannelVolumes::default();
@@ -1885,6 +1961,16 @@ impl AudioCli {
         // Update cached state.
         self.volume = percent;
 
+        Ok(())
+    }
+
+    /// Adjust volume relative to the current cached CLI state.
+    pub fn set_volume_relative(&mut self, delta: i32) -> Result<(), String> {
+        if let Some(target) =
+            bounded_relative_volume_target(self.volume, delta, self.user_max_percent)
+        {
+            self.set_volume(target)?;
+        }
         Ok(())
     }
 
@@ -1994,8 +2080,7 @@ impl AudioCli {
         introspect.get_sink_info_by_name(name, move |list_result| {
             if let ListResult::Item(info) = list_result {
                 let avg_volume = info.volume.avg();
-                let volume_percent =
-                    ((avg_volume.0 as f64 / Volume::NORMAL.0 as f64) * 100.0).round() as u32;
+                let volume_percent = volume_to_percent(avg_volume);
 
                 // Compute control_available using same logic as AudioService.
                 // We do NOT check sink state - suspended sinks still accept volume control.
@@ -2053,5 +2138,64 @@ impl AudioCli {
 impl Drop for AudioCli {
     fn drop(&mut self) {
         self.context.disconnect();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn percent_to_valid_volume_maps_100_to_normal() {
+        assert_eq!(percent_to_valid_volume(100), Volume::NORMAL);
+    }
+
+    #[test]
+    fn percent_to_valid_volume_clamps_to_pulse_max() {
+        assert_eq!(percent_to_valid_volume(u32::MAX), Volume::MAX);
+    }
+
+    #[test]
+    fn volume_ui_max_percent_stays_within_valid_volume_range() {
+        let ui_max = volume_ui_max_percent();
+        assert!(ui_max >= 100);
+        assert!(ui_max <= valid_volume_percent(u32::MAX));
+    }
+
+    #[test]
+    fn volume_user_max_percent_respects_overdrive_flag() {
+        assert_eq!(volume_user_max_percent(false), 100);
+        assert_eq!(volume_user_max_percent(true), volume_ui_max_percent());
+    }
+
+    #[test]
+    fn valid_volume_percent_is_idempotent() {
+        for percent in [50, 100, 150, u32::MAX] {
+            let normalized = valid_volume_percent(percent);
+            assert_eq!(valid_volume_percent(normalized), normalized);
+        }
+    }
+
+    #[test]
+    fn user_volume_percent_caps_to_ui_max() {
+        let ui_max = volume_ui_max_percent();
+        assert_eq!(user_volume_percent(100, ui_max), 100);
+        assert_eq!(user_volume_percent(ui_max, ui_max), ui_max);
+        assert_eq!(
+            user_volume_percent(ui_max.saturating_add(1), ui_max),
+            ui_max
+        );
+        assert_eq!(user_volume_percent(u32::MAX, ui_max), ui_max);
+        assert_eq!(user_volume_percent(ui_max, 100), 100);
+    }
+
+    #[test]
+    fn bounded_relative_volume_target_respects_ui_cap() {
+        assert_eq!(bounded_relative_volume_target(50, 5, 153), Some(55));
+        assert_eq!(bounded_relative_volume_target(153, 5, 153), None);
+        assert_eq!(bounded_relative_volume_target(200, 5, 153), None);
+        assert_eq!(bounded_relative_volume_target(200, -5, 153), Some(153));
+        assert_eq!(bounded_relative_volume_target(50, -5, 153), Some(45));
+        assert_eq!(bounded_relative_volume_target(50, 0, 153), None);
     }
 }

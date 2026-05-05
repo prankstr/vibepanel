@@ -11,7 +11,7 @@ mod services;
 pub mod styles;
 mod widgets;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
@@ -19,6 +19,7 @@ use gtk4::Application;
 use gtk4::prelude::*;
 use tracing::{debug, error, info, warn};
 
+use services::audio::AudioService;
 use services::bar_manager;
 use vibepanel_core::{Config, logging};
 
@@ -112,10 +113,9 @@ enum BrightnessAction {
 enum VolumeAction {
     /// Get current volume percentage
     Get,
-    /// Set volume to a specific percentage (0-150)
+    /// Set volume to a specific percentage
     Set {
-        /// Volume percentage (0-150, values above 100 are overdrive)
-        #[arg(value_parser = clap::value_parser!(u32).range(0..=150))]
+        /// Volume percentage, clamped to the configured user-facing range
         percent: u32,
     },
     /// Increase volume by a percentage (default: 5)
@@ -188,14 +188,15 @@ enum PopoverAction {
 }
 
 fn main() -> ExitCode {
-    let args = Args::parse();
+    let mut args = Args::parse();
 
     // Initialize logging
     logging::init(args.verbose);
 
-    // Handle subcommands (these don't need config or GTK)
-    if let Some(command) = args.command {
-        return handle_command(command);
+    // CLI subcommands don't need GTK. Volume only needs the audio policy and can
+    // fall back safely if unrelated config is broken.
+    if let Some(command) = args.command.take() {
+        return handle_command(command, args.config.as_deref());
     }
 
     // Load configuration using XDG lookup chain
@@ -254,15 +255,34 @@ fn main() -> ExitCode {
 }
 
 /// Handle CLI subcommands (brightness, volume, etc.)
-fn handle_command(command: Command) -> ExitCode {
+fn handle_command(command: Command, config_path: Option<&Path>) -> ExitCode {
     match command {
         Command::Brightness { action } => handle_brightness_command(action),
-        Command::Volume { action } => handle_volume_command(action),
+        Command::Volume { action } => {
+            handle_volume_command(action, load_volume_allow_overdrive(config_path))
+        }
         Command::Inhibit { action } => handle_inhibit_command(action),
         Command::Media { action } => handle_media_command(action),
         Command::Bar { action } => handle_bar_command(action),
         Command::Popover { action } => handle_popover_command(action),
     }
+}
+
+fn load_volume_allow_overdrive(config_path: Option<&Path>) -> bool {
+    let load_result = match Config::find_and_load(config_path) {
+        Ok(result) => result,
+        Err(e) => {
+            warn!("using default audio policy for volume command: {}", e);
+            return false;
+        }
+    };
+
+    if let Err(e) = load_result.config.validate() {
+        warn!("using default audio policy for volume command: {}", e);
+        return false;
+    }
+
+    load_result.config.audio.allow_overdrive
 }
 
 /// Handle brightness subcommands using direct sysfs/logind access.
@@ -318,8 +338,8 @@ fn handle_brightness_command(action: BrightnessAction) -> ExitCode {
 }
 
 /// Handle volume subcommands using PulseAudio.
-fn handle_volume_command(action: VolumeAction) -> ExitCode {
-    use crate::services::audio::AudioCli;
+fn handle_volume_command(action: VolumeAction, allow_overdrive: bool) -> ExitCode {
+    use crate::services::audio::{AudioCli, volume_user_max_percent};
     use crate::services::ipc::{notify_volume, notify_volume_unavailable};
 
     /// Check if an error indicates the audio sink is unavailable for control.
@@ -328,7 +348,8 @@ fn handle_volume_command(action: VolumeAction) -> ExitCode {
         error.contains("not ready") || error.contains("no channels")
     }
 
-    let mut cli = match AudioCli::new() {
+    let user_max_percent = volume_user_max_percent(allow_overdrive);
+    let mut cli = match AudioCli::new(user_max_percent) {
         Some(c) => c,
         None => {
             eprintln!(
@@ -346,7 +367,7 @@ fn handle_volume_command(action: VolumeAction) -> ExitCode {
         VolumeAction::Set { percent } => {
             match cli.set_volume(percent) {
                 Ok(()) => {
-                    notify_volume(percent, cli.is_muted());
+                    notify_volume(cli.get_volume(), cli.is_muted());
                     ExitCode::SUCCESS
                 }
                 Err(e) if is_sink_unavailable_error(&e) => {
@@ -362,12 +383,12 @@ fn handle_volume_command(action: VolumeAction) -> ExitCode {
             }
         }
         VolumeAction::Inc { amount } => {
-            let current = cli.get_volume();
-            let new_value = (current + amount).min(150);
-            match cli.set_volume(new_value) {
+            let delta = amount.min(i32::MAX as u32) as i32;
+            match cli.set_volume_relative(delta) {
                 Ok(()) => {
-                    notify_volume(new_value, cli.is_muted());
-                    println!("{}", new_value);
+                    let actual = cli.get_volume();
+                    notify_volume(actual, cli.is_muted());
+                    println!("{}", actual);
                     ExitCode::SUCCESS
                 }
                 Err(e) if is_sink_unavailable_error(&e) => {
@@ -382,12 +403,12 @@ fn handle_volume_command(action: VolumeAction) -> ExitCode {
             }
         }
         VolumeAction::Dec { amount } => {
-            let current = cli.get_volume();
-            let new_value = current.saturating_sub(amount);
-            match cli.set_volume(new_value) {
+            let delta = -(amount.min(i32::MAX as u32) as i32);
+            match cli.set_volume_relative(delta) {
                 Ok(()) => {
-                    notify_volume(new_value, cli.is_muted());
-                    println!("{}", new_value);
+                    let actual = cli.get_volume();
+                    notify_volume(actual, cli.is_muted());
+                    println!("{}", actual);
                     ExitCode::SUCCESS
                 }
                 Err(e) if is_sink_unavailable_error(&e) => {
@@ -565,21 +586,23 @@ fn run_gtk_app(config: Config, config_source: Option<PathBuf>) -> ExitCode {
         info!("Running with default configuration (no file found)");
     }
 
-    // Initialize the config manager singleton (before GTK, so it's ready for hot-reload)
-    ConfigManager::init_global(config.clone(), config_source.clone());
-
-    // Initialize the compositor manager singleton with advanced config
-    // This must happen after ConfigManager but before GTK widgets are created
-    CompositorManager::init_global(&config.advanced);
-
     // Default to Wayland backend
-    // SAFETY: This is called before GTK initialization, and we're setting a
-    // well-known environment variable. No other threads are accessing env vars yet.
+    // SAFETY: This is called before GTK initialization and before any service
+    // initialization that may spawn worker threads (for example AudioService).
+    // No other threads are accessing env vars yet.
     if std::env::var("GDK_BACKEND").is_err() {
         unsafe {
             std::env::set_var("GDK_BACKEND", "wayland");
         }
     }
+
+    // Initialize the config manager singleton (before GTK, so it's ready for hot-reload)
+    ConfigManager::init_global(config.clone(), config_source.clone());
+    AudioService::global().set_allow_overdrive(config.audio.allow_overdrive);
+
+    // Initialize the compositor manager singleton with advanced config
+    // This must happen after ConfigManager but before GTK widgets are created
+    CompositorManager::init_global(&config.advanced);
 
     let app = Application::builder()
         .application_id("io.github.vibepanel")

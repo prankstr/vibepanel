@@ -96,6 +96,10 @@ enabled = true
 position = "bottom" # "bottom", "top", "left", "right"
 show_value = false  # Show current value after the bar
 
+[audio]
+# Allow output and microphone volume over 100% (over-amplification), capped at PulseAudio's recommended UI max.
+allow_overdrive = false
+
 [advanced]
 # compositor = "auto"  # "auto", "hyprland", "niri", "mango"
 
