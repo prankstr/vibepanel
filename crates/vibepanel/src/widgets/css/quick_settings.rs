@@ -16,11 +16,6 @@ window.quick-settings-window {{
     background: transparent;
 }}
 
-/* QS window container - internal padding between container edge and content */
-.qs-window-container {{
-    padding-top: 4px;
-}}
-
 /* Click catcher overlay */
 .vp-click-catcher {{
     background: var(--color-click-catcher-overlay);
