@@ -15,7 +15,7 @@ use tracing::debug;
 use vibepanel_core::SurfaceStyles;
 
 use crate::services::config_manager::ConfigManager;
-use crate::styles::{icon, notification as notif, surface};
+use crate::styles::{icon, media, notification as notif, osd, surface};
 use crate::widgets::css::{POPOVER_BG_WITH_OPACITY, WIDGET_BG_WITH_OPACITY};
 use crate::widgets::scale_box::ScaleBox;
 
@@ -469,9 +469,10 @@ popover.widget-menu.background * {{
         } else {
             // Layer-shell popovers are GtkBox, not native Popover widgets.
             let is_popover_surface = widget.has_css_class(surface::POPOVER);
-            let is_toast_surface =
-                widget.has_css_class(notif::TOAST) || widget.has_css_class(notif::TOAST_CONTAINER);
-            let bg = if is_popover_surface || is_toast_surface {
+            let is_floating_surface = widget.has_css_class(notif::TOAST)
+                || widget.has_css_class(osd::OSD)
+                || widget.has_css_class(media::CONTENT);
+            let bg = if is_popover_surface || is_floating_surface {
                 POPOVER_BG_WITH_OPACITY
             } else {
                 WIDGET_BG_WITH_OPACITY
