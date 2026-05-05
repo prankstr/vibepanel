@@ -115,7 +115,7 @@ enum VolumeAction {
     Get,
     /// Set volume to a specific percentage
     Set {
-        /// Volume percentage, clamped to the configured user-facing range
+        /// Volume percentage, clamped to 100% unless audio overdrive is enabled in readable config
         percent: u32,
     },
     /// Increase volume by a percentage (default: 5)
@@ -259,30 +259,13 @@ fn handle_command(command: Command, config_path: Option<&Path>) -> ExitCode {
     match command {
         Command::Brightness { action } => handle_brightness_command(action),
         Command::Volume { action } => {
-            handle_volume_command(action, load_volume_allow_overdrive(config_path))
+            handle_volume_command(action, Config::read_audio_allow_overdrive(config_path))
         }
         Command::Inhibit { action } => handle_inhibit_command(action),
         Command::Media { action } => handle_media_command(action),
         Command::Bar { action } => handle_bar_command(action),
         Command::Popover { action } => handle_popover_command(action),
     }
-}
-
-fn load_volume_allow_overdrive(config_path: Option<&Path>) -> bool {
-    let load_result = match Config::find_and_load(config_path) {
-        Ok(result) => result,
-        Err(e) => {
-            warn!("using default audio policy for volume command: {}", e);
-            return false;
-        }
-    };
-
-    if let Err(e) = load_result.config.validate() {
-        warn!("using default audio policy for volume command: {}", e);
-        return false;
-    }
-
-    load_result.config.audio.allow_overdrive
 }
 
 /// Handle brightness subcommands using direct sysfs/logind access.
@@ -338,6 +321,9 @@ fn handle_brightness_command(action: BrightnessAction) -> ExitCode {
 }
 
 /// Handle volume subcommands using PulseAudio.
+///
+/// Volume commands are standalone media-key friendly operations: config errors
+/// must not fail the command, so unreadable policy safely caps controls at 100%.
 fn handle_volume_command(action: VolumeAction, allow_overdrive: bool) -> ExitCode {
     use crate::services::audio::{AudioCli, volume_user_max_percent};
     use crate::services::ipc::{notify_volume, notify_volume_unavailable};

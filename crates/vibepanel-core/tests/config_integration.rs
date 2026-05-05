@@ -309,3 +309,75 @@ fn test_validation_collects_multiple_errors() {
         "Should report osd.timeout_ms error"
     );
 }
+
+#[test]
+fn test_audio_overdrive_policy_explicit_true() {
+    let temp_dir = std::env::temp_dir().join("vibepanel_test_audio_policy_true");
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    std::fs::create_dir_all(&temp_dir).unwrap();
+
+    let config_path = temp_dir.join("config.toml");
+    std::fs::write(&config_path, "[audio]\nallow_overdrive = true\n").unwrap();
+
+    assert!(Config::read_audio_allow_overdrive(Some(&config_path)));
+
+    std::fs::remove_dir_all(&temp_dir).unwrap();
+}
+
+#[test]
+fn test_audio_overdrive_policy_explicit_false() {
+    let temp_dir = std::env::temp_dir().join("vibepanel_test_audio_policy_false");
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    std::fs::create_dir_all(&temp_dir).unwrap();
+
+    let config_path = temp_dir.join("config.toml");
+    std::fs::write(&config_path, "[audio]\nallow_overdrive = false\n").unwrap();
+
+    assert!(!Config::read_audio_allow_overdrive(Some(&config_path)));
+
+    std::fs::remove_dir_all(&temp_dir).unwrap();
+}
+
+#[test]
+fn test_audio_overdrive_policy_missing_or_invalid_falls_back() {
+    let temp_dir = std::env::temp_dir().join("vibepanel_test_audio_policy_invalid");
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    std::fs::create_dir_all(&temp_dir).unwrap();
+
+    let missing_path = temp_dir.join("missing.toml");
+    assert!(!Config::read_audio_allow_overdrive(Some(&missing_path)));
+
+    let malformed_path = temp_dir.join("malformed.toml");
+    std::fs::write(&malformed_path, "this is not valid toml {{{{\n").unwrap();
+    assert!(!Config::read_audio_allow_overdrive(Some(&malformed_path)));
+
+    let missing_audio_path = temp_dir.join("missing-audio.toml");
+    std::fs::write(&missing_audio_path, "[bar]\nsize = 40\n").unwrap();
+    assert!(!Config::read_audio_allow_overdrive(Some(
+        &missing_audio_path
+    )));
+
+    let wrong_type_path = temp_dir.join("wrong-type.toml");
+    std::fs::write(&wrong_type_path, "[audio]\nallow_overdrive = \"yes\"\n").unwrap();
+    assert!(!Config::read_audio_allow_overdrive(Some(&wrong_type_path)));
+
+    std::fs::remove_dir_all(&temp_dir).unwrap();
+}
+
+#[test]
+fn test_audio_overdrive_policy_ignores_unrelated_validation_errors() {
+    let temp_dir = std::env::temp_dir().join("vibepanel_test_audio_policy_lenient");
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    std::fs::create_dir_all(&temp_dir).unwrap();
+
+    let config_path = temp_dir.join("config.toml");
+    std::fs::write(
+        &config_path,
+        "[audio]\nallow_overdrive = true\n\n[theme]\nmode = \"invalid\"\n",
+    )
+    .unwrap();
+
+    assert!(Config::read_audio_allow_overdrive(Some(&config_path)));
+
+    std::fs::remove_dir_all(&temp_dir).unwrap();
+}

@@ -117,6 +117,49 @@ pub struct Config {
 }
 
 impl Config {
+    /// Best-effort loader for the standalone volume CLI's overdrive policy.
+    ///
+    /// Volume keybinds should stay reliable even when the full bar config is
+    /// invalid, so this reads only `[audio].allow_overdrive` and falls back to
+    /// `false` on any missing, unreadable, malformed, or wrongly typed value.
+    pub fn read_audio_allow_overdrive(explicit_path: Option<&Path>) -> bool {
+        fn read_policy(path: &Path) -> Option<bool> {
+            let contents = std::fs::read_to_string(path).ok()?;
+            let table = contents.parse::<Table>().ok()?;
+            table
+                .get("audio")
+                .and_then(|audio| audio.as_table())
+                .and_then(|audio| audio.get("allow_overdrive"))
+                .and_then(|value| value.as_bool())
+        }
+
+        if let Some(path) = explicit_path {
+            let policy = read_policy(path);
+            if policy.is_none() {
+                tracing::debug!(
+                    path = %path.display(),
+                    "using safe default audio policy for volume command"
+                );
+            }
+            return policy.unwrap_or(false);
+        }
+
+        for path in Self::config_search_paths() {
+            if path.exists() {
+                let policy = read_policy(&path);
+                if policy.is_none() {
+                    tracing::debug!(
+                        path = %path.display(),
+                        "using safe default audio policy for volume command"
+                    );
+                }
+                return policy.unwrap_or(false);
+            }
+        }
+
+        false
+    }
+
     /// Load configuration from an embedded default TOML string.
     pub fn from_default_toml() -> Result<Self> {
         let config: Config = toml::from_str(DEFAULT_CONFIG_TOML)?;
