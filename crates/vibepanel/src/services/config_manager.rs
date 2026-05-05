@@ -25,11 +25,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
-use gtk4::glib;
+use gtk4::{glib, prelude::*};
 use notify_debouncer_mini::{DebounceEventResult, new_debouncer, notify::RecursiveMode};
 use std::collections::HashSet;
 use tracing::{debug, error, info, warn};
 
+use vibepanel_core::theme::{BORDER_OPACITY_DARK, BORDER_OPACITY_GTK, BORDER_OPACITY_LIGHT};
 use vibepanel_core::{Config, ThemePalette, ThemeSizes};
 
 use super::callbacks::{CallbackId, Callbacks};
@@ -269,10 +270,109 @@ impl ConfigManager {
 
     /// Whether floating surface outlines are effectively visible.
     pub fn surface_outline_visible(&self) -> bool {
+        self.surface_outline_width() > 0.0
+    }
+
+    /// Resolve the current floating-surface outline as a concrete RGBA color.
+    ///
+    /// Custom GSK drawing cannot consume CSS variables or `color-mix()` tokens,
+    /// so this mirrors the supported `outline_color` symbolic values with the
+    /// already-computed palette colors. Per-widget overrides from
+    /// `[widgets.<name>]` take precedence over the global `theme.outline_color`.
+    /// This mirrors config/palette-driven outlines, not arbitrary user CSS overrides.
+    pub fn surface_outline_rgba_for_widget(
+        &self,
+        widget_name: &str,
+        widget: &impl IsA<gtk4::Widget>,
+    ) -> gtk4::gdk::RGBA {
+        let config = self.config.borrow();
+        let color = config
+            .widgets
+            .get_options(widget_name)
+            .and_then(|opts| opts.outline_color.as_deref())
+            .unwrap_or(&config.theme.outline_color)
+            .to_owned();
+        let alpha = (config.theme.outline_opacity as f32).clamp(0.0, 1.0);
+        drop(config);
+
+        self.resolve_outline_rgba(&color, alpha, widget)
+    }
+
+    fn resolve_outline_rgba(
+        &self,
+        color: &str,
+        alpha: f32,
+        widget: &impl IsA<gtk4::Widget>,
+    ) -> gtk4::gdk::RGBA {
+        let palette = self
+            .popover_palette
+            .borrow()
+            .clone()
+            .unwrap_or_else(|| self.palette.borrow().clone());
+        let is_subtle = color == "subtle";
+        let color = match color {
+            "subtle" => palette.border_subtle.as_str(),
+            "accent" => palette.accent_primary.as_str(),
+            "foreground" => palette.foreground_primary.as_str(),
+            value => value,
+        };
+
+        gtk4::gdk::RGBA::parse(color)
+            .map(|rgba| rgba.with_alpha(rgba.alpha() * alpha))
+            .unwrap_or_else(|_| {
+                // GTK mode stores some palette colors as CSS tokens. Resolve
+                // simple named colors through the widget style context so the
+                // animated outline matches the resting CSS outline.
+                if let Some(name) = color.strip_prefix('@') {
+                    // GTK4 has no non-deprecated replacement for resolving
+                    // runtime @token colors from the active theme.
+                    #[allow(deprecated)]
+                    if let Some(rgba) = widget.style_context().lookup_color(name) {
+                        return rgba.with_alpha(rgba.alpha() * alpha);
+                    }
+                }
+
+                if is_subtle && palette.is_gtk_mode {
+                    // Same GTK4 limitation as above, but `subtle` stores this
+                    // inside a color-mix() expression instead of a bare token.
+                    #[allow(deprecated)]
+                    if let Some(rgba) = widget.style_context().lookup_color("window_fg_color") {
+                        return rgba.with_alpha(rgba.alpha() * alpha * BORDER_OPACITY_GTK as f32);
+                    }
+                }
+
+                let fallback = if palette.is_dark_mode {
+                    gtk4::gdk::RGBA::WHITE
+                } else {
+                    gtk4::gdk::RGBA::BLACK
+                };
+                // GTK color-mix() values such as the subtle outline are not
+                // parseable here; approximate the baked-in non-GTK subtle alpha.
+                let subtle_factor = if is_subtle {
+                    if palette.is_dark_mode {
+                        BORDER_OPACITY_DARK as f32
+                    } else {
+                        BORDER_OPACITY_LIGHT as f32
+                    }
+                } else {
+                    1.0
+                };
+                fallback.with_alpha(alpha * subtle_factor)
+            })
+    }
+
+    /// Effective floating-surface outline width in logical pixels.
+    /// Width is palette-independent; only outline color follows the popover palette.
+    pub fn surface_outline_width(&self) -> f32 {
         let palette = self.palette.borrow();
-        palette.surface_outline_enabled
+        if palette.surface_outline_enabled
             && palette.outline_width_px > 0
             && palette.outline_opacity_pct > 0
+        {
+            palette.outline_width_px as f32
+        } else {
+            0.0
+        }
     }
 
     /// Get the pill radius (used for rounded indicators, thumbnails, etc.).

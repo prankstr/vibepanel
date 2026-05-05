@@ -32,7 +32,7 @@ use crate::styles::{qs, state, surface};
 use crate::widgets::layer_shell_popover::{
     ANIM_SCALE_FROM, AnimDirection, AnimState, Dismissible, calculate_bar_exclusive_zone,
     calculate_popover_bar_margin, calculate_popover_right_margin, create_click_catcher,
-    is_keynav_key, popover_bar_edge, popover_keyboard_mode, setup_esc_handler,
+    is_keynav_key, popover_bar_edge, popover_keyboard_mode, setup_esc_handler, snap_anim_shell,
 };
 use crate::widgets::scale_box::ScaleBox;
 
@@ -111,6 +111,9 @@ const QUICK_SETTINGS_DEFAULT_RIGHT_MARGIN: i32 = 8;
 const CARD_ROW_SPACING: i32 = 8;
 const CARD_ROW_GAP: i32 = 8;
 const AUDIO_SECTION_TOP_MARGIN: i32 = 12;
+/// Config key for the quick-settings widget, used for per-widget
+/// outline_color overrides in the animated outline path.
+const QUICK_SETTINGS_WIDGET: &str = "quick_settings";
 
 /// Full Quick Settings window.
 ///
@@ -1459,8 +1462,7 @@ impl QuickSettingsWindow {
                     if ConfigManager::global().animations_enabled() {
                         qs.start_animation(AnimDirection::Opening, generation);
                     } else {
-                        qs.anim_shell.set_opacity(1.0);
-                        qs.anim_shell.set_scale(1.0);
+                        snap_anim_shell(&qs.anim_shell, QUICK_SETTINGS_WIDGET, 1.0, 1.0);
                     }
                     let snapshot = NetworkService::global().snapshot();
                     network_card::on_network_changed(&qs.network, &snapshot, &qs.window);
@@ -1492,8 +1494,7 @@ impl QuickSettingsWindow {
                     if ConfigManager::global().animations_enabled() {
                         qs.start_animation(AnimDirection::Opening, generation);
                     } else {
-                        qs.anim_shell.set_opacity(1.0);
-                        qs.anim_shell.set_scale(1.0);
+                        snap_anim_shell(&qs.anim_shell, QUICK_SETTINGS_WIDGET, 1.0, 1.0);
                     }
 
                     let snapshot = NetworkService::global().snapshot();
@@ -1616,8 +1617,12 @@ impl QuickSettingsWindow {
 
         if !ConfigManager::global().animations_enabled() {
             // Animations disabled — snap closed immediately.
-            self.anim_shell.set_opacity(0.0);
-            self.anim_shell.set_scale(ANIM_SCALE_FROM);
+            snap_anim_shell(
+                &self.anim_shell,
+                QUICK_SETTINGS_WIDGET,
+                0.0,
+                ANIM_SCALE_FROM,
+            );
             self.is_animating_out.set(false);
             self.reset_ui_state();
             // No explicit blur removal needed — unmapping suspends
@@ -1677,10 +1682,6 @@ impl QuickSettingsWindow {
     /// close), the current progress is captured and the animation reverses from
     /// that point with proportional timing — no snapping.
     fn start_animation(&self, direction: AnimDirection, generation: u32) {
-        // Cache the current border radius for the duration of this animation.
-        self.anim_shell
-            .set_radius(ConfigManager::global().surface_border_radius() as f32);
-
         let start_time_us = self
             .anim_shell
             .frame_clock()
@@ -1692,6 +1693,15 @@ impl QuickSettingsWindow {
             generation,
             start_time_us,
             self.anim_shell.opacity(),
+        );
+
+        // Prepare first so reversal paths can reuse the existing tick callback;
+        // then ensure the current child has animation-outline styling even if no
+        // new callback is needed.
+        SurfaceStyleManager::global().apply_animated_surface_outline(
+            &self.anim_shell,
+            QUICK_SETTINGS_WIDGET,
+            true,
         );
 
         if !need_tick {
@@ -1745,8 +1755,7 @@ impl QuickSettingsWindow {
                     anim_state.borrow_mut().active = false;
 
                     if direction == AnimDirection::Closing {
-                        shell.set_opacity(0.0);
-                        shell_clone.set_scale(ANIM_SCALE_FROM);
+                        snap_anim_shell(&shell_clone, QUICK_SETTINGS_WIDGET, 0.0, ANIM_SCALE_FROM);
                         if let Some(window) = window_weak.upgrade()
                             && let Some(qs) = get_qs_window_data(&window)
                         {
@@ -1755,8 +1764,7 @@ impl QuickSettingsWindow {
                             qs.window.set_visible(false);
                         }
                     } else {
-                        shell.set_opacity(1.0);
-                        shell_clone.set_scale(1.0);
+                        snap_anim_shell(&shell_clone, QUICK_SETTINGS_WIDGET, 1.0, 1.0);
                     }
                     return ControlFlow::Break;
                 }

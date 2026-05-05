@@ -25,10 +25,10 @@ const SUBTLE_MULTIPLIER: f64 = 0.5;
 const CLICK_CATCHER_OPACITY: f64 = 0.005;
 
 // Border opacities (subtle borders that don't compete with content)
-const BORDER_OPACITY_DARK: f64 = 0.10;
-const BORDER_OPACITY_LIGHT: f64 = 0.12;
+pub const BORDER_OPACITY_DARK: f64 = 0.10;
+pub const BORDER_OPACITY_LIGHT: f64 = 0.12;
 // GTK mode: average of dark/light since we can't know the theme at build time
-const BORDER_OPACITY_GTK: f64 = 0.11;
+pub const BORDER_OPACITY_GTK: f64 = 0.11;
 
 // Shadow configuration (layered shadows for natural look)
 const SHADOW_OPACITY_DARK: f64 = 0.40;

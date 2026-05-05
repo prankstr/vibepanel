@@ -131,6 +131,11 @@ label link:active {{
     color: var(--color-foreground-primary);
 }}
 
+/* Mirrors the generated surface rule for static popover styles. */
+.vp-surface-popover.vp-suppress-css-outline {{
+    border-color: transparent;
+}}
+
 popover.widget-menu,
 box.popover-wrapper,
 box.widget-menu-wrapper {{

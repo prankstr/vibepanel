@@ -170,6 +170,12 @@ impl AnimState {
     }
 }
 
+pub(crate) fn snap_anim_shell(shell: &ScaleBox, widget_name: &str, opacity: f64, scale: f64) {
+    shell.set_opacity(opacity);
+    shell.set_scale(scale);
+    SurfaceStyleManager::global().apply_animated_surface_outline(shell, widget_name, false);
+}
+
 /// Calculate the margin for a popover on the bar-adjacent edge.
 ///
 /// When the bar has a visible background (opacity > 0), the popover needs to
@@ -649,8 +655,7 @@ impl LayerShellPopover {
         // If animations are disabled, snap closed immediately.
         if !ConfigManager::global().animations_enabled() {
             if let Some(ref shell) = anim_shell {
-                shell.set_opacity(0.0);
-                shell.set_scale(ANIM_SCALE_FROM);
+                snap_anim_shell(shell, &self.widget_name, 0.0, ANIM_SCALE_FROM);
                 shell.remove_child();
             }
             // No explicit blur removal needed — unmapping suspends
@@ -710,6 +715,13 @@ impl LayerShellPopover {
         }
 
         anim_shell.set_child(&content);
+        if self.anim_state.borrow().active {
+            SurfaceStyleManager::global().apply_animated_surface_outline(
+                &anim_shell,
+                &self.widget_name,
+                true,
+            );
+        }
 
         SurfaceStyleManager::global().apply_pango_attrs_all(&anim_shell);
     }
@@ -779,8 +791,7 @@ impl LayerShellPopover {
         {
             // Snap-close without animation to avoid recursion.
             if let Some(ref shell) = *self.anim_shell.borrow() {
-                shell.set_opacity(0.0);
-                shell.set_scale(ANIM_SCALE_FROM);
+                snap_anim_shell(shell, &self.widget_name, 0.0, ANIM_SCALE_FROM);
                 shell.remove_child();
             }
             if let Some(ref window) = *self.window.borrow() {
@@ -889,8 +900,7 @@ impl LayerShellPopover {
                 } else {
                     // Animations disabled — snap open immediately.
                     if let Some(ref shell) = *popover.anim_shell.borrow() {
-                        shell.set_opacity(1.0);
-                        shell.set_scale(1.0);
+                        snap_anim_shell(shell, &popover.widget_name, 1.0, 1.0);
                     }
                 }
             }
@@ -1028,9 +1038,6 @@ impl LayerShellPopover {
             return;
         };
 
-        // Cache the current border radius for the duration of this animation.
-        anim_shell.set_radius(ConfigManager::global().surface_border_radius() as f32);
-
         let start_time_us = anim_shell
             .frame_clock()
             .map(|fc| fc.frame_time())
@@ -1043,6 +1050,15 @@ impl LayerShellPopover {
             anim_shell.opacity(),
         );
 
+        // Prepare first so reversal paths can reuse the existing tick callback;
+        // then ensure the current child has animation-outline styling even if no
+        // new callback is needed.
+        SurfaceStyleManager::global().apply_animated_surface_outline(
+            &anim_shell,
+            &self.widget_name,
+            true,
+        );
+
         if !need_tick {
             return;
         }
@@ -1052,6 +1068,7 @@ impl LayerShellPopover {
         let window = self.window.borrow().as_ref().cloned();
         let shell_for_scale = anim_shell.clone();
         let on_close = self.on_close.borrow().clone();
+        let widget_name = self.widget_name.clone();
 
         anim_shell.add_tick_callback(move |shell, frame_clock| {
             // Generation check — bail if a newer cycle started.
@@ -1093,8 +1110,7 @@ impl LayerShellPopover {
 
                 if direction == AnimDirection::Closing {
                     // Close complete — remove content and hide window.
-                    shell.set_opacity(0.0);
-                    shell_for_scale.set_scale(ANIM_SCALE_FROM);
+                    snap_anim_shell(&shell_for_scale, &widget_name, 0.0, ANIM_SCALE_FROM);
                     shell_for_scale.remove_child();
                     if let Some(ref w) = window {
                         w.set_visible(false);
@@ -1105,8 +1121,7 @@ impl LayerShellPopover {
                     }
                 } else {
                     // Open complete — ensure we're at exactly 1.0.
-                    shell.set_opacity(1.0);
-                    shell_for_scale.set_scale(1.0);
+                    snap_anim_shell(&shell_for_scale, &widget_name, 1.0, 1.0);
                 }
                 return ControlFlow::Break;
             }

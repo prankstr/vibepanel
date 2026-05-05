@@ -14,8 +14,10 @@ use gtk4::prelude::*;
 use tracing::debug;
 use vibepanel_core::SurfaceStyles;
 
+use crate::services::config_manager::ConfigManager;
 use crate::styles::{icon, surface};
 use crate::widgets::css::{POPOVER_BG_WITH_OPACITY, WIDGET_BG_WITH_OPACITY};
+use crate::widgets::scale_box::ScaleBox;
 
 // GTK 4.10 deprecated widget-scoped style contexts but didn't provide a replacement.
 // We need widget-scoped CSS to style individual surfaces without affecting the entire
@@ -162,6 +164,37 @@ impl SurfaceStyleManager {
         } else {
             0
         }
+    }
+
+    /// Apply the temporary ScaleBox outline used while floating surfaces animate.
+    ///
+    /// The real CSS border is suppressed only when there is a GSK outline to
+    /// draw, so disabled outlines keep their normal resting CSS appearance.
+    pub fn apply_animated_surface_outline(
+        &self,
+        shell: &ScaleBox,
+        widget_name: &str,
+        active: bool,
+    ) {
+        let config = ConfigManager::global();
+        let width = config.surface_outline_width();
+        let color = if active && width > 0.0 {
+            debug_assert!(
+                shell.child_has_css_class(surface::SURFACE_POPOVER),
+                "animated surface outline suppression expects a popover surface child"
+            );
+            config.surface_outline_rgba_for_widget(widget_name, shell)
+        } else {
+            gtk4::gdk::RGBA::TRANSPARENT
+        };
+
+        shell.set_animated_outline(
+            active,
+            config.surface_border_radius() as f32,
+            width,
+            color,
+            surface::SUPPRESS_CSS_OUTLINE,
+        );
     }
 
     /// Apply shadow-aware margins to a popover/overlay container.
