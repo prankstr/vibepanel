@@ -826,7 +826,14 @@ fn build_merge_group(
     // theme-derived spacing as inter-child gaps inside a single widget — both
     // are gaps between visual elements that may carry Pango line-height
     // baggage on their flow-axis edges, so both shrink in vertical mode.
-    inner_content.set_spacing(ConfigManager::global().theme_sizes().widget_content_gap as i32);
+    let merge_gap = if orientation == gtk4::Orientation::Vertical {
+        ConfigManager::global()
+            .theme_sizes()
+            .widget_content_gap_vertical
+    } else {
+        ConfigManager::global().theme_sizes().widget_content_gap
+    };
+    inner_content.set_spacing(merge_gap as i32);
     wrapper.set_child(Some(&inner_content));
 
     let ripple_handle = RippleHandle::new();
@@ -980,7 +987,7 @@ fn create_center_section(
     output_id: Option<&str>,
     orientation: gtk4::Orientation,
 ) -> gtk4::Box {
-    let section = gtk4::Box::new(orientation, config.bar.spacing as i32);
+    let section = gtk4::Box::new(orientation, 0);
     section.add_css_class(class::BAR_SECTION_CENTER);
 
     let mut widget_count = 0;

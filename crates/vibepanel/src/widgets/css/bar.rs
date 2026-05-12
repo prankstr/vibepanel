@@ -367,12 +367,14 @@ sectioned-bar.bar.bar--vertical {{
 
 /* Section widget spacing via margins (Box spacing=0 to allow spacer to have no gaps) */
 .bar-section--left > *:not(:last-child):not(.spacer),
-.bar-section--right > *:not(:last-child):not(.spacer) {{
+.bar-section--right > *:not(:last-child):not(.spacer),
+.bar-section--center > *:not(:last-child):not(.spacer) {{
     margin-right: {spacing}px;
 }}
 
 .bar--vertical .bar-section--left > *:not(:last-child):not(.spacer),
-.bar--vertical .bar-section--right > *:not(:last-child):not(.spacer) {{
+.bar--vertical .bar-section--right > *:not(:last-child):not(.spacer),
+.bar--vertical .bar-section--center > *:not(:last-child):not(.spacer) {{
     margin-right: 0;
     margin-bottom: {spacing}px;
 }}
