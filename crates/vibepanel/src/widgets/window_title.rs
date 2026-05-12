@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use gtk4::prelude::*;
-use gtk4::{Box as GtkBox, Image, Label, Orientation};
+use gtk4::{Align, Box as GtkBox, CenterBox, Image, Label, Orientation};
 use tracing::{debug, trace};
 use vibepanel_core::config::WidgetEntry;
 
@@ -27,6 +27,8 @@ const DEFAULT_SHOW_APP_FALLBACK: bool = true;
 const DEFAULT_MAX_CHARS: i32 = 0;
 const DEFAULT_SHOW_ICON: bool = true;
 const DEFAULT_UPPERCASE: bool = false;
+const VERTICAL_ICON_SIZE_NUMERATOR: u32 = 6;
+const VERTICAL_ICON_SIZE_DENOMINATOR: u32 = 5;
 
 /// Configuration for the window title widget.
 #[derive(Debug, Clone)]
@@ -132,6 +134,12 @@ pub struct WindowTitleWidget {
     window_title_callback_id: CallbackId,
 }
 
+#[derive(Clone)]
+struct WindowTitleLabel {
+    wrapper: CenterBox,
+    label: Label,
+}
+
 impl WindowTitleWidget {
     /// Create a new window title widget with the given configuration.
     ///
@@ -140,23 +148,39 @@ impl WindowTitleWidget {
     /// If `None`, the widget shows the globally focused window regardless of monitor.
     pub fn new(config: WindowTitleConfig, output_id: Option<String>) -> Self {
         let base = BaseWidget::new(&[wgt::WINDOW_TITLE]);
+        let is_vertical = ConfigManager::global().bar_position().is_vertical();
 
         // Use the content box provided by BaseWidget (has .content CSS class)
         let content = base.content();
+        if !is_vertical {
+            content.set_halign(Align::Fill);
+            content.set_hexpand(true);
+        }
 
         // Create optional icon (icon + container tuple)
         let icon_widgets = if config.show_icon {
             let icon_img = Image::from_icon_name("application-default-icon");
             icon_img.add_css_class(icon::TEXT);
             icon_img.add_css_class(wgt::WINDOW_TITLE_APP_ICON);
+            // Mirror IconsService Image backend: valign only, no halign override.
+            icon_img.set_valign(Align::Center);
 
-            // Set pixel size to scale with bar size (same as system tray icons)
-            let icon_size = ConfigManager::global().theme_sizes().pixmap_icon_size as i32;
+            let icon_size = window_title_icon_size(is_vertical);
             icon_img.set_pixel_size(icon_size);
 
-            // Wrap in icon-root container for consistent sizing with other icons
+            // Wrap in icon-root container — mirror IconsService.create_icon and
+            // BaseWidget::add_icon (Center + hexpand keeps it centered in the
+            // content's available width without depending on intrinsic metrics).
             let icon_root = GtkBox::new(Orientation::Horizontal, 0);
             icon_root.add_css_class(icon::ROOT);
+            icon_root.set_valign(Align::Center);
+            icon_root.set_halign(Align::Center);
+            icon_root.set_hexpand(true);
+            if is_vertical {
+                icon_root.set_vexpand(true);
+                // Constant 1px right nudge for residual centering asymmetry.
+                icon_root.set_margin_start(1);
+            }
             icon_root.set_visible(false); // Start hidden (container controls visibility)
             icon_root.append(&icon_img);
 
@@ -167,17 +191,28 @@ impl WindowTitleWidget {
         };
 
         // Create label
-        let label = Label::new(Some(&config.empty_text));
-        label.add_css_class(wgt::WINDOW_TITLE_LABEL);
-        label.set_xalign(0.0);
+        let title_label = WindowTitleLabel {
+            wrapper: CenterBox::new(),
+            label: Label::new(Some(&config.empty_text)),
+        };
+        title_label.label.add_css_class(wgt::WINDOW_TITLE_LABEL);
+        if is_vertical {
+            title_label.label.set_visible(false);
+        }
+        set_label_alignment(&title_label, is_vertical, false);
         // Always use ellipsization at the end so long titles
         // show "…" instead of being hard-clipped by section bounds.
-        label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
-        label.set_single_line_mode(true);
+        title_label
+            .label
+            .set_ellipsize(gtk4::pango::EllipsizeMode::End);
+        title_label.label.set_single_line_mode(true);
         if config.max_chars > 0 {
-            label.set_max_width_chars(config.max_chars);
+            title_label.label.set_max_width_chars(config.max_chars);
         }
-        content.append(&label);
+        title_label
+            .wrapper
+            .set_center_widget(Some(&title_label.label));
+        content.append(&title_label.wrapper);
 
         // State owned by the callback.
         let app_name_cache = Rc::new(RefCell::new(HashMap::<String, String>::new()));
@@ -209,12 +244,13 @@ impl WindowTitleWidget {
 
             // Update the widget with the new window info
             update_window_title(
-                &label,
+                &title_label,
                 icon_widgets.as_ref(),
                 &base_widget,
                 &config,
                 &app_name_cache,
                 snapshot,
+                is_vertical,
             );
         });
 
@@ -234,6 +270,39 @@ impl WindowTitleWidget {
     }
 }
 
+fn window_title_icon_size(is_vertical: bool) -> i32 {
+    let sizes = ConfigManager::global().theme_sizes();
+    window_title_icon_size_from_values(
+        is_vertical,
+        sizes.pixmap_icon_size,
+        sizes.widget_height,
+        sizes.bar_height,
+    )
+}
+
+fn window_title_icon_size_from_values(
+    is_vertical: bool,
+    pixmap_icon_size: u32,
+    widget_height: u32,
+    bar_size: u32,
+) -> i32 {
+    let icon_size = if is_vertical {
+        (pixmap_icon_size * VERTICAL_ICON_SIZE_NUMERATOR / VERTICAL_ICON_SIZE_DENOMINATOR)
+            .min(widget_height)
+    } else {
+        pixmap_icon_size
+    };
+    // Match parity to bar_size: content width inherits bar_size parity, and
+    // matched parity makes (content - icon) even so centering lands on a whole
+    // pixel instead of a half-pixel that biases left or right.
+    let aligned = if icon_size % 2 == bar_size % 2 {
+        icon_size
+    } else {
+        icon_size.saturating_sub(1)
+    };
+    aligned as i32
+}
+
 impl Drop for WindowTitleWidget {
     fn drop(&mut self) {
         WindowTitleService::global().disconnect(self.window_title_callback_id);
@@ -242,23 +311,58 @@ impl Drop for WindowTitleWidget {
 
 /// Update the widget with new window info.
 fn update_window_title(
-    label: &Label,
+    title_label: &WindowTitleLabel,
     icon_widgets: Option<&(Image, GtkBox)>,
     base_widget: &GtkBox,
     config: &WindowTitleConfig,
     app_name_cache: &Rc<RefCell<HashMap<String, String>>>,
     snapshot: &WindowTitleSnapshot,
+    is_vertical: bool,
 ) {
     let text = render_title(config, app_name_cache, snapshot);
-    label.set_label(&text);
+    title_label.label.set_label(&text);
 
     // Update icon if enabled
     if let Some((icon, icon_root)) = icon_widgets {
         update_icon(icon, icon_root, snapshot);
     }
+    set_label_alignment(
+        title_label,
+        is_vertical,
+        icon_widgets.is_some() && !snapshot.app_id.is_empty(),
+    );
 
     // Update tooltip
     update_tooltip(base_widget, config, app_name_cache, snapshot);
+}
+
+fn set_label_alignment(title_label: &WindowTitleLabel, is_vertical: bool, icon_visible: bool) {
+    let label_wrapper = &title_label.wrapper;
+    let label = &title_label.label;
+    if is_vertical {
+        label_wrapper.set_halign(Align::Center);
+        label_wrapper.set_hexpand(false);
+        label.set_halign(Align::Center);
+        label.set_hexpand(false);
+        label.set_xalign(0.5);
+        label.set_margin_start(0);
+    } else if icon_visible {
+        label_wrapper.set_halign(Align::Fill);
+        label_wrapper.set_hexpand(false);
+        label.set_halign(Align::Fill);
+        label.set_hexpand(false);
+        label.set_xalign(0.0);
+        label.set_margin_start(0);
+    } else {
+        // CenterBox claims the square floor while the label keeps its natural
+        // width, so centering is layout-driven rather than a pixel nudge.
+        label_wrapper.set_halign(Align::Fill);
+        label_wrapper.set_hexpand(true);
+        label.set_halign(Align::Center);
+        label.set_hexpand(false);
+        label.set_xalign(0.5);
+        label.set_margin_start(0);
+    }
 }
 
 /// Render the title text from the snapshot.
@@ -608,6 +712,22 @@ mod tests {
         assert_eq!(titlecase("FIREFOX"), "FIREFOX");
         assert_eq!(titlecase(""), "");
         assert_eq!(titlecase("a"), "A");
+    }
+
+    #[test]
+    fn test_window_title_icon_size_vertical_is_larger_and_capped() {
+        // Even bar size — even pixmap/icon stays even.
+        assert_eq!(window_title_icon_size_from_values(false, 20, 26, 32), 20);
+        assert_eq!(window_title_icon_size_from_values(true, 20, 26, 32), 24);
+        assert_eq!(window_title_icon_size_from_values(true, 24, 26, 32), 26);
+    }
+
+    #[test]
+    fn test_window_title_icon_size_matches_bar_parity() {
+        // Odd bar size — icon parity flipped to odd so centering lands on
+        // a whole pixel rather than a half-pixel.
+        assert_eq!(window_title_icon_size_from_values(false, 20, 26, 33), 19);
+        assert_eq!(window_title_icon_size_from_values(true, 20, 26, 33), 23);
     }
 
     #[test]

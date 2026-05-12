@@ -46,6 +46,103 @@ window.layer-shell-click-catcher {{
     font-size: var(--icon-size);
 }}
 
+/* Material Symbols reserve the same amount of space no matter their shape, so narrow
+ * glyphs like battery leave trailing whitespace before the next label.
+ * These offsets are small optical corrections around the reserved glyph box. */
+
+.bar.bar--horizontal .quick-settings .material-symbol-vpn_key {{
+  margin-left: 0.2em;
+  margin-right: 0.15em;
+}}
+.bar.bar--vertical .quick-settings .material-symbol-vpn_key {{
+    margin-top: -0.3em;
+    transform: translateY(0.125em);
+}}
+
+.bar.bar--horizontal .quick-settings .material-symbol-bluetooth_disabled,
+.bar.bar--horizontal .quick-settings .material-symbol-bluetooth {{
+  margin-left: -0.15em;
+}}
+
+.bar.bar--horizontal .material-symbol-memory {{
+    margin-right: -0.1em;
+    margin-left: -0.1em;
+}}
+
+.bar.bar--horizontal .material-symbol-download {{
+    margin-right: -0.15em;
+    margin-left: -0.15em;
+    transform: translateY(0.05em);
+}}
+
+.bar.bar--horizontal .material-symbol-battery_1_bar,
+.bar.bar--horizontal .material-symbol-battery_2_bar,
+.bar.bar--horizontal .material-symbol-battery_3_bar,
+.bar.bar--horizontal .material-symbol-battery_4_bar,
+.bar.bar--horizontal .material-symbol-battery_5_bar,
+.bar.bar--horizontal .material-symbol-battery_6_bar,
+.bar.bar--horizontal .material-symbol-battery_full,
+.bar.bar--horizontal .material-symbol-battery_unknown,
+.bar.bar--horizontal .material-symbol-battery_charging_20,
+.bar.bar--horizontal .material-symbol-battery_charging_30,
+.bar.bar--horizontal .material-symbol-battery_charging_50,
+.bar.bar--horizontal .material-symbol-battery_charging_60,
+.bar.bar--horizontal .material-symbol-battery_charging_80,
+.bar.bar--horizontal .material-symbol-battery_charging_90,
+.bar.bar--horizontal .material-symbol-battery_charging_full,
+.bar.bar--horizontal .material-symbol-keyboard_arrow_up,
+.bar.bar--horizontal .material-symbol-keyboard_arrow_down {{
+    margin-right: -0.2em;
+    margin-left: -0.2em;
+}}
+
+/* Digits/caps don't use descender space, so they sit visually high in the em
+ * box — nudge down. Transform keeps layout and baseline unchanged. */
+.bar.bar--horizontal .vcenter-caps {{
+    transform: translateY(0.05em);
+}}
+
+/* Vertical bars are too narrow for 4-char speeds (e.g. "9.9M") at the default
+ * font size — shrink the labels and drop horizontal padding to claw back room. */
+.bar.bar--vertical .network-speed-dl-label,
+.bar.bar--vertical .network-speed-ul-label {{
+    font-size: 0.85em;
+}}
+.bar.bar--vertical .widget.network-speed:not(.widget-group) .content {{
+    padding-left: 0;
+    padding-right: 0;
+    /* Extra flow padding on the bottom so the UL row doesn't crowd the edge. */
+    padding-bottom: calc(var(--vp-widget-content-padding) + 1px);
+}}
+
+/* Wider gap between the DL and UL groups in vertical mode. */
+.bar.bar--vertical .widget.network-speed:not(.widget-group) > overlay > .content > *:not(:last-child),
+.bar.bar--vertical .widget.network-speed:not(.widget-group) > .content > *:not(:last-child) {{
+    margin-bottom: calc(var(--vp-widget-content-gap) + 2px);
+}}
+
+/* Tighter icon ↔ DL gap so it visually matches the within-group arrow ↔ label
+ * spacing instead of the wider DL ↔ UL gap. */
+.bar.bar--vertical .widget.network-speed:not(.widget-group) > overlay > .content > .icon-root,
+.bar.bar--vertical .widget.network-speed:not(.widget-group) > .content > .icon-root {{
+    margin-bottom: 2px;
+}}
+
+/* Tighten the multi-line vertical clock so the dot separator doesn't add a
+ * full font line of vertical air between HH and MM. */
+.bar.bar--vertical .clock-label {{
+    line-height: 1.0;
+}}
+
+/* Extra flow-axis breathing room around the vertical clock. Asymmetric
+ * padding pushes the block down to compensate for digits centering on the
+ * em box (which includes descender slack the digits never use), making the
+ * block visually sit too high otherwise. */
+.bar.bar--vertical .widget.clock:not(.widget-group) .content {{
+    padding-top: calc(var(--vp-widget-content-padding) + 3px);
+    padding-bottom: calc(var(--vp-widget-content-padding) + 1px);
+}}
+
 /* ===== NATIVE GTK TOOLTIPS ===== */
 /* Style GTK's native tooltips (used in popovers/windows where layer-shell tooltips don't work) */
 tooltip,

@@ -1436,6 +1436,16 @@ impl IconHandleInner {
             IconBackend::MaterialLabel(label) => {
                 let glyph = material_symbol_name(name);
                 label.set_label(glyph);
+                // Per-glyph CSS hook for ink-vs-advance compensation.
+                let stale: Vec<glib::GString> = label
+                    .css_classes()
+                    .into_iter()
+                    .filter(|c| c.starts_with("material-symbol-"))
+                    .collect();
+                for class in &stale {
+                    label.remove_css_class(class);
+                }
+                label.add_css_class(&format!("material-symbol-{glyph}"));
             }
             IconBackend::GtkImage(image) => {
                 let gtk_name = gtk_icon_name(name);
@@ -1856,6 +1866,7 @@ impl IconsService {
         // Create stable root container - this defines the icon's bounding box
         let root = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
         root.add_css_class(icon::ROOT);
+        root.set_valign(gtk4::Align::Center);
 
         // Apply all CSS classes to the root container so that:
         // 1. Layout selectors like `.quick-settings .icon { margin: ... }` work
@@ -2265,6 +2276,7 @@ fn create_backend_widget(kind: IconBackendKind, css_classes: &[&str]) -> IconBac
     match kind {
         IconBackendKind::Material => {
             let label = Label::new(None);
+            label.set_valign(gtk4::Align::Center);
             for class in css_classes {
                 label.add_css_class(class);
             }
@@ -2273,6 +2285,7 @@ fn create_backend_widget(kind: IconBackendKind, css_classes: &[&str]) -> IconBac
         }
         IconBackendKind::Gtk => {
             let image = Image::new();
+            image.set_valign(gtk4::Align::Center);
             for class in css_classes {
                 image.add_css_class(class);
             }
@@ -2281,6 +2294,7 @@ fn create_backend_widget(kind: IconBackendKind, css_classes: &[&str]) -> IconBac
         }
         IconBackendKind::Text => {
             let label = Label::new(None);
+            label.set_valign(gtk4::Align::Center);
             for class in css_classes {
                 label.add_css_class(class);
             }

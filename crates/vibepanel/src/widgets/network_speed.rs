@@ -15,6 +15,7 @@ use gtk4::{Label, Orientation};
 use vibepanel_core::config::WidgetEntry;
 
 use crate::services::callbacks::CallbackId;
+use crate::services::config_manager::ConfigManager;
 use crate::services::icons::IconHandle;
 use crate::services::system::{SystemService, SystemSnapshot, format_speed};
 use crate::services::tooltip::TooltipManager;
@@ -27,8 +28,9 @@ use crate::widgets::{WidgetConfig, warn_unknown_options};
 const DEFAULT_SHOW_ICON: bool = true;
 const DEFAULT_SHOW_ARROWS: bool = true;
 
-/// Tight spacing between arrow and speed label to visually bind them.
-const ARROW_LABEL_SPACING: i32 = 4;
+/// Spacing between arrow and speed label, per orientation.
+const ARROW_LABEL_SPACING_HORIZONTAL: i32 = 4;
+const ARROW_LABEL_SPACING_VERTICAL: i32 = 0;
 
 /// Reference string for minimum label width (digit 8 is widest in most fonts).
 const SPEED_BASELINE: &str = "88.8 KB/s";
@@ -243,12 +245,37 @@ fn build_speed_group(
     arrow_class: &str,
     label_class: &str,
 ) -> (Option<Label>, Label) {
-    let group = gtk4::Box::new(Orientation::Horizontal, ARROW_LABEL_SPACING);
+    let is_vertical = ConfigManager::global().bar_position().is_vertical();
+    let orientation = if is_vertical {
+        Orientation::Vertical
+    } else {
+        Orientation::Horizontal
+    };
+    let spacing = if is_vertical {
+        ARROW_LABEL_SPACING_VERTICAL
+    } else {
+        ARROW_LABEL_SPACING_HORIZONTAL
+    };
+
+    let group = gtk4::Box::new(orientation, spacing);
     group.set_valign(gtk4::Align::Center);
+    if is_vertical {
+        // Group fills content so its center doesn't shift as speed text grows.
+        group.set_halign(gtk4::Align::Fill);
+        group.set_hexpand(true);
+    }
 
     let arrow = if show_arrow {
         let lbl = Label::new(Some(arrow_char));
         lbl.add_css_class(arrow_class);
+        if is_vertical {
+            // Match `BaseWidget::add_label` centering (Fill + 1px margin-start
+            // compensates a constant Pango/GTK alignment asymmetry).
+            lbl.set_halign(gtk4::Align::Fill);
+            lbl.set_hexpand(true);
+            lbl.set_xalign(0.5);
+            lbl.set_margin_start(1);
+        }
         group.append(&lbl);
         Some(lbl)
     } else {
@@ -258,7 +285,15 @@ fn build_speed_group(
     let speed = Label::new(None);
     speed.add_css_class(label_class);
     speed.add_css_class(class::VCENTER_CAPS);
-    setup_baseline_sizing(&speed);
+    if is_vertical {
+        speed.set_halign(gtk4::Align::Fill);
+        speed.set_hexpand(true);
+        speed.set_xalign(0.5);
+        speed.set_margin_start(1);
+    }
+    if !is_vertical {
+        setup_baseline_sizing(&speed);
+    }
     group.append(&speed);
 
     base.content().append(&group);
@@ -308,12 +343,15 @@ fn update_network_widget(
     }
 
     icon_handle.widget().set_visible(show_icon);
+    let is_vertical = container.orientation() == Orientation::Vertical;
 
     let dl_text = format_speed(snapshot.net_download_speed);
     let ul_text = format_speed(snapshot.net_upload_speed);
+    let dl_label_text = format_speed_label(snapshot.net_download_speed, is_vertical);
+    let ul_label_text = format_speed_label(snapshot.net_upload_speed, is_vertical);
 
     if let Some(dl) = dl_label {
-        dl.set_label(&dl_text);
+        set_speed_label(dl, &dl_label_text, is_vertical);
         dl.set_visible(true);
     }
     if let Some(dl_a) = dl_arrow {
@@ -321,7 +359,7 @@ fn update_network_widget(
     }
 
     if let Some(ul) = ul_label {
-        ul.set_label(&ul_text);
+        set_speed_label(ul, &ul_label_text, is_vertical);
         ul.set_visible(true);
     }
     if let Some(ul_a) = ul_arrow {
@@ -335,6 +373,59 @@ fn update_network_widget(
     };
     let tooltip_manager = TooltipManager::global();
     tooltip_manager.set_styled_tooltip(container, &tooltip);
+}
+
+/// Update the speed label and apply a single-char centering compensation.
+///
+/// Single-digit strings ("0") visually drift left of the arrow because their
+/// glyph sits flush-left in its advance box. Bumping margin-start nudges
+/// just those cases right; multi-char strings keep the baseline 1px shift.
+fn set_speed_label(label: &Label, text: &str, is_vertical: bool) {
+    label.set_label(text);
+    if is_vertical {
+        let margin = if text.chars().count() == 1 { 2 } else { 1 };
+        label.set_margin_start(margin);
+    }
+}
+
+fn format_speed_label(bytes_per_sec: u64, is_vertical: bool) -> String {
+    if is_vertical {
+        format_speed_compact(bytes_per_sec)
+    } else {
+        format_speed(bytes_per_sec)
+    }
+}
+
+fn format_speed_compact(bytes_per_sec: u64) -> String {
+    const KB: f64 = 1024.0;
+    const UNITS: [&str; 3] = ["K", "M", "G"];
+
+    let mut value = bytes_per_sec as f64 / KB;
+    if value < 1.0 {
+        return "0".to_string();
+    }
+
+    let mut unit_index = 0;
+    while value.round() >= 100.0 && unit_index < UNITS.len() - 1 {
+        value /= KB;
+        unit_index += 1;
+    }
+
+    format_compact_value(value, UNITS[unit_index])
+}
+
+fn format_compact_value(value: f64, suffix: &str) -> String {
+    if value < 10.0 {
+        let rounded = (value * 10.0).round() / 10.0;
+        if rounded >= 10.0 || rounded.fract() == 0.0 {
+            format!("{}{}", rounded as u64, suffix)
+        } else {
+            format!("{rounded:.1}{suffix}")
+        }
+    } else {
+        let rounded = value.round().max(1.0) as u64;
+        format!("{rounded}{suffix}")
+    }
 }
 
 #[cfg(test)]
@@ -411,5 +502,29 @@ mod tests {
             NetworkSpeedFormat::from_str("unknown"),
             NetworkSpeedFormat::Both
         );
+    }
+
+    #[test]
+    fn test_format_speed_compact() {
+        assert_eq!(format_speed_compact(0), "0");
+        assert_eq!(format_speed_compact(512), "0");
+        assert_eq!(format_speed_compact(1024), "1K");
+        assert_eq!(format_speed_compact(12 * 1024), "12K");
+        assert_eq!(format_speed_compact(99 * 1024), "99K");
+        assert_eq!(format_speed_compact(100 * 1024), "0.1M");
+        assert_eq!(format_speed_compact(123 * 1024), "0.1M");
+        assert_eq!(format_speed_compact(512 * 1024), "0.5M");
+        assert_eq!(format_speed_compact(999 * 1024), "1M");
+        assert_eq!(format_speed_compact(1024 * 1024), "1M");
+        assert_eq!(format_speed_compact(1536 * 1024), "1.5M");
+        assert_eq!(format_speed_compact(12 * 1024 * 1024), "12M");
+        assert_eq!(format_speed_compact(123 * 1024 * 1024), "0.1G");
+        assert_eq!(format_speed_compact(1024 * 1024 * 1024), "1G");
+    }
+
+    #[test]
+    fn test_format_speed_label_uses_compact_only_when_vertical() {
+        assert_eq!(format_speed_label(1536 * 1024, true), "1.5M");
+        assert_eq!(format_speed_label(1536 * 1024, false), "1.5 MB/s");
     }
 }
