@@ -209,10 +209,12 @@ impl WindowTitleWidget {
         if config.max_chars > 0 {
             title_label.label.set_max_width_chars(config.max_chars);
         }
-        title_label
-            .wrapper
-            .set_center_widget(Some(&title_label.label));
-        content.append(&title_label.wrapper);
+        if !is_vertical {
+            title_label
+                .wrapper
+                .set_center_widget(Some(&title_label.label));
+            content.append(&title_label.wrapper);
+        }
 
         // State owned by the callback.
         let app_name_cache = Rc::new(RefCell::new(HashMap::<String, String>::new()));
