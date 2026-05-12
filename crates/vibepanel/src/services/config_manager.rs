@@ -1070,6 +1070,8 @@ fn config_theme_changed(old: &Config, new: &Config) -> bool {
         || old.bar.padding != new.bar.padding
         || old.bar.position != new.bar.position
         || old.bar.size != new.bar.size
+        || old.bar.position != new.bar.position
+        || old.bar.padding != new.bar.padding
         || old.bar.outline != new.bar.outline
         || old.widgets.background_color != new.widgets.background_color
         || old.widgets.background_opacity != new.widgets.background_opacity
@@ -1312,6 +1314,14 @@ mod tests {
 
         let mut new = old.clone();
         new.widgets.popover_background_opacity = Some(0.9);
+        assert!(config_theme_changed(&old, &new));
+
+        let mut new = old.clone();
+        new.bar.position = "right".to_string();
+        assert!(config_theme_changed(&old, &new));
+
+        let mut new = old.clone();
+        new.bar.padding = old.bar.padding + 1;
         assert!(config_theme_changed(&old, &new));
     }
 

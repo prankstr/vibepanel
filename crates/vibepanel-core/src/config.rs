@@ -36,7 +36,7 @@ pub enum SchemePolarity {
 const VALID_POPOVER_MODES: &[&str] = &["dark", "light"];
 
 /// Known valid values for bar.position.
-const VALID_BAR_POSITIONS: &[&str] = &["top", "bottom"];
+const VALID_BAR_POSITIONS: &[&str] = &["top", "bottom", "left", "right"];
 
 /// Known valid values for osd.position.
 const VALID_OSD_POSITIONS: &[&str] = &["bottom", "left", "right", "top"];
@@ -641,11 +641,49 @@ fn deep_merge_toml(base: &mut Table, overlay: Table) {
     }
 }
 
+/// Screen edge for the bar window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BarPosition {
+    Top,
+    Bottom,
+    Left,
+    Right,
+}
+
+impl BarPosition {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "top" => Some(Self::Top),
+            "bottom" => Some(Self::Bottom),
+            "left" => Some(Self::Left),
+            "right" => Some(Self::Right),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Top => "top",
+            Self::Bottom => "bottom",
+            Self::Left => "left",
+            Self::Right => "right",
+        }
+    }
+
+    pub fn is_vertical(self) -> bool {
+        matches!(self, Self::Left | Self::Right)
+    }
+
+    pub fn is_horizontal(self) -> bool {
+        !self.is_vertical()
+    }
+}
+
 /// Bar-level configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct BarConfig {
-    /// Bar position on screen: "top" or "bottom".
+    /// Bar position on screen: "top", "bottom", "left", or "right".
     /// Default: "top"
     pub position: String,
 
@@ -714,9 +752,25 @@ impl Default for BarConfig {
 }
 
 impl BarConfig {
-    /// Returns true if the bar is positioned at the bottom of the screen.
+    /// Return the parsed bar position. Invalid values are rejected by validation,
+    /// so this falls back to the default only for unchecked in-memory configs.
+    pub fn position(&self) -> BarPosition {
+        BarPosition::parse(&self.position).unwrap_or(BarPosition::Top)
+    }
+
+    /// Returns true if the bar is positioned on the bottom screen edge.
     pub fn is_bottom(&self) -> bool {
-        self.position == "bottom"
+        matches!(self.position(), BarPosition::Bottom)
+    }
+
+    /// Returns true if the bar is positioned on a vertical screen edge.
+    pub fn is_vertical(&self) -> bool {
+        self.position().is_vertical()
+    }
+
+    /// Returns true if the bar is positioned on a horizontal screen edge.
+    pub fn is_horizontal(&self) -> bool {
+        self.position().is_horizontal()
     }
 }
 
@@ -1838,9 +1892,23 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_invalid_bar_position() {
+    fn test_validate_bar_position_left() {
         let mut config = Config::default();
         config.bar.position = "left".to_string();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_bar_position_right() {
+        let mut config = Config::default();
+        config.bar.position = "right".to_string();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_invalid_bar_position() {
+        let mut config = Config::default();
+        config.bar.position = "middle".to_string();
 
         let result = config.validate();
         assert!(result.is_err());
@@ -1851,12 +1919,18 @@ mod tests {
     }
 
     #[test]
-    fn test_bar_is_bottom() {
+    fn test_bar_orientation_helpers() {
         let mut config = BarConfig::default();
-        assert!(!config.is_bottom());
+        assert!(config.is_horizontal());
+        assert!(!config.is_vertical());
 
-        config.position = "bottom".to_string();
-        assert!(config.is_bottom());
+        config.position = "left".to_string();
+        assert!(config.is_vertical());
+        assert!(!config.is_horizontal());
+
+        config.position = "right".to_string();
+        assert!(config.is_vertical());
+        assert!(!config.is_horizontal());
     }
 
     #[test]

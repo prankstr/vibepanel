@@ -244,6 +244,9 @@ fn test_validation_accepts_valid_enum_values() {
         
         [advanced]
         compositor = "hyprland"
+
+        [bar]
+        position = "left"
         
         [osd]
         position = "bottom"
@@ -266,6 +269,9 @@ fn test_validation_accepts_valid_enum_values() {
         
         [advanced]
         compositor = "niri"
+
+        [bar]
+        position = "right"
         
         [osd]
         position = "top"

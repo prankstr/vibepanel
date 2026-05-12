@@ -8,7 +8,7 @@ use material_colors::scheme::Scheme;
 use tracing::warn;
 
 use crate::Config;
-use crate::config::{SchemePolarity, ThemeStates};
+use crate::config::{BarPosition, SchemePolarity, ThemeStates};
 
 // Overlay opacities: base values for card backgrounds.
 // Dark mode uses lower opacity (0.06) since white overlays on dark are more visible.
@@ -266,16 +266,26 @@ fn gtk_fg_mix(pct: f64) -> String {
 pub struct ThemeSizes {
     pub bar_height: u32,
     pub widget_height: u32,
-    pub widget_padding_x: u32,
     pub widget_padding_y: u32,
     pub font_size: u32,
     pub text_icon_size: u32,
     pub pixmap_icon_size: u32,
     pub internal_spacing: u32,
-    /// Edge padding for widget content (inside .content box)
-    pub widget_content_edge: u32,
-    /// Gap between children inside widget content
+    /// Roomy content padding inside widgets. User CSS can tune this via the
+    /// additive `--widget-content-padding-offset` value.
+    pub widget_content_padding: u32,
+    /// Roomy gap between children inside widget content. User CSS can tune this
+    /// via the additive `--widget-content-gap-offset` value.
     pub widget_content_gap: u32,
+    /// Compact vertical content padding for label-bearing widgets. Vertical bars
+    /// put rounded widget ends above and below content instead of beside it;
+    /// text/icon advances are not square, so content padding needs separate
+    /// tuning from inter-child gaps.
+    pub widget_content_padding_vertical: u32,
+    /// Compact vertical child gap for label-bearing widgets. Stacked children
+    /// expose Pango line-height slack differently than rounded content padding,
+    /// so this intentionally differs from `widget_content_padding_vertical`.
+    pub widget_content_gap_vertical: u32,
 }
 
 impl Default for ThemeSizes {
@@ -283,14 +293,15 @@ impl Default for ThemeSizes {
         Self {
             bar_height: 36,
             widget_height: 26,
-            widget_padding_x: 5,
             widget_padding_y: 2,
             font_size: 14,
             text_icon_size: 16,
             pixmap_icon_size: 15,
             internal_spacing: 9,
-            widget_content_edge: 6,
+            widget_content_padding: 10,
             widget_content_gap: 10,
+            widget_content_padding_vertical: 7,
+            widget_content_gap_vertical: 7,
         }
     }
 }
@@ -405,7 +416,7 @@ pub struct ThemePalette {
     widget_radius_percent: u32,
     bar_size: u32,
     bar_padding: u32,
-    bar_is_bottom: bool,
+    bar_position: BarPosition,
 }
 
 /// Convert a material-colors `Argb` value to a CSS hex color string.
@@ -587,12 +598,27 @@ impl ThemePalette {
             _ => (self.accent_primary.clone(), self.accent_subtle.clone()),
         };
 
-        let edge_pad = self.bar_padding;
-        let center_pad = if self.bar_opacity > 0.0 {
-            self.bar_padding
-        } else {
-            0
-        };
+        let pad = self.bar_padding;
+        let is_island = self.bar_opacity == 0.0;
+
+        // Public bar padding hooks (`--bar-padding-y`, `--bar-padding-x`, and
+        // `--bar-padding-{side}`) are intentionally left unset. They exist as
+        // user override slots in bar CSS; generated defaults live in internal
+        // applied-side vars so island-mode asymmetry does not leak into the API.
+        let (bar_padding_top, bar_padding_right, bar_padding_bottom, bar_padding_left) =
+            if is_island {
+                match self.bar_position {
+                    BarPosition::Top => (pad, 0, 0, 0),
+                    BarPosition::Bottom => (0, 0, pad, 0),
+                    BarPosition::Left => (0, 0, 0, pad),
+                    BarPosition::Right => (0, pad, 0, 0),
+                }
+            } else if self.bar_position.is_vertical() {
+                (0, pad, 0, pad)
+            } else {
+                (pad, 0, pad, 0)
+            };
+
         format!(
             r#"
 :root {{
@@ -688,13 +714,20 @@ impl ThemePalette {
 
     /* ===== Sizes & Spacing ===== */
     --bar-height: {bar_height}px;
-    --bar-padding-y: {bar_padding_y}px;
-    --bar-padding-y-bottom: {bar_padding_y_bottom}px;
+    --vp-internal-bar-padding-top: {bar_padding_top}px;
+    --vp-internal-bar-padding-right: {bar_padding_right}px;
+    --vp-internal-bar-padding-bottom: {bar_padding_bottom}px;
+    --vp-internal-bar-padding-left: {bar_padding_left}px;
     --widget-height: {widget_height}px;
     --widget-padding-y: {widget_padding_y}px;
     --spacing-internal: {internal_spacing}px;
-    --spacing-widget-edge: {widget_content_edge}px;
-    --spacing-widget-gap: {widget_content_gap}px;
+    --vp-widget-content-padding-roomy: {widget_content_padding}px;
+    --vp-widget-content-gap-roomy: {widget_content_gap}px;
+    --vp-widget-content-padding-compact: {widget_content_padding_vertical}px;
+    --vp-widget-content-gap-compact: {widget_content_gap_vertical}px;
+    /* Public density offsets: user values are added to each widget's tuned base. */
+    --widget-content-padding-offset: 0px;
+    --widget-content-gap-offset: 0px;
     --widget-opacity: {widget_opacity};
 
     /* Spacing tokens - consistent spacing scale */
@@ -736,6 +769,7 @@ impl ThemePalette {
     /* Canonical icon box size for bar widgets - all icons sit in this size container */
     --icon-size: {text_icon_size}px;
 }}
+
 "#,
             bar_bg_with_opacity = self.bar_background_with_opacity(),
             widget_bg_color = self.widget_background,
@@ -803,24 +837,17 @@ impl ThemePalette {
             radius_pill = self.radius_pill,
             radius_factor = (self.widget_radius_percent as f64 / 50.0).min(1.0),
             bar_height = self.sizes.bar_height,
-            // Screen-edge padding always applies; screen-center padding is 0
-            // in islands mode (opacity=0) to keep the exclusive zone tight.
-            // When bar is bottom, CSS top/bottom roles swap.
-            bar_padding_y = if self.bar_is_bottom {
-                center_pad
-            } else {
-                edge_pad
-            },
-            bar_padding_y_bottom = if self.bar_is_bottom {
-                edge_pad
-            } else {
-                center_pad
-            },
+            bar_padding_top = bar_padding_top,
+            bar_padding_right = bar_padding_right,
+            bar_padding_bottom = bar_padding_bottom,
+            bar_padding_left = bar_padding_left,
             widget_height = self.sizes.widget_height,
             widget_padding_y = self.sizes.widget_padding_y,
             internal_spacing = self.sizes.internal_spacing,
-            widget_content_edge = self.sizes.widget_content_edge,
+            widget_content_padding = self.sizes.widget_content_padding,
             widget_content_gap = self.sizes.widget_content_gap,
+            widget_content_padding_vertical = self.sizes.widget_content_padding_vertical,
+            widget_content_gap_vertical = self.sizes.widget_content_gap_vertical,
             widget_opacity = self.widget_opacity,
             font_family = self.font_family,
             font_scale = FONT_SCALE,
@@ -1102,7 +1129,7 @@ impl ThemePalette {
         // Bar size
         self.bar_size = config.bar.size;
         self.bar_padding = config.bar.padding;
-        self.bar_is_bottom = config.bar.is_bottom();
+        self.bar_position = config.bar.position();
     }
 
     fn compute_derived_values(&mut self) {
@@ -1434,22 +1461,30 @@ impl ThemePalette {
         let text_icon_size = round_to_even((bar_size as f64 * TEXT_ICON_SCALE) as u32);
         let pixmap_icon_size = round_to_even((bar_size as f64 * PIXMAP_ICON_SCALE) as u32);
 
+        // Content spacing starts from a shared base. Vertical bars expose
+        // compact defaults through the same public CSS variables: once the bar
+        // is vertical, rounded widget ends sit on the flow axis and text/icon
+        // advances are not square, so content padding and stacked child gaps need
+        // different compensation. Opt-out widgets (tray, taskbar)
+        // use the internal base aliases directly.
+        let base_content_spacing = (internal_spacing / 2).max(4) + 5;
+        let widget_content_padding = base_content_spacing;
+        let widget_content_gap = base_content_spacing.saturating_sub(2);
+
         self.sizes = ThemeSizes {
             // bar_height is the content height (widgets area), CSS padding adds the rest
             bar_height: bar_size,
             widget_height,
-            widget_padding_x: (bar_size as f64 * PADDING_SCALE) as u32,
             // Vertical padding - fixed 2px for visual breathing room (already even)
             widget_padding_y: 2,
             font_size,
             text_icon_size,
             pixmap_icon_size,
             internal_spacing,
-            // Widget content spacing: fixed values that work well visually
-            // Edge padding provides breathing room at widget boundaries
-            widget_content_edge: 6,
-            // Gap between children (icon, label, etc.) - derived from internal_spacing
-            widget_content_gap: (internal_spacing / 2).max(4) + 5,
+            widget_content_padding,
+            widget_content_gap,
+            widget_content_padding_vertical: widget_content_padding.saturating_sub(3),
+            widget_content_gap_vertical: widget_content_gap.saturating_sub(6),
         };
     }
 }
@@ -1505,7 +1540,7 @@ impl Default for ThemePalette {
             widget_radius_percent: 40,
             bar_size: 32,
             bar_padding: 4,
-            bar_is_bottom: false,
+            bar_position: BarPosition::Top,
         }
     }
 }
@@ -1737,6 +1772,81 @@ mod tests {
         ));
         assert!(!css.contains("--color-workspace-indicator-hover-bg:"));
         assert!(!css.contains("--color-workspace-indicator-minimal-hover-bg"));
+    }
+
+    #[test]
+    fn test_bar_padding_vars_bar_mode() {
+        let mut config = Config::default();
+        config.bar.padding = 7;
+        config.bar.background_opacity = 1.0;
+
+        for (pos, top, right, bottom, left) in &[
+            ("top", 7, 0, 7, 0),
+            ("bottom", 7, 0, 7, 0),
+            ("left", 0, 7, 0, 7),
+            ("right", 0, 7, 0, 7),
+        ] {
+            config.bar.position = pos.to_string();
+            let css = ThemePalette::from_config(&config, None, None).css_vars_block();
+            assert_bar_padding_contract(&css, *top, *right, *bottom, *left, pos);
+        }
+    }
+
+    #[test]
+    fn test_bar_padding_vars_island_mode() {
+        let mut config = Config::default();
+        config.bar.padding = 7;
+        config.bar.background_opacity = 0.0;
+
+        for (position, top, right, bottom, left) in &[
+            ("top", 7, 0, 0, 0),
+            ("bottom", 0, 0, 7, 0),
+            ("left", 0, 0, 0, 7),
+            ("right", 0, 7, 0, 0),
+        ] {
+            config.bar.position = position.to_string();
+            let css = ThemePalette::from_config(&config, None, None).css_vars_block();
+            assert_bar_padding_contract(&css, *top, *right, *bottom, *left, position);
+        }
+    }
+
+    fn assert_bar_padding_contract(
+        css: &str,
+        top: i32,
+        right: i32,
+        bottom: i32,
+        left: i32,
+        case: &str,
+    ) {
+        for (var, value) in [
+            ("--vp-internal-bar-padding-top", top),
+            ("--vp-internal-bar-padding-right", right),
+            ("--vp-internal-bar-padding-bottom", bottom),
+            ("--vp-internal-bar-padding-left", left),
+        ] {
+            assert!(
+                css.contains(&format!("{var}: {value}px;")),
+                "{case}: expected {var}={value}px"
+            );
+        }
+
+        for public_var in [
+            "--bar-padding-y:",
+            "--bar-padding-x:",
+            "--bar-padding-top:",
+            "--bar-padding-right:",
+            "--bar-padding-bottom:",
+            "--bar-padding-left:",
+            "--bar-padding-y-top:",
+            "--bar-padding-y-bottom:",
+            "--bar-padding-x-left:",
+            "--bar-padding-x-right:",
+        ] {
+            assert!(
+                !css.contains(public_var),
+                "{case}: public override hook should not be emitted: {public_var}"
+            );
+        }
     }
 
     #[test]
