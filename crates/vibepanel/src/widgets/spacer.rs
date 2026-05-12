@@ -29,6 +29,7 @@
 //! center = ["spacer:200"]  # 200px fixed-width spacer in center
 //! ```
 
+use crate::services::config_manager::ConfigManager;
 use gtk4::prelude::*;
 use vibepanel_core::config::WidgetEntry;
 
@@ -59,7 +60,7 @@ impl WidgetConfig for SpacerConfig {
     }
 }
 
-/// Spacer widget - either expands to fill space or has a fixed width.
+/// Spacer widget - either expands to fill space or has a fixed main-axis size.
 ///
 /// Note: This widget intentionally does not use `BaseWidget` because it has no
 /// visible content, styling, tooltips, or click interactions - it's purely a
@@ -71,20 +72,37 @@ pub struct SpacerWidget {
 impl SpacerWidget {
     /// Create a new spacer widget with the given configuration.
     pub fn new(config: SpacerConfig) -> Self {
-        let widget = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
+        let is_vertical = ConfigManager::global().bar_position().is_vertical();
+        let orientation = if is_vertical {
+            gtk4::Orientation::Vertical
+        } else {
+            gtk4::Orientation::Horizontal
+        };
+        let widget = gtk4::Box::new(orientation, 0);
         widget.add_css_class(wgt::SPACER);
 
         match config.width {
-            Some(fixed_width) => {
-                // Fixed width: set exact size, no expansion
-                widget.set_size_request(fixed_width as i32, -1);
-                widget.set_hexpand(false);
+            Some(fixed_size) => {
+                // Fixed size applies to the bar's main axis.
+                if is_vertical {
+                    widget.set_size_request(-1, fixed_size as i32);
+                    widget.set_vexpand(false);
+                    widget.set_hexpand(true);
+                } else {
+                    widget.set_size_request(fixed_size as i32, -1);
+                    widget.set_hexpand(false);
+                }
             }
             None => {
-                // Flexible: expand to fill available space
-                widget.set_hexpand(true);
-                // Minimum width of 0 so it can shrink completely if needed
-                widget.set_size_request(0, -1);
+                // Flexible: expand to fill available space along the bar axis.
+                if is_vertical {
+                    widget.set_vexpand(true);
+                    widget.set_hexpand(true);
+                    widget.set_size_request(-1, 0);
+                } else {
+                    widget.set_hexpand(true);
+                    widget.set_size_request(0, -1);
+                }
             }
         }
 

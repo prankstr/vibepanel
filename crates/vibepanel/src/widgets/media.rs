@@ -449,7 +449,7 @@ impl CallbackWidgetRefs {
     }
 }
 
-fn create_controls(_parent_widget: &gtk4::Box) -> ControlsHandle {
+fn create_controls(_parent_widget: &gtk4::Box, is_vertical: bool) -> ControlsHandle {
     use crate::services::icons::IconsService;
     use crate::services::tooltip::TooltipManager;
     use crate::styles::{button, icon};
@@ -459,6 +459,9 @@ fn create_controls(_parent_widget: &gtk4::Box) -> ControlsHandle {
 
     let container = gtk4::Box::new(gtk4::Orientation::Horizontal, 2);
     container.add_css_class(media::CONTROLS);
+    if is_vertical {
+        container.set_halign(gtk4::Align::Center);
+    }
     container.set_visible(false);
 
     // Add motion controller to hide parent tooltip when hovering over controls.
@@ -477,11 +480,13 @@ fn create_controls(_parent_widget: &gtk4::Box) -> ControlsHandle {
         &[media::CONTROL_BTN, button::COMPACT],
         || MediaService::global().previous(),
     );
+    prev_btn.set_visible(!is_vertical);
     container.append(&prev_btn);
 
     let play_pause_icon = icons.create_icon("media-playback-start", &[icon::ICON]);
     let play_pause_btn = crate::widgets::base::vp_button();
     play_pause_btn.set_has_frame(false);
+    play_pause_btn.set_halign(gtk4::Align::Center);
     play_pause_btn.set_valign(gtk4::Align::Center);
     play_pause_btn.set_child(Some(&play_pause_icon.widget()));
     play_pause_btn.add_css_class(media::CONTROL_BTN);
@@ -500,6 +505,7 @@ fn create_controls(_parent_widget: &gtk4::Box) -> ControlsHandle {
         &[media::CONTROL_BTN, button::COMPACT],
         || MediaService::global().next(),
     );
+    next_btn.set_visible(!is_vertical);
     container.append(&next_btn);
 
     ControlsHandle {
@@ -516,7 +522,15 @@ impl MediaWidget {
         let base = BaseWidget::new(&[media::WIDGET]);
         base.set_tooltip("No media playing");
 
-        let template_elements = parse_template(&config.template);
+        let is_vertical = ConfigManager::global().bar_position().is_vertical();
+        let template_elements = if is_vertical {
+            vec![
+                TemplateElement::Widget(WidgetToken::PlayerIcon),
+                TemplateElement::Widget(WidgetToken::Controls),
+            ]
+        } else {
+            parse_template(&config.template)
+        };
 
         let mut art_picture: Option<RoundedPicture> = None;
         let mut player_icon: Option<Image> = None;
@@ -546,6 +560,10 @@ impl MediaWidget {
         {
             let image = Image::from_icon_name(media::ICON_AUDIO_GENERIC);
             image.add_css_class(media::PLAYER_ICON);
+            image.set_pixel_size(ConfigManager::global().theme_sizes().pixmap_icon_size as i32);
+            if is_vertical {
+                image.set_halign(gtk4::Align::Center);
+            }
             image.set_visible(false);
             player_icon = Some(image);
         }
@@ -563,7 +581,7 @@ impl MediaWidget {
             .iter()
             .any(|e| matches!(e, TemplateElement::Widget(WidgetToken::Controls)))
         {
-            controls = Some(create_controls(base.widget()));
+            controls = Some(create_controls(base.widget(), is_vertical));
         }
 
         let text_runs = compute_text_runs(&template_elements);
@@ -792,7 +810,7 @@ impl MediaWidget {
         // Create the bar waveform visualizer as an overlay on the base widget.
         // Use insert_before to place it behind the content box in paint order.
         // When disabled in config, skip creation entirely to avoid spawning cava.
-        let bar_visualizer = if config.visualizer {
+        let bar_visualizer = if config.visualizer && !is_vertical {
             let overlay = base.overlay().expect("media uses active BaseWidget");
             let viz = BarVisualizer::new();
             overlay.add_overlay(viz.widget());

@@ -22,6 +22,7 @@ use crate::styles::{class, state, widget};
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use crate::services::config_manager::ConfigManager;
 use crate::services::power_profile::{PowerProfileService, PowerProfileSnapshot};
 use crate::services::tooltip::TooltipManager;
 use crate::widgets::WidgetConfig;
@@ -129,6 +130,7 @@ impl BatteryWidget {
             &percentage_label,
             config.show_percentage,
             config.show_icon,
+            ConfigManager::global().bar_position().is_vertical(),
             false,
             None,
             None,
@@ -141,6 +143,7 @@ impl BatteryWidget {
             let percentage_label = percentage_label.clone();
             let show_percentage = config.show_percentage;
             let show_icon = config.show_icon;
+            let is_vertical = ConfigManager::global().bar_position().is_vertical();
             let controller_for_cb = controller_cell.clone();
 
             BatteryService::global().connect(move |snapshot: &BatterySnapshot| {
@@ -150,6 +153,7 @@ impl BatteryWidget {
                     &percentage_label,
                     show_percentage,
                     show_icon,
+                    is_vertical,
                     snapshot.available,
                     snapshot.percent,
                     snapshot.state,
@@ -206,6 +210,7 @@ fn update_widgets_from_state_impl(
     percentage_label: &Label,
     show_percentage: bool,
     show_icon: bool,
+    is_vertical: bool,
     available: bool,
     percent: Option<f64>,
     state: Option<u32>,
@@ -270,7 +275,7 @@ fn update_widgets_from_state_impl(
     // Percentage text
     if show_percentage {
         let text = match rounded_opt {
-            Some(pct) => readable_pct(pct),
+            Some(pct) => bar_pct_label(pct, is_vertical),
             None => "?".to_string(),
         };
         percentage_label.set_label(&text);
@@ -321,6 +326,15 @@ pub fn rounded_pct_value(percent: f64) -> u8 {
 /// Format a rounded percentage value as readable text, e.g. "57%".
 pub fn readable_pct(percent: u8) -> String {
     format!("{}%", percent)
+}
+
+/// Format a percentage for the bar label, compacting side-bar text.
+pub fn bar_pct_label(percent: u8, is_vertical: bool) -> String {
+    if is_vertical {
+        percent.to_string()
+    } else {
+        readable_pct(percent)
+    }
 }
 
 /// Return a symbolic icon name for the given battery level.
@@ -381,6 +395,12 @@ mod tests {
         assert_eq!(readable_pct(0), "0%");
         assert_eq!(readable_pct(57), "57%");
         assert_eq!(readable_pct(100), "100%");
+    }
+
+    #[test]
+    fn test_bar_pct_label_compacts_vertical() {
+        assert_eq!(bar_pct_label(57, false), "57%");
+        assert_eq!(bar_pct_label(57, true), "57");
     }
 
     #[test]

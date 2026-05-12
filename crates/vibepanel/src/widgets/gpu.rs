@@ -14,6 +14,7 @@ use gtk4::prelude::*;
 use vibepanel_core::config::WidgetEntry;
 
 use crate::services::callbacks::CallbackId;
+use crate::services::config_manager::ConfigManager;
 use crate::services::gpu::{GpuPowerState, GpuService, GpuSnapshot};
 use crate::services::icons::IconHandle;
 use crate::services::system::{SystemService, SystemSnapshot, format_bytes_long};
@@ -131,6 +132,7 @@ impl GpuWidget {
             let gpu_label = gpu_label.clone();
             let show_icon = config.show_icon;
             let format = config.format.clone();
+            let is_vertical = ConfigManager::global().bar_position().is_vertical();
             let popover_binding = popover_binding.clone();
 
             gpu_service.connect(move |snapshot: &GpuSnapshot| {
@@ -140,6 +142,7 @@ impl GpuWidget {
                     &gpu_label,
                     show_icon,
                     &format,
+                    is_vertical,
                     snapshot,
                 );
 
@@ -180,30 +183,44 @@ impl Drop for GpuWidget {
 }
 
 /// Format GPU label text according to the selected format.
-fn format_gpu_label(snapshot: &GpuSnapshot, format: &GpuFormat) -> String {
+fn format_gpu_label(snapshot: &GpuSnapshot, format: &GpuFormat, is_vertical: bool) -> String {
     if snapshot.power_state == GpuPowerState::Suspended {
         return "Idle".to_string();
     }
     match format {
         GpuFormat::Usage => match snapshot.gpu_usage {
-            Some(usage) => format!("{:.0}%", usage),
+            Some(usage) => format_gpu_usage(usage, is_vertical),
             None => "—".to_string(),
         },
         GpuFormat::Temperature => match snapshot.temperature {
+            Some(temp) if is_vertical => format!("{:.0}°", temp),
             Some(temp) => format!("{:.0}°C", temp),
             None => "—".to_string(),
         },
         GpuFormat::Both => {
             let usage_part = match snapshot.gpu_usage {
-                Some(usage) => format!("{:.0}%", usage),
+                Some(usage) => format_gpu_usage(usage, is_vertical),
                 None => "—".to_string(),
             };
             let temp_part = match snapshot.temperature {
+                Some(temp) if is_vertical => format!("{:.0}°", temp),
                 Some(temp) => format!("{:.0}°C", temp),
                 None => "—".to_string(),
             };
-            format!("{} {}", usage_part, temp_part)
+            if is_vertical {
+                format!("{}\n{}", usage_part, temp_part)
+            } else {
+                format!("{} {}", usage_part, temp_part)
+            }
         }
+    }
+}
+
+fn format_gpu_usage(usage: f32, is_vertical: bool) -> String {
+    if is_vertical {
+        format!("{usage:.0}")
+    } else {
+        format!("{usage:.0}%")
     }
 }
 
@@ -214,6 +231,7 @@ fn update_gpu_widget(
     gpu_label: &Label,
     show_icon: bool,
     format: &GpuFormat,
+    is_vertical: bool,
     snapshot: &GpuSnapshot,
 ) {
     if !snapshot.available {
@@ -247,7 +265,7 @@ fn update_gpu_widget(
 
     icon_handle.widget().set_visible(show_icon);
 
-    let text = format_gpu_label(snapshot, format);
+    let text = format_gpu_label(snapshot, format, is_vertical);
     gpu_label.set_label(&text);
     gpu_label.set_visible(true);
 
@@ -345,7 +363,8 @@ mod tests {
             temperature: Some(72.0),
             ..Default::default()
         };
-        assert_eq!(format_gpu_label(&snapshot, &GpuFormat::Usage), "76%");
+        assert_eq!(format_gpu_label(&snapshot, &GpuFormat::Usage, false), "76%");
+        assert_eq!(format_gpu_label(&snapshot, &GpuFormat::Usage, true), "76");
     }
 
     #[test]
@@ -356,7 +375,14 @@ mod tests {
             temperature: Some(72.0),
             ..Default::default()
         };
-        assert_eq!(format_gpu_label(&snapshot, &GpuFormat::Temperature), "72°C");
+        assert_eq!(
+            format_gpu_label(&snapshot, &GpuFormat::Temperature, false),
+            "72°C"
+        );
+        assert_eq!(
+            format_gpu_label(&snapshot, &GpuFormat::Temperature, true),
+            "72°"
+        );
     }
 
     #[test]
@@ -368,7 +394,10 @@ mod tests {
             ..Default::default()
         };
         // Shows dash when temperature is unavailable — no silent fallback
-        assert_eq!(format_gpu_label(&snapshot, &GpuFormat::Temperature), "—");
+        assert_eq!(
+            format_gpu_label(&snapshot, &GpuFormat::Temperature, false),
+            "—"
+        );
     }
 
     #[test]
@@ -379,7 +408,14 @@ mod tests {
             temperature: Some(72.0),
             ..Default::default()
         };
-        assert_eq!(format_gpu_label(&snapshot, &GpuFormat::Both), "76% 72°C");
+        assert_eq!(
+            format_gpu_label(&snapshot, &GpuFormat::Both, false),
+            "76% 72°C"
+        );
+        assert_eq!(
+            format_gpu_label(&snapshot, &GpuFormat::Both, true),
+            "76\n72°"
+        );
     }
 
     #[test]
@@ -390,7 +426,11 @@ mod tests {
             temperature: None,
             ..Default::default()
         };
-        assert_eq!(format_gpu_label(&snapshot, &GpuFormat::Both), "76% —");
+        assert_eq!(
+            format_gpu_label(&snapshot, &GpuFormat::Both, false),
+            "76% —"
+        );
+        assert_eq!(format_gpu_label(&snapshot, &GpuFormat::Both, true), "76\n—");
     }
 
     #[test]
@@ -401,8 +441,11 @@ mod tests {
             temperature: None,
             ..Default::default()
         };
-        assert_eq!(format_gpu_label(&snapshot, &GpuFormat::Usage), "—");
-        assert_eq!(format_gpu_label(&snapshot, &GpuFormat::Temperature), "—");
-        assert_eq!(format_gpu_label(&snapshot, &GpuFormat::Both), "— —");
+        assert_eq!(format_gpu_label(&snapshot, &GpuFormat::Usage, false), "—");
+        assert_eq!(
+            format_gpu_label(&snapshot, &GpuFormat::Temperature, false),
+            "—"
+        );
+        assert_eq!(format_gpu_label(&snapshot, &GpuFormat::Both, false), "— —");
     }
 }

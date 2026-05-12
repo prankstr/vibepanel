@@ -32,6 +32,10 @@ pub fn css(animations: bool) -> String {
     margin-right: 8px;
 }}
 
+.bar--vertical .media-player-icon:not(:last-child) {{
+    margin-right: 0;
+}}
+
 .media-icon:not(:last-child) {{
     margin-right: 4px;
 }}
@@ -39,6 +43,10 @@ pub fn css(animations: bool) -> String {
 /* Inline playback controls in bar */
 .media .media-controls {{
     margin-left: 4px;
+}}
+
+.bar--vertical .media .media-controls {{
+    margin-left: 0;
 }}
 
 .media-control-btn {{

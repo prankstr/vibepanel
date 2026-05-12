@@ -11,6 +11,7 @@ use crate::services::callbacks::CallbackId;
 use crate::services::compositor::CompositorManager;
 use crate::services::compositor::KeyboardLayoutInfo;
 use crate::services::compositor::xkb_names;
+use crate::services::config_manager::ConfigManager;
 use crate::services::tooltip::TooltipManager;
 use crate::styles::{class, state, widget};
 use crate::widgets::base::BaseWidget;
@@ -128,9 +129,10 @@ impl KeyboardLayoutWidget {
             let container = base.widget().clone();
             let label = label.clone();
             let format = config.format.clone();
+            let is_vertical = ConfigManager::global().bar_position().is_vertical();
 
             manager.register_keyboard_layout_callback(move |info: &KeyboardLayoutInfo| {
-                update_keyboard_layout_widget(&container, &label, info, &format);
+                update_keyboard_layout_widget(&container, &label, info, &format, is_vertical);
             })
         };
 
@@ -199,12 +201,17 @@ fn extract_short_name(layout_name: &str) -> String {
     layout_name.to_string()
 }
 
+fn compact_layout_label(label: &str) -> String {
+    label.chars().take(2).collect()
+}
+
 /// Update the keyboard layout widget from a layout info update.
 fn update_keyboard_layout_widget(
     container: &gtk4::Box,
     label: &Label,
     info: &KeyboardLayoutInfo,
     format: &LayoutFormat,
+    is_vertical: bool,
 ) {
     // Toggle clickable styling based on whether layout cycling is possible
     let is_cyclable = info.layout_count != Some(1);
@@ -235,7 +242,13 @@ fn update_keyboard_layout_widget(
         }
     };
 
-    label.set_label(&display_text);
+    let label_text = if is_vertical {
+        compact_layout_label(&display_text)
+    } else {
+        display_text
+    };
+
+    label.set_label(&label_text);
 
     // Set tooltip to full layout name
     let tooltip = if info.layout_name.is_empty() {
@@ -279,6 +292,13 @@ mod tests {
     #[test]
     fn test_extract_short_name_empty() {
         assert_eq!(extract_short_name(""), "?");
+    }
+
+    #[test]
+    fn test_compact_layout_label_takes_first_two_chars() {
+        assert_eq!(compact_layout_label("US"), "US");
+        assert_eq!(compact_layout_label("Dvorak"), "Dv");
+        assert_eq!(compact_layout_label("?"), "?");
     }
 
     #[test]

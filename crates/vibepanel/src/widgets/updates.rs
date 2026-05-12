@@ -15,6 +15,7 @@ use gtk4::{GestureClick, Label};
 use vibepanel_core::config::WidgetEntry;
 
 use crate::services::callbacks::CallbackId;
+use crate::services::config_manager::ConfigManager;
 use crate::services::icons::IconHandle;
 use crate::services::tooltip::TooltipManager;
 use crate::services::updates::{UpdatesService, UpdatesSnapshot};
@@ -113,9 +114,16 @@ impl UpdatesWidget {
             let container = base.widget().clone();
             let icon_handle = icon_handle.clone();
             let count_label = count_label.clone();
+            let is_vertical = ConfigManager::global().bar_position().is_vertical();
 
             service.connect(move |snapshot: &UpdatesSnapshot| {
-                update_widget_from_snapshot(&container, &icon_handle, &count_label, snapshot);
+                update_widget_from_snapshot(
+                    &container,
+                    &icon_handle,
+                    &count_label,
+                    snapshot,
+                    is_vertical,
+                );
             })
         };
 
@@ -143,6 +151,7 @@ fn update_widget_from_snapshot(
     icon_handle: &IconHandle,
     count_label: &Label,
     snapshot: &UpdatesSnapshot,
+    is_vertical: bool,
 ) {
     // Handle unavailable state (no package manager)
     if !snapshot.available {
@@ -178,13 +187,22 @@ fn update_widget_from_snapshot(
     if snapshot.error.is_some() {
         count_label.set_label("!");
     } else {
-        count_label.set_label(&snapshot.update_count.to_string());
+        let label = format_update_count(snapshot.update_count, is_vertical);
+        count_label.set_label(&label);
     }
 
     // Update tooltip
     let tooltip = format_tooltip(snapshot);
     let tooltip_manager = TooltipManager::global();
     tooltip_manager.set_styled_tooltip(container, &tooltip);
+}
+
+fn format_update_count(count: usize, is_vertical: bool) -> String {
+    if is_vertical && count > 999 {
+        "999".to_string()
+    } else {
+        count.to_string()
+    }
 }
 
 #[cfg(test)]
@@ -220,5 +238,16 @@ mod tests {
 
         assert_eq!(config.check_interval, 1800);
         assert_eq!(config.terminal, Some("ghostty".to_string()));
+    }
+
+    #[test]
+    fn test_format_update_count_caps_vertical() {
+        assert_eq!(format_update_count(42, false), "42");
+        assert_eq!(format_update_count(123, false), "123");
+        assert_eq!(format_update_count(42, true), "42");
+        assert_eq!(format_update_count(99, true), "99");
+        assert_eq!(format_update_count(123, true), "123");
+        assert_eq!(format_update_count(999, true), "999");
+        assert_eq!(format_update_count(1000, true), "999");
     }
 }

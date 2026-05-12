@@ -292,6 +292,9 @@ impl CustomWidget {
 
             let icon_root = GtkBox::new(Orientation::Horizontal, 0);
             icon_root.add_css_class(icon::ROOT);
+            icon_root.set_halign(gtk4::Align::Center);
+            icon_root.set_hexpand(true);
+            image.set_halign(gtk4::Align::Center);
             icon_root.append(&image);
             base.content().append(&icon_root);
 

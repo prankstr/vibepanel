@@ -14,6 +14,7 @@ use gtk4::prelude::*;
 use vibepanel_core::config::WidgetEntry;
 
 use crate::services::callbacks::CallbackId;
+use crate::services::config_manager::ConfigManager;
 use crate::services::icons::IconHandle;
 use crate::services::system::{SystemService, SystemSnapshot};
 use crate::services::tooltip::TooltipManager;
@@ -108,6 +109,7 @@ impl CpuWidget {
             let percentage_label = percentage_label.clone();
             let show_icon = config.show_icon;
             let show_percentage = config.show_percentage;
+            let is_vertical = ConfigManager::global().bar_position().is_vertical();
             let popover_binding = popover_binding.clone();
 
             system_service.connect(move |snapshot: &SystemSnapshot| {
@@ -117,6 +119,7 @@ impl CpuWidget {
                     &percentage_label,
                     show_icon,
                     show_percentage,
+                    is_vertical,
                     snapshot,
                 );
 
@@ -149,6 +152,7 @@ fn update_cpu_widget(
     percentage_label: &Label,
     show_icon: bool,
     show_percentage: bool,
+    is_vertical: bool,
     snapshot: &SystemSnapshot,
 ) {
     if !snapshot.available {
@@ -180,7 +184,7 @@ fn update_cpu_widget(
     }
 
     if show_percentage {
-        let text = format!("{:.0}%", snapshot.cpu_usage);
+        let text = format_cpu_label(snapshot.cpu_usage, is_vertical);
         percentage_label.set_label(&text);
         percentage_label.set_visible(true);
     } else {
@@ -193,6 +197,14 @@ fn update_cpu_widget(
     );
     let tooltip_manager = TooltipManager::global();
     tooltip_manager.set_styled_tooltip(container, &tooltip);
+}
+
+fn format_cpu_label(cpu_usage: f32, is_vertical: bool) -> String {
+    if is_vertical {
+        format!("{cpu_usage:.0}")
+    } else {
+        format!("{cpu_usage:.0}%")
+    }
 }
 
 #[cfg(test)]
@@ -223,5 +235,11 @@ mod tests {
         let config = CpuConfig::from_entry(&entry);
         assert!(!config.show_icon);
         assert!(config.show_percentage);
+    }
+
+    #[test]
+    fn test_format_cpu_label_compacts_vertical() {
+        assert_eq!(format_cpu_label(42.4, false), "42%");
+        assert_eq!(format_cpu_label(42.4, true), "42");
     }
 }

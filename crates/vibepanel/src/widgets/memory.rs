@@ -14,6 +14,7 @@ use gtk4::prelude::*;
 use vibepanel_core::config::WidgetEntry;
 
 use crate::services::callbacks::CallbackId;
+use crate::services::config_manager::ConfigManager;
 use crate::services::icons::IconHandle;
 use crate::services::system::{SystemService, SystemSnapshot, format_bytes, format_bytes_long};
 use crate::services::tooltip::TooltipManager;
@@ -131,6 +132,7 @@ impl MemoryWidget {
             let memory_label = memory_label.clone();
             let show_icon = config.show_icon;
             let format = config.format.clone();
+            let is_vertical = ConfigManager::global().bar_position().is_vertical();
             let popover_binding = popover_binding.clone();
 
             system_service.connect(move |snapshot: &SystemSnapshot| {
@@ -140,6 +142,7 @@ impl MemoryWidget {
                     &memory_label,
                     show_icon,
                     &format,
+                    is_vertical,
                     snapshot,
                 );
 
@@ -166,7 +169,11 @@ impl Drop for MemoryWidget {
 }
 
 /// Format memory usage according to the selected format.
-fn format_memory(snapshot: &SystemSnapshot, format: &MemoryFormat) -> String {
+fn format_memory(snapshot: &SystemSnapshot, format: &MemoryFormat, is_vertical: bool) -> String {
+    if is_vertical {
+        return format!("{:.0}", snapshot.memory_percent);
+    }
+
     match format {
         MemoryFormat::Percentage => format!("{:.0}%", snapshot.memory_percent),
         MemoryFormat::Absolute => format_bytes(snapshot.memory_used),
@@ -185,6 +192,7 @@ fn update_memory_widget(
     memory_label: &Label,
     show_icon: bool,
     format: &MemoryFormat,
+    is_vertical: bool,
     snapshot: &SystemSnapshot,
 ) {
     if !snapshot.available {
@@ -213,7 +221,7 @@ fn update_memory_widget(
         icon_handle.widget().set_visible(false);
     }
 
-    let text = format_memory(snapshot, format);
+    let text = format_memory(snapshot, format, is_vertical);
     memory_label.set_label(&text);
     memory_label.set_visible(true);
 
@@ -275,5 +283,30 @@ mod tests {
         assert_eq!(MemoryFormat::from_str("both"), MemoryFormat::Both);
         assert_eq!(MemoryFormat::from_str("Both"), MemoryFormat::Both);
         assert_eq!(MemoryFormat::from_str("unknown"), MemoryFormat::Percentage);
+    }
+
+    #[test]
+    fn test_format_memory_compacts_vertical_percentage() {
+        let snapshot = SystemSnapshot {
+            available: true,
+            memory_percent: 76.4,
+            memory_used: 8 * 1024 * 1024 * 1024,
+            memory_total: 16 * 1024 * 1024 * 1024,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            format_memory(&snapshot, &MemoryFormat::Percentage, false),
+            "76%"
+        );
+        assert_eq!(
+            format_memory(&snapshot, &MemoryFormat::Percentage, true),
+            "76"
+        );
+        assert_eq!(
+            format_memory(&snapshot, &MemoryFormat::Absolute, true),
+            "76"
+        );
+        assert_eq!(format_memory(&snapshot, &MemoryFormat::Both, true), "76");
     }
 }
