@@ -27,7 +27,7 @@ use crate::services::tooltip::TooltipManager;
 use crate::services::tray::{TrayItem, TrayMenuEntry, TrayPixmap, TrayService};
 use crate::styles::{button as btn, color, icon, surface, widget};
 use crate::widgets::WidgetConfig;
-use crate::widgets::base::{BaseWidget, WidgetSpacingProfile, configure_popover};
+use crate::widgets::base::{BaseWidget, configure_popover};
 use crate::widgets::warn_unknown_options;
 
 const DEFAULT_MAX_ICONS: usize = 12;
@@ -188,7 +188,7 @@ fn compute_contrast_params() -> ContrastParams {
 impl TrayWidget {
     /// Create a new system tray widget.
     pub fn new(config: TrayConfig) -> Self {
-        let base = BaseWidget::new_with_spacing(&[widget::TRAY], WidgetSpacingProfile::Icon);
+        let base = BaseWidget::new(&[widget::TRAY]);
 
         let state = Rc::new(RefCell::new(WidgetState {
             config,

@@ -306,6 +306,16 @@ impl Default for ThemeSizes {
     }
 }
 
+impl ThemeSizes {
+    pub fn content_gap_for_orientation(&self, vertical: bool) -> u32 {
+        if vertical {
+            self.widget_content_gap_vertical
+        } else {
+            self.widget_content_gap
+        }
+    }
+}
+
 /// Styles for popover/menu surfaces.
 #[derive(Debug, Clone)]
 pub struct SurfaceStyles {
@@ -721,10 +731,10 @@ impl ThemePalette {
     --widget-height: {widget_height}px;
     --widget-padding-y: {widget_padding_y}px;
     --spacing-internal: {internal_spacing}px;
-    --vp-widget-content-padding-roomy: {widget_content_padding}px;
-    --vp-widget-content-gap-roomy: {widget_content_gap}px;
-    --vp-widget-content-padding-compact: {widget_content_padding_vertical}px;
-    --vp-widget-content-gap-compact: {widget_content_gap_vertical}px;
+    --vp-widget-content-padding-h: {widget_content_padding}px;
+    --vp-widget-content-gap-h: {widget_content_gap}px;
+    --vp-widget-content-padding-v: {widget_content_padding_vertical}px;
+    --vp-widget-content-gap-v: {widget_content_gap_vertical}px;
     /* Public density offsets: user values are added to each widget's tuned base. */
     --widget-content-padding-offset: 0px;
     --widget-content-gap-offset: 0px;

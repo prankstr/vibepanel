@@ -42,14 +42,6 @@ pub mod class {
     /// enabling per-widget hover effects within groups.
     pub const WIDGET_ITEM: &str = "widget-item";
 
-    /// Label widget spacing profile (`.vp-spacing-label`).
-    /// Vertical defaults use compact flow-axis spacing to compensate for text line-height.
-    pub const SPACING_LABEL: &str = "vp-spacing-label";
-
-    /// Icon widget spacing profile (`.vp-spacing-icon`).
-    /// Vertical defaults keep roomier flow-axis spacing because icons/dots lack line-height slack.
-    pub const SPACING_ICON: &str = "vp-spacing-icon";
-
     /// Widget group container class (`.widget-group`).
     /// Applied to shared island containers that hold multiple grouped widgets.
     pub const WIDGET_GROUP: &str = "widget-group";

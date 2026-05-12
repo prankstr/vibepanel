@@ -98,29 +98,28 @@ sectioned-bar.bar.bar--vertical {{
 }}
 
 /* Widget spacing model:
-   - each widget wrapper carries a spacing profile class from BaseWidget;
-   - the profile selects tuned horizontal/vertical base spacing;
+   - root -h/-v tokens are orientation defaults from the theme;
+   - .widget-item computes the final effective tokens consumed by layout;
+   - vertical bars switch label/default widgets to compact -v tokens;
+   - tray/workspaces intentionally keep roomy -h spacing even in vertical bars;
    - public --widget-content-padding-offset / --widget-content-gap-offset are additive offsets.
    Layout rules consume --vp-widget-content-padding / --vp-widget-content-gap only. */
 .widget-item {{
-    --vp-widget-content-padding-base-h: var(--vp-widget-content-padding-roomy);
-    --vp-widget-content-gap-base-h: var(--vp-widget-content-gap-roomy);
-    --vp-widget-content-padding-base-v: var(--vp-widget-content-padding-compact);
-    --vp-widget-content-gap-base-v: var(--vp-widget-content-gap-compact);
-    --vp-widget-content-padding-base: var(--vp-widget-content-padding-base-h);
-    --vp-widget-content-gap-base: var(--vp-widget-content-gap-base-h);
-    --vp-widget-content-padding: max(0px, calc(var(--vp-widget-content-padding-base) + var(--widget-content-padding-offset, 0px)));
-    --vp-widget-content-gap: max(0px, calc(var(--vp-widget-content-gap-base) + var(--widget-content-gap-offset, 0px)));
+    --vp-widget-content-padding: max(0px, calc(var(--vp-widget-content-padding-h) + var(--widget-content-padding-offset, 0px)));
+    --vp-widget-content-gap: max(0px, calc(var(--vp-widget-content-gap-h) + var(--widget-content-gap-offset, 0px)));
 }}
 
 .bar--vertical .widget-item {{
-    --vp-widget-content-padding-base: var(--vp-widget-content-padding-base-v);
-    --vp-widget-content-gap-base: var(--vp-widget-content-gap-base-v);
+    --vp-widget-content-padding: max(0px, calc(var(--vp-widget-content-padding-v) + var(--widget-content-padding-offset, 0px)));
+    --vp-widget-content-gap: max(0px, calc(var(--vp-widget-content-gap-v) + var(--widget-content-gap-offset, 0px)));
 }}
 
-.widget-item.vp-spacing-icon {{
-    --vp-widget-content-padding-base-v: var(--vp-widget-content-padding-roomy);
-    --vp-widget-content-gap-base-v: var(--vp-widget-content-gap-roomy);
+/* Widget identity classes live on .widget, not .widget-item, so override
+   the final tokens on .content for icon/dot widgets that lack line-height slack. */
+.bar--vertical .widget.tray > overlay > .content,
+.bar--vertical .widget.workspaces > overlay > .content {{
+    --vp-widget-content-padding: max(0px, calc(var(--vp-widget-content-padding-h) + var(--widget-content-padding-offset, 0px)));
+    --vp-widget-content-gap: max(0px, calc(var(--vp-widget-content-gap-h) + var(--widget-content-gap-offset, 0px)));
 }}
 
 /* Padding on .content (not the container) so the ripple overlay

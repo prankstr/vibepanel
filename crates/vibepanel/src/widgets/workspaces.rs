@@ -120,7 +120,7 @@ use crate::services::tooltip::TooltipManager;
 use crate::services::workspace::{Workspace, WorkspaceService, WorkspaceServiceSnapshot};
 use crate::styles::{state, widget};
 use crate::widgets::WidgetConfig;
-use crate::widgets::base::{BaseWidget, WidgetSpacingProfile};
+use crate::widgets::base::BaseWidget;
 use crate::widgets::ripple::{trigger_ripple_from_gesture, wrap_with_ripple};
 use crate::widgets::warn_unknown_options;
 
@@ -954,7 +954,7 @@ impl WorkspacesWidget {
     ///   - For Hyprland: show the workspace currently active on this output,
     ///     plus workspaces reported with windows on this output.
     pub fn new(config: WorkspacesConfig, output_id: Option<String>) -> Self {
-        let base = BaseWidget::new_with_spacing(&[widget::WORKSPACES], WidgetSpacingProfile::Icon);
+        let base = BaseWidget::new(&[widget::WORKSPACES]);
 
         let label_type = config.label_type;
         let filter_by_output = config.filter_by_output;

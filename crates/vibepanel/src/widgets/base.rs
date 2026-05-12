@@ -509,30 +509,6 @@ pub struct BaseWidget {
     _show_if_timer: Option<glib::SourceId>,
 }
 
-/// Spacing profile used to choose a widget's tuned base spacing.
-///
-/// User-facing `--widget-content-padding-offset` / `--widget-content-gap-offset` values are
-/// offsets added to this base, so widgets only need to declare which visual
-/// spacing family they belong to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WidgetSpacingProfile {
-    /// Text/label-bearing widgets. Vertical bars use compact flow-axis spacing
-    /// because font line-height already contributes visual breathing room.
-    Label,
-    /// Icon/dot-only widgets. Vertical bars keep the roomier base spacing
-    /// because there is no text line-height slack to absorb.
-    Icon,
-}
-
-impl WidgetSpacingProfile {
-    fn css_class(self) -> &'static str {
-        match self {
-            Self::Label => class::SPACING_LABEL,
-            Self::Icon => class::SPACING_ICON,
-        }
-    }
-}
-
 impl BaseWidget {
     /// Create a new base widget container.
     ///
@@ -544,12 +520,7 @@ impl BaseWidget {
     /// - The first class in `extra_classes` is used as the widget name for
     ///   popover styling (e.g., "clock" -> popovers get "clock-popover" class).
     pub fn new(extra_classes: &[&str]) -> Self {
-        Self::new_with_spacing(extra_classes, WidgetSpacingProfile::Label)
-    }
-
-    /// Create a new base widget with an explicit spacing profile.
-    pub fn new_with_spacing(extra_classes: &[&str], spacing_profile: WidgetSpacingProfile) -> Self {
-        Self::new_inner(extra_classes, false, spacing_profile)
+        Self::new_inner(extra_classes, false)
     }
 
     /// Create a passive base widget — no GestureClick, no RippleHandle, no menu.
@@ -559,22 +530,10 @@ impl BaseWidget {
     /// The widget still builds its visual content (icon, label, tooltip) and
     /// responds to data service updates.
     pub(crate) fn new_passive(extra_classes: &[&str]) -> Self {
-        Self::new_passive_with_spacing(extra_classes, WidgetSpacingProfile::Label)
+        Self::new_inner(extra_classes, true)
     }
 
-    /// Create a passive base widget with an explicit spacing profile.
-    pub(crate) fn new_passive_with_spacing(
-        extra_classes: &[&str],
-        spacing_profile: WidgetSpacingProfile,
-    ) -> Self {
-        Self::new_inner(extra_classes, true, spacing_profile)
-    }
-
-    fn new_inner(
-        extra_classes: &[&str],
-        passive: bool,
-        spacing_profile: WidgetSpacingProfile,
-    ) -> Self {
+    fn new_inner(extra_classes: &[&str], passive: bool) -> Self {
         // Orientation is captured at construction. Changes to `bar.position`
         // are structural config changes, so bars/widgets are rebuilt instead
         // of mutating existing BaseWidget containers in place.
@@ -588,7 +547,6 @@ impl BaseWidget {
         let container = GtkBox::new(orientation, 0);
         container.add_css_class(class::WIDGET_WRAPPER);
         container.add_css_class(class::WIDGET_ITEM);
-        container.add_css_class(spacing_profile.css_class());
         if passive {
             container.add_css_class(class::PASSIVE);
         }

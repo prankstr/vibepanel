@@ -826,13 +826,9 @@ fn build_merge_group(
     // theme-derived spacing as inter-child gaps inside a single widget — both
     // are gaps between visual elements that may carry Pango line-height
     // baggage on their flow-axis edges, so both shrink in vertical mode.
-    let merge_gap = if orientation == gtk4::Orientation::Vertical {
-        ConfigManager::global()
-            .theme_sizes()
-            .widget_content_gap_vertical
-    } else {
-        ConfigManager::global().theme_sizes().widget_content_gap
-    };
+    let merge_gap = ConfigManager::global()
+        .theme_sizes()
+        .content_gap_for_orientation(orientation == gtk4::Orientation::Vertical);
     inner_content.set_spacing(merge_gap as i32);
     wrapper.set_child(Some(&inner_content));
 
