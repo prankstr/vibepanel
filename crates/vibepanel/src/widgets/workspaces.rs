@@ -120,7 +120,7 @@ use crate::services::tooltip::TooltipManager;
 use crate::services::workspace::{Workspace, WorkspaceService, WorkspaceServiceSnapshot};
 use crate::styles::{state, widget};
 use crate::widgets::WidgetConfig;
-use crate::widgets::base::BaseWidget;
+use crate::widgets::base::{BaseWidget, WidgetSpacingProfile};
 use crate::widgets::ripple::{trigger_ripple_from_gesture, wrap_with_ripple};
 use crate::widgets::warn_unknown_options;
 
@@ -179,6 +179,12 @@ mod ws_container_imp {
         /// the display). Display-scoped CSS is safe because workspace
         /// IDs are globally unique across all outputs.
         pub(super) long_mw_css_provider: RefCell<Option<CssProvider>>,
+        /// True when the bar is on a side edge (left/right). The container
+        /// uses width-named fields throughout (`target_width`, `current_width`,
+        /// etc.); in vertical orientation those values represent the flow
+        /// extent on the height axis. Naming is kept for diff churn — read
+        /// "width" as "flow extent" when this flag is set.
+        pub(super) axis_vertical: Cell<bool>,
     }
 
     #[glib::object_subclass]
@@ -217,10 +223,15 @@ mod ws_container_imp {
             if children.is_empty() {
                 return (0, 0, -1, -1);
             }
-            if orientation == gtk4::Orientation::Horizontal {
-                // Always use the animated/reconciled width so that
-                // per-frame CSS transition rounding noise does not
-                // cause the container to jitter during switches.
+            let flow = if self.axis_vertical.get() {
+                gtk4::Orientation::Vertical
+            } else {
+                gtk4::Orientation::Horizontal
+            };
+            if orientation == flow {
+                // Always use the animated/reconciled flow extent so that
+                // per-frame CSS transition rounding noise does not cause the
+                // container to jitter during switches.
                 let w = self.current_width.get().round() as i32;
                 (w, w, -1, -1)
             } else {
@@ -242,20 +253,40 @@ mod ws_container_imp {
                 return;
             }
 
+            let vertical = self.axis_vertical.get();
+            let flow_orient = if vertical {
+                gtk4::Orientation::Vertical
+            } else {
+                gtk4::Orientation::Horizontal
+            };
+            let flow_size = if vertical { height } else { width };
+            let cross_size = if vertical { width } else { height };
+            let allocate = |child: &Widget, c_flow: i32, pos: i32| {
+                let t = gtk4::gsk::Transform::new().translate(&if vertical {
+                    gtk4::graphene::Point::new(0.0, pos as f32)
+                } else {
+                    gtk4::graphene::Point::new(pos as f32, 0.0)
+                });
+                let (a, b) = if vertical {
+                    (cross_size, c_flow)
+                } else {
+                    (c_flow, cross_size)
+                };
+                child.allocate(a, b, baseline, Some(t));
+            };
+
             if n == 1 {
-                let (_, cw, _, _) = children[0].measure(gtk4::Orientation::Horizontal, height);
-                let x = (width - cw) / 2;
-                let t = gtk4::gsk::Transform::new()
-                    .translate(&gtk4::graphene::Point::new(x as f32, 0.0));
-                children[0].allocate(cw, height, baseline, Some(t));
+                let (_, c_flow, _, _) = children[0].measure(flow_orient, cross_size);
+                let pos = (flow_size - c_flow) / 2;
+                allocate(&children[0], c_flow, pos);
                 return;
             }
 
             let gap = self.gap.get();
 
             // Two-group split around the active indicator:
-            //   Left group: [0..=active_idx]  — laid out left-to-right
-            //   Right group: [active_idx+1..n] — laid out right-to-left
+            //   Left group: [0..=active_idx]  — laid out from the leading edge
+            //   Right group: [active_idx+1..n] — laid out from the trailing edge
             // The gap between groups absorbs ±1px rounding drift from
             // CSS-animated min-width values. Overflow::Hidden clips any
             // transient overshoot during multi-active transitions.
@@ -270,40 +301,32 @@ mod ws_container_imp {
                 compute_left_count(n, active_idx)
             };
 
-            // Left group: laid out left-to-right from x=0
-            let mut x = 0i32;
+            // Leading group: laid out from pos=0
+            let mut p = 0i32;
             for child in children[..left_count].iter() {
-                let (_, cw, _, _) = child.measure(gtk4::Orientation::Horizontal, height);
-                let t = gtk4::gsk::Transform::new()
-                    .translate(&gtk4::graphene::Point::new(x as f32, 0.0));
-                child.allocate(cw, height, baseline, Some(t));
-                x += cw + gap;
+                let (_, c_flow, _, _) = child.measure(flow_orient, cross_size);
+                allocate(child, c_flow, p);
+                p += c_flow + gap;
             }
 
-            // Right group: laid out right-to-left from x=width
-            let mut rx = width;
+            // Trailing group: laid out from pos=flow_size backwards
+            let mut rp = flow_size;
             for child in children[left_count..].iter().rev() {
-                let (_, cw, _, _) = child.measure(gtk4::Orientation::Horizontal, height);
-                rx -= cw;
-                let t = gtk4::gsk::Transform::new()
-                    .translate(&gtk4::graphene::Point::new(rx as f32, 0.0));
-                child.allocate(cw, height, baseline, Some(t));
-                rx -= gap;
+                let (_, c_flow, _, _) = child.measure(flow_orient, cross_size);
+                rp -= c_flow;
+                allocate(child, c_flow, rp);
+                rp -= gap;
             }
 
-            // Reconcile target width when CSS changes externally (e.g. user
+            // Reconcile target extent when CSS changes externally (e.g. user
             // style.css hot-reload). If no animation is running and the
-            // children's measured widths diverge from the stored target, snap
-            // both target and current width so the container tracks the new
-            // CSS dimensions without waiting for the next workspace event.
-            // The queue_resize() is safe here: GTK coalesces resize requests
-            // and will re-layout on the next frame, not recursively.
+            // children's measured flow extents diverge from the stored target,
+            // animate to the new extent so the container tracks the new CSS
+            // dimensions without waiting for the next workspace event.
             if !self.animating.get() && !self.suppress_reconcile.get() {
                 let obj = self.obj();
                 let measured = obj.compute_children_current_width();
                 if (measured - self.target_width.get()).abs() > 1 {
-                    // Animate to the new width rather than snapping, so
-                    // additions and CSS hot-reloads transition smoothly.
                     obj.set_target_width(measured);
                 }
             }
@@ -373,7 +396,13 @@ impl WorkspaceContainer {
                 // Skip while suppress_reconcile is set: the tracking
                 // branch below handles that case by following
                 // children_width directly.
-                let children_width = sum_children_widths(&imp.children.borrow(), imp.gap.get());
+                let flow = if imp.axis_vertical.get() {
+                    gtk4::Orientation::Vertical
+                } else {
+                    gtk4::Orientation::Horizontal
+                };
+                let children_width =
+                    sum_children_widths(&imp.children.borrow(), imp.gap.get(), flow);
                 if !imp.suppress_reconcile.get()
                     && (children_width - imp.target_width.get()).abs() > 1
                 {
@@ -524,10 +553,24 @@ impl WorkspaceContainer {
         *self.imp().long_mw_css_provider.borrow_mut() = Some(provider);
     }
 
-    /// Compute the current total width of children from live CSS measurements.
+    /// Compute the current total flow extent of children from live CSS
+    /// measurements. In horizontal mode this is total width; in vertical it
+    /// is total height.
     fn compute_children_current_width(&self) -> i32 {
         let children = self.imp().children.borrow();
-        sum_children_widths(&children, self.imp().gap.get())
+        sum_children_widths(&children, self.imp().gap.get(), self.flow_orientation())
+    }
+
+    fn flow_orientation(&self) -> gtk4::Orientation {
+        if self.imp().axis_vertical.get() {
+            gtk4::Orientation::Vertical
+        } else {
+            gtk4::Orientation::Horizontal
+        }
+    }
+
+    fn set_axis_vertical(&self, vertical: bool) {
+        self.imp().axis_vertical.set(vertical);
     }
 
     /// Seed `current_width` to a known value without triggering animation.
@@ -640,7 +683,12 @@ impl WorkspaceContainer {
                 return glib::ControlFlow::Break;
             }
 
-            let current = sum_children_widths(&imp.children.borrow(), imp.gap.get()) as f64;
+            let flow = if imp.axis_vertical.get() {
+                gtk4::Orientation::Vertical
+            } else {
+                gtk4::Orientation::Horizontal
+            };
+            let current = sum_children_widths(&imp.children.borrow(), imp.gap.get(), flow) as f64;
             let prev = imp.convergence_prev_width.get();
 
             // Wait for the CSS transition to finish before accepting
@@ -668,22 +716,22 @@ impl WorkspaceContainer {
     }
 }
 
-/// Sum the current natural widths of `children` plus inter-child gaps.
+/// Sum the current natural flow extents of `children` plus inter-child gaps.
 ///
-/// Each child is measured horizontally to get its live CSS-transitioning
-/// width, so the result tracks in-flight CSS transitions frame by frame.
+/// Each child is measured along the flow axis to get its live CSS-transitioning
+/// extent, so the result tracks in-flight CSS transitions frame by frame.
 ///
 /// Note: not unit-tested because `Widget::measure()` requires a GTK display
 /// server.  The gap arithmetic is trivially `(n-1) * gap`; the function is
 /// exercised end-to-end by the layout's `size_allocate` path.
-fn sum_children_widths(children: &[Widget], gap: i32) -> i32 {
+fn sum_children_widths(children: &[Widget], gap: i32, flow: gtk4::Orientation) -> i32 {
     let n = children.len();
     if n == 0 {
         return 0;
     }
     let mut total = 0i32;
     for child in children {
-        let (_, cw, _, _) = child.measure(gtk4::Orientation::Horizontal, -1);
+        let (_, cw, _, _) = child.measure(flow, -1);
         total += cw;
     }
     total + (n as i32 - 1) * gap
@@ -759,12 +807,29 @@ fn workspace_label_text(label_type: LabelType, workspace: &Workspace) -> String 
     }
 }
 
+fn compact_workspace_label_text(label_type: LabelType, workspace: &Workspace) -> String {
+    let text = workspace_label_text(label_type, workspace);
+    match label_type {
+        LabelType::Name | LabelType::Index => text.chars().take(2).collect(),
+        LabelType::Icons | LabelType::None => text,
+    }
+}
+
+fn workspace_label_text_for_orientation(
+    label_type: LabelType,
+    workspace: &Workspace,
+    is_vertical: bool,
+) -> String {
+    if is_vertical {
+        compact_workspace_label_text(label_type, workspace)
+    } else {
+        workspace_label_text(label_type, workspace)
+    }
+}
+
 const DEFAULT_LABEL_TYPE: LabelType = LabelType::None;
 const DEFAULT_SEPARATOR: &str = "";
 
-/// Multiplier for indicator height relative to widget_height.
-/// Used in CSS generation (bar.rs) for min-height on all indicators.
-pub(crate) const INDICATOR_HEIGHT_MULT: f64 = 0.7;
 /// Multiplier for inactive indicator width relative to widget_height.
 /// Used in CSS generation (bar.rs) for min-width on inactive indicators.
 pub(crate) const INDICATOR_INACTIVE_MULT: f64 = 0.7;
@@ -889,13 +954,15 @@ impl WorkspacesWidget {
     ///   - For Hyprland: show the workspace currently active on this output,
     ///     plus workspaces reported with windows on this output.
     pub fn new(config: WorkspacesConfig, output_id: Option<String>) -> Self {
-        let base = BaseWidget::new(&[widget::WORKSPACES]);
+        let base = BaseWidget::new_with_spacing(&[widget::WORKSPACES], WidgetSpacingProfile::Icon);
 
         let label_type = config.label_type;
         let filter_by_output = config.filter_by_output;
         let show_unoccupied = config.show_unoccupied;
         // Per-widget animate flag takes precedence when explicitly set.
         // Falls back to the global theme.animations setting.
+        let is_vertical = ConfigManager::global().bar_position().is_vertical();
+
         let animate = config
             .animate
             .unwrap_or_else(|| ConfigManager::global().animations_enabled());
@@ -904,13 +971,13 @@ impl WorkspacesWidget {
         // from bar.size/bar.padding, and any change to those triggers a full
         // bar rebuild (config_structure_changed → reconfigure_all), which
         // destroys and recreates this widget with fresh values.
-        let sizes = ConfigManager::global().theme_sizes();
-        let content_gap = sizes.widget_content_gap;
-
         // Animated mode uses WorkspaceContainer; otherwise indicators go in the GtkBox.
         let ws_container: Option<WorkspaceContainer> = if animate {
             let container = WorkspaceContainer::new();
-            container.set_gap(content_gap as i32);
+            container.set_axis_vertical(is_vertical);
+            // Inter-indicator spacing is CSS margin-based so user density
+            // offsets affect animated and non-animated workspaces consistently.
+            container.set_gap(0);
             base.content().append(&container);
             Some(container)
         } else {
@@ -936,6 +1003,7 @@ impl WorkspacesWidget {
                 &separator,
                 snapshot,
                 show_unoccupied,
+                is_vertical,
                 if filter_by_output {
                     output_id.as_deref()
                 } else {
@@ -1011,7 +1079,11 @@ fn clear_indicators(
 /// CSS classes for sizing and state go on the overlay so that
 /// `WorkspaceContainer::size_allocate` can detect the active indicator
 /// and `measure()` sees the correct min-width.
-fn create_single_indicator(label_type: LabelType, workspace: &Workspace) -> Widget {
+fn create_single_indicator(
+    label_type: LabelType,
+    workspace: &Workspace,
+    is_vertical: bool,
+) -> Widget {
     let workspace_id = workspace.id;
 
     let (overlay, ripple_handle, is_long) = if label_type == LabelType::None {
@@ -1020,11 +1092,10 @@ fn create_single_indicator(label_type: LabelType, workspace: &Workspace) -> Widg
         let (o, rh) = wrap_with_ripple(&dot);
         (o, rh, false)
     } else {
-        let label_text = workspace_label_text(label_type, workspace);
+        let label_text = workspace_label_text_for_orientation(label_type, workspace, is_vertical);
         let label = Label::new(Some(&label_text));
-        // Optical centering: glyphs ●/○/◆ appear left-heavy at 0.5;
-        // 0.55 nudges them to look visually centered in the pill.
-        label.set_xalign(0.55);
+        // Optical centering
+        label.set_xalign(if is_vertical { 0.58 } else { 0.55 });
         label.set_ellipsize(EllipsizeMode::End);
         label.set_single_line_mode(true);
         let (o, rh) = wrap_with_ripple(&label);
@@ -1043,6 +1114,7 @@ fn create_single_indicator(label_type: LabelType, workspace: &Workspace) -> Widg
         overlay.add_css_class(&ws_mw_class(workspace_id));
     }
     overlay.set_valign(Align::Center);
+    overlay.set_halign(Align::Center);
 
     let gesture = GestureClick::new();
     gesture.set_button(BUTTON_PRIMARY);
@@ -1075,6 +1147,7 @@ fn create_indicators(
     label_type: LabelType,
     separator: &str,
     workspaces: &[Workspace],
+    is_vertical: bool,
 ) {
     clear_indicators(container, ws_container, labels_cell, ids_cell);
 
@@ -1082,7 +1155,7 @@ fn create_indicators(
     let mut ids = ids_cell.borrow_mut();
 
     for (i, workspace) in workspaces.iter().enumerate() {
-        let indicator = create_single_indicator(label_type, workspace);
+        let indicator = create_single_indicator(label_type, workspace, is_vertical);
 
         labels.insert(workspace.id, indicator.clone());
         if let Some(wsc) = ws_container {
@@ -1092,7 +1165,11 @@ fn create_indicators(
         }
         ids.push(workspace.id);
 
-        if ws_container.is_none() && i < workspaces.len() - 1 && !separator.is_empty() {
+        if !is_vertical
+            && ws_container.is_none()
+            && i < workspaces.len() - 1
+            && !separator.is_empty()
+        {
             let sep = Label::new(Some(separator));
             sep.set_valign(Align::Center);
             sep.add_css_class(widget::WORKSPACE_SEPARATOR);
@@ -1134,6 +1211,7 @@ fn recreate_with_grow_in(
     display_workspaces: &[Workspace],
     old_ids: &HashSet<i32>,
     new_ids: &[i32],
+    is_vertical: bool,
 ) {
     create_indicators(
         container,
@@ -1143,6 +1221,7 @@ fn recreate_with_grow_in(
         label_type,
         separator,
         display_workspaces,
+        is_vertical,
     );
     if !old_ids.is_empty() {
         let labels = labels_cell.borrow();
@@ -1285,6 +1364,7 @@ fn update_indicators(
     separator: &str,
     snapshot: &WorkspaceServiceSnapshot,
     show_unoccupied: bool,
+    is_vertical: bool,
     output_id: Option<&str>,
 ) {
     let (workspaces, active_workspaces, source): (&[Workspace], &HashSet<i32>, &str) = if let Some(
@@ -1445,6 +1525,7 @@ fn update_indicators(
                         &display_workspaces,
                         &old_ids,
                         &new_ids,
+                        is_vertical,
                     );
                 }
                 ChangeType::Swap => {
@@ -1461,6 +1542,7 @@ fn update_indicators(
                         &display_workspaces,
                         &old_ids,
                         &new_ids,
+                        is_vertical,
                     );
                 }
                 ChangeType::Addition => {
@@ -1479,6 +1561,7 @@ fn update_indicators(
                         &display_workspaces,
                         &old_ids,
                         &new_ids,
+                        is_vertical,
                     );
                 }
                 ChangeType::None => {
@@ -1499,6 +1582,7 @@ fn update_indicators(
                 label_type,
                 separator,
                 &display_workspaces,
+                is_vertical,
             );
         }
     }
@@ -1586,7 +1670,8 @@ fn update_indicators(
                     }
                 }
                 LabelType::Name | LabelType::Index => {
-                    let label_text = workspace_label_text(label_type, workspace);
+                    let label_text =
+                        workspace_label_text_for_orientation(label_type, workspace, is_vertical);
                     label.set_text(&label_text);
                     let now_long = label_text.chars().count() > 2;
                     let was_long = indicator.has_css_class(widget::WORKSPACE_INDICATOR_LONG);

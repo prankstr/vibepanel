@@ -42,6 +42,14 @@ pub mod class {
     /// enabling per-widget hover effects within groups.
     pub const WIDGET_ITEM: &str = "widget-item";
 
+    /// Label widget spacing profile (`.vp-spacing-label`).
+    /// Vertical defaults use compact flow-axis spacing to compensate for text line-height.
+    pub const SPACING_LABEL: &str = "vp-spacing-label";
+
+    /// Icon widget spacing profile (`.vp-spacing-icon`).
+    /// Vertical defaults keep roomier flow-axis spacing because icons/dots lack line-height slack.
+    pub const SPACING_ICON: &str = "vp-spacing-icon";
+
     /// Widget group container class (`.widget-group`).
     /// Applied to shared island containers that hold multiple grouped widgets.
     pub const WIDGET_GROUP: &str = "widget-group";
@@ -80,6 +88,24 @@ pub mod class {
 
     /// Main bar class (`.bar`).
     pub const BAR: &str = "bar";
+
+    /// Horizontal bar orientation (`.bar--horizontal`).
+    pub const BAR_HORIZONTAL: &str = "bar--horizontal";
+
+    /// Vertical bar orientation (`.bar--vertical`).
+    pub const BAR_VERTICAL: &str = "bar--vertical";
+
+    /// Top bar position (`.bar--top`).
+    pub const BAR_TOP: &str = "bar--top";
+
+    /// Bottom bar position (`.bar--bottom`).
+    pub const BAR_BOTTOM: &str = "bar--bottom";
+
+    /// Left bar position (`.bar--left`).
+    pub const BAR_LEFT: &str = "bar--left";
+
+    /// Right bar position (`.bar--right`).
+    pub const BAR_RIGHT: &str = "bar--right";
 
     /// Sectioned bar widget CSS name (`sectioned-bar`).
     pub const SECTIONED_BAR: &str = "sectioned-bar";

@@ -11,6 +11,7 @@ use gtk4::pango::{AttrFontDesc, AttrList, FontDescription};
 use gtk4::prelude::*;
 use tracing::debug;
 use vibepanel_core::SurfaceStyles;
+use vibepanel_core::config::BarPosition;
 
 use crate::services::config_manager::ConfigManager;
 use crate::styles::{icon, surface};
@@ -160,20 +161,36 @@ impl SurfaceStyleManager {
 
     /// Apply shadow-aware margins to a popover/overlay container.
     ///
-    /// The bar-adjacent side gets 0 margin (tight against bar), the opposite
-    /// side and both horizontal sides get the shadow margin.
+    /// The bar-adjacent side gets 0 margin (tight against bar), all other sides
+    /// keep the shadow margin so shadows are not clipped.
     pub fn apply_shadow_margins(&self, widget: &impl gtk4::prelude::WidgetExt, base_margin: i32) {
         let m = self.shadow_margin(base_margin);
-        let is_bottom = crate::services::config_manager::ConfigManager::global().bar_is_bottom();
-        if is_bottom {
-            widget.set_margin_top(m);
-            widget.set_margin_bottom(0);
-        } else {
-            widget.set_margin_top(0);
-            widget.set_margin_bottom(m);
+        match crate::services::config_manager::ConfigManager::global().bar_position() {
+            BarPosition::Top => {
+                widget.set_margin_top(0);
+                widget.set_margin_bottom(m);
+                widget.set_margin_start(m);
+                widget.set_margin_end(m);
+            }
+            BarPosition::Bottom => {
+                widget.set_margin_top(m);
+                widget.set_margin_bottom(0);
+                widget.set_margin_start(m);
+                widget.set_margin_end(m);
+            }
+            BarPosition::Left => {
+                widget.set_margin_top(m);
+                widget.set_margin_bottom(m);
+                widget.set_margin_start(0);
+                widget.set_margin_end(m);
+            }
+            BarPosition::Right => {
+                widget.set_margin_top(m);
+                widget.set_margin_bottom(m);
+                widget.set_margin_start(m);
+                widget.set_margin_end(0);
+            }
         }
-        widget.set_margin_start(m);
-        widget.set_margin_end(m);
     }
 
     /// Get the current font size for bar widgets.

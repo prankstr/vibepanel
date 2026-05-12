@@ -8,12 +8,8 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use tracing::{debug, info, warn};
 
-use vibepanel_core::config::{WidgetEntry, WidgetOrGroup};
+use vibepanel_core::config::{BarPosition, WidgetEntry, WidgetOrGroup};
 use vibepanel_core::{Config, ThemePalette};
-
-/// Horizontal spacing (px) between widgets inside a merge group.
-/// Matches the `.content` horizontal padding in `css/bar.rs`.
-const MERGE_GROUP_SPACING: i32 = 10;
 
 use crate::popover_tracker::PopoverTracker;
 use crate::sectioned_bar::SectionedBar;
@@ -40,6 +36,42 @@ pub(crate) fn rendered_bar_height(config: &Config) -> i32 {
     }
 }
 
+/// Returns the bar's content-flow orientation: horizontal for top/bottom
+/// bars, vertical for left/right bars. This is the orientation passed to
+/// `SectionedBar` and `BaseWidget`, not the layer-shell cross-axis orientation
+/// returned by `shell_orientation_for`.
+fn bar_flow_orientation_for(position: BarPosition) -> gtk4::Orientation {
+    if position.is_vertical() {
+        gtk4::Orientation::Vertical
+    } else {
+        gtk4::Orientation::Horizontal
+    }
+}
+
+/// Returns the layer-shell cross-axis orientation: the axis along which the
+/// bar window stretches to fill the monitor (e.g. a top bar stretches
+/// horizontally, so this returns Vertical — the shell spacer flows
+/// perpendicular to the bar's content flow).
+fn shell_orientation_for(position: BarPosition) -> gtk4::Orientation {
+    if position.is_vertical() {
+        gtk4::Orientation::Horizontal
+    } else {
+        gtk4::Orientation::Vertical
+    }
+}
+
+fn screen_margin_spacer_size(position: BarPosition, margin: i32) -> (i32, i32) {
+    if position.is_vertical() {
+        (margin, -1)
+    } else {
+        (-1, margin)
+    }
+}
+
+fn screen_margin_spacer_precedes_bar(position: BarPosition) -> bool {
+    matches!(position, BarPosition::Top | BarPosition::Left)
+}
+
 /// Production-built bar content shared by the layer-shell window path and
 /// runtime UI regression tests.
 pub(crate) struct BuiltBarContent {
@@ -58,53 +90,82 @@ pub(crate) fn build_bar_content(
     state: &mut BarState,
     output_id: Option<&str>,
 ) -> BuiltBarContent {
+    let position = config.bar.position();
+    let is_vertical = position.is_vertical();
+    let orientation = bar_flow_orientation_for(position);
+    let margin = config.bar.screen_margin as i32;
+
     // Create the bar container using SectionedBar for proper left/center/right layout
     let bar_box = SectionedBar::new(
+        orientation,
         config.bar.spacing as i32,
         config.bar.inset as i32,
         config.widgets.left_has_expander(),
         config.widgets.right_has_expander(),
     );
     bar_box.add_css_class(class::BAR);
+    bar_box.add_css_class(if is_vertical {
+        class::BAR_VERTICAL
+    } else {
+        class::BAR_HORIZONTAL
+    });
+    bar_box.add_css_class(match position {
+        BarPosition::Top => class::BAR_TOP,
+        BarPosition::Bottom => class::BAR_BOTTOM,
+        BarPosition::Left => class::BAR_LEFT,
+        BarPosition::Right => class::BAR_RIGHT,
+    });
     bar_box.set_hexpand(true);
     bar_box.set_vexpand(true);
 
     // Wrap bar_box in an outer container so we can inset the
     // visible bar from the anchored edge and sides while
     // keeping the window and exclusive zone full-width.
-    let outer_box = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+    let shell_orientation = shell_orientation_for(position);
+    let outer_box = gtk4::Box::new(shell_orientation, 0);
     outer_box.add_css_class(class::BAR_SHELL);
     outer_box.set_hexpand(true);
     outer_box.set_vexpand(true);
 
     // Spacer: empty area between bar content and screen edge.
-    // For top bar, spacer goes above (pushes bar down from top edge).
-    // For bottom bar, spacer goes below (pushes bar up from bottom edge).
-    let margin = config.bar.screen_margin as i32;
     let spacer = if margin > 0 {
-        let s = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
-        s.set_size_request(-1, margin);
+        let s = gtk4::Box::new(shell_orientation, 0);
+        let (width, height) = screen_margin_spacer_size(position, margin);
+        s.set_size_request(width, height);
         s.add_css_class(class::BAR_MARGIN_SPACER);
         Some(s)
     } else {
         None
     };
 
-    let is_bottom = config.bar.is_bottom();
-    if !is_bottom && let Some(ref spacer) = spacer {
+    if screen_margin_spacer_precedes_bar(position)
+        && let Some(ref spacer) = spacer
+    {
         outer_box.append(spacer);
     }
 
-    // Inner horizontal box adds left/right padding via CSS.
-    let inner_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
+    let inner_box = gtk4::Box::new(orientation, 0);
     inner_box.add_css_class(class::BAR_SHELL_INNER);
-    inner_box.set_hexpand(true);
-    inner_box.set_vexpand(false);
+    inner_box.add_css_class(if is_vertical {
+        class::BAR_VERTICAL
+    } else {
+        class::BAR_HORIZONTAL
+    });
+    inner_box.add_css_class(match position {
+        BarPosition::Top => class::BAR_TOP,
+        BarPosition::Bottom => class::BAR_BOTTOM,
+        BarPosition::Left => class::BAR_LEFT,
+        BarPosition::Right => class::BAR_RIGHT,
+    });
+    inner_box.set_hexpand(!is_vertical);
+    inner_box.set_vexpand(is_vertical);
     inner_box.append(&bar_box);
 
     outer_box.append(&inner_box);
 
-    if is_bottom && let Some(ref spacer) = spacer {
+    if !screen_margin_spacer_precedes_bar(position)
+        && let Some(ref spacer) = spacer
+    {
         outer_box.append(spacer);
     }
 
@@ -130,19 +191,20 @@ pub(crate) fn build_bar_content(
     );
 
     // Create left section
-    let left_section = create_section("left", config, state, &qs_handle, output_id);
+    let left_section = create_section("left", config, state, &qs_handle, output_id, orientation);
     bar_box.set_start_widget(Some(&left_section));
 
     // Create center section only if there are center widgets
     // Without a center widget, the layout manager uses linear allocation
     let has_center_content = !config.widgets.resolved_center().is_empty();
     if has_center_content {
-        let center_section = create_center_section(config, state, &qs_handle, output_id);
+        let center_section =
+            create_center_section(config, state, &qs_handle, output_id, orientation);
         bar_box.set_center_widget(Some(&center_section));
     }
 
     // Create right section
-    let right_section = create_section("right", config, state, &qs_handle, output_id);
+    let right_section = create_section("right", config, state, &qs_handle, output_id, orientation);
     bar_box.set_end_widget(Some(&right_section));
 
     BuiltBarContent {
@@ -163,6 +225,8 @@ pub fn create_bar_window(
     output_id: &str,
     state: &mut BarState,
 ) -> ApplicationWindow {
+    let position = config.bar.position();
+    let is_vertical = position.is_vertical();
     let bar_height = rendered_bar_height(config);
 
     let window = ApplicationWindow::builder()
@@ -170,7 +234,8 @@ pub fn create_bar_window(
         .title("vibepanel")
         .decorated(false)
         .resizable(false)
-        .default_height(bar_height)
+        .default_height(if is_vertical { -1 } else { bar_height })
+        .default_width(if is_vertical { bar_height } else { -1 })
         .build();
 
     window.add_css_class(class::BAR_WINDOW);
@@ -184,12 +249,23 @@ pub fn create_bar_window(
     window.set_monitor(Some(monitor));
     debug!("Bar bound to monitor: {:?}", monitor.connector());
 
-    // Anchor to the configured edge, stretch horizontally
-    let is_bottom = config.bar.is_bottom();
-    window.set_anchor(Edge::Top, !is_bottom);
-    window.set_anchor(Edge::Left, true);
-    window.set_anchor(Edge::Right, true);
-    window.set_anchor(Edge::Bottom, is_bottom);
+    // Anchor to the configured edge and stretch along the opposite axis.
+    window.set_anchor(
+        Edge::Top,
+        matches!(position, BarPosition::Top) || is_vertical,
+    );
+    window.set_anchor(
+        Edge::Bottom,
+        matches!(position, BarPosition::Bottom) || is_vertical,
+    );
+    window.set_anchor(
+        Edge::Left,
+        matches!(position, BarPosition::Left) || !is_vertical,
+    );
+    window.set_anchor(
+        Edge::Right,
+        matches!(position, BarPosition::Right) || !is_vertical,
+    );
 
     // Reserve space (exclusive zone) so other windows don't overlap
     window.auto_exclusive_zone_enable();
@@ -207,16 +283,25 @@ pub fn create_bar_window(
     // because the surface might not be on the correct monitor yet at map time.
     let target_geometry = monitor.geometry();
     let target_width = target_geometry.width();
+    let target_height = target_geometry.height();
 
     let is_island_mode = config.bar.background_opacity == 0.0;
 
     let bar_box_for_blur = bar_box.clone();
     window.connect_map(move |win| {
-        win.set_default_size(target_width, bar_height);
-        debug!(
-            "Set window width to target monitor size: {}px",
-            target_width
-        );
+        if is_vertical {
+            win.set_default_size(bar_height, target_height);
+            debug!(
+                "Set window height to target monitor size: {}px",
+                target_height
+            );
+        } else {
+            win.set_default_size(target_width, bar_height);
+            debug!(
+                "Set window width to target monitor size: {}px",
+                target_width
+            );
+        }
 
         // Apply bar blur region on map (opaque/translucent bar path).
         // The islands path is handled by the layout allocate callback below.
@@ -460,6 +545,7 @@ fn build_widget_or_group(
     state: &mut BarState,
     qs_handle: &crate::widgets::QuickSettingsWindowHandle,
     output_id: Option<&str>,
+    orientation: gtk4::Orientation,
 ) -> usize {
     match item {
         WidgetOrGroup::Single(entry) => {
@@ -478,18 +564,27 @@ fn build_widget_or_group(
             }
 
             // Create a shared island container for the group
-            let island = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
+            let island = gtk4::Box::new(orientation, 0);
             island.add_css_class(class::WIDGET_WRAPPER);
 
             // Create inner content box (matching BaseWidget structure)
-            let content = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
+            let content = gtk4::Box::new(orientation, 0);
             content.add_css_class(class::CONTENT);
+            content.set_hexpand(true);
             content.set_vexpand(true);
-            content.set_valign(gtk4::Align::Fill);
+            // Cross-axis must fill the bar thickness so grouped children span
+            // the full bar width (vertical) or bar height (horizontal).
+            if orientation == gtk4::Orientation::Vertical {
+                content.set_halign(gtk4::Align::Fill);
+                content.set_valign(gtk4::Align::Center);
+            } else {
+                content.set_halign(gtk4::Align::Fill);
+                content.set_valign(gtk4::Align::Fill);
+            }
 
             // Group surface — transparent in CSS. Direct children paint their
             // own backgrounds so hover colors composite once over the bar.
-            let surface = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
+            let surface = gtk4::Box::new(orientation, 0);
             surface.add_css_class(class::WIDGET);
             surface.add_css_class(class::WIDGET_GROUP);
             // First real widget's per-widget style (outline_color, background_color)
@@ -575,7 +670,8 @@ fn build_widget_or_group(
                     && *kind != PopoverKind::Unmergeable
                     && (real_in_run >= 2 || total_real == 1)
                 {
-                    let merged = build_merge_group(run_entries, *kind, &content, state);
+                    let merged =
+                        build_merge_group(run_entries, *kind, &content, state, orientation);
                     if merged > 0 {
                         count += merged;
                     } else {
@@ -696,6 +792,7 @@ fn build_merge_group(
     kind: PopoverKind,
     parent_content: &gtk4::Box,
     state: &mut BarState,
+    orientation: gtk4::Orientation,
 ) -> usize {
     // Overlay wrapper — ripple sits on top of the content box.
     let wrapper = Overlay::new();
@@ -712,11 +809,24 @@ fn build_merge_group(
     // refill is clipped here so it cannot bleed outside the group.
     wrapper.set_overflow(gtk4::Overflow::Hidden);
 
-    let inner_content = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
+    let inner_content = gtk4::Box::new(orientation, 0);
     inner_content.add_css_class(class::MERGE_GROUP_CONTENT);
+    inner_content.set_hexpand(true);
     inner_content.set_vexpand(true);
-    inner_content.set_valign(gtk4::Align::Fill);
-    inner_content.set_spacing(MERGE_GROUP_SPACING);
+    // Cross-axis fill: same as the outer group content box (see
+    // build_widget_or_group).
+    if orientation == gtk4::Orientation::Vertical {
+        inner_content.set_halign(gtk4::Align::Fill);
+        inner_content.set_valign(gtk4::Align::Center);
+    } else {
+        inner_content.set_halign(gtk4::Align::Fill);
+        inner_content.set_valign(gtk4::Align::Fill);
+    }
+    // Visible gap between widgets inside a merge group. Uses the same
+    // theme-derived spacing as inter-child gaps inside a single widget — both
+    // are gaps between visual elements that may carry Pango line-height
+    // baggage on their flow-axis edges, so both shrink in vertical mode.
+    inner_content.set_spacing(ConfigManager::global().theme_sizes().widget_content_gap as i32);
     wrapper.set_child(Some(&inner_content));
 
     let ripple_handle = RippleHandle::new();
@@ -724,7 +834,7 @@ fn build_merge_group(
     // clip, so the ripple matches the inner pill shape on hover. The merge
     // group itself uses position-aware radius (square at seams in mixed
     // groups), which would otherwise leak the ripple into the corners.
-    let ripple_clip = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
+    let ripple_clip = gtk4::Box::new(orientation, 0);
     ripple_clip.add_css_class(class::WIDGET_MERGE_GROUP_RIPPLE_CLIP);
     ripple_clip.set_overflow(gtk4::Overflow::Hidden);
     ripple_clip.append(ripple_handle.widget());
@@ -826,9 +936,10 @@ fn create_section(
     state: &mut BarState,
     qs_handle: &crate::widgets::QuickSettingsWindowHandle,
     output_id: Option<&str>,
+    orientation: gtk4::Orientation,
 ) -> gtk4::Box {
     let section = gtk4::Box::new(
-        gtk4::Orientation::Horizontal,
+        orientation,
         0, // Spacing handled via CSS margins to allow spacer widget to have no gaps
     );
     // Clip overflowing content to prevent widgets from rendering beyond section bounds
@@ -850,7 +961,8 @@ fn create_section(
     // Build widgets from resolved entries
     let mut widget_count = 0;
     for item in &resolved {
-        widget_count += build_widget_or_group(item, &section, state, qs_handle, output_id);
+        widget_count +=
+            build_widget_or_group(item, &section, state, qs_handle, output_id, orientation);
     }
 
     debug!(
@@ -866,13 +978,15 @@ fn create_center_section(
     state: &mut BarState,
     qs_handle: &crate::widgets::QuickSettingsWindowHandle,
     output_id: Option<&str>,
+    orientation: gtk4::Orientation,
 ) -> gtk4::Box {
-    let section = gtk4::Box::new(gtk4::Orientation::Horizontal, config.bar.spacing as i32);
+    let section = gtk4::Box::new(orientation, config.bar.spacing as i32);
     section.add_css_class(class::BAR_SECTION_CENTER);
 
     let mut widget_count = 0;
     for item in &config.widgets.resolved_center() {
-        widget_count += build_widget_or_group(item, &section, state, qs_handle, output_id);
+        widget_count +=
+            build_widget_or_group(item, &section, state, qs_handle, output_id, orientation);
     }
 
     debug!("Created center section with {} widget(s)", widget_count);
@@ -1042,11 +1156,18 @@ fn load_transient_css(display: &gtk4::gdk::Display) {
             return;
         }
 
+        // `.workspace-grow-in` collapses the flow-axis size to 0 so the
+        // container animates the indicator in. In horizontal mode the flow
+        // axis is width; in vertical it is height. The .bar--vertical
+        // override restores min-width to the cross-axis size and zeros
+        // min-height instead.
         let provider = gtk4::CssProvider::new();
         provider.load_from_string(&format!(
-            ".{} {{ min-width: 0; }} .{} {{ transition: none; }}",
-            style_widget::WORKSPACE_GROW_IN,
-            style_widget::WORKSPACE_GROW_IN_NOTRANS
+            ".{grow_in} {{ min-width: 0; }} \
+             .bar--vertical .{grow_in} {{ min-width: var(--icon-size); min-height: 0; }} \
+             .{notrans} {{ transition: none; }}",
+            grow_in = style_widget::WORKSPACE_GROW_IN,
+            notrans = style_widget::WORKSPACE_GROW_IN_NOTRANS,
         ));
 
         gtk4::style_context_add_provider_for_display(display, &provider, TRANSIENT_CSS_PRIORITY);

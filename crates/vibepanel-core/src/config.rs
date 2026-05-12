@@ -758,11 +758,6 @@ impl BarConfig {
         BarPosition::parse(&self.position).unwrap_or(BarPosition::Top)
     }
 
-    /// Returns true if the bar is positioned on the bottom screen edge.
-    pub fn is_bottom(&self) -> bool {
-        matches!(self.position(), BarPosition::Bottom)
-    }
-
     /// Returns true if the bar is positioned on a vertical screen edge.
     pub fn is_vertical(&self) -> bool {
         self.position().is_vertical()

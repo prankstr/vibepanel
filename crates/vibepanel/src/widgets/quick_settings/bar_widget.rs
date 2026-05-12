@@ -17,7 +17,6 @@ use super::vpn_card::vpn_icon_name;
 use crate::services::audio::{AudioService, AudioSnapshot};
 use crate::services::bluetooth::{BluetoothService, BluetoothSnapshot};
 use crate::services::callbacks::CallbackId;
-use crate::services::config_manager::ConfigManager;
 use crate::services::network::{NetworkService, NetworkSnapshot};
 use crate::services::tooltip::TooltipManager;
 use crate::services::vpn::{VpnService, VpnSnapshot};
@@ -25,6 +24,7 @@ use crate::styles::{icon, qs, state, widget};
 use crate::widgets::BaseWidget;
 use crate::widgets::WidgetConfig;
 use crate::widgets::base::trigger_ripple_from_gesture;
+use crate::widgets::layer_shell_popover::PopoverAnchor;
 use crate::widgets::warn_unknown_options;
 use vibepanel_core::config::WidgetEntry;
 
@@ -562,17 +562,20 @@ impl QuickSettingsWidget {
                     });
 
                     if let Some(bounds) = root.compute_bounds(&native) {
-                        let screen_margin = ConfigManager::global().screen_margin() as i32;
-                        let widget_center_x =
-                            (bounds.x() + bounds.width() / 2.0) as i32 + screen_margin;
+                        // Bounds are already in the native surface coordinate space;
+                        // adding screen_margin here would double-offset the anchor.
+                        let anchor = PopoverAnchor {
+                            x: (bounds.x() + bounds.width() / 2.0) as i32,
+                            y: (bounds.y() + bounds.height() / 2.0) as i32,
+                        };
 
                         let monitor = monitor.flatten();
-                        qs_window_handle.toggle_at(widget_center_x, monitor);
+                        qs_window_handle.toggle_at(anchor, monitor);
                     } else {
-                        qs_window_handle.toggle_at(0, None);
+                        qs_window_handle.toggle_at(PopoverAnchor::default(), None);
                     }
                 } else {
-                    qs_window_handle.toggle_at(0, None);
+                    qs_window_handle.toggle_at(PopoverAnchor::default(), None);
                 }
             });
         }

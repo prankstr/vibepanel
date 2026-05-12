@@ -90,6 +90,7 @@ use gdk4_wayland::prelude::*;
 use gtk4::glib;
 use gtk4::prelude::*;
 use tracing::{debug, trace, warn};
+use vibepanel_core::config::BarPosition;
 use wayland_client::protocol::wl_compositor::WlCompositor;
 use wayland_client::protocol::wl_registry;
 use wayland_client::{Connection, Dispatch, EventQueue, QueueHandle};
@@ -427,11 +428,11 @@ fn compute_shadow_layout(shadow_margin: i32) -> (i32, i32, i32, i32, i32) {
 
     let m = effective_margin;
     let (margin_top, margin_bottom, margin_start, margin_end) = if m > 0 {
-        let is_bottom = crate::services::config_manager::ConfigManager::global().bar_is_bottom();
-        if is_bottom {
-            (m, 0, m, m) // bar at bottom → top/start/end get margin, bottom = 0
-        } else {
-            (0, m, m, m) // bar at top → bottom/start/end get margin, top = 0
+        match crate::services::config_manager::ConfigManager::global().bar_position() {
+            BarPosition::Top => (0, m, m, m),
+            BarPosition::Bottom => (m, 0, m, m),
+            BarPosition::Left => (m, m, 0, m),
+            BarPosition::Right => (m, m, m, 0),
         }
     } else {
         (0, 0, 0, 0)

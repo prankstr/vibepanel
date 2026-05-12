@@ -319,7 +319,9 @@ impl NotificationsWidget {
 
         // Create an overlay for badge on top of icon
         let overlay = Overlay::new();
+        overlay.set_halign(Align::Center);
         overlay.set_valign(Align::Center);
+        overlay.set_vexpand(true);
 
         // Bell icon - use logical name that maps to Material "notifications" or GTK equivalent
         let icon_handle = base.add_icon("notifications", &[widget::NOTIFICATION_ICON]);
@@ -362,12 +364,12 @@ impl NotificationsWidget {
         let inner_for_menu = Rc::clone(&inner);
         let menu_handle = base.create_menu(|| GtkBox::new(Orientation::Vertical, 0).into());
         let handle_weak = Rc::downgrade(&menu_handle);
-        menu_handle.set_builder(move || {
+        menu_handle.set_builder_with_monitor(move |monitor| {
             inner_for_menu.mark_as_seen();
             let on_close: Option<ClosePopoverCallback> = handle_weak
                 .upgrade()
                 .map(|handle| Rc::new(move || handle.hide()) as ClosePopoverCallback);
-            build_popover_content(on_close, Rc::clone(&suppress_rebuild))
+            build_popover_content(on_close, Rc::clone(&suppress_rebuild), monitor)
         });
         *inner.menu_handle.borrow_mut() = Some(menu_handle);
 

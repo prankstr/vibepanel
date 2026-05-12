@@ -17,6 +17,7 @@ use tracing::debug;
 use crate::services::notification::{
     Notification, NotificationService, URGENCY_CRITICAL, URGENCY_LOW,
 };
+use vibepanel_core::config::BarPosition;
 
 /// Type alias for toast notification callbacks.
 type ToastCallback = Rc<dyn Fn(u32)>;
@@ -70,7 +71,7 @@ impl NotificationToast {
         window.add_css_class(notif::TOAST_WRAPPER);
 
         // Determine bar position for toast anchoring
-        let is_bottom = ConfigManager::global().bar_is_bottom();
+        let is_bottom = ConfigManager::global().bar_position() == BarPosition::Bottom;
         let bar_edge = if is_bottom { Edge::Bottom } else { Edge::Top };
 
         // Initialize layer shell

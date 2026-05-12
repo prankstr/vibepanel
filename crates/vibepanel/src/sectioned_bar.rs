@@ -20,8 +20,8 @@ mod imp {
     use super::*;
     use std::cell::{Cell, RefCell};
 
-    #[derive(Default)]
     pub struct CenterPriorityLayout {
+        pub orientation: Cell<Orientation>,
         pub spacing: Cell<i32>,
         pub edge_margin: Cell<i32>,
         pub left_expand: Cell<bool>,
@@ -36,6 +36,25 @@ mod imp {
         /// Optional callback fired after every allocation pass.
         /// Used by bar blur to recompute island regions when layout changes.
         pub on_allocate: RefCell<Option<Box<dyn Fn()>>>,
+    }
+
+    impl Default for CenterPriorityLayout {
+        fn default() -> Self {
+            Self {
+                orientation: Cell::new(Orientation::Horizontal),
+                spacing: Cell::default(),
+                edge_margin: Cell::default(),
+                left_expand: Cell::default(),
+                right_expand: Cell::default(),
+                last_left_x: Cell::default(),
+                last_left_width: Cell::default(),
+                last_center_x: Cell::default(),
+                last_center_width: Cell::default(),
+                last_right_x: Cell::default(),
+                last_right_width: Cell::default(),
+                on_allocate: RefCell::default(),
+            }
+        }
     }
 
     #[glib::object_subclass]
@@ -62,42 +81,42 @@ mod imp {
             let spacing = self.spacing.get();
             let edge = self.edge_margin.get();
 
-            if orientation == Orientation::Horizontal {
-                let mut min_width = edge * 2;
-                let mut nat_width = edge * 2;
+            if orientation == self.orientation.get() {
+                let mut min_primary = edge * 2;
+                let mut nat_primary = edge * 2;
                 let mut active_count = 0;
 
                 for section in ["left", "center", "right"] {
                     if let Some(child) = bar.section(section)
                         && child.is_visible()
                     {
-                        let (min_w, nat_w, _, _) = child.measure(Orientation::Horizontal, -1);
-                        min_width += min_w;
-                        nat_width += nat_w;
+                        let (min, nat, _, _) = child.measure(self.orientation.get(), -1);
+                        min_primary += min;
+                        nat_primary += nat;
                         active_count += 1;
                     }
                 }
 
                 let spacing_total = spacing * (active_count - 1).max(0);
-                min_width += spacing_total;
-                nat_width += spacing_total;
+                min_primary += spacing_total;
+                nat_primary += spacing_total;
 
-                (min_width, nat_width, -1, -1)
+                (min_primary, nat_primary, -1, -1)
             } else {
-                let mut min_height = 0;
-                let mut nat_height = 0;
+                let mut min_cross = 0;
+                let mut nat_cross = 0;
 
                 for section in ["left", "center", "right"] {
                     if let Some(child) = bar.section(section)
                         && child.is_visible()
                     {
-                        let (min_h, nat_h, _, _) = child.measure(Orientation::Vertical, -1);
-                        min_height = min_height.max(min_h);
-                        nat_height = nat_height.max(nat_h);
+                        let (min, nat, _, _) = child.measure(orientation, -1);
+                        min_cross = min_cross.max(min);
+                        nat_cross = nat_cross.max(nat);
                     }
                 }
 
-                (min_height, nat_height, -1, -1)
+                (min_cross, nat_cross, -1, -1)
             }
         }
 
@@ -124,18 +143,32 @@ mod imp {
         /// - All x-coordinates are relative to the container's allocation
         fn allocate(&self, widget: &Widget, width: i32, height: i32, baseline: i32) {
             let bar = widget.downcast_ref::<super::SectionedBar>().unwrap();
+            let orientation = self.orientation.get();
             let spacing = self.spacing.get();
             let edge = self.edge_margin.get();
-            let interior = (width - 2 * edge).max(0);
+            let primary = if orientation == Orientation::Horizontal {
+                width
+            } else {
+                height
+            };
+            let cross = if orientation == Orientation::Horizontal {
+                height
+            } else {
+                width
+            };
+            let interior = (primary - 2 * edge).max(0);
 
             let left = bar.section("left").filter(|w| w.is_visible());
             let center = bar.section("center").filter(|w| w.is_visible());
             let right = bar.section("right").filter(|w| w.is_visible());
 
             // Helper to measure a widget
-            fn measure_section(widget: Option<&Widget>) -> Option<SectionSizes> {
+            fn measure_section(
+                widget: Option<&Widget>,
+                orientation: Orientation,
+            ) -> Option<SectionSizes> {
                 widget.map(|w| {
-                    let (min, nat, _, _) = w.measure(Orientation::Horizontal, -1);
+                    let (min, nat, _, _) = w.measure(orientation, -1);
                     SectionSizes { min, natural: nat }
                 })
             }
@@ -145,8 +178,8 @@ mod imp {
                 let alloc = compute_linear_allocation(
                     interior,
                     spacing,
-                    measure_section(left.as_ref()),
-                    measure_section(right.as_ref()),
+                    measure_section(left.as_ref(), orientation),
+                    measure_section(right.as_ref(), orientation),
                 );
 
                 // Record last allocation for snapshot/clipping
@@ -162,7 +195,8 @@ mod imp {
                         &left_widget,
                         edge + alloc.left_x,
                         alloc.left_width,
-                        height,
+                        cross,
+                        orientation,
                         baseline,
                     );
                 }
@@ -171,7 +205,8 @@ mod imp {
                         &right_widget,
                         edge + alloc.right_x,
                         alloc.right_width,
-                        height,
+                        cross,
+                        orientation,
                         baseline,
                     );
                 }
@@ -186,12 +221,12 @@ mod imp {
             let center = center.unwrap();
 
             // Measure all sections
-            let left_sizes = measure_section(left.as_ref());
+            let left_sizes = measure_section(left.as_ref(), orientation);
             let center_sizes = {
-                let (min, nat, _, _) = center.measure(Orientation::Horizontal, -1);
+                let (min, nat, _, _) = center.measure(orientation, -1);
                 SectionSizes { min, natural: nat }
             };
-            let right_sizes = measure_section(right.as_ref());
+            let right_sizes = measure_section(right.as_ref(), orientation);
 
             // Compute allocation using pure math function
             let alloc = compute_center_priority_allocation(
@@ -228,7 +263,8 @@ mod imp {
                     &left_widget,
                     edge + alloc.left_x,
                     alloc.left_width,
-                    height,
+                    cross,
+                    orientation,
                     baseline,
                 );
             }
@@ -237,7 +273,8 @@ mod imp {
                 &center,
                 edge + alloc.center_x,
                 alloc.center_width,
-                height,
+                cross,
+                orientation,
                 baseline,
             );
 
@@ -246,7 +283,8 @@ mod imp {
                     &right_widget,
                     edge + alloc.right_x,
                     alloc.right_width,
-                    height,
+                    cross,
+                    orientation,
                     baseline,
                 );
             }
@@ -269,8 +307,15 @@ glib::wrapper! {
 }
 
 impl CenterPriorityLayout {
-    pub fn new(spacing: i32, edge_margin: i32, left_expand: bool, right_expand: bool) -> Self {
+    pub fn new(
+        orientation: Orientation,
+        spacing: i32,
+        edge_margin: i32,
+        left_expand: bool,
+        right_expand: bool,
+    ) -> Self {
         let obj: Self = glib::Object::builder().build();
+        obj.imp().orientation.set(orientation);
         obj.imp().spacing.set(spacing);
         obj.imp().edge_margin.set(edge_margin);
         obj.imp().left_expand.set(left_expand);
@@ -304,7 +349,7 @@ impl CenterPriorityLayout {
 
 impl Default for CenterPriorityLayout {
     fn default() -> Self {
-        Self::new(8, 12, false, false)
+        Self::new(Orientation::Horizontal, 8, 12, false, false)
     }
 }
 
@@ -313,16 +358,33 @@ impl Default for CenterPriorityLayout {
 /// Uses a translation transform to position the child horizontally.
 /// The child is given the full height of the container.
 /// Baseline is set to -1 (none) to avoid text alignment issues with certain fonts.
-fn allocate_child_at(child: &Widget, x: i32, width: i32, height: i32, _baseline: i32) {
-    let width = width.max(0);
-    let transform = if x != 0 {
+fn allocate_child_at(
+    child: &Widget,
+    position: i32,
+    primary: i32,
+    cross: i32,
+    orientation: Orientation,
+    _baseline: i32,
+) {
+    let primary = primary.max(0);
+    let cross = cross.max(0);
+    let transform = if position != 0 {
         let transform = gtk4::gsk::Transform::new();
-        Some(transform.translate(&gtk4::graphene::Point::new(x as f32, 0.0)))
+        let point = if orientation == Orientation::Horizontal {
+            gtk4::graphene::Point::new(position as f32, 0.0)
+        } else {
+            gtk4::graphene::Point::new(0.0, position as f32)
+        };
+        Some(transform.translate(&point))
     } else {
         None
     };
     // Pass -1 for baseline to disable baseline alignment
-    child.allocate(width, height, -1, transform);
+    if orientation == Orientation::Horizontal {
+        child.allocate(primary, cross, -1, transform);
+    } else {
+        child.allocate(cross, primary, -1, transform);
+    }
 }
 
 mod bar_imp {
@@ -378,9 +440,16 @@ glib::wrapper! {
 }
 
 impl SectionedBar {
-    pub fn new(spacing: i32, edge_margin: i32, left_expand: bool, right_expand: bool) -> Self {
+    pub fn new(
+        orientation: Orientation,
+        spacing: i32,
+        edge_margin: i32,
+        left_expand: bool,
+        right_expand: bool,
+    ) -> Self {
         let obj: Self = glib::Object::builder().build();
-        let layout = CenterPriorityLayout::new(spacing, edge_margin, left_expand, right_expand);
+        let layout =
+            CenterPriorityLayout::new(orientation, spacing, edge_margin, left_expand, right_expand);
         obj.set_layout_manager(Some(layout));
         obj
     }
@@ -433,7 +502,7 @@ impl SectionedBar {
 
 impl Default for SectionedBar {
     fn default() -> Self {
-        Self::new(8, 12, false, false)
+        Self::new(Orientation::Horizontal, 8, 12, false, false)
     }
 }
 

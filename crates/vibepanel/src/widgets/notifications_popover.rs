@@ -3,7 +3,7 @@
 //! This module handles the popover that appears when clicking the notification
 //! bell icon, showing a scrollable list of notifications with dismiss controls.
 
-use gtk4::gdk::{self, Monitor};
+use gtk4::gdk::Monitor;
 use gtk4::prelude::*;
 use gtk4::{
     Align, Box as GtkBox, Button, Image, Label, Orientation, PolicyType, Revealer,
@@ -22,9 +22,7 @@ use crate::services::tooltip::TooltipManager;
 use crate::styles::{button, card, color, notification as notif, surface};
 
 use super::css::DISMISS_ANIMATION_MS;
-use super::layer_shell_popover::{
-    calculate_bar_exclusive_zone_from_values, calculate_popover_bar_margin,
-};
+use super::layer_shell_popover::{calculate_bar_exclusive_zone, calculate_popover_bar_margin};
 use super::notifications_common::{
     BODY_TRUNCATE_THRESHOLD, POPOVER_WIDTH, create_notification_image_widget, format_timestamp,
     sanitize_body_markup,
@@ -54,39 +52,24 @@ const MIN_HEIGHT_THRESHOLD: i32 = 100;
 const FALLBACK_MAX_HEIGHT: i32 = 500;
 
 /// Compute the maximum ScrolledWindow height based on monitor geometry.
-///
-/// Uses the same approach as quick settings: subtract the bar exclusive zone,
-/// bar margin, container overhead, and far edge margin from the monitor height.
-fn compute_max_scroll_height() -> i32 {
-    let monitor_opt = gdk::Display::default().and_then(|display| {
-        let monitors = display.monitors();
-        monitors
-            .item(0)
-            .and_then(|obj| obj.downcast::<Monitor>().ok())
-    });
-
-    let Some(monitor) = monitor_opt else {
+fn compute_max_scroll_height(monitor: Option<Monitor>) -> i32 {
+    let Some(monitor) = monitor else {
         return FALLBACK_MAX_HEIGHT;
     };
 
     let geom = monitor.geometry();
 
     let config_mgr = ConfigManager::global();
-    let bar_size = config_mgr.bar_size() as i32;
-    let bar_padding = config_mgr.bar_padding() as i32;
-    let bar_opacity = config_mgr.bar_background_opacity();
-    let screen_margin = config_mgr.screen_margin() as i32;
-    let popover_offset = config_mgr.popover_offset() as i32;
-
-    let bar_exclusive_zone =
-        calculate_bar_exclusive_zone_from_values(bar_size, bar_padding, bar_opacity, screen_margin)
-            + popover_offset;
-
     let bar_margin = calculate_popover_bar_margin();
+    let mut occupied_height = bar_margin;
+
+    if config_mgr.bar_position().is_horizontal() {
+        let popover_offset = config_mgr.popover_offset() as i32;
+        occupied_height += calculate_bar_exclusive_zone() + popover_offset;
+    }
 
     let max_height = geom.height()
-        - bar_exclusive_zone
-        - bar_margin
+        - occupied_height
         - HEADER_HEIGHT_ESTIMATE
         - CONTAINER_VERTICAL_OVERHEAD
         - FAR_EDGE_MARGIN;
@@ -109,6 +92,7 @@ fn compute_max_scroll_height() -> i32 {
 pub(super) fn build_popover_content(
     on_close: Option<ClosePopoverCallback>,
     suppress_rebuild: Rc<Cell<bool>>,
+    monitor: Option<Monitor>,
 ) -> gtk4::Widget {
     let root = GtkBox::new(Orientation::Vertical, 0);
     root.add_css_class(notif::POPOVER);
@@ -122,7 +106,7 @@ pub(super) fn build_popover_content(
 
     populate_notification_list(&notification_list, on_close, &suppress_rebuild);
 
-    let max_height = compute_max_scroll_height();
+    let max_height = compute_max_scroll_height(monitor);
 
     let scrolled = ScrolledWindow::new();
     scrolled.set_policy(PolicyType::Never, PolicyType::Automatic);

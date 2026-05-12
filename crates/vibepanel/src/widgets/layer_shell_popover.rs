@@ -32,12 +32,15 @@ pub fn is_keynav_key(keyval: gdk::Key) -> bool {
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use vibepanel_core::config::BarPosition;
 
 use super::scale_box::ScaleBox;
 use crate::services::compositor::CompositorManager;
 use crate::services::config_manager::ConfigManager;
 use crate::services::surfaces::SurfaceStyleManager;
 use crate::styles::{class, surface};
+
+type AnchorMonitorCallback = Rc<dyn Fn(Option<Monitor>)>;
 
 /// Margin around popover content for shadow rendering space.
 ///
@@ -52,6 +55,15 @@ const POPOVER_MIN_EDGE_MARGIN: i32 = 4;
 const POPOVER_DEFAULT_WIDTH_ESTIMATE: i32 = 320;
 
 const POPOVER_MIN_VALID_WIDTH: i32 = 20;
+const POPOVER_MIN_VALID_HEIGHT: i32 = 20;
+const POPOVER_DEFAULT_HEIGHT_ESTIMATE: i32 = 360;
+
+/// Monitor-local widget center used to place bar-adjacent popovers.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PopoverAnchor {
+    pub x: i32,
+    pub y: i32,
+}
 
 /// Animation duration as f64 milliseconds for tick-callback math.
 pub(crate) const ANIM_DURATION_MS: f64 = super::css::POPOVER_ANIMATION_MS as f64;
@@ -182,9 +194,13 @@ pub(crate) fn snap_anim_shell(shell: &ScaleBox, widget_name: &str, opacity: f64,
 /// account for bar padding in its positioning. This ensures consistent visual
 /// spacing regardless of bar transparency settings.
 ///
+/// The returned value can be negative when `bar.padding > popover_offset`.
+/// That is intentional: opaque bars include padding in their exclusive zone
+/// (`calculate_bar_exclusive_zone_for`), so subtracting it moves the popover
+/// back to the requested visual offset from the painted bar surface.
+///
 /// Used by both `LayerShellPopover` and Quick Settings for consistent positioning.
-/// The returned value should be applied to `Edge::Top` when bar is top,
-/// or `Edge::Bottom` when bar is bottom.
+/// The returned value should be applied to whichever edge the bar occupies.
 pub fn calculate_popover_bar_margin() -> i32 {
     let config_mgr = ConfigManager::global();
     let bar_padding = config_mgr.bar_padding() as i32;
@@ -203,10 +219,48 @@ pub fn calculate_popover_bar_margin() -> i32 {
 /// When bar is at the top, popovers anchor to `Edge::Top` and open downward.
 /// When bar is at the bottom, popovers anchor to `Edge::Bottom` and open upward.
 pub fn popover_bar_edge() -> Edge {
-    if ConfigManager::global().bar_is_bottom() {
-        Edge::Bottom
-    } else {
-        Edge::Top
+    match ConfigManager::global().bar_position() {
+        BarPosition::Top => Edge::Top,
+        BarPosition::Bottom => Edge::Bottom,
+        BarPosition::Left => Edge::Left,
+        BarPosition::Right => Edge::Right,
+    }
+}
+
+/// Configure layer-shell anchors so the popover hugs the bar edge and can be
+/// positioned along the opposite axis with a single far-edge margin.
+pub fn configure_popover_layer_anchors(window: &ApplicationWindow) {
+    match ConfigManager::global().bar_position() {
+        BarPosition::Top => {
+            window.set_anchor(Edge::Top, true);
+            window.set_anchor(Edge::Bottom, false);
+            window.set_anchor(Edge::Left, false);
+            window.set_anchor(Edge::Right, true);
+        }
+        BarPosition::Bottom => {
+            window.set_anchor(Edge::Top, false);
+            window.set_anchor(Edge::Bottom, true);
+            window.set_anchor(Edge::Left, false);
+            window.set_anchor(Edge::Right, true);
+        }
+        BarPosition::Left => {
+            window.set_anchor(Edge::Top, false);
+            window.set_anchor(Edge::Bottom, true);
+            window.set_anchor(Edge::Left, true);
+            window.set_anchor(Edge::Right, false);
+        }
+        BarPosition::Right => {
+            window.set_anchor(Edge::Top, false);
+            window.set_anchor(Edge::Bottom, true);
+            window.set_anchor(Edge::Left, false);
+            window.set_anchor(Edge::Right, true);
+        }
+    }
+}
+
+pub fn reset_popover_margins(window: &ApplicationWindow) {
+    for edge in [Edge::Top, Edge::Right, Edge::Bottom, Edge::Left] {
+        window.set_margin(edge, 0);
     }
 }
 
@@ -252,6 +306,15 @@ pub fn calculate_popover_right_margin(
     }
 }
 
+pub fn calculate_popover_bottom_margin(
+    anchor_y: i32,
+    monitor_height: i32,
+    window_height: i32,
+    min_edge_margin: i32,
+) -> i32 {
+    calculate_popover_right_margin(anchor_y, monitor_height, window_height, min_edge_margin)
+}
+
 /// Get the appropriate keyboard mode for layer-shell popovers.
 ///
 /// - **Hyprland**: Uses `OnDemand` because `Exclusive` mode breaks input handling
@@ -266,30 +329,30 @@ pub fn popover_keyboard_mode() -> KeyboardMode {
     }
 }
 
-/// Calculate the bar's exclusive zone height for click-catcher margin.
+/// Calculate the bar's exclusive-zone thickness for click-catcher margin.
 ///
-/// This matches the logic in `bar.rs` to ensure the click-catcher leaves
-/// the bar area uncovered for seamless transitions.
+/// This matches the layer-shell surface thickness in `bar.rs`: the visible bar
+/// thickness plus the single screen-edge spacer inserted ahead of/after it.
 pub fn calculate_bar_exclusive_zone() -> i32 {
     let config_mgr = ConfigManager::global();
-    let bar_size = config_mgr.bar_size() as i32;
-    let bar_padding = config_mgr.bar_padding() as i32;
-    let bar_opacity = config_mgr.bar_background_opacity();
-    let screen_margin = config_mgr.screen_margin() as i32;
-
-    calculate_bar_exclusive_zone_from_values(bar_size, bar_padding, bar_opacity, screen_margin)
+    calculate_bar_exclusive_zone_for(
+        config_mgr.bar_size() as i32,
+        config_mgr.bar_padding() as i32,
+        config_mgr.screen_margin() as i32,
+        config_mgr.bar_background_opacity(),
+    )
 }
 
-pub(crate) fn calculate_bar_exclusive_zone_from_values(
+pub(crate) fn calculate_bar_exclusive_zone_for(
     bar_size: i32,
     bar_padding: i32,
-    bar_opacity: f64,
     screen_margin: i32,
+    bar_opacity: f64,
 ) -> i32 {
     if bar_opacity > 0.0 {
-        bar_size + 2 * bar_padding + 2 * screen_margin
+        bar_size + 2 * bar_padding + screen_margin
     } else {
-        bar_size + bar_padding + 2 * screen_margin
+        bar_size + bar_padding + screen_margin
     }
 }
 
@@ -412,8 +475,8 @@ pub struct LayerShellPopover {
     /// Persistent animation shell. Never destroyed. Builder content is placed
     /// inside this as a child and swapped on each show.
     anim_shell: RefCell<Option<ScaleBox>>,
-    /// Anchor X coordinate (widget center) in monitor coordinates.
-    anchor_x: Cell<i32>,
+    /// Widget center in monitor coordinates.
+    anchor: Cell<PopoverAnchor>,
     anchor_monitor: RefCell<Option<Monitor>>,
     /// Optional callback invoked when the popover is fully hidden (after close
     /// animation completes). NOT fired at the start of hide().
@@ -422,6 +485,8 @@ pub struct LayerShellPopover {
     /// is parented but before the animation starts). Use this to refresh data
     /// in reuse mode — e.g. updating the calendar to today's date.
     on_show: RefCell<Option<Rc<dyn Fn()>>>,
+    /// Optional callback invoked when `show_at()` receives a new anchor monitor.
+    on_anchor_monitor_changed: RefCell<Option<AnchorMonitorCallback>>,
     /// Shared animation state driven by the tick callback.
     anim_state: Rc<RefCell<AnimState>>,
     /// Generation counter incremented on every show/hide to cancel stale
@@ -469,10 +534,11 @@ impl LayerShellPopover {
             window: RefCell::new(None),
             click_catcher: RefCell::new(None),
             anim_shell: RefCell::new(None),
-            anchor_x: Cell::new(0),
+            anchor: Cell::new(PopoverAnchor::default()),
             anchor_monitor: RefCell::new(None),
             on_close: RefCell::new(None),
             on_show: RefCell::new(None),
+            on_anchor_monitor_changed: RefCell::new(None),
             anim_state: Rc::new(RefCell::new(AnimState::new_idle())),
             anim_generation: Rc::new(Cell::new(0)),
             logically_open: Cell::new(false),
@@ -514,6 +580,10 @@ impl LayerShellPopover {
     /// allowing consumers to refresh data (e.g. update calendar to today).
     pub fn set_on_show<F: Fn() + 'static>(&self, callback: F) {
         *self.on_show.borrow_mut() = Some(Rc::new(callback));
+    }
+
+    pub fn set_on_anchor_monitor_changed<F: Fn(Option<Monitor>) + 'static>(&self, callback: F) {
+        *self.on_anchor_monitor_changed.borrow_mut() = Some(Rc::new(callback));
     }
 
     /// Enable content reuse mode.
@@ -618,8 +688,11 @@ impl LayerShellPopover {
     ///
     /// Reuses all persistent shells (window, animation, click-catcher) and
     /// builds fresh content.
-    pub fn show_at(self: &Rc<Self>, x: i32, monitor: Option<Monitor>) {
-        self.anchor_x.set(x);
+    pub fn show_at(self: &Rc<Self>, anchor: PopoverAnchor, monitor: Option<Monitor>) {
+        self.anchor.set(anchor);
+        if let Some(ref cb) = *self.on_anchor_monitor_changed.borrow() {
+            cb(monitor.clone());
+        }
         *self.anchor_monitor.borrow_mut() = monitor;
         self.show_internal();
     }
@@ -952,11 +1025,7 @@ impl LayerShellPopover {
         window.set_namespace(Some(&format!("vibepanel-{}-popover", self.widget_name)));
         window.set_layer(Layer::Top);
         window.set_exclusive_zone(0);
-        let is_bottom = ConfigManager::global().bar_is_bottom();
-        window.set_anchor(Edge::Top, !is_bottom);
-        window.set_anchor(Edge::Right, true);
-        window.set_anchor(Edge::Bottom, is_bottom);
-        window.set_anchor(Edge::Left, false);
+        configure_popover_layer_anchors(&window);
         window.set_keyboard_mode(popover_keyboard_mode());
 
         // ESC key handler
@@ -1154,7 +1223,7 @@ impl LayerShellPopover {
             return;
         };
 
-        let anchor_x = self.anchor_x.get();
+        let anchor = self.anchor.get();
 
         // Get monitor from anchor or fall back to primary
         let monitor_opt = self.anchor_monitor.borrow().clone().or_else(|| {
@@ -1172,31 +1241,56 @@ impl LayerShellPopover {
 
         let geom = monitor.geometry();
 
+        configure_popover_layer_anchors(window);
+        reset_popover_margins(window);
+
         // Set margin on the bar-adjacent edge
         let bar_edge = popover_bar_edge();
         window.set_margin(bar_edge, calculate_popover_bar_margin());
 
-        // Calculate horizontal position (center on anchor_x)
-        if anchor_x > 0 {
-            let window_width = {
-                let w = window.width();
-                if w > POPOVER_MIN_VALID_WIDTH {
-                    w
+        if ConfigManager::global().bar_position().is_horizontal() {
+            // Calculate horizontal position (center on anchor.x)
+            if anchor.x > 0 {
+                let window_width = {
+                    let w = window.width();
+                    if w > POPOVER_MIN_VALID_WIDTH {
+                        w
+                    } else {
+                        POPOVER_DEFAULT_WIDTH_ESTIMATE
+                    }
+                };
+                let right_margin = calculate_popover_right_margin(
+                    anchor.x,
+                    geom.width(),
+                    window_width,
+                    POPOVER_MIN_EDGE_MARGIN,
+                );
+                window.set_margin(Edge::Right, right_margin);
+            } else {
+                let fallback_margin =
+                    SurfaceStyleManager::global().shadow_margin(POPOVER_SHADOW_MARGIN);
+                window.set_margin(Edge::Right, fallback_margin);
+            }
+        } else if anchor.y > 0 {
+            let window_height = {
+                let h = window.height();
+                if h > POPOVER_MIN_VALID_HEIGHT {
+                    h
                 } else {
-                    POPOVER_DEFAULT_WIDTH_ESTIMATE
+                    POPOVER_DEFAULT_HEIGHT_ESTIMATE
                 }
             };
-            let right_margin = calculate_popover_right_margin(
-                anchor_x,
-                geom.width(),
-                window_width,
+            let bottom_margin = calculate_popover_bottom_margin(
+                anchor.y,
+                geom.height(),
+                window_height,
                 POPOVER_MIN_EDGE_MARGIN,
             );
-            window.set_margin(Edge::Right, right_margin);
+            window.set_margin(Edge::Bottom, bottom_margin);
         } else {
             let fallback_margin =
                 SurfaceStyleManager::global().shadow_margin(POPOVER_SHADOW_MARGIN);
-            window.set_margin(Edge::Right, fallback_margin);
+            window.set_margin(Edge::Bottom, fallback_margin);
         }
     }
 }
@@ -1247,15 +1341,28 @@ impl Dismissible for LayerShellPopover {
 
 #[cfg(test)]
 mod tests {
-    use super::calculate_bar_exclusive_zone_from_values;
+    use super::*;
 
     #[test]
-    fn bar_exclusive_zone_visible_mode_includes_symmetric_padding() {
-        assert_eq!(calculate_bar_exclusive_zone_from_values(32, 10, 1.0, 4), 60);
+    fn right_margin_centers_anchor_when_space_allows() {
+        assert_eq!(calculate_popover_right_margin(500, 1000, 200, 4), 400);
     }
 
     #[test]
-    fn bar_exclusive_zone_island_mode_includes_only_edge_padding() {
-        assert_eq!(calculate_bar_exclusive_zone_from_values(32, 10, 0.0, 4), 50);
+    fn right_margin_clamps_to_edge_margins() {
+        assert_eq!(calculate_popover_right_margin(20, 1000, 200, 4), 796);
+        assert_eq!(calculate_popover_right_margin(990, 1000, 200, 4), 4);
+    }
+
+    #[test]
+    fn bottom_margin_uses_same_axis_math_for_vertical_bars() {
+        assert_eq!(calculate_popover_bottom_margin(400, 800, 200, 4), 300);
+    }
+
+    #[test]
+    fn exclusive_zone_matches_bar_surface_thickness() {
+        assert_eq!(calculate_bar_exclusive_zone_for(32, 4, 12, 1.0), 52);
+        assert_eq!(calculate_bar_exclusive_zone_for(32, 4, 12, 0.5), 52);
+        assert_eq!(calculate_bar_exclusive_zone_for(32, 4, 12, 0.0), 48);
     }
 }

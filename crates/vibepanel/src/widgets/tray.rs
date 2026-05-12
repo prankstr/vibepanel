@@ -11,9 +11,11 @@ use gtk4::gdk_pixbuf::{Colorspace, Pixbuf};
 use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4::{
-    Box as GtkBox, Button, GestureClick, Image, Label, Orientation, Popover, Separator, Widget,
+    Align, Box as GtkBox, Button, GestureClick, Image, Label, Orientation, Popover, PositionType,
+    Separator, Widget,
 };
 use tracing::debug;
+use vibepanel_core::config::BarPosition;
 use vibepanel_core::config::WidgetEntry;
 use vibepanel_core::{parse_hex_color, theme::relative_luminance};
 
@@ -25,13 +27,37 @@ use crate::services::tooltip::TooltipManager;
 use crate::services::tray::{TrayItem, TrayMenuEntry, TrayPixmap, TrayService};
 use crate::styles::{button as btn, color, icon, surface, widget};
 use crate::widgets::WidgetConfig;
-use crate::widgets::base::{BaseWidget, configure_popover};
+use crate::widgets::base::{BaseWidget, WidgetSpacingProfile, configure_popover};
 use crate::widgets::warn_unknown_options;
 
 const DEFAULT_MAX_ICONS: usize = 12;
 const DEFAULT_PIXMAP_ICON_SIZE: i32 = 18;
 
 const GRAYSCALE_TOLERANCE: u8 = 15;
+
+fn configure_tray_popover(popover: &Popover) {
+    configure_popover(popover);
+
+    let offset = ConfigManager::global().popover_offset() as i32;
+    match ConfigManager::global().bar_position() {
+        BarPosition::Top => {
+            popover.set_position(PositionType::Bottom);
+            popover.set_offset(0, offset);
+        }
+        BarPosition::Bottom => {
+            popover.set_position(PositionType::Top);
+            popover.set_offset(0, -offset);
+        }
+        BarPosition::Left => {
+            popover.set_position(PositionType::Right);
+            popover.set_offset(offset, 0);
+        }
+        BarPosition::Right => {
+            popover.set_position(PositionType::Left);
+            popover.set_offset(-offset, 0);
+        }
+    }
+}
 
 /// Configuration for the system tray widget.
 #[derive(Debug, Clone)]
@@ -90,6 +116,14 @@ struct MenuState {
     container: GtkBox,
     identifier: String,
     stack: Vec<Vec<TrayMenuEntry>>,
+    parent: Widget,
+}
+
+fn close_menu_popover(popover: &Popover) {
+    if popover.parent().is_some() {
+        popover.popdown();
+        popover.unparent();
+    }
 }
 
 impl Drop for MenuState {
@@ -127,6 +161,7 @@ struct WidgetState {
 pub struct TrayWidget {
     base: BaseWidget,
     state: Rc<RefCell<WidgetState>>,
+    tray_callback_id: Option<CallbackId>,
     theme_callback_id: Option<CallbackId>,
 }
 
@@ -153,7 +188,7 @@ fn compute_contrast_params() -> ContrastParams {
 impl TrayWidget {
     /// Create a new system tray widget.
     pub fn new(config: TrayConfig) -> Self {
-        let base = BaseWidget::new(&[widget::TRAY]);
+        let base = BaseWidget::new_with_spacing(&[widget::TRAY], WidgetSpacingProfile::Icon);
 
         let state = Rc::new(RefCell::new(WidgetState {
             config,
@@ -168,6 +203,7 @@ impl TrayWidget {
         let mut widget = Self {
             base,
             state,
+            tray_callback_id: None,
             theme_callback_id: None,
         };
         widget.bind_service();
@@ -185,14 +221,14 @@ impl TrayWidget {
         let content = self.base.content().clone();
         let root = self.base.widget().clone();
 
-        service.connect(move |_svc| {
+        self.tray_callback_id = Some(service.connect(move |_svc| {
             let state = state.clone();
             let content = content.clone();
             let root = root.clone();
             glib::idle_add_local_once(move || {
                 sync_items(&state, &content, &root);
             });
-        });
+        }));
 
         // Subscribe to theme changes to invalidate pixmap cache
         {
@@ -230,6 +266,9 @@ impl TrayWidget {
 
 impl Drop for TrayWidget {
     fn drop(&mut self) {
+        if let Some(id) = self.tray_callback_id {
+            TrayService::global().disconnect(id);
+        }
         if let Some(id) = self.theme_callback_id {
             ConfigManager::global().disconnect_theme_callback(id);
         }
@@ -264,9 +303,9 @@ fn sync_items(state: &Rc<RefCell<WidgetState>>, container: &GtkBox, root: &GtkBo
 
         for identifier in to_remove {
             if let Some(button) = st.buttons.remove(&identifier) {
-                // If menu is parented to this button, mark it for cleanup
+                // If menu is attached to this button, mark it for cleanup
                 if let Some(ref menu) = st.menu
-                    && menu.popover.parent().as_ref() == Some(button.upcast_ref::<Widget>())
+                    && menu.parent == button.clone().upcast::<Widget>()
                 {
                     menu_to_close = Some(menu.popover.clone());
                 }
@@ -282,11 +321,8 @@ fn sync_items(state: &Rc<RefCell<WidgetState>>, container: &GtkBox, root: &GtkBo
         drop(st); // Release borrow before GTK operations
 
         // Now perform GTK operations (popdown triggers signals that may borrow state)
-        if let Some(popover) = menu_to_close
-            && popover.parent().is_some()
-        {
-            popover.popdown();
-            popover.unparent();
+        if let Some(popover) = menu_to_close {
+            close_menu_popover(&popover);
         }
 
         for button in buttons_to_remove {
@@ -335,6 +371,11 @@ fn create_button(state: &Rc<RefCell<WidgetState>>, identifier: &str) -> Button {
     // Wrap in icon-root container for consistent sizing with other icons
     let icon_root = GtkBox::new(Orientation::Horizontal, 0);
     icon_root.add_css_class(icon::ROOT);
+    if ConfigManager::global().bar_position().is_vertical() {
+        button.set_halign(Align::Center);
+        icon_root.set_halign(Align::Center);
+        image.set_halign(Align::Center);
+    }
     icon_root.append(&image);
 
     button.set_child(Some(&icon_root));
@@ -868,30 +909,25 @@ fn toggle_menu(state: &Rc<RefCell<WidgetState>>, identifier: &str, parent: &Widg
             && menu.identifier == identifier
         {
             let popover = menu.popover.clone();
+            let parent = menu.parent.clone();
             st.menu = None; // Clear before popdown to avoid borrow conflict in closed signal
             drop(st);
-            if popover.parent().is_some() {
-                popover.popdown();
-                popover.unparent();
-            }
+            parent.remove_css_class(widget::TRAY_ITEM_MENU_OPEN);
+            close_menu_popover(&popover);
             return;
         }
     }
 
-    // Close existing menu if any - extract popover first to avoid borrow conflict
-    let old_popover = {
+    // Close existing menu if any - extract surface first to avoid borrow conflict
+    let old_menu = {
         let mut st = state.borrow_mut();
-        st.menu.take().map(|m| {
-            let popover = m.popover.clone();
-            drop(m); // runs Drop → remove_blur_region
-            popover
-        })
+        st.menu.take()
     };
-    if let Some(popover) = old_popover
-        && popover.parent().is_some()
-    {
-        popover.popdown();
-        popover.unparent();
+    if let Some(old_menu) = old_menu {
+        old_menu
+            .parent
+            .remove_css_class(widget::TRAY_ITEM_MENU_OPEN);
+        close_menu_popover(&old_menu.popover);
     }
 
     // Fetch menu entries asynchronously, then create and show the popover
@@ -923,12 +959,6 @@ fn toggle_menu(state: &Rc<RefCell<WidgetState>>, identifier: &str, parent: &Widg
             }
         }
 
-        // Create the popover now that we have entries
-        let popover = Popover::new();
-        popover.set_parent(&parent_clone);
-        popover.set_can_focus(false);
-        configure_popover(&popover);
-
         let container = GtkBox::new(Orientation::Vertical, 2);
         container.add_css_class(widget::TRAY_MENU);
         container.add_css_class(surface::POPOVER);
@@ -938,23 +968,24 @@ fn toggle_menu(state: &Rc<RefCell<WidgetState>>, identifier: &str, parent: &Widg
         // Add tray-specific popover class for CSS variable-based styling
         container.add_css_class("tray-popover");
 
-        popover.set_child(Some(&container));
+        let popover = create_menu_popover(&state_clone, &parent_clone, &container);
 
         // Set up menu state
         {
             let mut st = state_clone.borrow_mut();
             // Close any existing menu first
-            if let Some(old_menu) = st.menu.take()
-                && old_menu.popover.parent().is_some()
-            {
-                old_menu.popover.popdown();
-                old_menu.popover.unparent();
+            if let Some(old_menu) = st.menu.take() {
+                old_menu
+                    .parent
+                    .remove_css_class(widget::TRAY_ITEM_MENU_OPEN);
+                close_menu_popover(&old_menu.popover);
             }
             st.menu = Some(MenuState {
                 popover: popover.clone(),
                 container: container.clone(),
                 identifier: identifier_owned.clone(),
                 stack: vec![entries],
+                parent: parent_clone.clone(),
             });
         }
 
@@ -969,38 +1000,46 @@ fn toggle_menu(state: &Rc<RefCell<WidgetState>>, identifier: &str, parent: &Widg
         // Add class to keep icon enlarged while menu is open
         parent_clone.add_css_class(widget::TRAY_ITEM_MENU_OPEN);
 
-        // Connect closed signal
-        let state_for_close = state_clone.clone();
-        let parent_for_close = parent_clone.clone();
-        popover.connect_closed(move |p| {
-            // Remove blur effect object for this popup surface.
-            if let Some(blur) = BackgroundEffectManager::global() {
-                blur.remove_blur_region(p);
-            }
-            state_for_close.borrow_mut().menu = None;
-            parent_for_close.remove_css_class(widget::TRAY_ITEM_MENU_OPEN);
-            if p.parent().is_some() {
-                p.unparent();
-            }
-        });
-
-        // Apply blur hint to the popup surface.  Must be connected before
-        // popup() — GTK4 fires the map signal synchronously during popup(),
-        // so a handler registered after popup() is never invoked.
-        let container_for_blur = container.clone();
-        popover.connect_map(move |p| {
-            if ConfigManager::global().blur_enabled()
-                && let Some(blur) = BackgroundEffectManager::global()
-            {
-                blur.apply_blur_surface(p, &container_for_blur, || {
-                    ConfigManager::global().surface_border_radius() as i32
-                });
-            }
-        });
-
-        // Now popup with content
         popover.popup();
     });
+}
+
+fn create_menu_popover(
+    state: &Rc<RefCell<WidgetState>>,
+    parent: &Widget,
+    container: &GtkBox,
+) -> Popover {
+    let popover = Popover::new();
+    popover.set_parent(parent);
+    popover.set_can_focus(false);
+    configure_tray_popover(&popover);
+    popover.set_child(Some(container));
+
+    let state_for_close = state.clone();
+    let parent_for_close = parent.clone();
+    popover.connect_closed(move |p| {
+        if let Some(blur) = BackgroundEffectManager::global() {
+            blur.remove_blur_region(p);
+        }
+        state_for_close.borrow_mut().menu = None;
+        parent_for_close.remove_css_class(widget::TRAY_ITEM_MENU_OPEN);
+        if p.parent().is_some() {
+            p.unparent();
+        }
+    });
+
+    let container_for_blur = container.clone();
+    popover.connect_map(move |p| {
+        if ConfigManager::global().blur_enabled()
+            && let Some(blur) = BackgroundEffectManager::global()
+        {
+            blur.apply_blur_surface(p, &container_for_blur, || {
+                ConfigManager::global().surface_border_radius() as i32
+            });
+        }
+    });
+
+    popover
 }
 
 fn render_menu_level(state: &Rc<RefCell<WidgetState>>) {
@@ -1129,11 +1168,10 @@ fn on_menu_entry_clicked(
     let service = TrayService::global();
     service.send_menu_event(identifier, entry.menu_id, "clicked");
 
-    // Close menu - extract popover first to avoid holding borrow during popdown()
-    // (popdown triggers the closed signal which also borrows state)
-    let popover = state.borrow().menu.as_ref().map(|m| m.popover.clone());
-    if let Some(popover) = popover {
-        popover.popdown();
+    // Close menu - extract popover first to avoid holding borrow during close.
+    let menu = state.borrow_mut().menu.take();
+    if let Some(menu) = menu {
+        menu.parent.remove_css_class(widget::TRAY_ITEM_MENU_OPEN);
+        close_menu_popover(&menu.popover);
     }
-    // Note: menu is set to None by the popover's closed signal handler
 }

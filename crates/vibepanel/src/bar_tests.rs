@@ -7,7 +7,8 @@ use crate::ui_regression_test_support::{
 };
 use crate::widgets::PopoverKind::{System, Unmergeable};
 use crate::widgets::layer_shell_popover::{
-    LayerShellPopover, calculate_bar_exclusive_zone, calculate_popover_bar_margin, popover_bar_edge,
+    LayerShellPopover, PopoverAnchor, calculate_bar_exclusive_zone, calculate_popover_bar_margin,
+    popover_bar_edge,
 };
 use std::time::{SystemTime, UNIX_EPOCH};
 use vibepanel_core::config::WidgetPlacement;
@@ -201,7 +202,10 @@ fn run_layer_shell_popover_position_contract(position: &str) {
     let popover = LayerShellPopover::new(&context.app, "contract", || {
         gtk4::Label::new(Some("contract popover")).upcast::<gtk4::Widget>()
     });
-    popover.show_at(160, Some(context.monitor.clone()));
+    popover.show_at(
+        PopoverAnchor { x: 160, y: 160 },
+        Some(context.monitor.clone()),
+    );
     flush_gtk();
 
     let Some(window) = popover.test_window() else {
@@ -277,7 +281,10 @@ fn run_layer_shell_popover_offset_contract(position: &str, background_opacity: f
     let popover = LayerShellPopover::new(&context.app, "contract", || {
         gtk4::Label::new(Some("contract popover")).upcast::<gtk4::Widget>()
     });
-    popover.show_at(160, Some(context.monitor.clone()));
+    popover.show_at(
+        PopoverAnchor { x: 160, y: 160 },
+        Some(context.monitor.clone()),
+    );
     flush_gtk();
 
     let Some(window) = popover.test_window() else {
@@ -559,6 +566,53 @@ fn merge_runs_system_grouping() {
         compute_merge_runs(&[MergeKind::Popover(System)]),
         vec![(System, 0, 1)]
     );
+}
+
+#[test]
+fn bar_flow_orientation_matches_position() {
+    assert_eq!(
+        bar_flow_orientation_for(BarPosition::Top),
+        gtk4::Orientation::Horizontal
+    );
+    assert_eq!(
+        bar_flow_orientation_for(BarPosition::Bottom),
+        gtk4::Orientation::Horizontal
+    );
+    assert_eq!(
+        bar_flow_orientation_for(BarPosition::Left),
+        gtk4::Orientation::Vertical
+    );
+    assert_eq!(
+        bar_flow_orientation_for(BarPosition::Right),
+        gtk4::Orientation::Vertical
+    );
+}
+
+#[test]
+fn screen_margin_shell_orientation_matches_screen_edge() {
+    assert_eq!(
+        shell_orientation_for(BarPosition::Top),
+        gtk4::Orientation::Vertical
+    );
+    assert_eq!(
+        shell_orientation_for(BarPosition::Bottom),
+        gtk4::Orientation::Vertical
+    );
+    assert_eq!(
+        shell_orientation_for(BarPosition::Left),
+        gtk4::Orientation::Horizontal
+    );
+    assert_eq!(
+        shell_orientation_for(BarPosition::Right),
+        gtk4::Orientation::Horizontal
+    );
+
+    assert_eq!(screen_margin_spacer_size(BarPosition::Top, 12), (-1, 12));
+    assert_eq!(screen_margin_spacer_size(BarPosition::Right, 12), (12, -1));
+    assert!(screen_margin_spacer_precedes_bar(BarPosition::Top));
+    assert!(screen_margin_spacer_precedes_bar(BarPosition::Left));
+    assert!(!screen_margin_spacer_precedes_bar(BarPosition::Bottom));
+    assert!(!screen_margin_spacer_precedes_bar(BarPosition::Right));
 }
 
 #[test]

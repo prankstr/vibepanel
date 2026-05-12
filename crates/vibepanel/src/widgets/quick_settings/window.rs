@@ -30,10 +30,11 @@ use crate::services::updates::UpdatesService;
 use crate::services::vpn::VpnService;
 use crate::styles::{qs, state, surface};
 use crate::widgets::layer_shell_popover::{
-    ANIM_SCALE_FROM, AnimDirection, AnimState, Dismissible, calculate_bar_exclusive_zone,
-    calculate_bar_exclusive_zone_from_values, calculate_popover_bar_margin,
-    calculate_popover_right_margin, create_click_catcher, is_keynav_key, popover_bar_edge,
-    popover_keyboard_mode, setup_esc_handler, snap_anim_shell,
+    ANIM_SCALE_FROM, AnimDirection, AnimState, Dismissible, PopoverAnchor,
+    calculate_bar_exclusive_zone, calculate_popover_bar_margin, calculate_popover_bottom_margin,
+    calculate_popover_right_margin, configure_popover_layer_anchors, create_click_catcher,
+    is_keynav_key, popover_bar_edge, popover_keyboard_mode, reset_popover_margins,
+    setup_esc_handler, snap_anim_shell,
 };
 use crate::widgets::scale_box::ScaleBox;
 
@@ -100,7 +101,9 @@ fn clear_current_qs_window() {
 }
 
 const QUICK_SETTINGS_CONTENT_WIDTH: i32 = 320;
-/// CSS `padding: 16px` on `.popover` (both sides).
+/// First-open estimate for side-bar placement before GTK reports a mapped height.
+const QUICK_SETTINGS_CONTENT_HEIGHT_ESTIMATE: i32 = 520;
+/// CSS `padding: 16px` on `.vp-surface-popover` (both sides).
 const QUICK_SETTINGS_POPOVER_PADDING: i32 = 32;
 const QUICK_SETTINGS_OUTER_MARGIN: i32 = 4;
 const QUICK_SETTINGS_FAR_EDGE_MARGIN: i32 = 8;
@@ -135,12 +138,15 @@ pub struct QuickSettingsWindow {
     margin_wrapper: GtkBox,
     /// Content container (surface styles, focus suppression).
     outer_container: RefCell<Option<GtkBox>>,
-    /// Anchor X position in monitor coordinates.
-    anchor_x: Cell<i32>,
+    /// Widget center in monitor coordinates.
+    anchor: Cell<PopoverAnchor>,
     anchor_monitor: RefCell<Option<gdk::Monitor>>,
     /// Cached window width from the first successful map. Layer shell surfaces
     /// report 0 width when hidden, so we cache the real value for re-opens.
     cached_width: Cell<i32>,
+    /// Cached window height for vertical bar placement. Mirrors cached_width:
+    /// hidden layer-shell surfaces can report 0 height on re-open.
+    cached_height: Cell<i32>,
     /// Whether the window has been mapped at least once (used to skip
     /// the opacity fade-in trick on subsequent shows).
     has_been_mapped: Cell<bool>,
@@ -205,11 +211,7 @@ impl QuickSettingsWindow {
         window.set_namespace(Some("vibepanel-quick-settings-popover"));
         window.set_layer(Layer::Top);
         window.set_exclusive_zone(0);
-        let is_bottom = ConfigManager::global().bar_is_bottom();
-        window.set_anchor(Edge::Top, !is_bottom);
-        window.set_anchor(Edge::Right, true);
-        window.set_anchor(Edge::Bottom, is_bottom);
-        window.set_anchor(Edge::Left, false);
+        configure_popover_layer_anchors(&window);
         window.set_margin(popover_bar_edge(), 0);
         window.set_margin(Edge::Right, 8);
         window.set_keyboard_mode(popover_keyboard_mode());
@@ -243,9 +245,10 @@ impl QuickSettingsWindow {
             anim_shell: anim_shell.clone(),
             margin_wrapper: margin_wrapper.clone(),
             outer_container: RefCell::new(None),
-            anchor_x: Cell::new(0),
+            anchor: Cell::new(PopoverAnchor::default()),
             anchor_monitor: RefCell::new(None),
             cached_width: Cell::new(0),
+            cached_height: Cell::new(0),
             has_been_mapped: Cell::new(false),
             is_animating_out: Cell::new(false),
             logically_open: Cell::new(false),
@@ -1305,15 +1308,15 @@ impl QuickSettingsWindow {
 
     // Position and visibility management
 
-    /// Set the anchor position for the window (horizontal positioning).
-    pub fn set_anchor_position(&self, x: i32, monitor: Option<Monitor>) {
-        self.anchor_x.set(x);
+    /// Set the anchor position for the window.
+    pub fn set_anchor_position(&self, anchor: PopoverAnchor, monitor: Option<Monitor>) {
+        self.anchor.set(anchor);
         *self.anchor_monitor.borrow_mut() = monitor;
     }
 
     /// Update window margins based on the current anchor position.
     fn update_position(&self) {
-        let anchor_x = self.anchor_x.get();
+        let anchor = self.anchor.get();
 
         // Update shadow margins on the margin wrapper.
         SurfaceStyleManager::global()
@@ -1337,29 +1340,26 @@ impl QuickSettingsWindow {
 
         let geom = monitor.geometry();
 
-        // Get bar dimensions from config for height calculation
         let config_mgr = ConfigManager::global();
-        let bar_size = config_mgr.bar_size() as i32;
-        let bar_padding = config_mgr.bar_padding() as i32;
-        let bar_opacity = config_mgr.bar_background_opacity();
-        let screen_margin = config_mgr.screen_margin() as i32;
-        let popover_offset = config_mgr.popover_offset() as i32;
+        let is_horizontal = config_mgr.bar_position().is_horizontal();
 
-        let bar_exclusive_zone = calculate_bar_exclusive_zone_from_values(
-            bar_size,
-            bar_padding,
-            bar_opacity,
-            screen_margin,
-        ) + popover_offset;
+        configure_popover_layer_anchors(&self.window);
+        reset_popover_margins(&self.window);
 
         // Set bar-edge margin using shared helper
         let bar_margin = calculate_popover_bar_margin();
         self.window.set_margin(popover_bar_edge(), bar_margin);
 
-        // Max height: screen minus bar zone, margins, and container padding
+        // Max height is constrained by the vertical axis. Top/bottom bars occupy
+        // vertical space; left/right bars occupy horizontal space and should not
+        // reduce the available popover height.
+        let vertical_bar_reservation = if is_horizontal {
+            calculate_bar_exclusive_zone() + bar_margin
+        } else {
+            0
+        };
         let max_height = geom.height()
-            - bar_exclusive_zone
-            - bar_margin
+            - vertical_bar_reservation
             - QUICK_SETTINGS_CONTAINER_PADDING
             - QUICK_SETTINGS_FAR_EDGE_MARGIN;
 
@@ -1367,8 +1367,8 @@ impl QuickSettingsWindow {
             self.scroll_container.set_max_content_height(max_height);
         }
 
-        // Set right margin using shared helper
-        if anchor_x > 0 {
+        if is_horizontal && anchor.x > 0 {
+            // Set right margin using shared helper
             // Use cached width from a previous map, or fall back to the live
             // value.  Layer-shell surfaces report 0 when hidden, so the cache
             // is essential for re-opens.
@@ -1385,15 +1385,40 @@ impl QuickSettingsWindow {
                 QUICK_SETTINGS_CONTENT_WIDTH + QUICK_SETTINGS_POPOVER_PADDING + 2 * shadow_m
             };
             let right_margin = calculate_popover_right_margin(
-                anchor_x,
+                anchor.x,
                 geom.width(),
                 window_width,
                 QUICK_SETTINGS_MIN_EDGE_MARGIN,
             );
             self.window.set_margin(Edge::Right, right_margin);
-        } else {
+        } else if !is_horizontal && anchor.y > 0 {
+            let h = self.window.height();
+            let window_height = if h > 0 {
+                self.cached_height.set(h);
+                h
+            } else if self.cached_height.get() > 0 {
+                self.cached_height.get()
+            } else {
+                // Never mapped — estimate from content + CSS padding + shadow margins.
+                let shadow_m =
+                    SurfaceStyleManager::global().shadow_margin(QUICK_SETTINGS_OUTER_MARGIN);
+                QUICK_SETTINGS_CONTENT_HEIGHT_ESTIMATE
+                    + QUICK_SETTINGS_POPOVER_PADDING
+                    + 2 * shadow_m
+            };
+            let bottom_margin = calculate_popover_bottom_margin(
+                anchor.y,
+                geom.height(),
+                window_height,
+                QUICK_SETTINGS_MIN_EDGE_MARGIN,
+            );
+            self.window.set_margin(Edge::Bottom, bottom_margin);
+        } else if is_horizontal {
             self.window
                 .set_margin(Edge::Right, QUICK_SETTINGS_DEFAULT_RIGHT_MARGIN);
+        } else {
+            self.window
+                .set_margin(Edge::Bottom, QUICK_SETTINGS_MIN_EDGE_MARGIN);
         }
     }
 
@@ -1903,31 +1928,32 @@ impl QuickSettingsWindowHandle {
 
     /// Derive anchor position and monitor from the bar widget.
     ///
-    /// Replicates the bar widget click handler's positioning logic
-    /// (`compute_bounds` center + `screen_margin` adjustment).
-    fn get_anchor_info(&self) -> (i32, Option<Monitor>) {
+    /// Replicates the bar widget click handler's positioning logic.
+    fn get_anchor_info(&self) -> (PopoverAnchor, Option<Monitor>) {
         let widget_ref = self.bar_widget.borrow();
         let Some(ref widget) = *widget_ref else {
-            return (0, None);
+            return (PopoverAnchor::default(), None);
         };
         let Some(native) = widget.native() else {
-            return (0, None);
+            return (PopoverAnchor::default(), None);
         };
         let Some(bounds) = widget.compute_bounds(&native) else {
-            return (0, None);
+            return (PopoverAnchor::default(), None);
         };
 
-        let screen_margin = ConfigManager::global().screen_margin() as i32;
-        let anchor_x = (bounds.x() + bounds.width() / 2.0) as i32 + screen_margin;
+        let anchor = PopoverAnchor {
+            x: (bounds.x() + bounds.width() / 2.0) as i32,
+            y: (bounds.y() + bounds.height() / 2.0) as i32,
+        };
 
         let monitor = native
             .surface()
             .and_then(|s| s.display().monitor_at_surface(&s));
 
-        (anchor_x, monitor)
+        (anchor, monitor)
     }
 
-    pub fn toggle_at(&self, x: i32, monitor: Option<Monitor>) {
+    pub fn toggle_at(&self, anchor: PopoverAnchor, monitor: Option<Monitor>) {
         // Check logical state, not window visibility — the window may still be
         // visible during a close animation but logically_open is already false.
         let is_visible = self
@@ -1960,7 +1986,7 @@ impl QuickSettingsWindowHandle {
 
         // Update position and show
         if let Some(qs) = self.window.borrow().as_ref() {
-            qs.set_anchor_position(x, monitor);
+            qs.set_anchor_position(anchor, monitor);
             qs.show_panel();
         }
 
@@ -1977,8 +2003,8 @@ impl QuickSettingsWindowHandle {
 impl crate::popover_registry::PopoverToggleable for QuickSettingsWindowHandle {
     fn ipc_show(&self) {
         if !self.ipc_is_visible() {
-            let (x, monitor) = self.get_anchor_info();
-            self.toggle_at(x, monitor);
+            let (anchor, monitor) = self.get_anchor_info();
+            self.toggle_at(anchor, monitor);
         }
     }
 

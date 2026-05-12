@@ -15,8 +15,7 @@ use gtk4::glib::{self, Variant};
 use sha2::{Digest, Sha256};
 use tracing::{debug, error, info, warn};
 
-/// Type alias for tray service callbacks.
-type TrayCallback = Rc<dyn Fn(&TrayService)>;
+use crate::services::callbacks::{CallbackId, Callbacks};
 
 const WATCHER_NAME: &str = "org.kde.StatusNotifierWatcher";
 const WATCHER_PATH: &str = "/StatusNotifierWatcher";
@@ -143,7 +142,7 @@ pub struct TrayService {
     pending_proxies: RefCell<HashSet<String>>,
 
     // Callbacks and readiness
-    callbacks: RefCell<Vec<TrayCallback>>,
+    callbacks: Callbacks<TrayService>,
     ready: Cell<bool>,
 
     /// D-Bus signal subscriptions for external watcher signals (kept alive for service lifetime).
@@ -168,7 +167,7 @@ impl TrayService {
             pending_updates: RefCell::new(HashMap::new()),
             debounce_timers: RefCell::new(HashMap::new()),
             pending_proxies: RefCell::new(HashSet::new()),
-            callbacks: RefCell::new(Vec::new()),
+            callbacks: Callbacks::new(),
             ready: Cell::new(false),
             _watcher_signal_subscriptions: RefCell::new(Vec::new()),
         });
@@ -186,17 +185,23 @@ impl TrayService {
     }
 
     /// Register a callback to be invoked when tray state changes.
-    pub fn connect<F>(&self, callback: F)
+    pub fn connect<F>(&self, callback: F) -> CallbackId
     where
         F: Fn(&TrayService) + 'static,
     {
-        let cb = Rc::new(callback);
-        self.callbacks.borrow_mut().push(cb.clone());
+        let id = self.callbacks.register(callback);
 
         // Immediately send current state if ready.
         if self.ready.get() {
-            cb(self);
+            self.callbacks.notify_single(id, self);
         }
+
+        id
+    }
+
+    /// Unregister a previously registered tray callback.
+    pub fn disconnect(&self, id: CallbackId) -> bool {
+        self.callbacks.unregister(id)
     }
 
     /// Check if the service is ready.
@@ -1485,10 +1490,7 @@ impl TrayService {
     }
 
     fn notify_listeners(&self) {
-        let callbacks: Vec<_> = self.callbacks.borrow().iter().cloned().collect();
-        for cb in callbacks {
-            cb(self);
-        }
+        self.callbacks.notify(self);
     }
 }
 

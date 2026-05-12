@@ -31,7 +31,7 @@ use std::collections::HashSet;
 use tracing::{debug, error, info, warn};
 
 use vibepanel_core::theme::{BORDER_OPACITY_DARK, BORDER_OPACITY_GTK, BORDER_OPACITY_LIGHT};
-use vibepanel_core::{Config, ThemePalette, ThemeSizes};
+use vibepanel_core::{Config, ThemePalette, ThemeSizes, config::BarPosition};
 
 use super::callbacks::{CallbackId, Callbacks};
 use super::wallpaper::{detect_wallpaper, extract_theme_from_image, theme_from_source_color};
@@ -427,8 +427,8 @@ impl ConfigManager {
         self.config.borrow().bar.background_opacity
     }
 
-    pub fn bar_is_bottom(&self) -> bool {
-        self.config.borrow().bar.is_bottom()
+    pub fn bar_position(&self) -> BarPosition {
+        self.config.borrow().bar.position()
     }
 
     /// Whether UI animations are enabled (CSS transitions, revealer

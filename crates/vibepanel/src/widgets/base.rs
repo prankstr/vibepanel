@@ -17,7 +17,7 @@ use crate::services::config_manager::ConfigManager;
 use crate::services::icons::{IconHandle, IconsService};
 use crate::services::tooltip::TooltipManager;
 use crate::styles::{class, state, surface, widget};
-use crate::widgets::layer_shell_popover::{Dismissible, LayerShellPopover};
+use crate::widgets::layer_shell_popover::{Dismissible, LayerShellPopover, PopoverAnchor};
 use gtk4::gio;
 use gtk4::glib;
 use tracing::{debug, info, warn};
@@ -70,7 +70,7 @@ pub struct MenuHandle {
     /// The lazily-initialized popover
     popover: RefCell<Option<Rc<LayerShellPopover>>>,
     /// Builder for popover content. `RefCell` allows `set_builder()` replacement.
-    builder: RefCell<Rc<dyn Fn() -> gtk4::Widget>>,
+    builder: RefCell<Rc<dyn Fn(Option<gtk4::gdk::Monitor>) -> gtk4::Widget>>,
     /// Widget name for CSS styling
     widget_name: String,
     /// Parent widget container (used for popover anchor positioning)
@@ -105,7 +105,7 @@ impl MenuHandle {
     {
         Rc::new(Self {
             popover: RefCell::new(None),
-            builder: RefCell::new(Rc::new(builder)),
+            builder: RefCell::new(Rc::new(move |_| builder())),
             widget_name,
             parent: parent.upcast(),
             tracker_id: Cell::new(None),
@@ -119,7 +119,7 @@ impl MenuHandle {
     pub(crate) fn new_placeholder(widget_name: String, parent: impl IsA<gtk4::Widget>) -> Rc<Self> {
         Rc::new(Self {
             popover: RefCell::new(None),
-            builder: RefCell::new(Rc::new(|| {
+            builder: RefCell::new(Rc::new(|_| {
                 unreachable!(
                     "placeholder builder called — set_builder() must be called before showing the popover"
                 )
@@ -139,6 +139,16 @@ impl MenuHandle {
     /// has no effect because the `LayerShellPopover` captures the builder at
     /// creation time.
     pub(crate) fn set_builder<F: Fn() -> gtk4::Widget + 'static>(&self, builder: F) {
+        *self.builder.borrow_mut() = Rc::new(move |_| builder());
+    }
+
+    /// Replace the builder function with one that receives the anchor monitor.
+    pub(crate) fn set_builder_with_monitor<
+        F: Fn(Option<gtk4::gdk::Monitor>) -> gtk4::Widget + 'static,
+    >(
+        &self,
+        builder: F,
+    ) {
         *self.builder.borrow_mut() = Rc::new(builder);
     }
 
@@ -170,7 +180,14 @@ impl MenuHandle {
         };
 
         let builder = self.builder.borrow().clone();
-        let popover = LayerShellPopover::new(&app, &self.widget_name, move || builder());
+        let anchor_monitor = Rc::new(RefCell::new(None));
+        let builder_anchor_monitor = Rc::clone(&anchor_monitor);
+        let popover = LayerShellPopover::new(&app, &self.widget_name, move || {
+            builder(builder_anchor_monitor.borrow().clone())
+        });
+        popover.set_on_anchor_monitor_changed(move |monitor| {
+            *anchor_monitor.borrow_mut() = monitor;
+        });
 
         // Forward any stored on_close callback
         if let Some(ref cb) = *self.on_close.borrow() {
@@ -251,19 +268,24 @@ impl MenuHandle {
     ///    surface, which for layer-shell is the monitor-local coordinate space.
     /// 3. The popover is also a layer-shell surface on the same monitor, so it
     ///    uses the same coordinate space for its margin calculations.
-    fn get_anchor_info(&self) -> (i32, Option<gtk4::gdk::Monitor>) {
+    fn get_anchor_info(&self) -> (PopoverAnchor, Option<gtk4::gdk::Monitor>) {
         let Some(native) = self.parent.native() else {
-            return (0, None);
+            return (PopoverAnchor::default(), None);
         };
 
         let Some(bounds) = self.parent.compute_bounds(&native) else {
-            return (0, None);
+            return (PopoverAnchor::default(), None);
         };
 
         let widget_x = bounds.x() as i32;
+        let widget_y = bounds.y() as i32;
         let widget_width = bounds.width() as i32;
+        let widget_height = bounds.height() as i32;
         // anchor_x is monitor-relative: the center X of the widget on its monitor
-        let anchor_x = widget_x + widget_width / 2;
+        let anchor = PopoverAnchor {
+            x: widget_x + widget_width / 2,
+            y: widget_y + widget_height / 2,
+        };
 
         // Get monitor - the popover will be placed on the same monitor
         let monitor = self
@@ -273,20 +295,20 @@ impl MenuHandle {
             .and_then(|w| w.surface())
             .and_then(|s| gtk4::gdk::Display::default().and_then(|d| d.monitor_at_surface(&s)));
 
-        (anchor_x, monitor)
+        (anchor, monitor)
     }
 
     pub fn show(&self) {
         let Some(popover) = self.ensure_popover() else {
             return;
         };
-        let (anchor_x, monitor) = self.get_anchor_info();
+        let (anchor, monitor) = self.get_anchor_info();
 
         // Register as active popup and store the ID for later clearing
         let id = PopoverTracker::global().set_active(popover.clone());
         self.tracker_id.set(Some(id));
 
-        popover.show_at(anchor_x, monitor);
+        popover.show_at(anchor, monitor);
     }
 
     pub fn hide(&self) {
@@ -487,6 +509,30 @@ pub struct BaseWidget {
     _show_if_timer: Option<glib::SourceId>,
 }
 
+/// Spacing profile used to choose a widget's tuned base spacing.
+///
+/// User-facing `--widget-content-padding-offset` / `--widget-content-gap-offset` values are
+/// offsets added to this base, so widgets only need to declare which visual
+/// spacing family they belong to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WidgetSpacingProfile {
+    /// Text/label-bearing widgets. Vertical bars use compact flow-axis spacing
+    /// because font line-height already contributes visual breathing room.
+    Label,
+    /// Icon/dot-only widgets. Vertical bars keep the roomier base spacing
+    /// because there is no text line-height slack to absorb.
+    Icon,
+}
+
+impl WidgetSpacingProfile {
+    fn css_class(self) -> &'static str {
+        match self {
+            Self::Label => class::SPACING_LABEL,
+            Self::Icon => class::SPACING_ICON,
+        }
+    }
+}
+
 impl BaseWidget {
     /// Create a new base widget container.
     ///
@@ -498,7 +544,12 @@ impl BaseWidget {
     /// - The first class in `extra_classes` is used as the widget name for
     ///   popover styling (e.g., "clock" -> popovers get "clock-popover" class).
     pub fn new(extra_classes: &[&str]) -> Self {
-        Self::new_inner(extra_classes, false)
+        Self::new_with_spacing(extra_classes, WidgetSpacingProfile::Label)
+    }
+
+    /// Create a new base widget with an explicit spacing profile.
+    pub fn new_with_spacing(extra_classes: &[&str], spacing_profile: WidgetSpacingProfile) -> Self {
+        Self::new_inner(extra_classes, false, spacing_profile)
     }
 
     /// Create a passive base widget — no GestureClick, no RippleHandle, no menu.
@@ -508,13 +559,36 @@ impl BaseWidget {
     /// The widget still builds its visual content (icon, label, tooltip) and
     /// responds to data service updates.
     pub(crate) fn new_passive(extra_classes: &[&str]) -> Self {
-        Self::new_inner(extra_classes, true)
+        Self::new_passive_with_spacing(extra_classes, WidgetSpacingProfile::Label)
     }
 
-    fn new_inner(extra_classes: &[&str], passive: bool) -> Self {
-        let container = GtkBox::new(Orientation::Horizontal, 0);
+    /// Create a passive base widget with an explicit spacing profile.
+    pub(crate) fn new_passive_with_spacing(
+        extra_classes: &[&str],
+        spacing_profile: WidgetSpacingProfile,
+    ) -> Self {
+        Self::new_inner(extra_classes, true, spacing_profile)
+    }
+
+    fn new_inner(
+        extra_classes: &[&str],
+        passive: bool,
+        spacing_profile: WidgetSpacingProfile,
+    ) -> Self {
+        // Orientation is captured at construction. Changes to `bar.position`
+        // are structural config changes, so bars/widgets are rebuilt instead
+        // of mutating existing BaseWidget containers in place.
+        let is_vertical = ConfigManager::global().bar_position().is_vertical();
+        let orientation = if is_vertical {
+            Orientation::Vertical
+        } else {
+            Orientation::Horizontal
+        };
+
+        let container = GtkBox::new(orientation, 0);
         container.add_css_class(class::WIDGET_WRAPPER);
         container.add_css_class(class::WIDGET_ITEM);
+        container.add_css_class(spacing_profile.css_class());
         if passive {
             container.add_css_class(class::PASSIVE);
         }
@@ -537,11 +611,19 @@ impl BaseWidget {
 
         // Create inner content box for consistent padding/margins via CSS
         // Spacing between children is controlled via CSS (see bar.rs .widget > .content)
-        let content = GtkBox::new(Orientation::Horizontal, 0);
+        let content = GtkBox::new(orientation, 0);
         content.add_css_class(class::CONTENT);
         // Fill the widget height so children can be properly centered within
         content.set_vexpand(true);
-        content.set_valign(Align::Fill);
+        if is_vertical {
+            // Fill the side-bar width so child rows keep a stable center even
+            // when a sibling label changes from one to two digits.
+            content.set_halign(Align::Fill);
+            content.set_hexpand(true);
+            content.set_valign(Align::Center);
+        } else {
+            content.set_valign(Align::Fill);
+        }
         // Disable baseline alignment - it can cause vertical offset issues with text
         content.set_baseline_position(gtk4::BaselinePosition::Center);
 
@@ -563,7 +645,7 @@ impl BaseWidget {
 
         // Visual surface: rounded background + overflow clipping.
         // Must be a GtkBox (not Overlay) — Overlay doesn't clip background to border-radius.
-        let surface = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
+        let surface = gtk4::Box::new(orientation, 0);
         surface.add_css_class(class::WIDGET);
         // Widget-specific classes live on the surface so user CSS like
         // `.clock { background: ... }` targets the painted element only.
@@ -925,6 +1007,15 @@ impl BaseWidget {
     pub fn add_icon(&self, icon_name: &str, css_classes: &[&str]) -> IconHandle {
         let icons = IconsService::global();
         let handle = icons.create_icon(icon_name, css_classes);
+        // Self-center within the parent .content's available width. For
+        // single-icon widgets this fixes left-alignment in horizontal mode
+        // (icon at natural width, sat at the left of bar-height-square
+        // floor). For multi-element widgets where icon + label naturally
+        // exceeds bar-height there's no extra space to claim, so this is a
+        // visual no-op. In vertical mode the same alignment centers the icon
+        // on the cross axis.
+        handle.widget().set_halign(Align::Center);
+        handle.widget().set_hexpand(true);
         self.content.append(&handle.widget());
         handle
     }
@@ -949,6 +1040,11 @@ impl BaseWidget {
         for class in css_classes {
             label.add_css_class(class);
         }
+        // Fill the content allocation so xalign centers text against the same
+        // box as the widget's visual center.
+        label.set_halign(Align::Fill);
+        label.set_hexpand(true);
+        label.set_xalign(0.5);
         self.content.append(&label);
         label
     }
