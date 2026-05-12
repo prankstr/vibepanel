@@ -35,12 +35,6 @@ pub const POPOVER_ANIMATION_MS: u64 = 150;
 /// Used for notification row dismiss (CSS opacity fade + Revealer collapse).
 pub const DISMISS_ANIMATION_MS: u64 = 200;
 
-/// Base horizontal padding (px) for `.content` inside widgets.
-///
-/// Shared between the CSS rule in `bar.rs` and the runtime padding adjustment
-/// in `taskbar.rs`.
-pub const CONTENT_PADDING_X: i32 = 10;
-
 mod bar;
 mod base;
 mod battery;

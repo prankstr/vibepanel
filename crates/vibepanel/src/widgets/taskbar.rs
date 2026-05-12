@@ -21,7 +21,6 @@ use crate::services::window_list::WindowListService;
 use crate::styles::{icon, state, widget};
 use crate::widgets::WidgetConfig;
 use crate::widgets::base::BaseWidget;
-use crate::widgets::css::CONTENT_PADDING_X;
 use crate::widgets::warn_unknown_options;
 
 /// Configuration for the taskbar widget.
@@ -187,6 +186,7 @@ pub struct TaskbarWidget {
 impl TaskbarWidget {
     pub fn new(mut config: TaskbarConfig, output_id: Option<String>) -> Self {
         let layout = TaskbarLayout::from_config_manager();
+        let is_vertical = ConfigManager::global().bar_position().is_vertical();
 
         // Resolve icon_size: user-specified value takes priority, otherwise
         // use the theme-derived pixmap_icon_size.  Clamp to fit within buttons.
@@ -199,12 +199,16 @@ impl TaskbarWidget {
 
         let base = BaseWidget::new(&[widget::TASKBAR]);
         let content = base.content().clone();
+        if is_vertical {
+            content.set_halign(Align::Fill);
+            content.set_hexpand(true);
+        }
 
-        // Reduce .content horizontal padding so button padding doesn't add
-        // extra space at the widget edges.  The default .content rule uses
-        // `padding: var(--widget-padding-y) {CONTENT_PADDING_X}px`.  We override
-        // the horizontal component to `CONTENT_PADDING_X - pad` so the first/last
-        // button's visual padding fills the remaining edge space exactly.
+        // Compute per-instance button padding (the space inside each button,
+        // around the icon). `pad` is baked into the calc expressions below.
+        // Taskbar derives from the resolved widget spacing variables so it
+        // follows the same tuned base + user density offset model as the rest
+        // of the bar, while still subtracting per-button padding below.
         let (effective_icon, pad) = compute_button_padding(
             config.icon_size.unwrap_or(layout.theme_icon_size),
             layout.max_button_size,
@@ -221,15 +225,22 @@ impl TaskbarWidget {
             ".taskbar-button {{ padding: {pad}px; border-radius: {radius}px; }}"
         ));
 
-        let content_hpad = (CONTENT_PADDING_X - pad).max(0);
+        // Per-instance variables defined as calc expressions against the
+        // effective widget spacing. max(0px, ...) guards against user density
+        // offsets that would push the result negative.
+        let two_pad = 2 * pad;
         let content_css = CssProvider::new();
         content_css.load_from_string(&format!(
-            ".taskbar .content {{ padding-left: {content_hpad}px; padding-right: {content_hpad}px; }}"
+            ".taskbar .content {{ \
+               --taskbar-content-edge: max(0px, calc(var(--vp-widget-content-padding) - {pad}px)); \
+               --taskbar-button-gap: max(0px, calc(var(--vp-widget-content-gap) - {two_pad}px)); \
+               --taskbar-separator-gap: max(0px, calc(var(--vp-widget-content-gap) - {pad}px - 2px)); \
+            }}",
         ));
         #[allow(deprecated)]
         content
             .style_context()
-            .add_provider(&content_css, gtk4::STYLE_PROVIDER_PRIORITY_USER + 1000);
+            .add_provider(&content_css, gtk4::STYLE_PROVIDER_PRIORITY_USER + 10);
 
         let window_buttons: Rc<RefCell<HashMap<u64, Widget>>> =
             Rc::new(RefCell::new(HashMap::new()));
@@ -245,6 +256,7 @@ impl TaskbarWidget {
                 &config,
                 &button_css,
                 effective_icon,
+                is_vertical,
                 output_id.as_deref(),
             );
         });
@@ -277,6 +289,7 @@ fn update_window_buttons(
     config: &TaskbarConfig,
     button_css: &CssProvider,
     effective_icon: i32,
+    is_vertical: bool,
     output_id: Option<&str>,
 ) {
     let mut windows: Vec<_> = snapshot
@@ -333,15 +346,13 @@ fn update_window_buttons(
 
                 if output_changed {
                     // Output boundary — insert a more prominent separator.
-                    let sep = GtkBox::new(Orientation::Vertical, 0);
-                    sep.add_css_class(widget::TASKBAR_SEPARATOR);
+                    let sep = separator_widget(is_vertical);
                     sep.add_css_class(widget::TASKBAR_OUTPUT_SEPARATOR);
                     container.append(&sep);
                 } else if let (Some(prev), Some(cur)) = (prev_workspace, window.workspace_id)
                     && prev != cur
                 {
-                    let sep = GtkBox::new(Orientation::Vertical, 0);
-                    sep.add_css_class(widget::TASKBAR_SEPARATOR);
+                    let sep = separator_widget(is_vertical);
                     container.append(&sep);
                 }
 
@@ -349,7 +360,8 @@ fn update_window_buttons(
                 prev_output = window.output.as_deref();
             }
 
-            let button = create_window_button(window, config, button_css, effective_icon);
+            let button =
+                create_window_button(window, config, button_css, effective_icon, is_vertical);
             container.append(&button);
             buttons.borrow_mut().insert(window.id, button);
         }
@@ -393,16 +405,64 @@ fn compute_button_padding(icon_size: i32, max_button_size: i32) -> (i32, i32) {
     (effective_icon, pad)
 }
 
+fn separator_widget(is_vertical: bool) -> GtkBox {
+    let wrapper = GtkBox::new(
+        if is_vertical {
+            Orientation::Vertical
+        } else {
+            Orientation::Horizontal
+        },
+        0,
+    );
+    wrapper.add_css_class(widget::TASKBAR_SEPARATOR);
+
+    let line = GtkBox::new(
+        if is_vertical {
+            Orientation::Horizontal
+        } else {
+            Orientation::Vertical
+        },
+        0,
+    );
+    line.add_css_class("taskbar-separator-line");
+
+    if is_vertical {
+        wrapper.set_halign(Align::Fill);
+        wrapper.set_hexpand(true);
+        line.set_halign(Align::Fill);
+        line.set_hexpand(true);
+        line.set_valign(Align::Center);
+    } else {
+        line.set_halign(Align::Center);
+        line.set_valign(Align::Fill);
+        line.set_vexpand(true);
+    }
+
+    wrapper.append(&line);
+    wrapper
+}
+
 fn create_window_button(
     window: &crate::services::compositor::Window,
     config: &TaskbarConfig,
     button_css: &CssProvider,
     effective_icon: i32,
+    is_vertical: bool,
 ) -> Widget {
-    let button = GtkBox::new(Orientation::Horizontal, 4);
+    let button = GtkBox::new(
+        if is_vertical {
+            Orientation::Vertical
+        } else {
+            Orientation::Horizontal
+        },
+        4,
+    );
     button.add_css_class(widget::TASKBAR_BUTTON);
     button.add_css_class(state::CLICKABLE);
     button.set_valign(Align::Center);
+    if is_vertical {
+        button.set_halign(Align::Center);
+    }
 
     #[allow(deprecated)]
     button
@@ -419,13 +479,15 @@ fn create_window_button(
         let icon = Image::from_icon_name(&icon_name);
         icon.add_css_class(icon::TEXT);
         icon.add_css_class(widget::TASKBAR_ICON);
+        icon.set_valign(Align::Center);
+        icon.set_halign(Align::Center);
 
         icon.set_pixel_size(effective_icon);
 
         button.append(&icon);
     }
 
-    if config.show_title {
+    if config.show_title && !is_vertical {
         let label = Label::new(Some(window_display_title(window)));
         label.add_css_class(widget::TASKBAR_LABEL);
         label.set_single_line_mode(true);
