@@ -464,9 +464,10 @@ fn build_widget_or_group(
             let surface = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
             surface.add_css_class(class::WIDGET);
             surface.add_css_class(class::WIDGET_GROUP);
-            // First widget's per-widget style (outline_color, background_color)
+            // First real widget's per-widget style (outline_color, background_color)
             // applies to the group surface so the shared border uses the right color.
-            if let Some(first) = group.first() {
+            // Skip spacers — they carry no per-widget styling.
+            if let Some(first) = group.iter().find(|e| e.name != "spacer") {
                 surface.add_css_class(&first.name.replace('_', "-"));
             }
             surface.set_overflow(gtk4::Overflow::Hidden);
@@ -479,14 +480,20 @@ fn build_widget_or_group(
             // Partition into runs of same-popover widgets for merge grouping.
             // Widgets with custom click handlers stay unmergeable so their
             // on_click_right / on_click_middle commands aren't silently lost.
-            let kinds: Vec<PopoverKind> = group
+            // Spacers are tracked as MergeKind::Spacer so they can be absorbed
+            // into adjacent runs rather than breaking merges.
+            let kinds: Vec<MergeKind> = group
                 .iter()
                 .map(|e| {
-                    let (right, middle) = ConfigManager::global().get_click_handlers(&e.name);
-                    if right.is_some() || middle.is_some() {
-                        PopoverKind::Unmergeable
+                    if e.name == "spacer" {
+                        MergeKind::Spacer
                     } else {
-                        popover_kind_for(&e.name)
+                        let (right, middle) = ConfigManager::global().get_click_handlers(&e.name);
+                        if right.is_some() || middle.is_some() {
+                            MergeKind::Popover(PopoverKind::Unmergeable)
+                        } else {
+                            MergeKind::Popover(popover_kind_for(&e.name))
+                        }
                     }
                 })
                 .collect();
@@ -510,6 +517,13 @@ fn build_widget_or_group(
                             // Grouped hover uses a large box-shadow spread to refill
                             // the cell around the pill; this clips it to item bounds.
                             built.widget.set_overflow(gtk4::Overflow::Hidden);
+                            // Spacers don't use BaseWidget, so they lack the
+                            // .widget-item class that provides the grouped background.
+                            // Add it so spacers inside groups inherit the background
+                            // colour instead of showing a transparent gap.
+                            if entry.name == "spacer" {
+                                built.widget.add_css_class(class::WIDGET_ITEM);
+                            }
                             content.append(&built.widget);
                             state.add_handle(built.handle);
                             n += 1;
@@ -518,11 +532,21 @@ fn build_widget_or_group(
                     n
                 };
 
+            // Spacers don't affect the merge decision. Only create a
+            // merge group when the run contains ≥2 real widgets of the
+            // same kind, or when the entire group has exactly one real
+            // widget (per the explicit [cpu, spacer] single-button rule).
+            let total_real = group.iter().filter(|e| e.name != "spacer").count();
+
             for (kind, start, end) in &runs {
                 let run_entries = &group[*start..*end];
                 let run_len = end - start;
+                let real_in_run = run_entries.iter().filter(|e| e.name != "spacer").count();
 
-                if run_len >= 2 && *kind != PopoverKind::Unmergeable {
+                if run_len >= 2
+                    && *kind != PopoverKind::Unmergeable
+                    && (real_in_run >= 2 || total_real == 1)
+                {
                     let merged = build_merge_group(run_entries, *kind, &content, state);
                     if merged > 0 {
                         count += merged;
@@ -546,29 +570,94 @@ fn build_widget_or_group(
     }
 }
 
-/// Partition `PopoverKind` values into runs of adjacent equal values.
-/// `Unmergeable` entries are never grouped — each becomes its own singleton run.
-fn compute_merge_runs(kinds: &[PopoverKind]) -> Vec<(PopoverKind, usize, usize)> {
-    let mut runs = Vec::new();
+/// Merge-kind used by the group builder: either a real widget with a popover
+/// kind, or a transparent spacer that should be absorbed into adjacent runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MergeKind {
+    Popover(PopoverKind),
+    Spacer,
+}
+
+/// Partition `MergeKind` values into runs of adjacent equal popover kinds.
+///
+/// Spacers are transparently absorbed:
+///   * Leading spacers join the first real run.
+///   * Trailing spacers join the last real run.
+///   * Spacers between two widgets of the same mergeable kind are swallowed
+///     into that run so e.g. `[cpu, spacer, memory]` still merges.
+///   * Spacers between different kinds (or next to `Unmergeable`) attach to
+///     the left-hand run.
+///   * `Unmergeable` entries are never grouped — each becomes its own singleton
+///     run (any neighbouring spacers are absorbed into it).
+fn compute_merge_runs(kinds: &[MergeKind]) -> Vec<(PopoverKind, usize, usize)> {
+    let mut runs: Vec<(PopoverKind, usize, usize)> = Vec::new();
     if kinds.is_empty() {
         return runs;
     }
 
     let mut start = 0;
     while start < kinds.len() {
-        let kind = kinds[start];
-        if kind == PopoverKind::Unmergeable {
-            runs.push((kind, start, start + 1));
-            start += 1;
-        } else {
-            let mut end = start + 1;
-            while end < kinds.len() && kinds[end] == kind {
-                end += 1;
+        match kinds[start] {
+            MergeKind::Spacer => {
+                // Absorb into the previous run if one exists, otherwise skip
+                // and let the trailing-spacer fix-up attach it to the first run.
+                if let Some(last) = runs.last_mut() {
+                    last.2 = start + 1;
+                }
+                start += 1;
             }
-            runs.push((kind, start, end));
-            start = end;
+            MergeKind::Popover(kind) => {
+                if kind == PopoverKind::Unmergeable {
+                    runs.push((kind, start, start + 1));
+                    start += 1;
+                } else {
+                    let mut end = start + 1;
+                    while end < kinds.len() {
+                        match kinds[end] {
+                            MergeKind::Spacer => {
+                                // Look ahead past consecutive spacers to see
+                                // whether the next real widget matches our kind.
+                                let mut lookahead = end + 1;
+                                while lookahead < kinds.len()
+                                    && kinds[lookahead] == MergeKind::Spacer
+                                {
+                                    lookahead += 1;
+                                }
+                                if lookahead < kinds.len()
+                                    && let MergeKind::Popover(k) = kinds[lookahead]
+                                    && k == kind
+                                {
+                                    // Spacer bridges same-kind widgets — absorb it.
+                                    end = lookahead + 1;
+                                    continue;
+                                }
+                                // Spacer precedes a different kind or EOF — stop.
+                                break;
+                            }
+                            MergeKind::Popover(k) => {
+                                if k == kind {
+                                    end += 1;
+                                } else {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    runs.push((kind, start, end));
+                    start = end;
+                }
+            }
         }
     }
+
+    // Leading spacers: if the first real run starts after index 0, extend it
+    // backward so those spacers are still built as part of the group.
+    if let Some(first) = runs.first_mut()
+        && first.1 > 0
+    {
+        first.1 = 0;
+    }
+
     runs
 }
 
@@ -584,9 +673,13 @@ fn build_merge_group(
     let wrapper = Overlay::new();
     wrapper.add_css_class(class::WIDGET_MERGE_GROUP);
     wrapper.add_css_class(state::CLICKABLE);
-    // Merged groups paint as a single button; only the leading widget's
-    // per-widget background class applies.
-    wrapper.add_css_class(&entries[0].name.replace('_', "-"));
+    // Merged groups paint as a single button; use the first non-spacer
+    // entry so a leading spacer doesn't determine the group's identity.
+    let representative = entries
+        .iter()
+        .find(|e| e.name != "spacer")
+        .unwrap_or(&entries[0]);
+    wrapper.add_css_class(&representative.name.replace('_', "-"));
     // Required for the merge-group hover pill: its 9999px box-shadow
     // refill is clipped here so it cannot bleed outside the group.
     wrapper.set_overflow(gtk4::Overflow::Hidden);
@@ -610,7 +703,7 @@ fn build_merge_group(
     wrapper.add_overlay(&ripple_clip);
     wrapper.set_measure_overlay(&ripple_clip, true);
 
-    let widget_name = entries[0].name.clone();
+    let widget_name = representative.name.clone();
     let menu_handle = MenuHandle::new_placeholder(widget_name, wrapper.clone());
 
     let binding = match kind {
@@ -678,6 +771,9 @@ fn build_merge_group(
     // Register the shared menu handle under ALL participating widget names
     // for IPC popover control. Uses underscores (config convention).
     for entry in entries {
+        if entry.name == "spacer" {
+            continue;
+        }
         crate::popover_registry::register(
             &entry.name,
             menu_handle.clone() as Rc<dyn crate::popover_registry::PopoverToggleable>,
@@ -1069,7 +1165,11 @@ mod tests {
 
     #[test]
     fn merge_runs_unmergeable_never_grouped() {
-        let runs = compute_merge_runs(&[Unmergeable, Unmergeable, Unmergeable]);
+        let runs = compute_merge_runs(&[
+            MergeKind::Popover(Unmergeable),
+            MergeKind::Popover(Unmergeable),
+            MergeKind::Popover(Unmergeable),
+        ]);
         assert_eq!(
             runs,
             vec![
@@ -1084,16 +1184,85 @@ mod tests {
     fn merge_runs_system_grouping() {
         // Consecutive System entries merge into one run
         assert_eq!(
-            compute_merge_runs(&[System, System, System]),
+            compute_merge_runs(&[
+                MergeKind::Popover(System),
+                MergeKind::Popover(System),
+                MergeKind::Popover(System),
+            ]),
             vec![(System, 0, 3)]
         );
         // Unmergeable breaks a System run; singleton System stays singleton
         assert_eq!(
-            compute_merge_runs(&[System, System, Unmergeable, System]),
+            compute_merge_runs(&[
+                MergeKind::Popover(System),
+                MergeKind::Popover(System),
+                MergeKind::Popover(Unmergeable),
+                MergeKind::Popover(System),
+            ]),
             vec![(System, 0, 2), (Unmergeable, 2, 3), (System, 3, 4)],
         );
         // Single System is its own run
-        assert_eq!(compute_merge_runs(&[System]), vec![(System, 0, 1)]);
+        assert_eq!(
+            compute_merge_runs(&[MergeKind::Popover(System)]),
+            vec![(System, 0, 1)]
+        );
+    }
+
+    #[test]
+    fn merge_runs_spacer_absorbed_between_same_kind() {
+        // cpu, spacer, memory → still merges into one System run
+        assert_eq!(
+            compute_merge_runs(&[
+                MergeKind::Popover(System),
+                MergeKind::Spacer,
+                MergeKind::Popover(System),
+            ]),
+            vec![(System, 0, 3)]
+        );
+    }
+
+    #[test]
+    fn merge_runs_spacer_absorbed_into_left_run() {
+        // System, spacer, Unmergeable → spacer attaches to System run
+        assert_eq!(
+            compute_merge_runs(&[
+                MergeKind::Popover(System),
+                MergeKind::Spacer,
+                MergeKind::Popover(Unmergeable),
+            ]),
+            vec![(System, 0, 2), (Unmergeable, 2, 3)]
+        );
+    }
+
+    #[test]
+    fn merge_runs_leading_spacer_absorbed() {
+        // spacer, System, System → leading spacer joins first run
+        assert_eq!(
+            compute_merge_runs(&[
+                MergeKind::Spacer,
+                MergeKind::Popover(System),
+                MergeKind::Popover(System),
+            ]),
+            vec![(System, 0, 3)]
+        );
+    }
+
+    #[test]
+    fn merge_runs_trailing_spacer_absorbed() {
+        // System, spacer → trailing spacer joins the System run
+        assert_eq!(
+            compute_merge_runs(&[MergeKind::Popover(System), MergeKind::Spacer]),
+            vec![(System, 0, 2)]
+        );
+    }
+
+    #[test]
+    fn merge_runs_all_spacers_get_no_runs() {
+        // Spacers only exist to join painted groups; alone they build nothing.
+        assert_eq!(
+            compute_merge_runs(&[MergeKind::Spacer, MergeKind::Spacer]),
+            Vec::new()
+        );
     }
 
     #[test]

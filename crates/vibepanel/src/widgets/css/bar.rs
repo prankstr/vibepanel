@@ -24,6 +24,7 @@ pub fn css(screen_margin: u32, spacing: u32, workspace_animations: bool) -> Stri
     let content_pad_x = CONTENT_PADDING_X;
     let content_pad_x_half = CONTENT_PADDING_X / 2;
     let content_pad_x_double = 2 * CONTENT_PADDING_X;
+    let spacer_following_margin = content_pad_x_double + content_pad_x;
     let workspace_transition = if workspace_animations {
         "transition: min-width 200ms linear, background-color 100ms ease;"
     } else {
@@ -226,6 +227,16 @@ sectioned-bar.bar {{
 /* Pull non-first items left to overlap adjacent .content padding (2 × {content_pad_x}px) */
 .merge-group-content > .widget-item:not(:first-child) {{
     margin-left: -{content_pad_x_double}px;
+}}
+
+/* Spacers have no inner padding and can be zero-width; don't give them a
+   negative margin or GTK reports a negative minimum size. The following
+   widget pulls in far enough to collapse the extra GTK spacing seam. */
+.merge-group-content > .widget-item.spacer:not(:first-child) {{
+    margin-left: 0;
+}}
+.merge-group-content > .widget-item.spacer + .widget-item {{
+    margin-left: -{spacer_following_margin}px;
 }}
 
 /* Spacing between items inside widgets (icon→label, etc.).

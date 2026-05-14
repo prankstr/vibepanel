@@ -83,6 +83,8 @@ use std::any::Any;
 use tracing::{debug, warn};
 use vibepanel_core::config::WidgetEntry;
 
+use crate::styles::class;
+
 /// The kind of shared popover a widget opens when clicked.
 ///
 /// Used by merge-group logic to identify adjacent widgets that can be
@@ -427,6 +429,20 @@ impl WidgetFactory {
                 Some(BuiltWidget {
                     widget: root,
                     handle: Box::new(network),
+                })
+            }
+            "spacer" => {
+                let cfg = SpacerConfig::from_entry(entry);
+                let spacer = SpacerWidget::new(cfg);
+                let widget = spacer.widget().clone();
+                // Passive spacers inside merge groups need the same structural
+                // classes as other passive widgets so margin / hover rules apply.
+                widget.add_css_class(class::WIDGET_ITEM);
+                widget.add_css_class(class::PASSIVE);
+                let root = widget.upcast::<Widget>();
+                Some(BuiltWidget {
+                    widget: root,
+                    handle: Box::new(spacer),
                 })
             }
             name => {
