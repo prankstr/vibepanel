@@ -11,7 +11,6 @@ pub fn css() -> &'static str {
 }
 
 /* Container - tight padding for compact appearance */
-/* Note: border-radius set via apply_surface_styles_with_radius() */
 .osd-container {
     padding: 10px 16px;
 }

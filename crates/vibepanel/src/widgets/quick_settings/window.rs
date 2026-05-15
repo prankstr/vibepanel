@@ -100,7 +100,7 @@ fn clear_current_qs_window() {
 }
 
 const QUICK_SETTINGS_CONTENT_WIDTH: i32 = 320;
-/// CSS `padding: 16px` on `.vp-surface-popover` (both sides).
+/// CSS `padding: 16px` on `.popover` (both sides).
 const QUICK_SETTINGS_POPOVER_PADDING: i32 = 32;
 const QUICK_SETTINGS_OUTER_MARGIN: i32 = 4;
 const QUICK_SETTINGS_FAR_EDGE_MARGIN: i32 = 8;

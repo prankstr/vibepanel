@@ -50,9 +50,6 @@ const FOREGROUND_MUTED_OPACITY: f64 = 0.6;
 const FOREGROUND_DISABLED_OPACITY: f64 = 0.4;
 const FOREGROUND_FAINT_OPACITY: f64 = 0.3;
 
-// Toast critical background blend weight
-const TOAST_CRITICAL_URGENT_WEIGHT: f64 = 0.35;
-
 /// Perceptual dark/light boundary in WCAG linear relative luminance.
 ///
 /// CIELAB L*=50 (perceptual midpoint) ⇒ Y = ((50+16)/116)³ ≈ 0.184187.
@@ -305,11 +302,6 @@ pub struct SurfaceStyles {
     pub text_color: String,
     pub font_family: String,
     pub font_size: u32,
-    pub border_radius: u32,
-    pub border_color: String,
-    pub opacity: f64,
-    pub shadow: String,
-    pub is_dark_mode: bool,
     pub shadows_enabled: bool,
 }
 
@@ -371,7 +363,6 @@ pub struct ThemePalette {
 
     // Critical backgrounds
     pub row_critical_background: String,
-    pub toast_critical_background: String,
 
     // Typography
     pub font_family: String,
@@ -498,7 +489,7 @@ impl ThemePalette {
         ))
     }
 
-    /// Generate CSS variable overrides scoped to `.vp-surface-popover`.
+    /// Generate CSS variable overrides scoped to `.popover`.
     ///
     /// Only emits polarity-dependent color variables (foregrounds, overlays,
     /// borders, shadows, slider tracks, critical backgrounds, accent derivatives,
@@ -523,7 +514,7 @@ impl ThemePalette {
 
         format!(
             r#"
-.vp-surface-popover {{
+.popover {{
     /* ===== Popover polarity override ===== */
     --widget-background-color: {widget_bg};
     --widget-hover-tint: {hover_tint};
@@ -557,7 +548,6 @@ impl ThemePalette {
 
     /* Contextual backgrounds */
     --color-row-critical-background: {row_critical_bg};
-    --color-toast-critical-background: {toast_critical_bg};
 }}
 "#,
             widget_bg = self.widget_background,
@@ -580,7 +570,6 @@ impl ThemePalette {
             slider_track = self.slider_track,
             slider_track_disabled = self.slider_track_disabled,
             row_critical_bg = self.row_critical_background,
-            toast_critical_bg = self.toast_critical_background,
         )
     }
 
@@ -686,7 +675,6 @@ impl ThemePalette {
     --color-row-background: var(--color-card-overlay-subtle);
     --color-row-background-hover: var(--color-card-overlay-hover);
     --color-row-critical-background: {row_critical_bg};
-    --color-toast-critical-background: {toast_critical_bg};
 
     /* ===== Radii ===== */
     --radius-bar: {radius_bar}px;
@@ -804,7 +792,6 @@ impl ThemePalette {
             slider_track = self.slider_track,
             slider_track_disabled = self.slider_track_disabled,
             row_critical_bg = self.row_critical_background,
-            toast_critical_bg = self.toast_critical_background,
             radius_bar = self.bar_border_radius,
             radius_surface = self.surface_border_radius,
             radius_widget = if self.widget_radius_percent >= 50 {
@@ -870,11 +857,6 @@ impl ThemePalette {
             text_color: self.foreground_primary.clone(),
             font_family: self.font_family.clone(),
             font_size: self.sizes.font_size,
-            border_radius: self.surface_border_radius,
-            border_color: self.border_subtle.clone(),
-            opacity: self.widget_opacity,
-            shadow: self.shadow_soft.clone(),
-            is_dark_mode: self.is_dark_mode,
             shadows_enabled: self.shadows_enabled,
         }
     }
@@ -1305,11 +1287,6 @@ impl ThemePalette {
                 "color-mix(in srgb, {} 18%, @view_bg_color)",
                 self.state_urgent
             );
-            self.toast_critical_background = format!(
-                "color-mix(in srgb, {} {:.0}%, @window_bg_color)",
-                self.state_urgent,
-                TOAST_CRITICAL_URGENT_WEIGHT * 100.0
-            );
             return;
         }
 
@@ -1318,19 +1295,6 @@ impl ThemePalette {
             match blend_colors(&self.state_urgent, &self.widget_background, 0.18) {
                 Some((r, g, b)) => rgba_str(r, g, b, 0.95),
                 None => "rgba(255, 100, 100, 0.15)".to_string(),
-            };
-
-        // Toast critical: darker, more opaque
-        let base = if self.is_dark_mode {
-            "#1a1a1a"
-        } else {
-            "#f5f5f5"
-        };
-
-        self.toast_critical_background =
-            match blend_colors(&self.state_urgent, base, TOAST_CRITICAL_URGENT_WEIGHT) {
-                Some((r, g, b)) => rgba_str(r, g, b, 0.95),
-                None => "rgba(40, 20, 20, 0.95)".to_string(),
             };
     }
 
@@ -1437,13 +1401,6 @@ impl ThemePalette {
             Some((r, g, b)) => rgba_str(r, g, b, 0.95),
             None => argb_to_hex(&scheme.error_container),
         };
-
-        let surface_hex = argb_to_hex(&scheme.surface);
-        self.toast_critical_background =
-            match blend_colors(&error_hex, &surface_hex, TOAST_CRITICAL_URGENT_WEIGHT) {
-                Some((r, g, b)) => rgba_str(r, g, b, 0.95),
-                None => argb_to_hex(&scheme.error_container),
-            };
     }
 
     fn compute_sizes(&mut self) {
@@ -1529,7 +1486,6 @@ impl Default for ThemePalette {
             slider_track: String::new(),
             slider_track_disabled: String::new(),
             row_critical_background: String::new(),
-            toast_critical_background: String::new(),
             font_family: DEFAULT_FONT_FAMILY.to_string(),
             bar_opacity: 0.0,
             widget_opacity: 1.0,
@@ -2084,13 +2040,6 @@ mod tests {
             "row_critical_background should reference @view_bg_color, got: {}",
             palette.row_critical_background
         );
-        assert!(
-            palette
-                .toast_critical_background
-                .contains("@window_bg_color"),
-            "toast_critical_background should reference @window_bg_color, got: {}",
-            palette.toast_critical_background
-        );
     }
 
     #[test]
@@ -2365,10 +2314,10 @@ mod tests {
         let popover = ThemePalette::popover_palette(&config, None, None).unwrap();
         let css = popover.css_popover_vars_block();
 
-        // Should be scoped under .vp-surface-popover
+        // Should be scoped under .popover
         assert!(
-            css.contains(".vp-surface-popover"),
-            "popover CSS should be scoped to .vp-surface-popover"
+            css.contains(".popover"),
+            "popover CSS should be scoped to .popover"
         );
         // Should contain polarity-dependent variables
         assert!(css.contains("--widget-background-color:"));

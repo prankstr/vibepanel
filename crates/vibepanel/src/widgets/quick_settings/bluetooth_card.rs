@@ -389,8 +389,6 @@ fn create_bluetooth_action_widget(dev: &BluetoothDevice, is_pairing: bool) -> gt
         content_box.append(&action);
 
         panel.append(&content_box);
-        SurfaceStyleManager::global().apply_surface_styles(&panel, true);
-
         popover.set_child(Some(&panel));
         popover.set_parent(btn);
 

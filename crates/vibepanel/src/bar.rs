@@ -1134,7 +1134,7 @@ pub(crate) fn generate_css(
     // Per-widget CSS overrides (background_color, etc. from [widgets.xxx] sections)
     let per_widget_css = ThemePalette::generate_per_widget_css(config);
 
-    // Popover polarity overrides (scoped under .vp-surface-popover)
+    // Popover polarity overrides (scoped under .popover)
     let popover_css = popover_palette
         .map(|p| p.css_popover_vars_block())
         .unwrap_or_default();

@@ -309,17 +309,13 @@ fn build_toast_content(
     outer.add_css_class(notif::TOAST_CONTAINER);
     outer.add_css_class(notif::TOAST);
 
-    // Add urgency styling before applying widget-scoped surface styles, so the
-    // surface provider can preserve urgency-specific border/background rules at
-    // the same CSS priority.
+    // Add urgency styling before the widget is attached so static CSS can match
+    // the final toast class set immediately.
     if notification.urgency == URGENCY_CRITICAL {
         outer.add_css_class(notif::TOAST_CRITICAL);
     } else if notification.urgency == URGENCY_LOW {
         outer.add_css_class(notif::TOAST_LOW);
     }
-
-    // Apply surface styling
-    SurfaceStyleManager::global().apply_surface_styles(&outer, false);
 
     // Apply uniform shadow margins so the CSS box-shadow is not clipped at
     // the layer-shell surface boundary.  Unlike popovers (which are flush

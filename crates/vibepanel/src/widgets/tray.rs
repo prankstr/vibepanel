@@ -938,10 +938,6 @@ fn toggle_menu(state: &Rc<RefCell<WidgetState>>, identifier: &str, parent: &Widg
         // Add tray-specific popover class for CSS variable-based styling
         container.add_css_class("tray-popover");
 
-        // Apply surface styling - background color comes from CSS variables
-        // which may be overridden by the tray-popover class
-        SurfaceStyleManager::global().apply_surface_styles(&container, true);
-
         popover.set_child(Some(&container));
 
         // Set up menu state

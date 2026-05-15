@@ -69,6 +69,21 @@ tooltip.background label {{
     color: var(--color-foreground-primary);
 }}
 
+/* Layer-shell tooltips use custom windows so they share the same styling as native tooltips. */
+.vibepanel-tooltip {{
+    background-color: color-mix(in srgb, {popover_bg} 90%, var(--widget-hover-tint));
+    border-radius: var(--radius-surface);
+    border: none;
+    padding: 6px 10px;
+    opacity: 0.90;
+}}
+
+.vibepanel-tooltip-label {{
+    font-family: var(--font-family);
+    font-size: var(--font-size);
+    color: var(--color-foreground-primary);
+}}
+
 /* Color utilities - applies to both text and icons */
 .vp-primary {{ color: var(--color-foreground-primary); }}
 .vp-muted {{ color: var(--color-foreground-muted); }}
@@ -119,9 +134,13 @@ label link:active {{
 }}
 
 /* Popover/surface background */
-/* color-mix() is inline here so per-widget popover --widget-background-color overrides work via CSS scoping */
-.vp-surface-popover {{
+/* color-mix() uses CSS custom properties so per-widget `.popover` descendants can override
+   --widget-background-color and have the mixed value recomputed via CSS scoping */
+/* NOTE: `.popover` is an explicit style class added by Vibepanel (LayerShellPopover etc.).
+   GTK's native Popover widget is the `popover` CSS *node* (no leading dot) — no collision. */
+.popover {{
     background-color: {popover_bg};
+    background-image: none;
     border: var(--surface-outline-width) solid color-mix(in srgb, var(--surface-outline-color) var(--surface-outline-opacity), transparent);
     border-radius: var(--radius-surface);
     box-shadow: var(--shadow-soft);
@@ -131,8 +150,29 @@ label link:active {{
     color: var(--color-foreground-primary);
 }}
 
+.notification-toast,
+window.media-window > .media-content,
+.osd {{
+    background-color: {popover_bg};
+    background-image: none;
+    border: var(--surface-outline-width) solid color-mix(in srgb, var(--surface-outline-color) var(--surface-outline-opacity), transparent);
+    border-radius: var(--radius-surface);
+    box-shadow: var(--shadow-soft);
+    font-family: var(--font-family);
+    font-size: var(--font-size);
+    color: var(--color-foreground-primary);
+}}
+
+window.media-window > .media-content {{
+    padding: 16px;
+}}
+
+.osd {{
+    border-radius: var(--radius-widget-lg);
+}}
+
 /* Mirrors the generated surface rule for static popover styles. */
-.vp-surface-popover.vp-suppress-css-outline {{
+.popover.vp-suppress-css-outline {{
     border-color: transparent;
 }}
 
@@ -155,12 +195,17 @@ popover.widget-menu.background > contents {{
     margin: 0 6px 6px 6px;
 }}
 
+/* Inner panel inside a native widget-menu popover already gets the shadow
+   from the contents node above; suppress the duplicate. */
+popover.widget-menu .popover.widget-menu-content {{
+    box-shadow: none;
+}}
+
 /* ===== FOCUS SUPPRESSION ===== */
 /* When GTK's 3 s focus_visible timeout fires, the focused widget keeps :focus
    but loses :focus-visible.  Suppress Adwaita's residual :focus outline so no
    faint ring lingers after keyboard nav times out. */
-.popover *:focus:not(:focus-visible),
-.vp-surface-popover *:focus:not(:focus-visible) {{
+.popover *:focus:not(:focus-visible) {{
     outline: none;
     box-shadow: none;
 }}
@@ -205,33 +250,33 @@ popover.widget-menu.background > contents {{
    color.  Rules must be self-contained (full outline shorthand) because
    transition:none at our priority (USER=800) blocks Adwaita's
    outline-width animation from 0→2px at THEME=200.
-   Scoped under .vp-surface-popover for specificity. */
-.vp-surface-popover button:focus-visible,
-.vp-surface-popover row:focus-visible,
-.vp-surface-popover switch:focus-visible,
-.vp-surface-popover entry:focus-visible {{
+   Scoped under .popover for specificity. */
+.popover button:focus-visible,
+.popover row:focus-visible,
+.popover switch:focus-visible,
+.popover entry:focus-visible {{
     outline: 2px solid var(--color-accent-primary);
     outline-offset: -2px;
     transition: none;
 }}
-.vp-surface-popover scale:focus-visible > trough > slider {{
+.popover scale:focus-visible > trough > slider {{
     outline: 2px solid var(--color-accent-primary);
     outline-offset: -2px;
     transition: none;
 }}
 /* Suppress Adwaita's outline transition on entries so the accent color
    doesn't flash blue when focus leaves. */
-.vp-surface-popover entry {{
+.popover entry {{
     transition: none;
 }}
 
 /* Rows with inline action buttons delegate focus to the button.  GTK still
    sets :focus-visible on the row even when non-focusable, so suppress it.
-   Must come after focus color rules and use .vp-surface-popover scope to
+   Must come after focus color rules and use .popover scope to
    beat the accent color rule's specificity. */
-.vp-surface-popover row.vp-row-has-action,
-.vp-surface-popover row.vp-row-has-action:focus,
-.vp-surface-popover row.vp-row-has-action:focus-visible {{
+.popover row.vp-row-has-action,
+.popover row.vp-row-has-action:focus,
+.popover row.vp-row-has-action:focus-visible {{
     outline: none;
     box-shadow: none;
     transition: none;
@@ -240,14 +285,14 @@ popover.widget-menu.background > contents {{
 /* Suppress :focus-within outlines on rows whose children handle their own
    focus rings (e.g. password entry row).  The child widget (entry, button)
    already shows the accent-colored ring. */
-.vp-surface-popover row:focus-within {{
+.popover row:focus-within {{
     outline: none;
     box-shadow: none;
 }}
 
 /* Power action rows are directly focusable (hold-to-confirm on the row
    itself).  Restore the accent focus ring that :focus-within above kills. */
-.vp-surface-popover row.qs-power-row:focus-visible {{
+.popover row.qs-power-row:focus-visible {{
     outline: 2px solid var(--color-accent-primary);
     outline-offset: -2px;
     transition: none;

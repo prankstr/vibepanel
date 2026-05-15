@@ -66,7 +66,7 @@ pub fn css(animations: bool) -> String {
 }}
 
 /* Popover styling */
-.media-popover.vp-surface-popover {{
+.media-popover.popover {{
     min-width: 340px;
 }}
 

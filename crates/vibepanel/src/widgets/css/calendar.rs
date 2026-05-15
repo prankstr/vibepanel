@@ -5,7 +5,7 @@ pub fn css() -> &'static str {
     r#"
 /* ===== CALENDAR ===== */
 
-/* Note: padding comes from apply_surface_styles() in base.rs */
+/* Popover padding comes from the shared .popover rule. */
 .calendar-popover .vp-popover-icon-btn {
     margin-top: 0;
 }

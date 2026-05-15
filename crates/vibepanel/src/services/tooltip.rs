@@ -3,10 +3,6 @@
 //! Uses layer-shell positioned tooltip windows instead of GTK's native tooltips,
 //! which don't position correctly on layer-shell surfaces.
 //!
-//! Tooltip styling is derived from `ThemePalette::surface_styles()` for full
-//! theme integration. Initialize with `TooltipManager::init_global(styles)`
-//! before first use.
-
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -16,7 +12,6 @@ use gtk4::prelude::*;
 use gtk4::{Label, Window};
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use tracing::debug;
-use vibepanel_core::SurfaceStyles;
 
 use crate::services::config_manager::ConfigManager;
 use crate::services::surfaces::SurfaceStyleManager;
@@ -40,23 +35,6 @@ const SCREEN_EDGE_MARGIN: i32 = 8;
 /// Fallback tooltip width when measurement fails
 const FALLBACK_TOOLTIP_WIDTH: i32 = 300;
 
-/// Default tooltip styles, used when init_global is not called.
-/// Provides a reasonable dark-mode appearance as fallback.
-fn default_surface_styles() -> SurfaceStyles {
-    SurfaceStyles {
-        background_color: "#111217".to_string(),
-        text_color: "#ffffff".to_string(),
-        font_family: "monospace".to_string(),
-        font_size: 14,
-        border_radius: 8,
-        border_color: "rgba(255, 255, 255, 0.10)".to_string(),
-        opacity: 1.0,
-        shadow: "0 1px 2px rgba(0, 0, 0, 0.24)".to_string(),
-        is_dark_mode: true,
-        shadows_enabled: true,
-    }
-}
-
 /// A layer-shell tooltip window.
 struct TooltipWindow {
     window: Window,
@@ -73,7 +51,7 @@ enum TooltipAnchor {
 }
 
 impl TooltipWindow {
-    fn new(styles: &SurfaceStyles) -> Self {
+    fn new() -> Self {
         let window = Window::builder().decorated(false).resizable(false).build();
 
         window.add_css_class(tooltip::WINDOW);
@@ -97,50 +75,9 @@ impl TooltipWindow {
         label.add_css_class(tooltip::LABEL);
         window.set_child(Some(&label));
 
-        // Apply styles via inline CSS on the window
-        Self::apply_styles(&window, &label, styles);
+        SurfaceStyleManager::global().apply_pango_attrs(&label);
 
         Self { window, label }
-    }
-
-    fn apply_styles(window: &Window, label: &Label, styles: &SurfaceStyles) {
-        // Tooltip background: the popover base tinted 20% toward the hover-tint
-        // direction (white in dark mode, black in light mode) so that it is
-        // visibly elevated above any surface it appears over.
-        let css = format!(
-            r#"
-.vibepanel-tooltip {{
-    background-color: color-mix(in srgb, color-mix(in srgb, var(--widget-background-color) var(--widget-background-opacity), transparent) 90%, var(--widget-hover-tint));
-    border-radius: var(--radius-surface);
-    border: none;
-    padding: 6px 10px;
-    opacity: 0.90;
-}}
-
-.vibepanel-tooltip-label {{
-    font-family: {font};
-    font-size: {size}px;
-    color: {fg};
-}}
-"#,
-            font = styles.font_family,
-            size = styles.font_size,
-            fg = styles.text_color,
-        );
-
-        let provider = gtk4::CssProvider::new();
-        provider.load_from_string(&css);
-
-        // Apply to window and label via display-wide provider with USER priority to override GTK themes
-        let display = gtk4::prelude::WidgetExt::display(window);
-        gtk4::style_context_add_provider_for_display(
-            &display,
-            &provider,
-            gtk4::STYLE_PROVIDER_PRIORITY_USER + 10,
-        );
-
-        // Apply Pango font attributes if enabled (workaround for layer-shell font issues)
-        SurfaceStyleManager::global().apply_pango_attrs(label);
     }
 
     /// Measure the natural width of the tooltip with the given text.
@@ -194,10 +131,6 @@ impl TooltipWindow {
     fn hide(&self) {
         self.window.set_visible(false);
     }
-
-    fn update_styles(&self, styles: &SurfaceStyles) {
-        Self::apply_styles(&self.window, &self.label, styles);
-    }
 }
 
 /// Process-wide tooltip manager using layer-shell windows.
@@ -205,8 +138,6 @@ impl TooltipWindow {
 /// Provides `set_styled_tooltip` for applying tooltips to widgets.
 /// Unlike GTK's native tooltips, these are positioned correctly on layer-shell surfaces.
 pub struct TooltipManager {
-    /// Surface styling configuration.
-    styles: RefCell<SurfaceStyles>,
     /// The tooltip window (lazily created).
     tooltip_window: RefCell<Option<TooltipWindow>>,
     /// Pending show timer source ID.
@@ -224,10 +155,9 @@ pub struct TooltipManager {
 }
 
 impl TooltipManager {
-    /// Create a new TooltipManager with the given styles.
-    fn new(styles: SurfaceStyles) -> Rc<Self> {
+    /// Create a new TooltipManager.
+    fn new() -> Rc<Self> {
         Rc::new(Self {
-            styles: RefCell::new(styles),
             tooltip_window: RefCell::new(None),
             pending_show: RefCell::new(None),
             current_widget: RefCell::new(None),
@@ -238,53 +168,30 @@ impl TooltipManager {
         })
     }
 
-    /// Initialize the global TooltipManager with styles from ThemePalette.
-    ///
-    /// Should be called during application startup after loading config:
-    /// ```ignore
-    /// let palette = ThemePalette::from_config(&config, None, None);
-    /// TooltipManager::init_global(palette.surface_styles());
-    /// ```
-    pub fn init_global(styles: SurfaceStyles) {
+    /// Initialize the global TooltipManager.
+    pub fn init_global() {
         TOOLTIP_INSTANCE.with(|cell| {
             let mut opt = cell.borrow_mut();
             if opt.is_some() {
                 debug!("TooltipManager already initialized, ignoring init_global call");
                 return;
             }
-            *opt = Some(TooltipManager::new(styles));
+            *opt = Some(TooltipManager::new());
         });
     }
 
     /// Get the global TooltipManager singleton.
     ///
-    /// If not initialized via `init_global`, uses default dark-mode styles.
+    /// If not initialized via `init_global`, initializes on demand.
     pub fn global() -> Rc<Self> {
         TOOLTIP_INSTANCE.with(|cell| {
             let mut opt = cell.borrow_mut();
             if opt.is_none() {
                 debug!("TooltipManager not initialized, using defaults");
-                *opt = Some(TooltipManager::new(default_surface_styles()));
+                *opt = Some(TooltipManager::new());
             }
             opt.as_ref().unwrap().clone()
         })
-    }
-
-    /// Reconfigure the manager with new styles (for live config reload).
-    ///
-    /// This updates the internal styles and updates any existing tooltip window.
-    pub fn reconfigure(&self, styles: SurfaceStyles) {
-        debug!(
-            "TooltipManager reconfiguring: bg={} -> {}",
-            self.styles.borrow().background_color,
-            styles.background_color
-        );
-        *self.styles.borrow_mut() = styles.clone();
-
-        // Update existing tooltip window if it exists
-        if let Some(ref tooltip_window) = *self.tooltip_window.borrow() {
-            tooltip_window.update_styles(&styles);
-        }
     }
 
     /// Set a styled tooltip on a widget.
@@ -536,24 +443,7 @@ impl TooltipManager {
             return;
         }
 
-        let styles = self.styles.borrow();
-        let tooltip_window = TooltipWindow::new(&styles);
+        let tooltip_window = TooltipWindow::new();
         *self.tooltip_window.borrow_mut() = Some(tooltip_window);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_default_surface_styles() {
-        // Verify default styles are sensible
-        let styles = default_surface_styles();
-        assert_eq!(styles.background_color, "#111217");
-        assert_eq!(styles.text_color, "#ffffff");
-        assert!(styles.border_radius > 0);
-        assert!(styles.font_size > 0);
-        assert!(styles.is_dark_mode);
     }
 }

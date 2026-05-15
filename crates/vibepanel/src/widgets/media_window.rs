@@ -12,7 +12,6 @@ use crate::services::background_effect::attach_blur_surface_lifecycle;
 use crate::services::callbacks::CallbackId;
 use crate::services::config_manager::{ConfigManager, ThemeCallbackGuard};
 use crate::services::media::MediaService;
-use crate::services::surfaces::SurfaceStyleManager;
 use crate::styles::{media, surface};
 use crate::widgets::media_components::{
     MediaViewController, build_album_art, build_media_controls, build_seek_section,
@@ -97,9 +96,6 @@ where
     main_box.add_css_class(media::CONTENT);
     main_box.add_css_class(surface::NO_FOCUS);
     main_box.set_size_request(260, 150);
-
-    // Apply surface styles for consistent theming
-    SurfaceStyleManager::global().apply_surface_styles(&main_box, true);
 
     // Apply opacity to the entire window content (background + children)
     // We use CSS opacity on the main_box since Wayland doesn't support window-level opacity

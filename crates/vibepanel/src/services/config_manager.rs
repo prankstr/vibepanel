@@ -50,7 +50,6 @@ use crate::services::bar_manager::BarManager;
 use crate::services::icons::IconsService;
 use crate::services::network::NetworkService;
 use crate::services::surfaces::SurfaceStyleManager;
-use crate::services::tooltip::TooltipManager;
 
 /// Messages sent from the file watcher thread to the GTK main thread.
 #[derive(Debug)]
@@ -871,9 +870,6 @@ impl ConfigManager {
                 new_config.advanced.pango_font_rendering,
             );
 
-            // Update tooltip manager
-            TooltipManager::global().reconfigure(surface_styles);
-
             // Update the cached palettes before load_css so they're available
             *self.palette.borrow_mut() = palette;
             *self.popover_palette.borrow_mut() = popover_palette;
@@ -1024,8 +1020,6 @@ impl ConfigManager {
 
                 SurfaceStyleManager::global()
                     .reconfigure(surface_styles.clone(), config.advanced.pango_font_rendering);
-                TooltipManager::global().reconfigure(surface_styles);
-
                 *mgr.palette.borrow_mut() = palette;
                 *mgr.popover_palette.borrow_mut() = popover_palette;
                 bar::load_css(&config);

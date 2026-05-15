@@ -96,18 +96,12 @@ pub fn css(animations: bool) -> String {
     margin-right: -3px;
 }}
 
-/* Shared urgency styling (row + toast) */
-.notification-row.notification-critical,
-.notification-toast-critical {{
+.notification-row.notification-critical {{
     border-left: 3px solid var(--color-state-warning);
 }}
 
 .notification-row.notification-critical {{
     background-color: var(--color-row-critical-background);
-}}
-
-.notification-toast-critical {{
-    background-color: var(--color-toast-critical-background);
 }}
 
 .notification-row.notification-low {{

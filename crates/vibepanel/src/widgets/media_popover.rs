@@ -218,10 +218,6 @@ fn show_player_menu(parent: &Button) {
 
     popover.set_child(Some(&panel));
 
-    // Apply surface styling to the panel for background, font, etc.
-    // The popover's contents node styling (shadow, margin) comes from base CSS.
-    SurfaceStyleManager::global().apply_surface_styles(&panel, true);
-
     // Apply Pango font attributes to all labels if enabled
     SurfaceStyleManager::global().apply_pango_attrs_all(&panel);
 

@@ -630,7 +630,7 @@ fn run_gtk_app(config: Config, config_source: Option<PathBuf>) -> ExitCode {
             "Surface style manager initialized with theme styles (pango_font_rendering={})",
             config_for_activate.advanced.pango_font_rendering
         );
-        services::tooltip::TooltipManager::init_global(surface_styles);
+        services::tooltip::TooltipManager::init_global();
         debug!("Tooltip manager initialized with theme styles");
 
         // Initialize idle inhibitor service (uses logind D-Bus API)

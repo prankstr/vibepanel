@@ -195,12 +195,6 @@ fn build_osd_content(orientation: Orientation, show_value: bool) -> OsdContent {
         container.add_css_class(osd::HORIZONTAL);
     }
 
-    SurfaceStyleManager::global().apply_surface_styles_with_radius(
-        &container,
-        false,
-        "var(--radius-widget-lg)",
-    );
-
     let osd_widget = OsdWidget::new(orientation, 24, show_value);
     container.append(osd_widget.widget());
     SurfaceStyleManager::global().apply_pango_attrs_all(&container);

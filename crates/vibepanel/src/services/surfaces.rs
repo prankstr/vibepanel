@@ -1,9 +1,7 @@
 //! Surface styling helpers for vibepanel.
 //!
-//! This module owns `SurfaceStyles` derived from the theme and provides
-//! helpers to apply consistent styling to popovers, menus, and other
-//! overlay containers. It is intentionally separate from `TooltipManager`
-//! so that tooltip concerns and general surface styling remain decoupled.
+//! This module owns runtime surface helpers that cannot live in static CSS,
+//! such as shadow margins, animated outlines, and optional Pango font styling.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -15,17 +13,8 @@ use tracing::debug;
 use vibepanel_core::SurfaceStyles;
 
 use crate::services::config_manager::ConfigManager;
-use crate::styles::{icon, media, notification as notif, osd, surface};
-use crate::widgets::css::{POPOVER_BG_WITH_OPACITY, WIDGET_BG_WITH_OPACITY};
+use crate::styles::{icon, surface};
 use crate::widgets::scale_box::ScaleBox;
-
-// GTK 4.10 deprecated widget-scoped style contexts but didn't provide a replacement.
-// We need widget-scoped CSS to style individual surfaces without affecting the entire
-// display. The display-scoped alternative (style_context_add_provider_for_display)
-// would require unique CSS class names for every surface instance, which is impractical.
-// This import is used for StyleContextExt::add_provider().
-#[allow(deprecated)]
-use gtk4::prelude::StyleContextExt;
 
 // Thread-local singleton storage for SurfaceStyleManager
 thread_local! {
@@ -40,19 +29,14 @@ fn default_surface_styles() -> SurfaceStyles {
         text_color: "#ffffff".to_string(),
         font_family: "monospace".to_string(),
         font_size: 14,
-        border_radius: 8,
-        border_color: "rgba(255, 255, 255, 0.10)".to_string(),
-        opacity: 1.0,
-        shadow: "0 1px 2px rgba(0, 0, 0, 0.20), 0 1px 3px rgba(0, 0, 0, 0.24)".to_string(),
-        is_dark_mode: true,
         shadows_enabled: true,
     }
 }
 
 /// Process-wide surface styling manager.
 ///
-/// Provides `apply_surface_styles` for popovers, menus, and other containers
-/// that should share the same visual language as widgets.
+/// Provides runtime styling helpers for shadow margins, GSK outline coordination,
+/// Pango font workarounds, and tray contrast adjustments.
 pub struct SurfaceStyleManager {
     styles: RefCell<SurfaceStyles>,
     /// Whether to use Pango attributes for font rendering instead of CSS.
@@ -68,18 +52,6 @@ impl SurfaceStyleManager {
             styles: RefCell::new(styles),
             pango_font_rendering: Cell::new(false),
         })
-    }
-
-    /// Initialize the global SurfaceStyleManager with styles from ThemePalette.
-    ///
-    /// Should be called during application startup after loading config:
-    /// ```ignore
-    /// let palette = ThemePalette::from_config(&config, None, None);
-    /// SurfaceStyleManager::init_global(palette.surface_styles());
-    /// ```
-    #[allow(dead_code)]
-    pub fn init_global(styles: SurfaceStyles) {
-        Self::init_global_with_config(styles, false);
     }
 
     /// Initialize the global SurfaceStyleManager with styles and config options.
@@ -120,11 +92,6 @@ impl SurfaceStyleManager {
     }
 
     /// Reconfigure the manager with new styles (for live config reload).
-    ///
-    /// This updates the internal styles. Note that surfaces already styled
-    /// won't be automatically updated - they would need to call
-    /// `apply_surface_styles` again. For most use cases, newly created
-    /// surfaces will pick up the new styles automatically.
     pub fn reconfigure(&self, styles: SurfaceStyles, pango_font_rendering: bool) {
         debug!(
             "SurfaceStyleManager reconfiguring: bg={} -> {}, pango_font_rendering={}",
@@ -134,12 +101,6 @@ impl SurfaceStyleManager {
         );
         *self.styles.borrow_mut() = styles;
         self.pango_font_rendering.set(pango_font_rendering);
-    }
-
-    /// Get the current font family.
-    #[allow(dead_code)]
-    pub fn font_family(&self) -> String {
-        self.styles.borrow().font_family.clone()
     }
 
     /// Get the current background color.
@@ -180,7 +141,7 @@ impl SurfaceStyleManager {
         let width = config.surface_outline_width();
         let color = if active && width > 0.0 {
             debug_assert!(
-                shell.child_has_css_class(surface::SURFACE_POPOVER),
+                shell.child_has_css_class(surface::POPOVER),
                 "animated surface outline suppression expects a popover surface child"
             );
             config.surface_outline_rgba_for_widget(widget_name, shell)
@@ -359,193 +320,5 @@ impl SurfaceStyleManager {
         if self.pango_font_rendering.get() {
             self.style_all_labels(widget, self.font_size());
         }
-    }
-
-    /// Apply tooltip-like surface styling to a widget.
-    ///
-    /// Use this for popovers, menus, or any container that should have the
-    /// same visual language as widgets: dark background, rounded corners,
-    /// readable text, subtle border.
-    ///
-    /// The styles are applied at base priority so CSS classes can override
-    /// specific properties while GTK themes are still overridden.
-    ///
-    /// Background color is determined by CSS variables:
-    /// - Default: Uses `--widget-background-color` from `:root`
-    /// - Per-widget override: Add a class like `.clock-popover` to the widget,
-    ///   which overrides `--widget-background-color` via generated CSS
-    ///
-    /// # Arguments
-    /// * `widget` - The widget to style
-    /// * `with_padding` - Whether to apply padding to the widget
-    pub fn apply_surface_styles(&self, widget: &impl IsA<gtk4::Widget>, with_padding: bool) {
-        self.apply_surface_styles_inner(widget, with_padding, "var(--radius-surface)");
-    }
-
-    /// Apply surface styles with a custom border radius.
-    ///
-    /// # Arguments
-    /// * `widget` - The widget to style
-    /// * `with_padding` - Whether to apply padding to the widget
-    /// * `radius` - CSS value for border-radius (e.g., "var(--radius-widget)")
-    pub fn apply_surface_styles_with_radius(
-        &self,
-        widget: &impl IsA<gtk4::Widget>,
-        with_padding: bool,
-        radius: &str,
-    ) {
-        self.apply_surface_styles_inner(widget, with_padding, radius);
-    }
-
-    fn apply_surface_styles_inner(
-        &self,
-        widget: &impl IsA<gtk4::Widget>,
-        with_padding: bool,
-        radius: &str,
-    ) {
-        let widget = widget.as_ref();
-
-        let styles = self.styles.borrow();
-        let padding_css = if with_padding {
-            "padding: 16px;".to_string()
-        } else {
-            String::new()
-        };
-
-        // Use inline color-mix() so per-widget overrides work via CSS scoping
-        // (e.g., .clock-popover overrides --widget-background-color)
-
-        // Build CSS targeting the widget's CSS name
-        // For Popover, we need to target both the popover and its contents
-        // Use high-specificity selectors to override GTK themes
-        let css_name = widget.css_name();
-        let css = if css_name == "popover" {
-            let bg = POPOVER_BG_WITH_OPACITY;
-            format!(
-                r#"
-popover.widget-menu,
-popover.widget-menu.background {{
-    background-color: {bg};
-    background: {bg};
-    background-image: none;
-    border: none;
-    border-radius: {radius};
-    box-shadow: none;
-}}
-
-popover.widget-menu > contents,
-popover.widget-menu.background > contents {{
-    background-color: transparent;
-    background: transparent;
-    background-image: none;
-    border: var(--surface-outline-width) solid color-mix(in srgb, var(--surface-outline-color) var(--surface-outline-opacity), transparent);
-    border-radius: {radius};
-    font-family: {font};
-    font-size: var(--font-size);
-    color: var(--color-foreground-primary);
-    {padding}
-    margin: 0 6px 6px 6px;
-    box-shadow: var(--shadow-soft);
-}}
-
-popover.widget-menu > arrow,
-popover.widget-menu.background > arrow {{
-    background: transparent;
-    background-color: transparent;
-    border: none;
-    box-shadow: none;
-}}
-
-popover.widget-menu *,
-popover.widget-menu.background * {{
-    font-family: inherit;
-}}
-"#,
-                bg = bg,
-                font = styles.font_family,
-                padding = padding_css,
-                radius = radius,
-            )
-        } else {
-            // Layer-shell popovers are GtkBox, not native Popover widgets.
-            let is_popover_surface = widget.has_css_class(surface::POPOVER);
-            let is_floating_surface = widget.has_css_class(notif::TOAST)
-                || widget.has_css_class(osd::OSD)
-                || widget.has_css_class(media::CONTENT);
-            let bg = if is_popover_surface || is_floating_surface {
-                POPOVER_BG_WITH_OPACITY
-            } else {
-                WIDGET_BG_WITH_OPACITY
-            };
-            // Check if widget has the widget-menu-content class - if so, use
-            // that as the selector for more specific targeting. These inner panels
-            // should NOT get a shadow since popover contents node handles that.
-            let has_menu_content_class = widget.has_css_class(surface::WIDGET_MENU_CONTENT);
-
-            let selector = if has_menu_content_class {
-                format!(".{}", surface::WIDGET_MENU_CONTENT)
-            } else {
-                // Use the widget's first CSS class so the rule only targets
-                // the styled surface, not every descendant GtkBox.
-                let classes = widget.css_classes();
-                if let Some(first) = classes.first() {
-                    format!(".{}", first.as_str())
-                } else {
-                    css_name.to_string()
-                }
-            };
-
-            // Inner popover panels (.widget-menu-content) don't need shadow -
-            // the popover's contents node handles that.
-            let shadow_css = if has_menu_content_class {
-                "none".to_string()
-            } else {
-                "var(--shadow-soft)".to_string()
-            };
-
-            format!(
-                r#"
-{selector} {{
-    background-color: {bg};
-    background-image: none;
-    border: var(--surface-outline-width) solid color-mix(in srgb, var(--surface-outline-color) var(--surface-outline-opacity), transparent);
-    border-radius: {radius};
-    font-family: {font};
-    font-size: var(--font-size);
-    color: var(--color-foreground-primary);
-    {padding}
-    box-shadow: {shadow};
-}}
-
-{selector} * {{
-    font-family: inherit;
-}}
-"#,
-                selector = selector,
-                bg = bg,
-                font = styles.font_family,
-                padding = padding_css,
-                shadow = shadow_css,
-                radius = radius,
-            )
-        };
-
-        let provider = gtk4::CssProvider::new();
-        provider.load_from_string(&css);
-
-        // Apply styles to the widget's style context so they are scoped to
-        // this surface hierarchy instead of the entire display. GTK will
-        // propagate these styles to descendants automatically.
-        //
-        // NOTE: style_context() and add_provider() are deprecated in GTK 4.10+
-        // but GTK provides no replacement for widget-scoped CSS. The alternative
-        // (style_context_add_provider_for_display) applies CSS globally, which
-        // would require unique class names per surface instance. We use the
-        // deprecated API intentionally here as it's the only way to scope CSS
-        // to a specific widget subtree.
-        #[allow(deprecated)]
-        widget
-            .style_context()
-            .add_provider(&provider, gtk4::STYLE_PROVIDER_PRIORITY_USER);
     }
 }

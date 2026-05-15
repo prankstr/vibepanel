@@ -308,14 +308,14 @@ fn assert_widget_style_bindings(config: &Config) {
 
 fn production_popover_declarations(config: &Config) -> String {
     let css = crate::widgets::css::utility_css(config);
-    let selector = ".vp-surface-popover {";
+    let selector = ".popover {";
     let selector_pos = css
         .find(selector)
-        .expect("production utility CSS should contain the .vp-surface-popover selector");
+        .expect("production utility CSS should contain the .popover selector");
     let selector_block = &css[selector_pos..];
     let block_end = selector_block
         .find('}')
-        .expect("production .vp-surface-popover selector should have a declaration block");
+        .expect("production .popover selector should have a declaration block");
 
     selector_block[..block_end].to_string()
 }
@@ -325,11 +325,11 @@ fn assert_popover_style_bindings(config: &Config) {
 
     assert!(
         declarations.contains(&format!("background-color: {POPOVER_BG_WITH_OPACITY};")),
-        "production popover CSS should apply --widget-background-color and --popover-background-opacity to .vp-surface-popover"
+        "production popover CSS should apply --widget-background-color and --popover-background-opacity to .popover"
     );
     assert!(
         declarations.contains("border: var(--surface-outline-width) solid"),
-        "production popover CSS should apply --surface-outline-width to .vp-surface-popover"
+        "production popover CSS should apply --surface-outline-width to .popover"
     );
 }
 
@@ -1487,7 +1487,7 @@ fn run_test_surface_outline_css_gsk_parity() {
     config.widgets.popover_background_opacity = Some(1.0);
 
     set_ui_regression_config(&config);
-    let surface_fixture = painted_surface_fixture(&config, crate::styles::surface::SURFACE_POPOVER);
+    let surface_fixture = painted_surface_fixture(&config, crate::styles::surface::POPOVER);
     let css_edge = edge_pixel_of_surface(&surface_fixture);
     let gsk_rgba = crate::services::config_manager::ConfigManager::global()
         .surface_outline_rgba_for_widget("custom-a", &surface_fixture.surface);
@@ -1554,7 +1554,7 @@ fn run_test_theme_popover_polarity_pixel() {
     bar_fixture.window.close();
     flush_gtk();
 
-    let popover_fixture = painted_surface_fixture(&config, crate::styles::surface::SURFACE_POPOVER);
+    let popover_fixture = painted_surface_fixture(&config, crate::styles::surface::POPOVER);
     let popover_pixel = center_pixel_of_surface(&popover_fixture);
     maybe_hold_probe_window();
     popover_fixture.window.close();

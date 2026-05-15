@@ -695,6 +695,7 @@ pub mod surface {
     pub const POPOVER_WRAPPER: &str = "popover-wrapper";
 
     /// Deprecated: use [`POPOVER`]. Internal popover surface marker (`.vp-surface-popover`).
+    /// Kept as a user-CSS compatibility alias; scheduled for removal in a future breaking release.
     pub const SURFACE_POPOVER: &str = "vp-surface-popover";
 
     /// Temporarily hide the CSS-painted outline while `ScaleBox` draws it on

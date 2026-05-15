@@ -40,20 +40,24 @@ fn run_toast_ui_regression_subprocess(test_case: &str) {
 }
 
 #[test]
-fn test_notification_toast_critical_class_consumes_critical_tokens() {
+fn test_notification_toast_critical_class_does_not_apply_visual_tokens() {
     let css = crate::widgets::css::widget_css(&Config::default());
 
     assert!(
         css.contains(
-            ".notification-row.notification-critical,\n.notification-toast-critical {\n    border-left: 3px solid var(--color-state-warning);"
+            ".notification-row.notification-critical {\n    border-left: 3px solid var(--color-state-warning);"
         ),
-        "critical toast selector should consume the shared warning border token"
+        "critical notification rows should consume the shared warning border token"
     );
     assert!(
         css.contains(
-            ".notification-toast-critical {\n    background-color: var(--color-toast-critical-background);"
+            ".notification-row.notification-critical {\n    background-color: var(--color-row-critical-background);"
         ),
-        "critical toast selector should consume the toast critical background token"
+        "critical notification rows should consume the row critical background token"
+    );
+    assert!(
+        !css.contains(".notification-toast-critical {"),
+        "critical toasts intentionally keep main's neutral visual styling"
     );
 }
 

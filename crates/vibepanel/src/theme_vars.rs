@@ -58,7 +58,6 @@ pub(super) const THEME_VAR_EXPECTATIONS: &[ThemeVarExpectation] = &[
     hover_var("--color-taskbar-button-active-hover-bg", Root, BuiltinCss),
     hover_var("--color-taskbar-button-hover-bg", Root, BuiltinCss),
     hover_var("--color-taskbar-button-urgent-hover-bg", Root, BuiltinCss),
-    var("--color-toast-critical-background", Root, BuiltinCss),
     hover_var("--color-widget-hover-bg", Root, BuiltinCss),
     hover_var(
         "--color-workspace-indicator-active-hover-bg",
