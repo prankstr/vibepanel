@@ -46,7 +46,7 @@ use pulse::proplist::Proplist;
 use pulse::volume::Volume;
 
 /// Information about an audio sink (output device).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SinkInfoSnapshot {
     /// Internal PulseAudio name (used for set-default-sink).
     pub name: String,
@@ -62,7 +62,7 @@ pub struct SinkInfoSnapshot {
 }
 
 /// Information about an audio source (input device).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceInfoSnapshot {
     /// Internal PulseAudio name (used for set-default-source).
     pub name: String,
@@ -78,7 +78,7 @@ pub struct SourceInfoSnapshot {
 }
 
 /// Snapshot of audio service state for callbacks.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AudioSnapshot {
     /// Current volume as a percentage, where values above 100 are overdrive.
     pub volume: u32,
@@ -526,46 +526,8 @@ impl AudioService {
             mic_control_available: update.mic_control_available,
         };
 
-        // Check if anything actually changed.
-        {
-            let current = self.current.borrow();
-            if current.volume == new_snapshot.volume
-                && current.muted == new_snapshot.muted
-                && current.mic_muted == new_snapshot.mic_muted
-                && current.mic_volume == new_snapshot.mic_volume
-                && current.default_sink_name == new_snapshot.default_sink_name
-                && current.default_source_name == new_snapshot.default_source_name
-                && current.available == new_snapshot.available
-                && current.control_available == new_snapshot.control_available
-                && current.mic_control_available == new_snapshot.mic_control_available
-                && current.sinks.len() == new_snapshot.sinks.len()
-                && current.sources.len() == new_snapshot.sources.len()
-            {
-                // Sinks list length is the same; check if contents differ.
-                let sinks_equal =
-                    current
-                        .sinks
-                        .iter()
-                        .zip(new_snapshot.sinks.iter())
-                        .all(|(a, b)| {
-                            a.name == b.name
-                                && a.is_default == b.is_default
-                                && a.port_available == b.port_available
-                        });
-                let sources_equal =
-                    current
-                        .sources
-                        .iter()
-                        .zip(new_snapshot.sources.iter())
-                        .all(|(a, b)| {
-                            a.name == b.name
-                                && a.is_default == b.is_default
-                                && a.port_available == b.port_available
-                        });
-                if sinks_equal && sources_equal {
-                    return;
-                }
-            }
+        if *self.current.borrow() == new_snapshot {
+            return;
         }
 
         // Update state and mark as ready.
