@@ -40,11 +40,13 @@ use gtk4::gio;
 use gtk4::glib::{self, SourceId};
 use gtk4::prelude::*;
 use gtk4::{Box as GtkBox, GestureClick, Image, Label, Orientation, gdk};
+use serde::Deserialize;
 use tracing::{debug, warn};
 use vibepanel_core::config::WidgetEntry;
 
 use crate::services::config_manager::ConfigManager;
 use crate::services::icons::{IconHandle, has_material_mapping};
+use crate::services::tooltip::TooltipManager;
 use crate::styles::{icon, state, widget as wgt};
 use crate::widgets::base::{BaseWidget, describe_exit_status};
 use crate::widgets::{WidgetConfig, warn_unknown_options};
@@ -64,6 +66,64 @@ const KNOWN_OPTIONS: &[&str] = &[
 
 /// Default exec timeout in seconds.
 const EXEC_TIMEOUT_SECS: u64 = 10;
+
+/// Normalized output from a custom widget exec command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CustomExecOutput {
+    text: String,
+    tooltip: Option<String>,
+}
+
+/// JSON shape emitted by Waybar-style custom scripts.
+#[derive(Debug, Deserialize, PartialEq)]
+struct CustomExecJsonOutput {
+    /// Primary display text used by Waybar custom modules.
+    #[serde(default)]
+    text: String,
+    /// Alternate label key accepted for compatibility with simple scripts.
+    #[serde(default)]
+    label: String,
+    /// Optional tooltip text.
+    #[serde(default)]
+    tooltip: Option<String>,
+    /// Optional numeric percentage. Used as tooltip fallback when tooltip is
+    /// absent.
+    #[serde(default)]
+    percentage: Option<CustomExecPercentage>,
+}
+
+impl CustomExecJsonOutput {
+    fn into_output(self) -> CustomExecOutput {
+        let text = if self.text.is_empty() {
+            self.label
+        } else {
+            self.text
+        };
+
+        let tooltip = self
+            .tooltip
+            .filter(|s| !s.is_empty())
+            .or_else(|| self.percentage.map(|percentage| percentage.to_tooltip()));
+
+        CustomExecOutput { text, tooltip }
+    }
+}
+
+#[derive(Debug, Deserialize, PartialEq)]
+#[serde(untagged)]
+enum CustomExecPercentage {
+    Integer(i64),
+    Float(f64),
+}
+
+impl CustomExecPercentage {
+    fn to_tooltip(&self) -> String {
+        match self {
+            Self::Integer(n) => format!("{n}%"),
+            Self::Float(n) => format!("{n:.0}%"),
+        }
+    }
+}
 
 /// Configuration for a custom widget instance.
 #[derive(Debug, Clone, Default)]
@@ -237,6 +297,11 @@ impl CustomWidget {
         // Retrieve show_if config from WidgetOptions (not CustomConfig — these
         // are cross-cutting fields parsed at the WidgetOptions level).
         let (show_if_cmd, show_if_interval) = ConfigManager::global().get_show_if(&css_class_name);
+        let custom_on_click = config.on_click.clone().or_else(|| {
+            ConfigManager::global()
+                .get_click_handlers(&css_class_name)
+                .0
+        });
 
         // When exec + interval is active, show_if piggybacks on the exec cycle
         // instead of running a separate timer. Cancel BaseWidget's show_if timer.
@@ -255,7 +320,7 @@ impl CustomWidget {
 
         // Enables hover styling for left-click action.
         // BaseWidget handles CLICKABLE for on_click_right / on_click_middle.
-        if config.on_click.is_some() {
+        if custom_on_click.is_some() {
             base.widget().add_css_class(state::CLICKABLE);
         }
 
@@ -394,7 +459,7 @@ impl CustomWidget {
             None
         };
 
-        if let Some(on_click) = config.on_click {
+        if let Some(on_click) = custom_on_click {
             // Custom widget's own left-click handler. Runs the command, then
             // re-runs exec to refresh the label immediately.
             // Right-click and middle-click are handled by BaseWidget via
@@ -624,8 +689,8 @@ fn run_exec(
         match result {
             Ok(Ok(output)) => {
                 // Trim whitespace (including the trailing newline from read_line)
-                let text = output.trim();
-                if text.is_empty() {
+                let output = parse_exec_output(output.trim());
+                if output.text.is_empty() {
                     label.set_label(&fallback_text);
                     // Auto-hide when exec returns empty and no fallback is configured
                     if fallback_text.is_empty() {
@@ -633,11 +698,14 @@ fn run_exec(
                     }
                 } else {
                     let display = if let Some(ref tmpl) = template {
-                        tmpl.replace("{output}", text)
+                        tmpl.replace("{output}", &output.text)
                     } else {
-                        text.to_string()
+                        output.text
                     };
                     label.set_label(&display);
+                    if let Some(tooltip) = output.tooltip {
+                        TooltipManager::global().set_styled_tooltip(&widget, &tooltip);
+                    }
                     widget.set_visible(true);
                 }
             }
@@ -651,6 +719,25 @@ fn run_exec(
             }
         }
     });
+}
+
+fn parse_exec_output(text: &str) -> CustomExecOutput {
+    let trimmed = text.trim();
+    if !trimmed.starts_with('{') {
+        return CustomExecOutput {
+            text: trimmed.to_string(),
+            tooltip: None,
+        };
+    }
+
+    let Ok(output) = serde_json::from_str::<CustomExecJsonOutput>(trimmed) else {
+        return CustomExecOutput {
+            text: trimmed.to_string(),
+            tooltip: None,
+        };
+    };
+
+    output.into_output()
 }
 
 #[cfg(test)]
@@ -714,6 +801,39 @@ mod tests {
         assert_eq!(config.on_click, Some("wlogout".to_string()));
         assert_eq!(config.tooltip, Some("Power menu".to_string()));
         assert_eq!(config.max_chars, Some(30));
+    }
+
+    #[test]
+    fn test_parse_exec_output_plain_text() {
+        assert_eq!(
+            parse_exec_output("hello"),
+            CustomExecOutput {
+                text: "hello".to_string(),
+                tooltip: None,
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_exec_output_waybar_json() {
+        assert_eq!(
+            parse_exec_output(r#"{"text":"󰋎 ","percentage":72}"#),
+            CustomExecOutput {
+                text: "󰋎 ".to_string(),
+                tooltip: Some("72%".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_exec_output_tooltip_json() {
+        assert_eq!(
+            parse_exec_output(r#"{"text":"󰋎 ","tooltip":"Headset 72%"}"#),
+            CustomExecOutput {
+                text: "󰋎 ".to_string(),
+                tooltip: Some("Headset 72%".to_string()),
+            }
+        );
     }
 
     #[test]
