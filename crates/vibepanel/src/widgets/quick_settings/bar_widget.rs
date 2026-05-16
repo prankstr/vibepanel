@@ -195,6 +195,7 @@ impl QuickSettingsWidget {
             let audio_icon_name_initial =
                 volume_icon_name(audio_snapshot.volume, audio_snapshot.muted);
             let audio_icon = base.add_icon(audio_icon_name_initial, &[icon::ICON, icon::TEXT]);
+            audio_icon.widget().add_css_class(qs::VOLUME);
 
             // Subscribe to AudioService updates
             let audio_icon_handle = audio_icon.clone();
@@ -251,6 +252,7 @@ impl QuickSettingsWidget {
             if bt_connected_devices > 0 {
                 bt_icon.widget().add_css_class(state::ICON_ACTIVE);
             }
+            bt_icon.widget().set_visible(bt_powered);
             if !bt_powered {
                 bt_icon.widget().add_css_class(qs::BT_DISABLED_ICON);
             }
@@ -262,6 +264,7 @@ impl QuickSettingsWidget {
                     let widget = bt_icon_handle.widget();
 
                     if !snapshot.has_adapter && snapshot.is_ready {
+                        widget.set_visible(false);
                         widget.add_css_class(state::SERVICE_UNAVAILABLE);
                         widget.remove_css_class(state::ICON_ACTIVE);
                         bt_icon_handle.set_icon("bluetooth-disabled-symbolic");
@@ -274,6 +277,7 @@ impl QuickSettingsWidget {
 
                     let powered = snapshot.powered;
                     let connected_devices = snapshot.connected_devices;
+                    widget.set_visible(powered);
 
                     let icon_name = bt_icon_name(powered, connected_devices);
                     bt_icon_handle.set_icon(icon_name);
@@ -323,6 +327,7 @@ impl QuickSettingsWidget {
 
             let ctx = NetworkIconContext::for_bar(&snapshot);
             let wifi_icon = base.add_icon(network_icon_name(&ctx), &[icon::ICON, icon::TEXT]);
+            wifi_icon.widget().add_css_class(qs::WIFI);
 
             if !wifi_enabled && !wired_connected {
                 wifi_icon.widget().add_css_class(qs::WIFI_DISABLED_ICON);
@@ -482,9 +487,10 @@ impl QuickSettingsWidget {
             let vpn_icon_name_initial = vpn_icon_name();
             let vpn_icon = base.add_icon(vpn_icon_name_initial, &[icon::ICON, icon::TEXT]);
 
-            if !vpn_snapshot.available {
-                vpn_icon.widget().set_visible(false);
-            } else if vpn_any_active {
+            vpn_icon
+                .widget()
+                .set_visible(vpn_snapshot.available && vpn_any_active);
+            if vpn_snapshot.available && vpn_any_active {
                 vpn_icon.widget().add_css_class(state::ICON_ACTIVE);
             }
 
@@ -493,8 +499,9 @@ impl QuickSettingsWidget {
             vpn_callback_id = Some(VpnService::global().connect(move |snapshot: &VpnSnapshot| {
                 let widget = vpn_icon_handle.widget();
 
-                if !snapshot.available {
+                if !snapshot.available || !snapshot.any_active {
                     widget.set_visible(false);
+                    widget.remove_css_class(state::ICON_ACTIVE);
                     return;
                 }
                 widget.set_visible(true);

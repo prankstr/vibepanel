@@ -269,6 +269,9 @@ pub mod qs {
     /// Wi-Fi toggle card (`.qs-wifi`).
     pub const WIFI: &str = "qs-wifi";
 
+    /// Volume bar icon (`.qs-volume`).
+    pub const VOLUME: &str = "qs-volume";
+
     /// Bluetooth toggle card (`.qs-bluetooth`).
     pub const BLUETOOTH: &str = "qs-bluetooth";
 

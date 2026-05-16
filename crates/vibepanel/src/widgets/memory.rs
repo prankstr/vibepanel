@@ -28,6 +28,8 @@ const DEFAULT_SHOW_ICON: bool = true;
 /// Memory display format options.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub enum MemoryFormat {
+    /// Show no text on the bar; details remain available in tooltip/popover.
+    None,
     /// Show percentage only: "76%"
     #[default]
     Percentage,
@@ -41,6 +43,7 @@ impl MemoryFormat {
     /// Parse from a string value.
     fn from_str(s: &str) -> Self {
         match s.to_lowercase().as_str() {
+            "none" | "hidden" | "icon" => Self::None,
             "absolute" => Self::Absolute,
             "both" => Self::Both,
             _ => Self::Percentage,
@@ -168,6 +171,7 @@ impl Drop for MemoryWidget {
 /// Format memory usage according to the selected format.
 fn format_memory(snapshot: &SystemSnapshot, format: &MemoryFormat) -> String {
     match format {
+        MemoryFormat::None => String::new(),
         MemoryFormat::Percentage => format!("{:.0}%", snapshot.memory_percent),
         MemoryFormat::Absolute => format_bytes(snapshot.memory_used),
         MemoryFormat::Both => format!(
@@ -191,8 +195,12 @@ fn update_memory_widget(
         if show_icon {
             icon_handle.widget().set_visible(true);
         }
-        memory_label.set_label("?");
-        memory_label.set_visible(true);
+        if *format == MemoryFormat::None {
+            memory_label.set_visible(false);
+        } else {
+            memory_label.set_label("?");
+            memory_label.set_visible(true);
+        }
 
         let tooltip_manager = TooltipManager::global();
         tooltip_manager.set_styled_tooltip(container, "Memory: Service unavailable");
@@ -215,7 +223,7 @@ fn update_memory_widget(
 
     let text = format_memory(snapshot, format);
     memory_label.set_label(&text);
-    memory_label.set_visible(true);
+    memory_label.set_visible(!text.is_empty());
 
     let tooltip = format!(
         "Memory: {:.1}%\n{} / {}",
@@ -274,6 +282,8 @@ mod tests {
         assert_eq!(MemoryFormat::from_str("ABSOLUTE"), MemoryFormat::Absolute);
         assert_eq!(MemoryFormat::from_str("both"), MemoryFormat::Both);
         assert_eq!(MemoryFormat::from_str("Both"), MemoryFormat::Both);
+        assert_eq!(MemoryFormat::from_str("none"), MemoryFormat::None);
+        assert_eq!(MemoryFormat::from_str("icon"), MemoryFormat::None);
         assert_eq!(MemoryFormat::from_str("unknown"), MemoryFormat::Percentage);
     }
 }
