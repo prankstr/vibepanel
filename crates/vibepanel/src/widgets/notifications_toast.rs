@@ -1,8 +1,7 @@
 //! Notification toast windows for displaying new notifications.
 //!
 //! This module handles floating toast windows that appear when new notifications
-//! arrive. Toasts stack vertically on the bar-adjacent edge (top-right when bar
-//! is at top, bottom-right when bar is at bottom) and auto-dismiss after a
+//! arrive. Toasts appear at top-center and auto-dismiss after a
 //! timeout (except for critical notifications).
 
 use gtk4::glib::{self, SourceId};
@@ -28,9 +27,9 @@ use crate::services::surfaces::SurfaceStyleManager;
 use crate::styles::{button, color, notification as notif};
 
 use super::notifications_common::{
-    POPOVER_WIDTH, SURFACE_SHADOW_MARGIN, TOAST_BAR_MARGIN, TOAST_ESTIMATED_HEIGHT, TOAST_GAP,
-    TOAST_MARGIN_RIGHT, TOAST_TIMEOUT_CRITICAL_MS, TOAST_TIMEOUT_MS,
-    create_notification_image_widget, sanitize_body_markup,
+    POPOVER_WIDTH, SURFACE_SHADOW_MARGIN, TOAST_ESTIMATED_HEIGHT, TOAST_GAP,
+    TOAST_TIMEOUT_CRITICAL_MS, TOAST_TIMEOUT_MS, create_notification_image_widget,
+    sanitize_body_markup,
 };
 
 /// Floating toast window for displaying a single notification.
@@ -69,9 +68,7 @@ impl NotificationToast {
 
         window.add_css_class(notif::TOAST_WRAPPER);
 
-        // Determine bar position for toast anchoring
-        let is_bottom = ConfigManager::global().bar_is_bottom();
-        let bar_edge = if is_bottom { Edge::Bottom } else { Edge::Top };
+        let bar_edge = Edge::Top;
 
         // Initialize layer shell
         window.init_layer_shell();
@@ -80,19 +77,14 @@ impl NotificationToast {
         window.set_exclusive_zone(0);
         window.set_keyboard_mode(KeyboardMode::None);
 
-        // Anchor to bar-edge + right
-        window.set_anchor(bar_edge, true);
-        window.set_anchor(Edge::Right, true);
+        // Anchor to top only: layer-shell centers the unanchored horizontal axis.
+        window.set_anchor(Edge::Top, true);
+        window.set_anchor(Edge::Bottom, false);
+        window.set_anchor(Edge::Right, false);
         window.set_anchor(Edge::Left, false);
-        // Ensure opposite edge is unanchored
-        let opposite_edge = if is_bottom { Edge::Top } else { Edge::Bottom };
-        window.set_anchor(opposite_edge, false);
 
-        window.set_margin(bar_edge, initial_margin);
-        let right_margin = (TOAST_MARGIN_RIGHT
-            - SurfaceStyleManager::global().shadow_margin(SURFACE_SHADOW_MARGIN))
-        .max(0);
-        window.set_margin(Edge::Right, right_margin);
+        window.set_margin(bar_edge, initial_margin.max(12));
+        window.set_margin(Edge::Right, 0);
 
         let notification_id = notification.id;
         let toast = Rc::new(Self {
@@ -558,7 +550,7 @@ impl NotificationToastManager {
         let initial_margin = {
             let order = self.toast_order.borrow();
             let toasts = self.toasts.borrow();
-            let mut y_offset = (TOAST_BAR_MARGIN - sm).max(0);
+            let mut y_offset = 0;
             for &id in order.iter() {
                 if let Some(toast) = toasts.get(&id) {
                     y_offset += (toast.height() - 2 * sm).max(0) + TOAST_GAP;
@@ -606,7 +598,7 @@ impl NotificationToastManager {
         let order = self.toast_order.borrow();
         let toasts = self.toasts.borrow();
         let sm = SurfaceStyleManager::global().shadow_margin(SURFACE_SHADOW_MARGIN);
-        let mut y_offset = (TOAST_BAR_MARGIN - sm).max(0);
+        let mut y_offset = 0;
         for &id in order.iter() {
             if let Some(toast) = toasts.get(&id) {
                 toast.update_bar_margin(y_offset, ConfigManager::global().animations_enabled());

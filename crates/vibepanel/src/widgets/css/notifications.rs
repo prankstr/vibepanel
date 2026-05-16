@@ -205,6 +205,10 @@ window.notification-toast-wrapper,
     min-width: 300px;
 }}
 
+.notification-toast {{
+    background-color: color-mix(in srgb, var(--color-background-popover) 58%, transparent);
+}}
+
 .notification-toast-actions {{
     margin-top: 10px;
     padding-top: 8px;

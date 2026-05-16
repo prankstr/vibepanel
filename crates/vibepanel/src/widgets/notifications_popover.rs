@@ -106,7 +106,7 @@ fn compute_max_scroll_height() -> i32 {
 ///   single notification does NOT close the popover.
 /// * `suppress_rebuild` - Flag set by dismiss handlers to prevent the service
 ///   update listener from rebuilding the popover (since the row was already removed).
-pub(super) fn build_popover_content(
+pub(crate) fn build_popover_content(
     on_close: Option<ClosePopoverCallback>,
     suppress_rebuild: Rc<Cell<bool>>,
 ) -> gtk4::Widget {

@@ -4,7 +4,7 @@
 //! - Bell icon with unread notification badge
 //! - CSS states: has-notifications, has-critical, backend-unavailable
 //! - Popover with scrollable notification list and dismiss controls
-//! - Toast overlay windows for new notifications (top-right stacked)
+//! - Toast overlay windows for new notifications
 //!
 //! This module is split into several files for maintainability:
 //! - `notifications.rs` (this file): Widget implementation and badge logic
@@ -23,6 +23,7 @@ use tracing::debug;
 use vibepanel_core::config::WidgetEntry;
 
 use crate::services::callbacks::CallbackId;
+use crate::services::config_manager::ConfigManager;
 use crate::services::icons::IconHandle;
 use crate::services::notification::{NotificationService, URGENCY_CRITICAL};
 use crate::services::tooltip::TooltipManager;
@@ -30,16 +31,34 @@ use crate::styles::widget;
 use crate::widgets::base::MenuHandle;
 use crate::widgets::{BaseWidget, WidgetConfig};
 
+use super::control_panel::build_clock_control_panel;
 use super::notifications_popover::{ClosePopoverCallback, build_popover_content};
 use super::notifications_toast::NotificationToastManager;
 
 /// Configuration for the notification widget.
 #[derive(Debug, Clone, Default)]
-pub struct NotificationsConfig {}
+pub struct NotificationsConfig {
+    /// Hide the bell until there is notification history.
+    hide_empty: bool,
+    /// Open the combined clock control panel instead of the notification-only
+    /// popover.
+    control_panel: bool,
+}
 
 impl WidgetConfig for NotificationsConfig {
-    fn from_entry(_entry: &WidgetEntry) -> Self {
-        Self {}
+    fn from_entry(entry: &WidgetEntry) -> Self {
+        Self {
+            hide_empty: entry
+                .options
+                .get("hide_empty")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            control_panel: entry
+                .options
+                .get("control_panel")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+        }
     }
 }
 
@@ -65,6 +84,7 @@ struct NotificationsWidgetInner {
     /// When set, the popover dismiss handler already removed the row in-place,
     /// so `on_service_update` should skip `refresh_if_visible`.
     suppress_rebuild: Rc<Cell<bool>>,
+    hide_empty: bool,
 }
 
 impl NotificationsWidgetInner {
@@ -77,6 +97,11 @@ impl NotificationsWidgetInner {
 
         // Show toasts for new notifications
         self.show_new_toasts(service);
+
+        if self.hide_empty {
+            self.container
+                .set_visible(service.backend_available() && count > 0);
+        }
 
         // Update badge: unread since last popover open
         // Badge is shown as a simple dot (no text), count is only in tooltip
@@ -314,7 +339,7 @@ pub struct NotificationsWidget {
 
 impl NotificationsWidget {
     /// Create a new notification widget.
-    pub fn new(_config: NotificationsConfig) -> Self {
+    pub fn new(config: NotificationsConfig) -> Self {
         let base = BaseWidget::new(&[widget::NOTIFICATIONS]);
 
         // Create an overlay for badge on top of icon
@@ -343,6 +368,9 @@ impl NotificationsWidget {
         base.content().append(&overlay);
 
         base.set_tooltip("Notifications");
+        if config.hide_empty {
+            base.widget().set_visible(false);
+        }
 
         let inner = Rc::new(NotificationsWidgetInner {
             icon_handle,
@@ -355,19 +383,36 @@ impl NotificationsWidget {
             menu_handle: RefCell::new(None),
             last_notif_ids: RefCell::new(Vec::new()),
             suppress_rebuild: Rc::new(Cell::new(false)),
+            hide_empty: config.hide_empty,
         });
 
         // Build menu before constructing Self so we can move base/inner cleanly.
         let suppress_rebuild = Rc::clone(&inner.suppress_rebuild);
         let inner_for_menu = Rc::clone(&inner);
+        let control_panel = config.control_panel;
         let menu_handle = base.create_menu(|| GtkBox::new(Orientation::Vertical, 0).into());
         let handle_weak = Rc::downgrade(&menu_handle);
         menu_handle.set_builder(move || {
             inner_for_menu.mark_as_seen();
-            let on_close: Option<ClosePopoverCallback> = handle_weak
-                .upgrade()
-                .map(|handle| Rc::new(move || handle.hide()) as ClosePopoverCallback);
-            build_popover_content(on_close, Rc::clone(&suppress_rebuild))
+            if control_panel {
+                suppress_rebuild.set(false);
+
+                let show_week_numbers = ConfigManager::global()
+                    .get_widget_option("clock", "show_week_numbers")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true);
+                let weather_widget_name = ConfigManager::global()
+                    .get_widget_option("clock", "control_panel_weather_widget")
+                    .and_then(|v| v.as_str().map(str::to_string));
+                let (widget, _refresh) =
+                    build_clock_control_panel(show_week_numbers, weather_widget_name);
+                widget
+            } else {
+                let on_close: Option<ClosePopoverCallback> = handle_weak
+                    .upgrade()
+                    .map(|handle| Rc::new(move || handle.hide()) as ClosePopoverCallback);
+                build_popover_content(on_close, Rc::clone(&suppress_rebuild))
+            }
         });
         *inner.menu_handle.borrow_mut() = Some(menu_handle);
 

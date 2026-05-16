@@ -15,6 +15,7 @@ use crate::styles::widget as wgt;
 use crate::widgets::WidgetConfig;
 use crate::widgets::base::BaseWidget;
 use crate::widgets::calendar_popover::build_clock_calendar_popover;
+use crate::widgets::control_panel::build_clock_control_panel;
 use crate::widgets::warn_unknown_options;
 
 /// Default format string for the clock display.
@@ -28,11 +29,26 @@ pub struct ClockConfig {
     pub format: String,
     /// Whether to show week numbers in the calendar popover.
     pub show_week_numbers: bool,
+    /// Whether the clock opens the combined control panel instead of the
+    /// calendar-only popover.
+    pub control_panel: bool,
+    /// Optional custom widget name whose exec output is shown in the control
+    /// panel weather card.
+    pub control_panel_weather_widget: Option<String>,
 }
 
 impl WidgetConfig for ClockConfig {
     fn from_entry(entry: &WidgetEntry) -> Self {
-        warn_unknown_options("clock", entry, &["format", "show_week_numbers"]);
+        warn_unknown_options(
+            "clock",
+            entry,
+            &[
+                "format",
+                "show_week_numbers",
+                "control_panel",
+                "control_panel_weather_widget",
+            ],
+        );
 
         let format = entry
             .options
@@ -47,9 +63,24 @@ impl WidgetConfig for ClockConfig {
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
 
+        let control_panel = entry
+            .options
+            .get("control_panel")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        let control_panel_weather_widget = entry
+            .options
+            .get("control_panel_weather_widget")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+
         Self {
             format,
             show_week_numbers,
+            control_panel,
+            control_panel_weather_widget,
         }
     }
 }
@@ -59,6 +90,8 @@ impl Default for ClockConfig {
         Self {
             format: DEFAULT_FORMAT.to_string(),
             show_week_numbers: true,
+            control_panel: false,
+            control_panel_weather_widget: None,
         }
     }
 }
@@ -85,6 +118,8 @@ impl ClockWidget {
         let label = base.add_label(Some("--:--"), &[wgt::CLOCK_LABEL]);
 
         let show_week_numbers = config.show_week_numbers;
+        let control_panel = config.control_panel;
+        let control_panel_weather_widget = config.control_panel_weather_widget.clone();
 
         // Shared slot for the calendar refresh callback. Populated by the
         // builder on first open, invoked by on_show on every subsequent open.
@@ -93,14 +128,17 @@ impl ClockWidget {
 
         let refresh_for_builder = refresh_slot.clone();
         let menu_handle = base.create_menu(move || {
-            let (widget, refresh) = build_clock_calendar_popover(show_week_numbers);
+            let (widget, refresh) = if control_panel {
+                build_clock_control_panel(show_week_numbers, control_panel_weather_widget.clone())
+            } else {
+                build_clock_calendar_popover(show_week_numbers)
+            };
             *refresh_for_builder.borrow_mut() = Some(refresh);
             widget
         });
 
-        // Reuse the calendar widget across open/close cycles to avoid
-        // unbounded memory growth from GTK4.
-        menu_handle.set_reuse_content(true);
+        // Rebuild the combined panel on open so notification history is fresh.
+        menu_handle.set_reuse_content(!control_panel);
         menu_handle.set_on_show(move || {
             if let Some(ref cb) = *refresh_slot.borrow() {
                 cb();

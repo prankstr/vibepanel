@@ -18,6 +18,7 @@ mod battery;
 mod battery_popover;
 mod calendar_popover;
 mod clock;
+mod control_panel;
 mod cpu;
 mod custom;
 mod gpu;
