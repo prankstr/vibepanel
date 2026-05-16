@@ -585,10 +585,14 @@ impl BaseWidget {
 
         let menu: Rc<RefCell<Option<Rc<MenuHandle>>>> = Rc::new(RefCell::new(None));
 
-        let (on_click_right, on_click_middle) =
+        let (mut on_click, on_click_right, on_click_middle) =
             ConfigManager::global().get_click_handlers(&widget_name);
+        if widget_name.starts_with(widget::CUSTOM_PREFIX) {
+            on_click = None;
+        }
 
-        let has_click_handler = on_click_right.is_some() || on_click_middle.is_some();
+        let has_click_handler =
+            on_click.is_some() || on_click_right.is_some() || on_click_middle.is_some();
         if has_click_handler {
             container.add_css_class(state::CLICKABLE);
         }
@@ -600,15 +604,26 @@ impl BaseWidget {
             let menu_for_cb = menu.clone();
             let container_for_ripple = container.clone();
             let ripple_for_press = ripple_handle.clone();
+            let widget_name_for_cb = widget_name.clone();
             gesture_click.connect_pressed(move |gesture, _n_press, x, y| {
                 let button = gesture.current_button();
 
                 if button == gdk::BUTTON_PRIMARY {
-                    // Skip if target is an interactive child (e.g., a Button)
+                    // Let embedded controls (for example media play/pause)
+                    // handle their own primary clicks before widget-level
+                    // click commands or popovers run.
                     if click_target_matches(gesture, x, y, |w| {
                         w.downcast_ref::<gtk4::Button>().is_some()
                     }) {
                         debug!("BaseWidget press: target is a Button, skipping");
+                        return;
+                    }
+
+                    if let Some(ref cmd) = on_click {
+                        debug!("BaseWidget left-click: sh -c {}", cmd);
+                        TooltipManager::global().cancel_and_hide();
+                        PopoverTracker::global().dismiss_active();
+                        spawn_click_command(&widget_name_for_cb, cmd);
                         return;
                     }
 

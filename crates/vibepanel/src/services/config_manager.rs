@@ -476,14 +476,23 @@ impl ConfigManager {
 
     /// Get click handler commands for a widget.
     ///
-    /// Returns `(on_click_right, on_click_middle)` from `[widgets.<name>]`.
-    pub fn get_click_handlers(&self, widget_name: &str) -> (Option<String>, Option<String>) {
+    /// Returns `(on_click, on_click_right, on_click_middle)` from `[widgets.<name>]`.
+    pub fn get_click_handlers(
+        &self,
+        widget_name: &str,
+    ) -> (Option<String>, Option<String>, Option<String>) {
         let config = self.config.borrow();
         config
             .widgets
             .get_options(widget_name)
-            .map(|opts| (opts.on_click_right.clone(), opts.on_click_middle.clone()))
-            .unwrap_or((None, None))
+            .map(|opts| {
+                (
+                    opts.on_click.clone(),
+                    opts.on_click_right.clone(),
+                    opts.on_click_middle.clone(),
+                )
+            })
+            .unwrap_or((None, None, None))
     }
 
     /// Get `show_if` command and interval for a widget.

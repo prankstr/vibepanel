@@ -1100,6 +1100,11 @@ pub struct WidgetOptions {
     #[serde(default)]
     pub outline_color: Option<String>,
 
+    /// Shell command to execute on left-click. Runs via `sh -c`.
+    /// If set, it takes precedence over the widget's native left-click popover.
+    #[serde(default)]
+    pub on_click: Option<String>,
+
     /// Shell command to execute on right-click. Runs via `sh -c`.
     #[serde(default)]
     pub on_click_right: Option<String>,
@@ -1205,8 +1210,8 @@ fn format_widget_section(items: &[WidgetPlacement]) -> Vec<String> {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ThemeIconsConfig {
-    /// Icon backend: "material" for bundled Material Symbols, or "gtk" for
-    /// the system GTK icon theme.
+    /// Icon set: "material" for bundled Material Symbols, "gtk" for the
+    /// system GTK icon theme, or a named GTK icon theme such as "Adwaita".
     pub theme: String,
 
     /// Icon stroke weight for Material Symbols (100-700). Lower = thinner strokes.
@@ -2250,12 +2255,14 @@ mod tests {
     #[test]
     fn test_widget_options_click_handlers_parsed() {
         let toml_str = r#"
+            on_click = "notify-send primary"
             on_click_right = "notify-send hello"
             on_click_middle = "xdg-open https://example.com"
             format = "%H:%M"
         "#;
         let opts: WidgetOptions = toml::from_str(toml_str).unwrap();
 
+        assert_eq!(opts.on_click, Some("notify-send primary".to_string()));
         assert_eq!(opts.on_click_right, Some("notify-send hello".to_string()));
         assert_eq!(
             opts.on_click_middle,
@@ -2271,12 +2278,14 @@ mod tests {
     #[test]
     fn test_widget_options_click_handlers_not_in_options_map() {
         let toml_str = r#"
+            on_click = "notify-send primary"
             on_click_right = "notify-send hello"
             on_click_middle = "xdg-open https://example.com"
         "#;
         let opts: WidgetOptions = toml::from_str(toml_str).unwrap();
 
         // Click handler fields should NOT leak into the options HashMap
+        assert!(!opts.options.contains_key("on_click"));
         assert!(!opts.options.contains_key("on_click_right"));
         assert!(!opts.options.contains_key("on_click_middle"));
     }
@@ -2290,18 +2299,21 @@ mod tests {
 
         assert!(opts.on_click_right.is_none());
         assert!(opts.on_click_middle.is_none());
+        assert!(opts.on_click.is_none());
     }
 
     #[test]
     fn test_widget_options_click_handlers_not_in_widget_entry() {
         // Verify click handlers don't leak into WidgetEntry.options
         let opts = WidgetOptions {
+            on_click: Some("notify-send primary".to_string()),
             on_click_right: Some("notify-send hello".to_string()),
             on_click_middle: Some("xdg-open https://example.com".to_string()),
             ..Default::default()
         };
 
         let entry = WidgetEntry::with_options("clock", &opts);
+        assert!(!entry.options.contains_key("on_click"));
         assert!(!entry.options.contains_key("on_click_right"));
         assert!(!entry.options.contains_key("on_click_middle"));
     }

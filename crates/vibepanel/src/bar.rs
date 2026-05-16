@@ -487,8 +487,9 @@ fn build_widget_or_group(
                     if e.name == "spacer" {
                         MergeKind::Spacer
                     } else {
-                        let (right, middle) = ConfigManager::global().get_click_handlers(&e.name);
-                        if right.is_some() || middle.is_some() {
+                        let (left, right, middle) =
+                            ConfigManager::global().get_click_handlers(&e.name);
+                        if left.is_some() || right.is_some() || middle.is_some() {
                             MergeKind::Popover(PopoverKind::Unmergeable)
                         } else {
                             MergeKind::Popover(popover_kind_for(&e.name))

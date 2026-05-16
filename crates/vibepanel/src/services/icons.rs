@@ -1699,17 +1699,36 @@ impl IconsService {
     /// icon theme's `changed` signal so that icons are rebuilt live when the
     /// system icon theme changes.
     fn setup_backends(service: &Rc<Self>, theme: &str) {
-        // Get the display's icon theme for lookups. We don't call set_theme_name()
-        // on this because it's a singleton and GTK warns about modifying it.
-        // Instead, we just use it for icon lookups with the system's configured theme.
+        Self::configure_gtk_icon_theme(service, theme);
+
+        // Started unconditionally — supports live theme switching via reconfigure().
+        Self::start_font_dir_watcher();
+
+        // Initialize Material if configured
+        if is_material_theme(theme) {
+            service.ensure_material_css();
+        }
+    }
+
+    fn configure_gtk_icon_theme(service: &Rc<Self>, theme: &str) {
         if let Some(display) = gtk4::gdk::Display::default() {
-            let gtk_theme = IconTheme::for_display(&display);
+            let gtk_theme = if is_material_theme(theme) || theme.eq_ignore_ascii_case("gtk") {
+                // Use the process/display default icon theme.
+                IconTheme::for_display(&display)
+            } else {
+                // Use an explicitly named GTK icon theme such as "Adwaita".
+                // This gives config a real icon-set selector without changing
+                // the user's global GTK settings.
+                let gtk_theme = IconTheme::new();
+                gtk_theme.set_theme_name(Some(theme));
+                gtk_theme
+            };
 
             // Rebuild icons whenever the system icon theme changes.
             let weak = Rc::downgrade(service);
             gtk_theme.connect_changed(move |_| {
                 if let Some(service) = weak.upgrade() {
-                    // Only relevant when using the GTK backend (non-Material)
+                    // Only relevant when using a GTK icon backend.
                     if !service.uses_material() {
                         service.reapply_all_icons();
                     }
@@ -1720,14 +1739,6 @@ impl IconsService {
         } else {
             debug!("No display available; GTK icon backend will use fallback");
             *service.icon_theme.borrow_mut() = None;
-        }
-
-        // Started unconditionally — supports live theme switching via reconfigure().
-        Self::start_font_dir_watcher();
-
-        // Initialize Material if configured
-        if is_material_theme(theme) {
-            service.ensure_material_css();
         }
     }
 
@@ -1767,10 +1778,11 @@ impl IconsService {
     ///
     /// # Arguments
     ///
-    /// * `new_theme` - The new theme name ("material" for Material Symbols,
-    ///   or a GTK theme name like "Adwaita", "Breeze", etc.)
+    /// * `new_theme` - The new theme name: "material" for Material Symbols,
+    ///   "gtk" for the system GTK icon theme, or a GTK icon theme name like
+    ///   "Adwaita", "Breeze", etc.
     /// * `new_weight` - The font weight for Material Symbols (100-700)
-    pub fn reconfigure(&self, new_theme: &str, new_weight: u16) {
+    pub fn reconfigure(self: &Rc<Self>, new_theme: &str, new_weight: u16) {
         let old_theme = self.theme.borrow().clone();
         let old_weight = *self.weight.borrow();
         let theme_changed = old_theme != new_theme;
@@ -1797,6 +1809,10 @@ impl IconsService {
         // Update theme name and weight
         *self.theme.borrow_mut() = new_theme.to_string();
         *self.weight.borrow_mut() = new_weight;
+
+        if theme_changed {
+            Self::configure_gtk_icon_theme(self, new_theme);
+        }
 
         // Reload Material CSS if switching to Material or if weight changed while using Material
         let switching_to_material = is_material_theme(new_theme) && !is_material_theme(&old_theme);
@@ -2536,7 +2552,7 @@ mod tests {
     #[test]
     fn test_reconfigure_changes_theme_and_backend_kind() {
         // Test that reconfigure() updates theme and backend kind
-        let service = IconsService {
+        let service = Rc::new(IconsService {
             theme: RefCell::new("material".to_string()),
             weight: RefCell::new(400),
             material_ready: RefCell::new(true),
@@ -2545,7 +2561,7 @@ mod tests {
             handles: RefCell::new(Vec::new()),
             material_css_provider: RefCell::new(None),
             font_path: RefCell::new(None),
-        };
+        });
 
         assert_eq!(service.theme(), "material");
         assert!(service.uses_material());
@@ -2563,7 +2579,7 @@ mod tests {
     #[test]
     fn test_reconfigure_same_theme_is_noop() {
         // Reconfiguring to the same theme and weight should be a no-op
-        let service = IconsService {
+        let service = Rc::new(IconsService {
             theme: RefCell::new("material".to_string()),
             weight: RefCell::new(400),
             material_ready: RefCell::new(true),
@@ -2572,7 +2588,7 @@ mod tests {
             handles: RefCell::new(Vec::new()),
             material_css_provider: RefCell::new(None),
             font_path: RefCell::new(None),
-        };
+        });
 
         // This should not change anything
         service.reconfigure("material", 400);
