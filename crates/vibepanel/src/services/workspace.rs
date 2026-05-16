@@ -212,6 +212,11 @@ impl WorkspaceService {
         self.manager.switch_workspace(workspace_id);
     }
 
+    /// Return the current enriched workspace snapshot.
+    pub fn snapshot(&self) -> WorkspaceServiceSnapshot {
+        self.build_snapshot()
+    }
+
     fn handle_update(&self, snapshot: WorkspaceSnapshot) {
         // Update stored snapshot
         *self.snapshot.borrow_mut() = snapshot;

@@ -257,6 +257,39 @@ pub fn build_clock_calendar_popover(show_week_numbers: bool) -> (Widget, Rc<dyn 
         });
     }
 
+    {
+        let sync_visible_month: Rc<dyn Fn(&Calendar)> = {
+            let current_date = current_date.clone();
+            let update_header = update_header.clone();
+            let update_calendar = update_calendar.clone();
+            let updating = updating.clone();
+            Rc::new(move |cal: &Calendar| {
+                if updating.get() {
+                    return;
+                }
+
+                let year = cal.year();
+                let month = (cal.month() + 1) as u32;
+                let current = *current_date.borrow();
+
+                if (month != current.month() || year != current.year())
+                    && let Some(date) = NaiveDate::from_ymd_opt(year, month, 1)
+                {
+                    *current_date.borrow_mut() = date;
+                    update_header(date);
+                    update_calendar(date);
+                }
+            })
+        };
+
+        calendar.connect_month_notify({
+            let sync_visible_month = sync_visible_month.clone();
+            move |cal| sync_visible_month(cal)
+        });
+
+        calendar.connect_year_notify(move |cal| sync_visible_month(cal));
+    }
+
     // Refresh callback — navigates calendar to the real current date.
     // Called by on_show when the popover is reused across open/close cycles.
     let refresh: Rc<dyn Fn()> = {

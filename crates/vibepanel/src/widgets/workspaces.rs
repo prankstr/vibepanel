@@ -110,7 +110,10 @@ use gtk4::glib;
 use gtk4::pango::EllipsizeMode;
 use gtk4::prelude::*;
 use gtk4::subclass::prelude::*;
-use gtk4::{Align, Box as GtkBox, CssProvider, GestureClick, Label, Overlay, Widget};
+use gtk4::{
+    Align, Box as GtkBox, CssProvider, EventControllerScroll, EventControllerScrollFlags,
+    GestureClick, Label, Overlay, Widget,
+};
 use tracing::{debug, trace, warn};
 use vibepanel_core::config::WidgetEntry;
 
@@ -925,6 +928,32 @@ impl WorkspacesWidget {
         let separator = config.separator;
 
         let output_id_debug = output_id.clone();
+        let scroll_output_id = output_id.clone();
+        let scroll = EventControllerScroll::new(EventControllerScrollFlags::VERTICAL);
+        scroll.connect_scroll(move |_, _dx, dy| {
+            if dy == 0.0 {
+                return glib::Propagation::Proceed;
+            }
+
+            let snapshot = WorkspaceService::global().snapshot();
+            if let Some(next_id) = workspace_id_for_scroll(
+                &snapshot,
+                show_unoccupied,
+                if filter_by_output {
+                    scroll_output_id.as_deref()
+                } else {
+                    None
+                },
+                dy,
+            ) {
+                TooltipManager::global().cancel_and_hide();
+                WorkspaceService::global().switch_workspace(next_id);
+                return glib::Propagation::Stop;
+            }
+
+            glib::Propagation::Proceed
+        });
+        base.widget().add_controller(scroll);
 
         let workspace_callback_id = WorkspaceService::global().connect(move |snapshot| {
             update_indicators(
@@ -1260,6 +1289,58 @@ fn collect_display_ids(
     }
 
     display_ids
+}
+
+fn display_workspaces_for_snapshot(
+    snapshot: &WorkspaceServiceSnapshot,
+    show_unoccupied: bool,
+    output_id: Option<&str>,
+) -> Vec<Workspace> {
+    let (workspaces, active_workspaces): (&[Workspace], &HashSet<i32>) =
+        if let Some(output) = output_id {
+            if let Some(per_output) = snapshot.per_output.get(output) {
+                (&per_output.workspaces, &per_output.active_workspace)
+            } else {
+                (&snapshot.workspaces, &snapshot.active_workspace)
+            }
+        } else {
+            (&snapshot.workspaces, &snapshot.active_workspace)
+        };
+
+    let display_ids = collect_display_ids(
+        workspaces,
+        active_workspaces,
+        snapshot,
+        show_unoccupied,
+        output_id.is_none(),
+    );
+
+    workspaces
+        .iter()
+        .filter(|ws| display_ids.contains(&ws.id))
+        .cloned()
+        .collect()
+}
+
+fn workspace_id_for_scroll(
+    snapshot: &WorkspaceServiceSnapshot,
+    show_unoccupied: bool,
+    output_id: Option<&str>,
+    dy: f64,
+) -> Option<i32> {
+    let display_workspaces = display_workspaces_for_snapshot(snapshot, show_unoccupied, output_id);
+    if display_workspaces.len() < 2 {
+        return None;
+    }
+
+    let active_idx = display_workspaces.iter().position(|ws| ws.active)?;
+    let next_idx = if dy > 0.0 {
+        active_idx.checked_add(1)?
+    } else {
+        active_idx.checked_sub(1)?
+    };
+
+    display_workspaces.get(next_idx).map(|ws| ws.id)
 }
 
 /// Update workspace indicators based on the current snapshot.
