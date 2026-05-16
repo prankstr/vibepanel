@@ -334,7 +334,7 @@ impl MediaVisualizer {
 const WAVE_MAX_HEIGHT: f64 = 10.0;
 
 /// Base line thickness (px) when bars are at zero.
-const WAVE_BASE_HEIGHT: f64 = 2.0;
+const WAVE_BASE_HEIGHT: f64 = 1.4;
 
 /// Height of the DrawingArea (enough room for max peak + base).
 const WAVE_AREA_HEIGHT: i32 = 14;
@@ -450,7 +450,18 @@ fn draw_waveform(cr: &cairo::Context, bars: &[f64], w: f64, h: f64, (r, g, b): (
     cr.line_to(w, baseline);
     cr.close_path();
 
-    cr.set_source_rgba(r, g, b, 1.0);
+    let gradient = cairo::LinearGradient::new(0.0, 0.0, 0.0, h);
+    gradient.add_color_stop_rgba(0.0, r, g, b, 0.18);
+    gradient.add_color_stop_rgba(0.35, r, g, b, 0.36);
+    gradient.add_color_stop_rgba(1.0, r, g, b, 0.08);
+    let _ = cr.set_source(&gradient);
+    let _ = cr.fill_preserve();
+
+    cr.set_line_width(1.0);
+    cr.set_source_rgba(r, g, b, 0.42);
+    let _ = cr.stroke_preserve();
+
+    cr.set_source_rgba(r, g, b, 0.12);
     let _ = cr.fill();
 }
 

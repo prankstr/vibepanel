@@ -73,6 +73,9 @@ pub struct MediaConfig {
     /// `ConfigManager::get_widget_option()` at runtime to support live-reload.
     #[allow(dead_code)]
     pub art_radius: Option<u32>,
+    /// Bar controls mode: "full" shows previous/play/next, "play_pause" shows
+    /// only the primary play/pause button.
+    pub controls: String,
 }
 
 impl WidgetConfig for MediaConfig {
@@ -87,6 +90,7 @@ impl WidgetConfig for MediaConfig {
                 "popout_opacity",
                 "visualizer",
                 "art_radius",
+                "controls",
             ],
         );
 
@@ -130,6 +134,13 @@ impl WidgetConfig for MediaConfig {
             .and_then(|v| v.as_integer())
             .map(|v| v.clamp(0, 100) as u32);
 
+        let controls = entry
+            .options
+            .get("controls")
+            .and_then(|v| v.as_str())
+            .unwrap_or("full")
+            .to_string();
+
         Self {
             template,
             empty_text,
@@ -137,6 +148,7 @@ impl WidgetConfig for MediaConfig {
             popout_opacity,
             visualizer,
             art_radius,
+            controls,
         }
     }
 }
@@ -150,6 +162,7 @@ impl Default for MediaConfig {
             popout_opacity: 1.0,
             visualizer: true,
             art_radius: None,
+            controls: "full".to_string(),
         }
     }
 }
@@ -394,8 +407,8 @@ pub struct MediaWidget {
 #[derive(Clone)]
 struct ControlsHandle {
     container: gtk4::Box,
-    prev_btn: gtk4::Button,
-    next_btn: gtk4::Button,
+    prev_btn: Option<gtk4::Button>,
+    next_btn: Option<gtk4::Button>,
     play_pause_btn: gtk4::Button,
     play_pause_icon: IconHandle,
 }
@@ -449,7 +462,7 @@ impl CallbackWidgetRefs {
     }
 }
 
-fn create_controls(_parent_widget: &gtk4::Box) -> ControlsHandle {
+fn create_controls(_parent_widget: &gtk4::Box, play_pause_only: bool) -> ControlsHandle {
     use crate::services::icons::IconsService;
     use crate::services::tooltip::TooltipManager;
     use crate::styles::{button, icon};
@@ -459,6 +472,8 @@ fn create_controls(_parent_widget: &gtk4::Box) -> ControlsHandle {
 
     let container = gtk4::Box::new(gtk4::Orientation::Horizontal, 2);
     container.add_css_class(media::CONTROLS);
+    container.set_halign(gtk4::Align::Center);
+    container.set_valign(gtk4::Align::Center);
     container.set_visible(false);
 
     // Add motion controller to hide parent tooltip when hovering over controls.
@@ -470,18 +485,25 @@ fn create_controls(_parent_widget: &gtk4::Box) -> ControlsHandle {
     });
     container.add_controller(motion);
 
-    let prev_btn = create_media_control_button(
-        &icons,
-        "media-skip-backward",
-        "Previous",
-        &[media::CONTROL_BTN, button::COMPACT],
-        || MediaService::global().previous(),
-    );
-    container.append(&prev_btn);
+    let prev_btn = if play_pause_only {
+        None
+    } else {
+        let btn = create_media_control_button(
+            &icons,
+            "media-skip-backward",
+            "Previous",
+            &[media::CONTROL_BTN, button::COMPACT],
+            || MediaService::global().previous(),
+        );
+        container.append(&btn);
+        Some(btn)
+    };
 
     let play_pause_icon = icons.create_icon("media-playback-start", &[icon::ICON]);
     let play_pause_btn = crate::widgets::base::vp_button();
     play_pause_btn.set_has_frame(false);
+    play_pause_btn.set_size_request(28, 28);
+    play_pause_btn.set_halign(gtk4::Align::Center);
     play_pause_btn.set_valign(gtk4::Align::Center);
     play_pause_btn.set_child(Some(&play_pause_icon.widget()));
     play_pause_btn.add_css_class(media::CONTROL_BTN);
@@ -493,14 +515,19 @@ fn create_controls(_parent_widget: &gtk4::Box) -> ControlsHandle {
     });
     container.append(&play_pause_btn);
 
-    let next_btn = create_media_control_button(
-        &icons,
-        "media-skip-forward",
-        "Next",
-        &[media::CONTROL_BTN, button::COMPACT],
-        || MediaService::global().next(),
-    );
-    container.append(&next_btn);
+    let next_btn = if play_pause_only {
+        None
+    } else {
+        let btn = create_media_control_button(
+            &icons,
+            "media-skip-forward",
+            "Next",
+            &[media::CONTROL_BTN, button::COMPACT],
+            || MediaService::global().next(),
+        );
+        container.append(&btn);
+        Some(btn)
+    };
 
     ControlsHandle {
         container,
@@ -563,7 +590,9 @@ impl MediaWidget {
             .iter()
             .any(|e| matches!(e, TemplateElement::Widget(WidgetToken::Controls)))
         {
-            controls = Some(create_controls(base.widget()));
+            let play_pause_only =
+                config.controls == "play_pause" || config.controls == "play-pause";
+            controls = Some(create_controls(base.widget(), play_pause_only));
         }
 
         let text_runs = compute_text_runs(&template_elements);
@@ -1056,8 +1085,12 @@ fn update_widgets_from_snapshot_impl(ctx: &WidgetUpdateContext<'_>, snapshot: &M
         ctrl.play_pause_icon.set_icon(icon_name);
         ctrl.play_pause_btn
             .set_sensitive(snapshot.can_play || snapshot.can_pause);
-        ctrl.prev_btn.set_sensitive(snapshot.can_go_previous);
-        ctrl.next_btn.set_sensitive(snapshot.can_go_next);
+        if let Some(ref btn) = ctrl.prev_btn {
+            btn.set_sensitive(snapshot.can_go_previous);
+        }
+        if let Some(ref btn) = ctrl.next_btn {
+            btn.set_sensitive(snapshot.can_go_next);
+        }
         ctrl.container.set_visible(true);
     }
 

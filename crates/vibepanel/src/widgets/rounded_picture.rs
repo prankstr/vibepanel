@@ -5,9 +5,36 @@
 
 use gtk4::gdk::Paintable;
 use gtk4::glib;
+use gtk4::graphene;
 use gtk4::prelude::*;
 use gtk4::subclass::prelude::*;
 use std::cell::{Cell, RefCell};
+
+fn snapshot_cover_paintable(
+    paintable: &Paintable,
+    snapshot: &gtk4::Snapshot,
+    width: f32,
+    height: f32,
+) {
+    let intrinsic_width = paintable.intrinsic_width();
+    let intrinsic_height = paintable.intrinsic_height();
+
+    if intrinsic_width <= 0 || intrinsic_height <= 0 {
+        paintable.snapshot(snapshot, width as f64, height as f64);
+        return;
+    }
+
+    let scale = (width / intrinsic_width as f32).max(height / intrinsic_height as f32);
+    let draw_width = intrinsic_width as f32 * scale;
+    let draw_height = intrinsic_height as f32 * scale;
+    let x = (width - draw_width) / 2.0;
+    let y = (height - draw_height) / 2.0;
+
+    snapshot.save();
+    snapshot.translate(&graphene::Point::new(x, y));
+    paintable.snapshot(snapshot, draw_width as f64, draw_height as f64);
+    snapshot.restore();
+}
 
 mod imp {
     use super::*;
@@ -92,11 +119,13 @@ mod imp {
 
                 // Push the rounded clip, render, pop
                 snapshot.push_rounded_clip(&rounded_rect);
-                paintable.snapshot(snapshot, width as f64, height as f64);
+                snapshot_cover_paintable(&paintable, snapshot, width, height);
                 snapshot.pop();
             } else {
                 // No rounding needed
-                paintable.snapshot(snapshot, width as f64, height as f64);
+                snapshot.push_clip(&gtk4::graphene::Rect::new(0.0, 0.0, width, height));
+                snapshot_cover_paintable(&paintable, snapshot, width, height);
+                snapshot.pop();
             }
         }
     }
