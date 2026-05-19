@@ -400,7 +400,7 @@ window.quick-settings-window {{
     border-radius: var(--radius-widget);
     font-size: calc(var(--font-size) * 1.1);
     background: var(--color-card-overlay);
-    border: 1px solid var(--color-border, rgba(255,255,255,0.1));
+    border: 1px solid var(--color-border-subtle, rgba(255,255,255,0.1));
     margin: 0 2px;
     color: var(--color-foreground-primary);
 }}

@@ -703,7 +703,6 @@ impl ThemePalette {
     --bar-padding-y: {bar_padding_y}px;
     --bar-padding-y-bottom: {bar_padding_y_bottom}px;
     --widget-height: {widget_height}px;
-    --widget-padding-x: {widget_padding_x}px;
     --widget-padding-y: {widget_padding_y}px;
     --spacing-internal: {internal_spacing}px;
     --spacing-widget-edge: {widget_content_edge}px;
@@ -831,7 +830,6 @@ impl ThemePalette {
                 center_pad
             },
             widget_height = self.sizes.widget_height,
-            widget_padding_x = self.sizes.widget_padding_x,
             widget_padding_y = self.sizes.widget_padding_y,
             internal_spacing = self.sizes.internal_spacing,
             widget_content_edge = self.sizes.widget_content_edge,
@@ -1560,6 +1558,15 @@ impl Default for ThemePalette {
 mod tests {
     use super::*;
 
+    fn css_var_value<'a>(css: &'a str, var_name: &str) -> Option<&'a str> {
+        let needle = format!("{var_name}:");
+        css.lines().find_map(|line| {
+            let trimmed = line.trim();
+            let value = trimmed.strip_prefix(&needle)?;
+            Some(value.trim().trim_end_matches(';').trim())
+        })
+    }
+
     #[test]
     fn test_parse_hex_color_valid() {
         assert_eq!(parse_hex_color("#ff0000"), Some((255, 0, 0)));
@@ -1671,6 +1678,96 @@ mod tests {
         assert!(css.contains("--radius-bar:"));
         assert!(css.contains("--widget-height:"));
         assert!(css.contains("--font-family:"));
+    }
+
+    #[test]
+    fn test_css_vars_block_emits_bar_visual_config_tokens() {
+        let mut config = Config::default();
+        config.bar.size = 40;
+        config.bar.padding = 10;
+        config.bar.background_opacity = 1.0;
+        config.bar.background_color = Some("#445566".to_string());
+        config.bar.border_radius = 50;
+        config.theme.outline = true;
+        config.theme.outline_width = 3;
+        config.bar.outline = Some(true);
+
+        let palette = ThemePalette::from_config(&config, None, None);
+        let css = palette.css_vars_block();
+        let expected_widget_height = format!("{}px", palette.sizes.widget_height);
+        let expected_bar_radius = format!("{}px", palette.bar_border_radius);
+
+        assert_eq!(css_var_value(&css, "--bar-height"), Some("40px"));
+        assert_eq!(
+            css_var_value(&css, "--widget-height"),
+            Some(expected_widget_height.as_str())
+        );
+        assert_eq!(css_var_value(&css, "--bar-padding-y"), Some("10px"));
+        assert_eq!(css_var_value(&css, "--bar-padding-y-bottom"), Some("10px"));
+        assert_eq!(
+            css_var_value(&css, "--color-background-bar"),
+            Some("#445566")
+        );
+        assert_eq!(
+            css_var_value(&css, "--radius-bar"),
+            Some(expected_bar_radius.as_str())
+        );
+        assert_eq!(
+            css_var_value(&css, "--bar-outline-width"),
+            Some("var(--outline-width)")
+        );
+        assert_eq!(css_var_value(&css, "--outline-width"), Some("3px"));
+    }
+
+    #[test]
+    fn test_css_vars_block_emits_transparent_bar_tokens() {
+        let mut config = Config::default();
+        config.bar.padding = 10;
+        config.bar.background_opacity = 0.0;
+
+        let css = ThemePalette::from_config(&config, None, None).css_vars_block();
+
+        assert_eq!(
+            css_var_value(&css, "--color-background-bar"),
+            Some("transparent")
+        );
+        assert_eq!(css_var_value(&css, "--bar-padding-y"), Some("10px"));
+        assert_eq!(css_var_value(&css, "--bar-padding-y-bottom"), Some("0px"));
+    }
+
+    #[test]
+    fn test_css_vars_block_emits_widget_visual_config_tokens() {
+        let mut config = Config::default();
+        config.widgets.background_color = Some("#445566".to_string());
+        config.widgets.background_opacity = 0.35;
+        config.widgets.popover_background_opacity = Some(0.42);
+        config.widgets.border_radius = 50;
+        config.theme.outline = true;
+        config.theme.outline_width = 3;
+        config.widgets.outline = Some(true);
+
+        let palette = ThemePalette::from_config(&config, None, None);
+        let css = palette.css_vars_block();
+
+        assert_eq!(
+            css_var_value(&css, "--widget-background-color"),
+            Some("#445566")
+        );
+        assert_eq!(
+            css_var_value(&css, "--widget-background-opacity"),
+            Some("35%")
+        );
+        assert_eq!(
+            css_var_value(&css, "--popover-background-opacity"),
+            Some("42%")
+        );
+        assert_eq!(css_var_value(&css, "--radius-widget"), Some("9999px"));
+        assert_eq!(
+            css_var_value(&css, "--widget-outline-width"),
+            Some("var(--outline-width)")
+        );
+        assert_eq!(css_var_value(&css, "--outline-width"), Some("3px"));
+        assert_eq!(palette.widget_radius_percent, 50);
     }
 
     #[test]

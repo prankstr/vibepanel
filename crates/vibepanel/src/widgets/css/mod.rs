@@ -37,8 +37,8 @@ pub const DISMISS_ANIMATION_MS: u64 = 200;
 
 /// Base horizontal padding (px) for `.content` inside widgets.
 ///
-/// Shared between the CSS rule (`padding: var(--widget-padding-y) {CONTENT_PADDING_X}px`)
-/// in `bar.rs` and the runtime padding adjustment in `taskbar.rs`.
+/// Shared between the CSS rule in `bar.rs` and the runtime padding adjustment
+/// in `taskbar.rs`.
 pub const CONTENT_PADDING_X: i32 = 10;
 
 mod bar;
