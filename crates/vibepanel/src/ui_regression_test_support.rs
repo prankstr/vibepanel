@@ -350,6 +350,8 @@ pub(crate) fn sample_widget_pixel(
     let stride = texture.width() as usize * 4;
     let mut data = vec![0; stride * texture.height() as usize];
     texture.download(&mut data, stride);
+    drop(texture);
+    renderer.unrealize();
 
     let offset = y as usize * stride + x as usize * 4;
     Rgba8 {

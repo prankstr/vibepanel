@@ -1647,7 +1647,7 @@ fn run_test_workspaces_urgent_production_pixel() {
         indicator.has_css_class(crate::styles::state::URGENT),
         "production workspaces widget should apply the urgent state class"
     );
-    let urgent_pixel = center_pixel_of(&fixture, &indicator);
+    let urgent_pixel = center_pixel_of(&fixture, indicator);
 
     assert_pixel_close(
         urgent_pixel,
