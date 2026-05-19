@@ -34,6 +34,8 @@ jobs:
             libdbus-1-dev
           rustup component add clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test --verbose
 
@@ -54,6 +56,8 @@ jobs:
             libdbus-1-dev \
             xvfb
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Run display-required UI regression tests
         run: scripts/run-ui-regression-tests.sh
 
