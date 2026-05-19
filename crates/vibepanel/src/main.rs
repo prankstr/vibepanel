@@ -10,6 +10,8 @@ mod sectioned_bar;
 mod services;
 pub mod styles;
 #[cfg(test)]
+mod theme_vars;
+#[cfg(test)]
 mod ui_regression_test_support;
 mod widgets;
 

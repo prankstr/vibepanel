@@ -105,6 +105,24 @@ impl CompositorManager {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn replace_global_for_test(snapshot: WorkspaceSnapshot) {
+        COMPOSITOR_MANAGER.with(|cell| {
+            *cell.borrow_mut() = Some(Rc::new(Self {
+                backend: RefCell::new(None),
+                workspace_callbacks: Callbacks::new(),
+                window_callbacks: Callbacks::new(),
+                keyboard_layout_callbacks: Callbacks::new(),
+                window_list_callbacks: Callbacks::new(),
+                last_workspace_snapshot: RefCell::new(Some(snapshot)),
+                last_window_info: RefCell::new(None),
+                last_keyboard_layout: RefCell::new(None),
+                last_window_list: RefCell::new(None),
+                started: RefCell::new(true),
+            }));
+        });
+    }
+
     /// Register a callback for workspace state changes.
     ///
     /// The callback will be immediately invoked with the current state if available.

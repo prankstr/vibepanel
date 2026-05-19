@@ -26,66 +26,38 @@ use crate::widgets::{
     trigger_ripple_from_gesture,
 };
 
-/// Create and configure the bar window with layer-shell.
+/// Total bar window/content height reserved for the shell.
 ///
-/// The `state` parameter is used to store widget handles, keeping them alive
-/// for the lifetime of the bar. The `output_id` is the monitor connector name
-/// used for per-monitor widget filtering.
-pub fn create_bar_window(
-    app: &Application,
-    config: &Config,
-    monitor: &gtk4::gdk::Monitor,
-    output_id: &str,
-    state: &mut BarState,
-) -> ApplicationWindow {
-    // Window height determines the exclusive zone (via auto_exclusive_zone_enable).
-    // - When bar is visible (opacity > 0): include padding on both sides.
-    // - When bar is transparent (opacity = 0): include only screen-edge padding;
-    //   CSS suppresses the center-side padding in islands mode.
-    let bar_height = if config.bar.background_opacity > 0.0 {
+/// When the bar background is visible, user padding contributes on both sides.
+/// In transparent/islands mode, CSS still applies the screen-edge padding so
+/// widgets are visually offset from the edge, but suppresses center-side
+/// padding to keep the reserved area tighter than visible-bar mode.
+pub(crate) fn rendered_bar_height(config: &Config) -> i32 {
+    if config.bar.background_opacity > 0.0 {
         config.bar.size as i32 + 2 * config.bar.padding as i32
     } else {
         config.bar.size as i32 + config.bar.padding as i32
-    };
+    }
+}
 
-    let window = ApplicationWindow::builder()
-        .application(app)
-        .title("vibepanel")
-        .decorated(false)
-        .resizable(false)
-        .default_height(bar_height)
-        .build();
+/// Production-built bar content shared by the layer-shell window path and
+/// runtime UI regression tests.
+pub(crate) struct BuiltBarContent {
+    pub root: gtk4::Box,
+    pub bar: SectionedBar,
+}
 
-    window.add_css_class(class::BAR_WINDOW);
-
-    // Initialize layer-shell
-    window.init_layer_shell();
-    window.set_namespace(Some("vibepanel"));
-    window.set_layer(Layer::Top);
-
-    // Bind to specific monitor - this should handle width automatically
-    window.set_monitor(Some(monitor));
-    debug!("Bar bound to monitor: {:?}", monitor.connector());
-
-    // Anchor to the configured edge, stretch horizontally
-    let is_bottom = config.bar.is_bottom();
-    window.set_anchor(Edge::Top, !is_bottom);
-    window.set_anchor(Edge::Left, true);
-    window.set_anchor(Edge::Right, true);
-    window.set_anchor(Edge::Bottom, is_bottom);
-
-    // Reserve space (exclusive zone) so other windows don't overlap
-    window.auto_exclusive_zone_enable();
-
-    // Bar doesn't need keyboard input
-    window.set_keyboard_mode(KeyboardMode::None);
-
-    // Set margins from config (legacy behavior)
-    // We keep window margins at 0 for left/right so the bar window
-    // fills the monitor width; screen_margin is applied inside the
-    // bar content instead.
-    let margin = config.bar.screen_margin as i32;
-
+/// Build the real bar widget tree without creating the layer-shell window.
+///
+/// This is intentionally production code: `create_bar_window()` uses this same
+/// builder before adding layer-shell/window-specific behavior, and UI tests
+/// use it to avoid maintaining a parallel bar implementation.
+pub(crate) fn build_bar_content(
+    app: &Application,
+    config: &Config,
+    state: &mut BarState,
+    output_id: Option<&str>,
+) -> BuiltBarContent {
     // Create the bar container using SectionedBar for proper left/center/right layout
     let bar_box = SectionedBar::new(
         config.bar.spacing as i32,
@@ -108,6 +80,7 @@ pub fn create_bar_window(
     // Spacer: empty area between bar content and screen edge.
     // For top bar, spacer goes above (pushes bar down from top edge).
     // For bottom bar, spacer goes below (pushes bar up from bottom edge).
+    let margin = config.bar.screen_margin as i32;
     let spacer = if margin > 0 {
         let s = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
         s.set_size_request(-1, margin);
@@ -117,6 +90,7 @@ pub fn create_bar_window(
         None
     };
 
+    let is_bottom = config.bar.is_bottom();
     if !is_bottom && let Some(ref spacer) = spacer {
         outer_box.append(spacer);
     }
@@ -156,22 +130,77 @@ pub fn create_bar_window(
     );
 
     // Create left section
-    let left_section = create_section("left", config, state, &qs_handle, Some(output_id));
+    let left_section = create_section("left", config, state, &qs_handle, output_id);
     bar_box.set_start_widget(Some(&left_section));
 
     // Create center section only if there are center widgets
     // Without a center widget, the layout manager uses linear allocation
     let has_center_content = !config.widgets.resolved_center().is_empty();
     if has_center_content {
-        let center_section = create_center_section(config, state, &qs_handle, Some(output_id));
+        let center_section = create_center_section(config, state, &qs_handle, output_id);
         bar_box.set_center_widget(Some(&center_section));
     }
 
     // Create right section
-    let right_section = create_section("right", config, state, &qs_handle, Some(output_id));
+    let right_section = create_section("right", config, state, &qs_handle, output_id);
     bar_box.set_end_widget(Some(&right_section));
 
-    window.set_child(Some(&outer_box));
+    BuiltBarContent {
+        root: outer_box,
+        bar: bar_box,
+    }
+}
+
+/// Create and configure the bar window with layer-shell.
+///
+/// The `state` parameter is used to store widget handles, keeping them alive
+/// for the lifetime of the bar. The `output_id` is the monitor connector name
+/// used for per-monitor widget filtering.
+pub fn create_bar_window(
+    app: &Application,
+    config: &Config,
+    monitor: &gtk4::gdk::Monitor,
+    output_id: &str,
+    state: &mut BarState,
+) -> ApplicationWindow {
+    let bar_height = rendered_bar_height(config);
+
+    let window = ApplicationWindow::builder()
+        .application(app)
+        .title("vibepanel")
+        .decorated(false)
+        .resizable(false)
+        .default_height(bar_height)
+        .build();
+
+    window.add_css_class(class::BAR_WINDOW);
+
+    // Initialize layer-shell
+    window.init_layer_shell();
+    window.set_namespace(Some("vibepanel"));
+    window.set_layer(Layer::Top);
+
+    // Bind to specific monitor - this should handle width automatically
+    window.set_monitor(Some(monitor));
+    debug!("Bar bound to monitor: {:?}", monitor.connector());
+
+    // Anchor to the configured edge, stretch horizontally
+    let is_bottom = config.bar.is_bottom();
+    window.set_anchor(Edge::Top, !is_bottom);
+    window.set_anchor(Edge::Left, true);
+    window.set_anchor(Edge::Right, true);
+    window.set_anchor(Edge::Bottom, is_bottom);
+
+    // Reserve space (exclusive zone) so other windows don't overlap
+    window.auto_exclusive_zone_enable();
+
+    // Bar doesn't need keyboard input
+    window.set_keyboard_mode(KeyboardMode::None);
+
+    let built_content = build_bar_content(app, config, state, Some(output_id));
+    let bar_box = built_content.bar.clone();
+
+    window.set_child(Some(&built_content.root));
 
     // Set window width to the target monitor's width on map.
     // We capture the geometry now rather than using monitor_at_surface() later,
@@ -1094,7 +1123,7 @@ pub(crate) fn replace_user_css() {
 }
 
 /// Generate CSS string from configuration and theme palette.
-fn generate_css(
+pub(crate) fn generate_css(
     config: &Config,
     palette: &ThemePalette,
     popover_palette: Option<&ThemePalette>,
@@ -1123,236 +1152,5 @@ fn generate_css(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::widgets::PopoverKind::{System, Unmergeable};
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    struct TestDir(PathBuf);
-
-    impl TestDir {
-        fn new(name: &str) -> Self {
-            let unique = format!(
-                "{}_{}_{}",
-                name,
-                std::process::id(),
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            );
-            let path = std::env::temp_dir().join(unique);
-            std::fs::create_dir_all(&path).unwrap();
-            Self(path)
-        }
-
-        fn path(&self) -> &Path {
-            &self.0
-        }
-    }
-
-    impl Drop for TestDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-
-    #[test]
-    fn merge_runs_empty() {
-        assert_eq!(compute_merge_runs(&[]), vec![]);
-    }
-
-    #[test]
-    fn merge_runs_unmergeable_never_grouped() {
-        let runs = compute_merge_runs(&[
-            MergeKind::Popover(Unmergeable),
-            MergeKind::Popover(Unmergeable),
-            MergeKind::Popover(Unmergeable),
-        ]);
-        assert_eq!(
-            runs,
-            vec![
-                (Unmergeable, 0, 1),
-                (Unmergeable, 1, 2),
-                (Unmergeable, 2, 3),
-            ]
-        );
-    }
-
-    #[test]
-    fn merge_runs_system_grouping() {
-        // Consecutive System entries merge into one run
-        assert_eq!(
-            compute_merge_runs(&[
-                MergeKind::Popover(System),
-                MergeKind::Popover(System),
-                MergeKind::Popover(System),
-            ]),
-            vec![(System, 0, 3)]
-        );
-        // Unmergeable breaks a System run; singleton System stays singleton
-        assert_eq!(
-            compute_merge_runs(&[
-                MergeKind::Popover(System),
-                MergeKind::Popover(System),
-                MergeKind::Popover(Unmergeable),
-                MergeKind::Popover(System),
-            ]),
-            vec![(System, 0, 2), (Unmergeable, 2, 3), (System, 3, 4)],
-        );
-        // Single System is its own run
-        assert_eq!(
-            compute_merge_runs(&[MergeKind::Popover(System)]),
-            vec![(System, 0, 1)]
-        );
-    }
-
-    #[test]
-    fn merge_runs_spacer_absorbed_between_same_kind() {
-        // cpu, spacer, memory → still merges into one System run
-        assert_eq!(
-            compute_merge_runs(&[
-                MergeKind::Popover(System),
-                MergeKind::Spacer,
-                MergeKind::Popover(System),
-            ]),
-            vec![(System, 0, 3)]
-        );
-    }
-
-    #[test]
-    fn merge_runs_spacer_absorbed_into_left_run() {
-        // System, spacer, Unmergeable → spacer attaches to System run
-        assert_eq!(
-            compute_merge_runs(&[
-                MergeKind::Popover(System),
-                MergeKind::Spacer,
-                MergeKind::Popover(Unmergeable),
-            ]),
-            vec![(System, 0, 2), (Unmergeable, 2, 3)]
-        );
-    }
-
-    #[test]
-    fn merge_runs_leading_spacer_absorbed() {
-        // spacer, System, System → leading spacer joins first run
-        assert_eq!(
-            compute_merge_runs(&[
-                MergeKind::Spacer,
-                MergeKind::Popover(System),
-                MergeKind::Popover(System),
-            ]),
-            vec![(System, 0, 3)]
-        );
-    }
-
-    #[test]
-    fn merge_runs_trailing_spacer_absorbed() {
-        // System, spacer → trailing spacer joins the System run
-        assert_eq!(
-            compute_merge_runs(&[MergeKind::Popover(System), MergeKind::Spacer]),
-            vec![(System, 0, 2)]
-        );
-    }
-
-    #[test]
-    fn merge_runs_all_spacers_get_no_runs() {
-        // Spacers only exist to join painted groups; alone they build nothing.
-        assert_eq!(
-            compute_merge_runs(&[MergeKind::Spacer, MergeKind::Spacer]),
-            Vec::new()
-        );
-    }
-
-    #[test]
-    fn user_css_search_paths_config_dir_first() {
-        let dir = std::path::Path::new("/custom/config/dir");
-        let paths = user_css_search_paths_from_env(
-            Some(dir),
-            Some(Path::new("/xdg-home")),
-            Some(Path::new("/home/test")),
-        );
-        assert_eq!(
-            paths,
-            vec![
-                dir.join("style.css"),
-                PathBuf::from("/xdg-home/vibepanel/style.css"),
-                PathBuf::from("/home/test/.config/vibepanel/style.css"),
-                PathBuf::from("style.css"),
-            ]
-        );
-    }
-
-    #[test]
-    fn user_css_search_paths_deduplicates() {
-        let paths = user_css_search_paths_from_env(
-            Some(Path::new("/home/test/.config/vibepanel")),
-            Some(Path::new("/home/test/.config")),
-            Some(Path::new("/home/test")),
-        );
-        assert_eq!(
-            paths,
-            vec![
-                PathBuf::from("/home/test/.config/vibepanel/style.css"),
-                PathBuf::from("style.css"),
-            ]
-        );
-    }
-
-    #[test]
-    fn user_css_search_paths_none_config_dir_still_has_entries() {
-        let paths = user_css_search_paths_from_env(None, None, None);
-        assert_eq!(
-            paths,
-            vec![PathBuf::from("style.css")],
-            "without config/XDG/HOME, only the CWD fallback remains"
-        );
-    }
-
-    #[test]
-    fn user_css_search_paths_xdg_dedup_with_home() {
-        let paths = user_css_search_paths_from_env(
-            None,
-            Some(Path::new("/home/test/.config")),
-            Some(Path::new("/home/test")),
-        );
-        assert_eq!(
-            paths,
-            vec![
-                PathBuf::from("/home/test/.config/vibepanel/style.css"),
-                PathBuf::from("style.css"),
-            ]
-        );
-    }
-
-    #[test]
-    fn find_user_css_returns_none_when_no_file_exists() {
-        // Pass a config_dir that does not contain style.css; without HOME/XDG
-        // overrides the CWD fallback is unlikely to exist either, but we use an
-        // empty tmp dir as config_dir so that slot is definitely absent.
-        let tmp = TestDir::new("vibepanel_test_missing_css");
-        // An empty directory: none of the candidate paths will exist.
-        let result =
-            user_css_search_paths_from_env(Some(tmp.path()), Some(tmp.path()), Some(tmp.path()))
-                .into_iter()
-                .find(|p| p.exists());
-        assert_eq!(result, None);
-    }
-
-    #[test]
-    fn find_user_css_finds_existing_file() {
-        // Create a real style.css in a temp directory and point config_dir at
-        // it so find_user_css returns the config-adjacent path (highest priority).
-        let tmp = TestDir::new("vibepanel_test_css");
-        let style_path = tmp.path().join("style.css");
-        std::fs::write(&style_path, "/* test */").unwrap();
-
-        // Use the injected-env helper so we don't depend on real HOME/XDG.
-        let found =
-            user_css_search_paths_from_env(Some(tmp.path()), Some(tmp.path()), Some(tmp.path()))
-                .into_iter()
-                .find(|p| p.exists());
-
-        assert_eq!(found, Some(style_path));
-    }
-}
+#[path = "bar_tests.rs"]
+mod tests;

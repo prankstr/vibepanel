@@ -436,3 +436,7 @@ impl Default for SectionedBar {
         Self::new(8, 12, false, false)
     }
 }
+
+#[cfg(test)]
+#[path = "sectioned_bar_tests.rs"]
+mod tests;

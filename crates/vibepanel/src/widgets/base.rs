@@ -366,6 +366,14 @@ impl crate::popover_registry::PopoverToggleable for MenuHandle {
             .and_then(|m| m.connector())
             .map(|c| c.to_string())
     }
+
+    #[cfg(test)]
+    fn test_layer_shell_window(&self) -> Option<gtk4::ApplicationWindow> {
+        self.popover
+            .borrow()
+            .as_ref()
+            .and_then(|popover| popover.test_window())
+    }
 }
 
 /// Describe a process exit status in human-readable form.

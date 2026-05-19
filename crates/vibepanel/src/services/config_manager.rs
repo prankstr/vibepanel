@@ -211,6 +211,21 @@ impl ConfigManager {
         });
     }
 
+    #[cfg(test)]
+    pub(crate) fn replace_global_for_test(config: Config) {
+        Self::replace_global_with_config_path_for_test(config, None);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn replace_global_with_config_path_for_test(
+        config: Config,
+        config_path: Option<PathBuf>,
+    ) {
+        CONFIG_MANAGER_INSTANCE.with(|cell| {
+            *cell.borrow_mut() = Some(ConfigManager::new(config, config_path));
+        });
+    }
+
     /// Get the computed theme sizes from the current configuration.
     ///
     /// This returns sizes from the cached palette — no recomputation needed.

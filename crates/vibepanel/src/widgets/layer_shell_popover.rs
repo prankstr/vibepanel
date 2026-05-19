@@ -493,6 +493,16 @@ impl LayerShellPopover {
         self.logically_open.get()
     }
 
+    #[cfg(test)]
+    pub(crate) fn test_window(&self) -> Option<ApplicationWindow> {
+        self.window.borrow().as_ref().cloned()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_click_catcher(&self) -> Option<ApplicationWindow> {
+        self.click_catcher.borrow().as_ref().cloned()
+    }
+
     /// Set a callback to be invoked when the popover is hidden.
     pub fn set_on_close<F: Fn() + 'static>(&self, callback: F) {
         *self.on_close.borrow_mut() = Some(Rc::new(callback));
@@ -1232,5 +1242,20 @@ impl Dismissible for LayerShellPopover {
 
     fn is_visible(&self) -> bool {
         self.is_visible()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::calculate_bar_exclusive_zone_from_values;
+
+    #[test]
+    fn bar_exclusive_zone_visible_mode_includes_symmetric_padding() {
+        assert_eq!(calculate_bar_exclusive_zone_from_values(32, 10, 1.0, 4), 60);
+    }
+
+    #[test]
+    fn bar_exclusive_zone_island_mode_includes_only_edge_padding() {
+        assert_eq!(calculate_bar_exclusive_zone_from_values(32, 10, 0.0, 4), 50);
     }
 }

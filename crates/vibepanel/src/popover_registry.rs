@@ -38,6 +38,11 @@ pub trait PopoverToggleable {
     fn monitor_connector(&self) -> Option<String> {
         None
     }
+
+    #[cfg(test)]
+    fn test_layer_shell_window(&self) -> Option<gtk4::ApplicationWindow> {
+        None
+    }
 }
 
 /// Actions that can be dispatched to a registered popover.
@@ -106,6 +111,17 @@ pub fn dispatch(name: &str, action: DispatchAction) -> bool {
         );
         false
     }
+}
+
+#[cfg(test)]
+pub fn test_layer_shell_window(name: &str) -> Option<gtk4::ApplicationWindow> {
+    let normalized = name.replace('-', "_");
+    REGISTRY.with(|r| {
+        r.borrow()
+            .get(&normalized)
+            .and_then(|handles| handles.first())
+            .and_then(|handle| handle.test_layer_shell_window())
+    })
 }
 
 /// Resolve which handle to dispatch to based on the focused monitor.

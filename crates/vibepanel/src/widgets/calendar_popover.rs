@@ -272,3 +272,28 @@ pub fn build_clock_calendar_popover(show_week_numbers: bool) -> (Widget, Rc<dyn 
 
     (container.upcast::<Widget>(), refresh)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui_regression_test_support::{find_descendant_with_class, init_gtk_or_skip};
+
+    #[test]
+    fn clock_calendar_week_number_header_tracks_config() {
+        if !init_gtk_or_skip("clock calendar popover test", None) {
+            return;
+        }
+
+        let (with_week_numbers, _refresh) = build_clock_calendar_popover(true);
+        assert!(
+            find_descendant_with_class(&with_week_numbers, "week-number-header").is_some(),
+            "calendar popover should render the week-number header when week numbers are enabled"
+        );
+
+        let (without_week_numbers, _refresh) = build_clock_calendar_popover(false);
+        assert!(
+            find_descendant_with_class(&without_week_numbers, "week-number-header").is_none(),
+            "calendar popover should omit the week-number header when week numbers are disabled"
+        );
+    }
+}

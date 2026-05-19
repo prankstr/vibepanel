@@ -186,6 +186,19 @@ impl WorkspaceService {
         INSTANCE.with(|s| s.clone())
     }
 
+    #[cfg(test)]
+    pub(crate) fn replace_state_for_test(
+        workspaces: Vec<WorkspaceMeta>,
+        snapshot: WorkspaceSnapshot,
+    ) {
+        let service = Self::global();
+        *service.workspaces.borrow_mut() = workspaces;
+        *service.snapshot.borrow_mut() = snapshot;
+        *service.ready.borrow_mut() = true;
+        let service_snapshot = service.build_snapshot();
+        service.callbacks.notify(&service_snapshot);
+    }
+
     /// Register a callback to be invoked when workspace state changes.
     /// The callback is always executed on the GLib main loop.
     pub fn connect<F>(&self, callback: F) -> CallbackId
