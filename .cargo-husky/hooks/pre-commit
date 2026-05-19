@@ -1,0 +1,15 @@
+#!/usr/bin/env sh
+set -e
+
+echo '+cargo test --all'
+cargo test --all
+if command -v xvfb-run >/dev/null 2>&1; then
+    echo '+scripts/run-ui-regression-tests.sh'
+    scripts/run-ui-regression-tests.sh
+else
+    printf '%s\n' 'skipping scripts/run-ui-regression-tests.sh: xvfb-run is not installed'
+fi
+echo '+cargo clippy --all -- -D warnings'
+cargo clippy --all -- -D warnings
+echo '+cargo fmt --all -- --check'
+cargo fmt --all -- --check

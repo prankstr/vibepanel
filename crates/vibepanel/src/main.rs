@@ -9,6 +9,8 @@ pub mod popover_tracker;
 mod sectioned_bar;
 mod services;
 pub mod styles;
+#[cfg(test)]
+mod ui_regression_test_support;
 mod widgets;
 
 use std::path::{Path, PathBuf};

@@ -37,6 +37,26 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test --verbose
 
+  ui-regression-tests:
+    runs-on: ubuntu-latest
+    container: rust:trixie
+    name: UI Regression Tests
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          apt-get update
+          apt-get install -y \
+            libgtk-4-dev \
+            libgtk4-layer-shell-dev \
+            libpulse-dev \
+            libudev-dev \
+            libdbus-1-dev \
+            xvfb
+      - uses: Swatinem/rust-cache@v2
+      - name: Run display-required UI regression tests
+        run: scripts/run-ui-regression-tests.sh
+
   font-check:
     runs-on: ubuntu-latest
     name: Font subset manifest

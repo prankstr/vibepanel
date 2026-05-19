@@ -42,10 +42,6 @@ image = { workspace = true }
 
 [dev-dependencies]
 cargo-husky = { version = "1.5.0", default-features = false, features = [
-    "precommit-hook",
-    "run-for-all",
-    "run-cargo-test",
-    "run-cargo-clippy",
-    "run-cargo-fmt",
+    "user-hooks",
 ] }
 toml = { workspace = true }
