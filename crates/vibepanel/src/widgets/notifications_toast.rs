@@ -231,174 +231,8 @@ impl NotificationToast {
         on_dismiss: ToastCallback,
         on_action: ToastActionCallback,
     ) {
-        let outer = GtkBox::new(Orientation::Vertical, 0);
-        outer.add_css_class(notif::TOAST_CONTAINER);
-        outer.add_css_class(notif::TOAST);
-
-        // Apply surface styling
-        SurfaceStyleManager::global().apply_surface_styles(&outer, false);
-
-        // Apply uniform shadow margins so the CSS box-shadow is not clipped at
-        // the layer-shell surface boundary.  Unlike popovers (which are flush
-        // against the bar on one side), the toast floats freely and needs equal
-        // margins on all four sides.
-        let sm = SurfaceStyleManager::global().shadow_margin(SURFACE_SHADOW_MARGIN);
-        outer.set_margin_top(sm);
-        outer.set_margin_bottom(sm);
-        outer.set_margin_start(sm);
-        outer.set_margin_end(sm);
-
-        // Add urgency styling
-        if notification.urgency == URGENCY_CRITICAL {
-            outer.add_css_class(notif::TOAST_CRITICAL);
-        } else if notification.urgency == URGENCY_LOW {
-            outer.add_css_class(notif::TOAST_LOW);
-        }
-
-        let has_default_action = notification.actions.iter().any(|(id, _)| id == "default");
-
-        let main_row = GtkBox::new(Orientation::Horizontal, 10);
-
-        // App icon / avatar in a centered column
-        let icon_container = GtkBox::new(Orientation::Vertical, 0);
-        icon_container.set_halign(Align::Center);
-        icon_container.set_valign(Align::Start);
-        icon_container.set_width_request(56);
-
-        let icon = create_notification_image_widget(notification);
-        icon.add_css_class(notif::TOAST_ICON);
-        icon.set_halign(Align::Center);
-        icon_container.append(&icon);
-
-        main_row.append(&icon_container);
-
-        let content = GtkBox::new(Orientation::Vertical, 2);
-        content.set_hexpand(true);
-        content.add_css_class(notif::TOAST_CONTENT);
-
-        let app_label = Label::new(Some(&notification.app_name));
-        app_label.add_css_class(notif::TOAST_APP);
-        app_label.add_css_class(color::MUTED);
-        app_label.set_xalign(0.0);
-        app_label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
-        app_label.set_margin_bottom(4);
-        content.append(&app_label);
-
-        if !notification.summary.is_empty() {
-            let summary_label = Label::new(Some(&notification.summary));
-            summary_label.add_css_class(notif::TOAST_SUMMARY);
-            summary_label.set_xalign(0.0);
-            summary_label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
-            summary_label.set_single_line_mode(true);
-            content.append(&summary_label);
-        }
-
-        if !notification.body.is_empty() {
-            let body_markup = sanitize_body_markup(&notification.body);
-            let body_label = Label::new(None);
-            body_label.set_markup(&body_markup);
-            body_label.add_css_class(notif::TOAST_BODY);
-            body_label.add_css_class(color::MUTED);
-            body_label.set_xalign(0.0);
-            body_label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
-            body_label.set_lines(2);
-            body_label.set_wrap(true);
-            body_label.set_wrap_mode(gtk4::pango::WrapMode::WordChar);
-            content.append(&body_label);
-        }
-
-        main_row.append(&content);
-
-        let dismiss_btn = Button::new();
-        dismiss_btn.set_has_frame(false);
-        dismiss_btn.add_css_class(notif::TOAST_DISMISS);
-        dismiss_btn.add_css_class(button::RESET);
-        dismiss_btn.set_valign(Align::Start);
-        dismiss_btn.set_focusable(false);
-
-        let dismiss_icon = Image::from_icon_name("window-close-symbolic");
-        dismiss_icon.set_halign(Align::Center);
-        dismiss_icon.set_valign(Align::Center);
-        dismiss_btn.set_child(Some(&dismiss_icon));
-
-        let notification_id = notification.id;
-        let window = self.window.clone();
-        let on_dismiss_for_btn = on_dismiss.clone();
-        dismiss_btn.connect_clicked(move |_| {
-            on_dismiss_for_btn(notification_id);
-            window.close();
-        });
-
-        main_row.append(&dismiss_btn);
-
-        // Handle default action click
-        if has_default_action {
-            // Make the content area clickable
-            let click_gesture = gtk4::GestureClick::new();
-            click_gesture.set_button(1); // Only respond to left mouse button
-            let on_action_clone = on_action.clone();
-            let on_dismiss_clone = on_dismiss.clone();
-            let notification_id = notification.id;
-            let window_for_action = self.window.clone();
-            // Use connect_pressed instead of connect_released to ensure it's a real click
-            // that started within the widget (released can fire from drags ending on widget)
-            click_gesture.connect_pressed(move |gesture, n_press, _, _| {
-                // Only respond to single clicks (not double-clicks, etc.)
-                if n_press == 1 {
-                    // Stop propagation to prevent accidental triggers
-                    gesture.set_state(gtk4::EventSequenceState::Claimed);
-                    on_action_clone(notification_id, "default");
-                    on_dismiss_clone(notification_id);
-                    window_for_action.close();
-                }
-            });
-            content.add_controller(click_gesture);
-            content.add_css_class(notif::TOAST_CLICKABLE);
-        }
-
-        outer.append(&main_row);
-
-        // Action buttons at the bottom
-        let non_default_actions: Vec<_> = notification
-            .actions
-            .iter()
-            .filter(|(id, _)| id != "default")
-            .collect();
-
-        if !non_default_actions.is_empty() {
-            let actions_box = GtkBox::new(Orientation::Horizontal, 8);
-            actions_box.add_css_class(notif::TOAST_ACTIONS);
-            actions_box.set_halign(Align::End);
-
-            for (action_id, action_label) in non_default_actions {
-                let action_btn = crate::widgets::base::vp_button_with_label(action_label);
-                action_btn.add_css_class(notif::TOAST_ACTION);
-                action_btn.add_css_class(button::GHOST);
-                action_btn.set_focusable(false);
-
-                let on_action_clone = on_action.clone();
-                let on_dismiss_clone = on_dismiss.clone();
-                let notification_id = notification.id;
-                let action_id = action_id.clone();
-                let window_for_action = self.window.clone();
-                action_btn.connect_clicked(move |_| {
-                    on_action_clone(notification_id, &action_id);
-                    on_dismiss_clone(notification_id);
-                    window_for_action.close();
-                });
-
-                actions_box.append(&action_btn);
-            }
-
-            outer.append(&actions_box);
-        }
-
+        let outer = build_toast_content(notification, on_dismiss, on_action, &self.window);
         self.window.set_child(Some(&outer));
-
-        // Apply Pango font attributes to all labels if enabled in config.
-        // This is the central hook for notification toasts - widgets create standard
-        // GTK labels, and we apply Pango attributes here after the tree is built.
-        SurfaceStyleManager::global().apply_pango_attrs_all(&outer);
     }
 
     pub fn present(&self) {
@@ -463,6 +297,184 @@ impl NotificationToast {
         );
         *self.animation_source.borrow_mut() = Some(source_id);
     }
+}
+
+fn build_toast_content(
+    notification: &Notification,
+    on_dismiss: ToastCallback,
+    on_action: ToastActionCallback,
+    close_window: &Window,
+) -> GtkBox {
+    let outer = GtkBox::new(Orientation::Vertical, 0);
+    outer.add_css_class(notif::TOAST_CONTAINER);
+    outer.add_css_class(notif::TOAST);
+
+    // Add urgency styling before applying widget-scoped surface styles, so the
+    // surface provider can preserve urgency-specific border/background rules at
+    // the same CSS priority.
+    if notification.urgency == URGENCY_CRITICAL {
+        outer.add_css_class(notif::TOAST_CRITICAL);
+    } else if notification.urgency == URGENCY_LOW {
+        outer.add_css_class(notif::TOAST_LOW);
+    }
+
+    // Apply surface styling
+    SurfaceStyleManager::global().apply_surface_styles(&outer, false);
+
+    // Apply uniform shadow margins so the CSS box-shadow is not clipped at
+    // the layer-shell surface boundary.  Unlike popovers (which are flush
+    // against the bar on one side), the toast floats freely and needs equal
+    // margins on all four sides.
+    let sm = SurfaceStyleManager::global().shadow_margin(SURFACE_SHADOW_MARGIN);
+    outer.set_margin_top(sm);
+    outer.set_margin_bottom(sm);
+    outer.set_margin_start(sm);
+    outer.set_margin_end(sm);
+
+    let has_default_action = notification.actions.iter().any(|(id, _)| id == "default");
+
+    let main_row = GtkBox::new(Orientation::Horizontal, 10);
+
+    // App icon / avatar in a centered column
+    let icon_container = GtkBox::new(Orientation::Vertical, 0);
+    icon_container.set_halign(Align::Center);
+    icon_container.set_valign(Align::Start);
+    icon_container.set_width_request(56);
+
+    let icon = create_notification_image_widget(notification);
+    icon.add_css_class(notif::TOAST_ICON);
+    icon.set_halign(Align::Center);
+    icon_container.append(&icon);
+
+    main_row.append(&icon_container);
+
+    let content = GtkBox::new(Orientation::Vertical, 2);
+    content.set_hexpand(true);
+    content.add_css_class(notif::TOAST_CONTENT);
+
+    let app_label = Label::new(Some(&notification.app_name));
+    app_label.add_css_class(notif::TOAST_APP);
+    app_label.add_css_class(color::MUTED);
+    app_label.set_xalign(0.0);
+    app_label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+    app_label.set_margin_bottom(4);
+    content.append(&app_label);
+
+    if !notification.summary.is_empty() {
+        let summary_label = Label::new(Some(&notification.summary));
+        summary_label.add_css_class(notif::TOAST_SUMMARY);
+        summary_label.set_xalign(0.0);
+        summary_label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+        summary_label.set_single_line_mode(true);
+        content.append(&summary_label);
+    }
+
+    if !notification.body.is_empty() {
+        let body_markup = sanitize_body_markup(&notification.body);
+        let body_label = Label::new(None);
+        body_label.set_markup(&body_markup);
+        body_label.add_css_class(notif::TOAST_BODY);
+        body_label.add_css_class(color::MUTED);
+        body_label.set_xalign(0.0);
+        body_label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+        body_label.set_lines(2);
+        body_label.set_wrap(true);
+        body_label.set_wrap_mode(gtk4::pango::WrapMode::WordChar);
+        content.append(&body_label);
+    }
+
+    main_row.append(&content);
+
+    let dismiss_btn = Button::new();
+    dismiss_btn.set_has_frame(false);
+    dismiss_btn.add_css_class(notif::TOAST_DISMISS);
+    dismiss_btn.add_css_class(button::RESET);
+    dismiss_btn.set_valign(Align::Start);
+    dismiss_btn.set_focusable(false);
+
+    let dismiss_icon = Image::from_icon_name("window-close-symbolic");
+    dismiss_icon.set_halign(Align::Center);
+    dismiss_icon.set_valign(Align::Center);
+    dismiss_btn.set_child(Some(&dismiss_icon));
+
+    let notification_id = notification.id;
+    let window = close_window.clone();
+    let on_dismiss_for_btn = on_dismiss.clone();
+    dismiss_btn.connect_clicked(move |_| {
+        on_dismiss_for_btn(notification_id);
+        window.close();
+    });
+
+    main_row.append(&dismiss_btn);
+
+    // Handle default action click
+    if has_default_action {
+        // Make the content area clickable
+        let click_gesture = gtk4::GestureClick::new();
+        click_gesture.set_button(1); // Only respond to left mouse button
+        let on_action_clone = on_action.clone();
+        let on_dismiss_clone = on_dismiss.clone();
+        let notification_id = notification.id;
+        let window_for_action = close_window.clone();
+        // Use connect_pressed instead of connect_released to ensure it's a real click
+        // that started within the widget (released can fire from drags ending on widget)
+        click_gesture.connect_pressed(move |gesture, n_press, _, _| {
+            // Only respond to single clicks (not double-clicks, etc.)
+            if n_press == 1 {
+                // Stop propagation to prevent accidental triggers
+                gesture.set_state(gtk4::EventSequenceState::Claimed);
+                on_action_clone(notification_id, "default");
+                on_dismiss_clone(notification_id);
+                window_for_action.close();
+            }
+        });
+        content.add_controller(click_gesture);
+        content.add_css_class(notif::TOAST_CLICKABLE);
+    }
+
+    outer.append(&main_row);
+
+    // Action buttons at the bottom
+    let non_default_actions: Vec<_> = notification
+        .actions
+        .iter()
+        .filter(|(id, _)| id != "default")
+        .collect();
+
+    if !non_default_actions.is_empty() {
+        let actions_box = GtkBox::new(Orientation::Horizontal, 8);
+        actions_box.add_css_class(notif::TOAST_ACTIONS);
+        actions_box.set_halign(Align::End);
+
+        for (action_id, action_label) in non_default_actions {
+            let action_btn = crate::widgets::base::vp_button_with_label(action_label);
+            action_btn.add_css_class(notif::TOAST_ACTION);
+            action_btn.add_css_class(button::GHOST);
+            action_btn.set_focusable(false);
+
+            let on_action_clone = on_action.clone();
+            let on_dismiss_clone = on_dismiss.clone();
+            let notification_id = notification.id;
+            let action_id = action_id.clone();
+            let window_for_action = close_window.clone();
+            action_btn.connect_clicked(move |_| {
+                on_action_clone(notification_id, &action_id);
+                on_dismiss_clone(notification_id);
+                window_for_action.close();
+            });
+
+            actions_box.append(&action_btn);
+        }
+
+        outer.append(&actions_box);
+    }
+
+    // Apply Pango font attributes to all labels if enabled in config.
+    // This is the central hook for notification toasts - widgets create standard
+    // GTK labels, and we apply Pango attributes here after the tree is built.
+    SurfaceStyleManager::global().apply_pango_attrs_all(&outer);
+
+    outer
 }
 
 impl Drop for NotificationToast {
@@ -619,3 +631,7 @@ impl NotificationToastManager {
         self.toasts.borrow().keys().cloned().collect()
     }
 }
+
+#[cfg(test)]
+#[path = "notifications_toast_tests.rs"]
+mod tests;
