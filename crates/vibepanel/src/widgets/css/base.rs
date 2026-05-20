@@ -75,7 +75,21 @@ window.layer-shell-click-catcher {{
     transform: translateY(0.05em);
 }}
 
-.bar.bar--horizontal .material-symbol[class*="material-symbol-battery_"],
+.bar.bar--horizontal .material-symbol-battery_full,
+.bar.bar--horizontal .material-symbol-battery_6_bar,
+.bar.bar--horizontal .material-symbol-battery_5_bar,
+.bar.bar--horizontal .material-symbol-battery_4_bar,
+.bar.bar--horizontal .material-symbol-battery_3_bar,
+.bar.bar--horizontal .material-symbol-battery_2_bar,
+.bar.bar--horizontal .material-symbol-battery_1_bar,
+.bar.bar--horizontal .material-symbol-battery_unknown,
+.bar.bar--horizontal .material-symbol-battery_charging_full,
+.bar.bar--horizontal .material-symbol-battery_charging_90,
+.bar.bar--horizontal .material-symbol-battery_charging_80,
+.bar.bar--horizontal .material-symbol-battery_charging_60,
+.bar.bar--horizontal .material-symbol-battery_charging_50,
+.bar.bar--horizontal .material-symbol-battery_charging_30,
+.bar.bar--horizontal .material-symbol-battery_charging_20,
 .bar.bar--horizontal .material-symbol-keyboard_arrow_up,
 .bar.bar--horizontal .material-symbol-keyboard_arrow_down {{
     margin-right: -0.2em;

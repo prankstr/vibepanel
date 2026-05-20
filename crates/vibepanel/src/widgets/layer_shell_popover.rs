@@ -784,7 +784,7 @@ impl LayerShellPopover {
     /// popover is already open (e.g. a new notification arrives). This avoids
     /// the hide→show cycle which would trigger the mid-close reversal path and
     /// skip the content rebuild.
-    pub fn rebuild_content(&self) {
+    pub fn rebuild_content(self: &Rc<Self>) {
         let Some(anim_shell) = self.anim_shell.borrow().as_ref().cloned() else {
             return;
         };
@@ -816,6 +816,20 @@ impl LayerShellPopover {
         }
 
         SurfaceStyleManager::global().apply_pango_attrs_all(&anim_shell);
+
+        // Reposition after content updates while visible (e.g. notifications
+        // list changing in-place). Do this in idle so GTK has a chance to
+        // re-measure the new child before we read window dimensions.
+        if self.logically_open.get() {
+            let weak_self = Rc::downgrade(self);
+            glib::idle_add_local_once(move || {
+                if let Some(popover) = weak_self.upgrade()
+                    && popover.logically_open.get()
+                {
+                    popover.update_position();
+                }
+            });
+        }
     }
 
     fn show_internal(self: &Rc<Self>) {

@@ -64,8 +64,7 @@ fn compute_max_scroll_height(monitor: Option<Monitor>) -> i32 {
 
     if config_mgr.bar_position().is_horizontal() {
         let bar_margin = calculate_popover_bar_margin();
-        let popover_offset = config_mgr.popover_offset() as i32;
-        occupied_height += calculate_bar_exclusive_zone() + bar_margin + popover_offset;
+        occupied_height += calculate_bar_exclusive_zone() + bar_margin;
     }
 
     let max_height = geom.height()
