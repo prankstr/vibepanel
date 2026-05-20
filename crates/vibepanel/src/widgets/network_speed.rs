@@ -406,7 +406,7 @@ fn format_speed_compact(bytes_per_sec: u64) -> String {
     }
 
     let mut unit_index = 0;
-    while value.round() >= 100.0 && unit_index < UNITS.len() - 1 {
+    while value.round() >= 1000.0 && unit_index < UNITS.len() - 1 {
         value /= KB;
         unit_index += 1;
     }
@@ -511,14 +511,14 @@ mod tests {
         assert_eq!(format_speed_compact(1024), "1K");
         assert_eq!(format_speed_compact(12 * 1024), "12K");
         assert_eq!(format_speed_compact(99 * 1024), "99K");
-        assert_eq!(format_speed_compact(100 * 1024), "0.1M");
-        assert_eq!(format_speed_compact(123 * 1024), "0.1M");
-        assert_eq!(format_speed_compact(512 * 1024), "0.5M");
-        assert_eq!(format_speed_compact(999 * 1024), "1M");
+        assert_eq!(format_speed_compact(100 * 1024), "100K");
+        assert_eq!(format_speed_compact(123 * 1024), "123K");
+        assert_eq!(format_speed_compact(512 * 1024), "512K");
+        assert_eq!(format_speed_compact(999 * 1024), "999K");
         assert_eq!(format_speed_compact(1024 * 1024), "1M");
         assert_eq!(format_speed_compact(1536 * 1024), "1.5M");
         assert_eq!(format_speed_compact(12 * 1024 * 1024), "12M");
-        assert_eq!(format_speed_compact(123 * 1024 * 1024), "0.1G");
+        assert_eq!(format_speed_compact(123 * 1024 * 1024), "123M");
         assert_eq!(format_speed_compact(1024 * 1024 * 1024), "1G");
     }
 
