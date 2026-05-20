@@ -20,6 +20,7 @@ use tracing::{debug, error};
 
 use crate::services::callbacks::{CallbackId, Callbacks};
 use crate::services::network::{WifiNetwork, objpath_to_string};
+use crate::services::sleep_watcher::SleepWatcher;
 
 mod mobile;
 mod wifi;
@@ -686,32 +687,16 @@ impl NmService {
                 );
 
                 // Refresh mobile state after resume from suspend/hibernate.
-                let sub_sleep = connection.subscribe_to_signal(
-                    Some("org.freedesktop.login1"),
-                    Some("org.freedesktop.login1.Manager"),
-                    Some("PrepareForSleep"),
-                    Some("/org/freedesktop/login1"),
-                    None,
-                    gio::DBusSignalFlags::NONE,
-                    {
-                        let this_weak = Rc::downgrade(&this);
-                        move |signal| {
-                            // Only refresh on resume (preparing=false), not on suspend.
-                            if let Some(preparing) = signal.parameters.child_value(0).get::<bool>()
-                                && !preparing
-                                && let Some(this) = this_weak.upgrade()
-                            {
-                                this.queue_mobile_refresh();
-                            }
-                        }
-                    },
-                );
+                // NmService is a process-lifetime singleton; the callback intentionally
+                // lives for the process lifetime — unregistration is not needed.
+                let _resume_callback_id = SleepWatcher::global().on_resume(|| {
+                    NmService::global().queue_mobile_refresh();
+                });
 
                 this.mobile.signal_subscriptions.borrow_mut().extend([
                     sub_props,
                     sub_added,
                     sub_removed,
-                    sub_sleep,
                 ]);
 
                 // Create NetworkManager main proxy

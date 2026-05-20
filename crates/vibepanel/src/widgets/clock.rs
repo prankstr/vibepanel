@@ -1,18 +1,23 @@
 //! Clock widget - displays the current time.
 //!
-//! Updates on minute boundaries to minimize CPU usage.
+//! Uses second-resolution ticks only for formats that display seconds, and
+//! otherwise updates on minute boundaries to minimize wakeups.
 
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::time::Duration;
 
 use chrono::Timelike;
+use chrono::format::{Fixed, Item, Numeric, StrftimeItems};
 use gtk4::Label;
 use gtk4::glib::{self, SourceId};
 use gtk4::prelude::*;
-use tracing::debug;
+use tracing::{debug, trace, warn};
 use vibepanel_core::config::WidgetEntry;
 
+use crate::services::callbacks::CallbackId;
 use crate::services::config_manager::ConfigManager;
+use crate::services::sleep_watcher::SleepWatcher;
 use crate::styles::widget as wgt;
 use crate::widgets::WidgetConfig;
 use crate::widgets::base::BaseWidget;
@@ -23,6 +28,15 @@ use crate::widgets::warn_unknown_options;
 const DEFAULT_FORMAT: &str = "%a %d %H:%M";
 /// Default compact format string for side-bar clock display.
 const DEFAULT_VERTICAL_FORMAT: &str = "%H\n%M";
+const CLOCK_BOUNDARY_BUFFER_MS: u64 = 10;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SchedulingMode {
+    /// Tick once per second for formats containing sub-minute specifiers.
+    /// Fractional seconds refresh at this cadence, not subsecond cadence.
+    Second,
+    MinuteBoundary,
+}
 
 /// Configuration for the clock widget.
 
@@ -93,10 +107,11 @@ pub struct ClockWidget {
     format_vertical: Option<String>,
     /// Whether the bar is on a side edge.
     is_vertical: bool,
+    scheduling_mode: SchedulingMode,
     /// Active timer source ID for cancellation on drop.
-    /// The Rc<RefCell<>> allows the closure to update the ID when
-    /// it transitions from the one-shot to the repeating timer.
+    /// The Rc<RefCell<>> lets self-rescheduling callbacks replace the ID.
     timer_source: Rc<RefCell<Option<SourceId>>>,
+    resume_callback_id: Option<CallbackId>,
 }
 
 impl ClockWidget {
@@ -136,19 +151,44 @@ impl ClockWidget {
             }
         });
 
+        let format = validated_clock_format(config.format, DEFAULT_FORMAT, "format");
+        let format_vertical = config.format_vertical.map(|format| {
+            validated_clock_format(format, DEFAULT_VERTICAL_FORMAT, "format_vertical")
+        });
+        let scheduling_mode =
+            clock_scheduling_mode(&format, format_vertical.as_deref(), is_vertical);
         let timer_source = Rc::new(RefCell::new(None));
+
+        let resume_callback_id = {
+            let label = label.clone();
+            let format = format.clone();
+            let format_vertical = format_vertical.clone();
+            let timer_source = Rc::clone(&timer_source);
+            Some(SleepWatcher::global().on_resume(move || {
+                reset_clock_timer(
+                    &label,
+                    &format,
+                    format_vertical.as_deref(),
+                    is_vertical,
+                    scheduling_mode,
+                    &timer_source,
+                );
+            }))
+        };
 
         let widget = Self {
             base,
             label,
-            format: config.format,
-            format_vertical: config.format_vertical,
+            format,
+            format_vertical,
             is_vertical,
+            scheduling_mode,
             timer_source,
+            resume_callback_id,
         };
 
         widget.update_time();
-        widget.schedule_minute_tick();
+        widget.schedule_tick();
 
         widget
     }
@@ -174,52 +214,154 @@ impl ClockWidget {
             self.is_vertical,
             now,
         );
-        debug!("Clock updated: {}", text.replace('\n', " "));
+        trace!("Clock updated: {}", text.replace('\n', " "));
     }
 
-    fn schedule_minute_tick(&self) {
+    fn schedule_tick(&self) {
+        schedule_clock_tick(
+            self.label.clone(),
+            self.format.clone(),
+            self.format_vertical.clone(),
+            self.is_vertical,
+            self.scheduling_mode,
+            Rc::clone(&self.timer_source),
+        );
+    }
+}
+
+fn clock_scheduling_mode(
+    format: &str,
+    format_vertical: Option<&str>,
+    is_vertical: bool,
+) -> SchedulingMode {
+    let active_format = if is_vertical {
+        format_vertical.unwrap_or(DEFAULT_VERTICAL_FORMAT)
+    } else {
+        format
+    };
+
+    if clock_format_has_seconds(active_format) || (is_vertical && clock_format_has_seconds(format))
+    {
+        SchedulingMode::Second
+    } else {
+        SchedulingMode::MinuteBoundary
+    }
+}
+
+fn validated_clock_format(format: String, fallback: &str, field_name: &str) -> String {
+    if analyze_clock_format(&format).is_some() {
+        return format;
+    }
+
+    warn!("Invalid clock {field_name} {format:?}; falling back to {fallback:?}");
+    fallback.to_string()
+}
+
+fn schedule_clock_tick(
+    label: Label,
+    format: String,
+    format_vertical: Option<String>,
+    is_vertical: bool,
+    mode: SchedulingMode,
+    timer_source: Rc<RefCell<Option<SourceId>>>,
+) {
+    let delay = next_tick_delay(mode);
+    let timer_source_for_callback = Rc::clone(&timer_source);
+
+    let source_id = glib::timeout_add_local_once(delay, move || {
         let now = chrono::Local::now();
-        let delay_seconds = 60 - now.second();
+        update_label(
+            &label,
+            &format,
+            format_vertical.as_deref(),
+            is_vertical,
+            now,
+        );
+        schedule_clock_tick(
+            label,
+            format,
+            format_vertical,
+            is_vertical,
+            mode,
+            timer_source_for_callback,
+        );
+    });
 
-        let label = self.label.clone();
-        let format = self.format.clone();
-        let format_vertical = self.format_vertical.clone();
-        let is_vertical = self.is_vertical;
-        let timer_source = Rc::clone(&self.timer_source);
+    *timer_source.borrow_mut() = Some(source_id);
+    trace!("Clock tick scheduled in {:?}", delay);
+}
 
-        let source_id = glib::timeout_add_seconds_local_once(delay_seconds, move || {
-            let now = chrono::Local::now();
-            update_label(
-                &label,
-                &format,
-                format_vertical.as_deref(),
-                is_vertical,
-                now,
-            );
+fn next_tick_delay(mode: SchedulingMode) -> Duration {
+    let now = chrono::Local::now();
+    let millis_into_second = u64::from(now.nanosecond() / 1_000_000);
 
-            let label_clone = label.clone();
-            let format_clone = format.clone();
-            let format_vertical_clone = format_vertical.clone();
-            let timer_source_clone = Rc::clone(&timer_source);
-            let repeating_id = glib::timeout_add_seconds_local(60, move || {
-                let now = chrono::Local::now();
-                update_label(
-                    &label_clone,
-                    &format_clone,
-                    format_vertical_clone.as_deref(),
-                    is_vertical,
-                    now,
-                );
-                glib::ControlFlow::Continue
-            });
+    let boundary_delay_ms = match mode {
+        SchedulingMode::Second => 1_000 - millis_into_second,
+        SchedulingMode::MinuteBoundary => {
+            let millis_into_minute = u64::from(now.second()) * 1_000 + millis_into_second;
+            60_000 - millis_into_minute
+        }
+    };
 
-            *timer_source_clone.borrow_mut() = Some(repeating_id);
-        });
+    Duration::from_millis(boundary_delay_ms + CLOCK_BOUNDARY_BUFFER_MS)
+}
 
-        *self.timer_source.borrow_mut() = Some(source_id);
-
-        debug!("Clock tick scheduled in {} seconds", delay_seconds);
+fn cancel_clock_timer(timer_source: &Rc<RefCell<Option<SourceId>>>) {
+    if let Some(source_id) = timer_source.borrow_mut().take() {
+        source_id.remove();
     }
+}
+
+fn reset_clock_timer(
+    label: &Label,
+    format: &str,
+    format_vertical: Option<&str>,
+    is_vertical: bool,
+    mode: SchedulingMode,
+    timer_source: &Rc<RefCell<Option<SourceId>>>,
+) {
+    cancel_clock_timer(timer_source);
+    let now = chrono::Local::now();
+    update_label(label, format, format_vertical, is_vertical, now);
+    schedule_clock_tick(
+        label.clone(),
+        format.to_string(),
+        format_vertical.map(String::from),
+        is_vertical,
+        mode,
+        Rc::clone(timer_source),
+    );
+}
+
+fn analyze_clock_format(format: &str) -> Option<SchedulingMode> {
+    let mut has_seconds = false;
+
+    for item in StrftimeItems::new(format) {
+        match item {
+            Item::Error => return None,
+            Item::Numeric(Numeric::Second | Numeric::Nanosecond | Numeric::Timestamp, _)
+            | Item::Fixed(
+                Fixed::Nanosecond
+                | Fixed::Nanosecond3
+                | Fixed::Nanosecond6
+                | Fixed::Nanosecond9
+                | Fixed::RFC2822
+                | Fixed::RFC3339
+                | Fixed::Internal(_),
+            ) => has_seconds = true,
+            _ => {}
+        }
+    }
+
+    Some(if has_seconds {
+        SchedulingMode::Second
+    } else {
+        SchedulingMode::MinuteBoundary
+    })
+}
+
+fn clock_format_has_seconds(format: &str) -> bool {
+    analyze_clock_format(format) == Some(SchedulingMode::Second)
 }
 
 fn formatted_clock_text(
@@ -253,10 +395,11 @@ fn update_label(
 impl Drop for ClockWidget {
     fn drop(&mut self) {
         // Cancel any active timer to prevent callbacks after widget is dropped
-        if let Some(source_id) = self.timer_source.borrow_mut().take() {
-            source_id.remove();
-            debug!("Clock timer cancelled on drop");
+        cancel_clock_timer(&self.timer_source);
+        if let Some(id) = self.resume_callback_id.take() {
+            SleepWatcher::global().disconnect(id);
         }
+        debug!("Clock timer cancelled on drop");
     }
 }
 
@@ -353,6 +496,89 @@ mod tests {
         assert_eq!(
             formatted_clock_text("%a %d %H:%M", Some("%H\n%M"), false, now),
             now.format("%a %d %H:%M").to_string()
+        );
+    }
+
+    #[test]
+    fn test_analyze_clock_format_detects_second_resolution_formats() {
+        for format in ["%H:%M:%S", "%T", "%r", "%X", "%c", "%+", "%s"] {
+            assert_eq!(
+                analyze_clock_format(format),
+                Some(SchedulingMode::Second),
+                "{format} should need seconds"
+            );
+        }
+    }
+
+    #[test]
+    fn test_analyze_clock_format_detects_fractional_seconds() {
+        for format in ["%f", "%.f", "%.3f", "%3f", "%H:%M:%.6f"] {
+            assert_eq!(
+                analyze_clock_format(format),
+                Some(SchedulingMode::Second),
+                "{format} should need seconds"
+            );
+        }
+    }
+
+    #[test]
+    fn test_analyze_clock_format_detects_valid_padded_seconds() {
+        for format in ["%-S", "%_S", "%0S"] {
+            assert_eq!(
+                analyze_clock_format(format),
+                Some(SchedulingMode::Second),
+                "{format} should need seconds"
+            );
+        }
+    }
+
+    #[test]
+    fn test_analyze_clock_format_rejects_invalid_chrono_formats() {
+        for format in ["%3S", "%OS", "%ES", "%^S", "%#S"] {
+            assert_eq!(
+                analyze_clock_format(format),
+                None,
+                "{format} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn test_analyze_clock_format_uses_minute_boundary_for_minute_formats() {
+        for format in ["%H:%M", "%a %d %H:%M", "%Y", "literal S"] {
+            assert_eq!(
+                analyze_clock_format(format),
+                Some(SchedulingMode::MinuteBoundary),
+                "{format} should not need seconds"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validated_clock_format_falls_back_for_invalid_format() {
+        assert_eq!(
+            validated_clock_format("%OS".to_string(), DEFAULT_FORMAT, "format"),
+            DEFAULT_FORMAT
+        );
+        assert_eq!(
+            validated_clock_format("%H:%M:%S".to_string(), DEFAULT_FORMAT, "format"),
+            "%H:%M:%S"
+        );
+    }
+
+    #[test]
+    fn test_clock_scheduling_mode_considers_rendered_formats() {
+        assert_eq!(
+            clock_scheduling_mode("%H:%M:%S", Some("%H\n%M"), true),
+            SchedulingMode::Second
+        );
+        assert_eq!(
+            clock_scheduling_mode("%H:%M", Some("%H\n%M\n%S"), true),
+            SchedulingMode::Second
+        );
+        assert_eq!(
+            clock_scheduling_mode("%H:%M:%S", Some("%H\n%M"), false),
+            SchedulingMode::Second
         );
     }
 }

@@ -20,6 +20,7 @@
 //! - **system**: CPU, memory, and system resource monitoring
 //! - **gpu**: GPU utilization and VRAM monitoring (AMD sysfs, NVIDIA NVML)
 //! - **media**: MPRIS media player control and monitoring
+//! - **sleep_watcher**: Shared resume-from-sleep notifications via logind
 
 pub mod audio;
 pub mod background_effect;
@@ -40,6 +41,7 @@ pub mod media_ipc;
 pub mod network;
 pub mod notification;
 pub mod power_profile;
+pub mod sleep_watcher;
 pub mod state;
 pub mod surfaces;
 pub mod system;

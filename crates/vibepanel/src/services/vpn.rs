@@ -21,6 +21,7 @@ use gtk4::glib::{self, Variant};
 use tracing::{debug, error, warn};
 
 use super::callbacks::{CallbackId, Callbacks};
+use super::sleep_watcher::SleepWatcher;
 use super::state;
 use super::vpn_secret_agent::{VpnAuthRequest, VpnSecretAgent};
 
@@ -663,24 +664,12 @@ impl VpnService {
 
                 // After resume from sleep, signal subscriptions on active connection
                 // paths may be stale. Refresh to re-subscribe to current paths.
-                let sub_sleep = connection.subscribe_to_signal(
-                    Some("org.freedesktop.login1"),
-                    Some("org.freedesktop.login1.Manager"),
-                    Some("PrepareForSleep"),
-                    Some("/org/freedesktop/login1"),
-                    None,
-                    gio::DBusSignalFlags::NONE,
-                    move |signal| {
-                        // PrepareForSleep(boolean): true = going to sleep, false = resuming
-                        if let Some(preparing) = signal.parameters.child_value(0).get::<bool>()
-                            && !preparing
-                        {
-                            debug!("VPN: System resumed from sleep, refreshing state");
-                            send_vpn_update(VpnUpdate::RequestRefresh);
-                        }
-                    },
-                );
-                this._signal_subscriptions.borrow_mut().push(sub_sleep);
+                // VpnService is a process-lifetime singleton; the callback intentionally
+                // lives for the process lifetime — unregistration is not needed.
+                let _resume_callback_id = SleepWatcher::global().on_resume(|| {
+                    debug!("VPN: System resumed from sleep, refreshing state");
+                    send_vpn_update(VpnUpdate::RequestRefresh);
+                });
 
                 // Create NetworkManager main proxy.
                 let this_weak2 = Rc::downgrade(&this);
