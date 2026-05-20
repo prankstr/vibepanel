@@ -27,8 +27,6 @@ const DEFAULT_SHOW_APP_FALLBACK: bool = true;
 const DEFAULT_MAX_CHARS: i32 = 0;
 const DEFAULT_SHOW_ICON: bool = true;
 const DEFAULT_UPPERCASE: bool = false;
-const VERTICAL_ICON_SIZE_NUMERATOR: u32 = 6;
-const VERTICAL_ICON_SIZE_DENOMINATOR: u32 = 5;
 
 /// Configuration for the window title widget.
 #[derive(Debug, Clone)]
@@ -298,20 +296,15 @@ fn window_title_icon_size(is_vertical: bool, configured_icon_size: Option<i32>) 
 }
 
 fn window_title_icon_size_from_values(
-    is_vertical: bool,
+    _is_vertical: bool,
     configured_icon_size: Option<i32>,
     pixmap_icon_size: u32,
     widget_height: u32,
     bar_size: u32,
 ) -> i32 {
-    let default_icon_size = if is_vertical {
-        pixmap_icon_size * VERTICAL_ICON_SIZE_NUMERATOR / VERTICAL_ICON_SIZE_DENOMINATOR
-    } else {
-        pixmap_icon_size
-    };
     let requested_icon_size = configured_icon_size
         .map(|size| size.max(1) as u32)
-        .unwrap_or(default_icon_size);
+        .unwrap_or(pixmap_icon_size);
     let icon_size = requested_icon_size.min(widget_height);
     // Match parity to bar_size: content width inherits bar_size parity, and
     // matched parity makes (content - icon) even so centering lands on a whole
@@ -758,7 +751,7 @@ mod tests {
     }
 
     #[test]
-    fn test_window_title_icon_size_vertical_is_larger_and_capped() {
+    fn test_window_title_icon_size_uses_same_default_for_both_orientations() {
         // Even bar size — even pixmap/icon stays even.
         assert_eq!(
             window_title_icon_size_from_values(false, None, 20, 26, 32),
@@ -766,11 +759,11 @@ mod tests {
         );
         assert_eq!(
             window_title_icon_size_from_values(true, None, 20, 26, 32),
-            24
+            20
         );
         assert_eq!(
             window_title_icon_size_from_values(true, None, 24, 26, 32),
-            26
+            24
         );
     }
 
@@ -784,7 +777,7 @@ mod tests {
         );
         assert_eq!(
             window_title_icon_size_from_values(true, None, 20, 26, 33),
-            23
+            19
         );
     }
 
