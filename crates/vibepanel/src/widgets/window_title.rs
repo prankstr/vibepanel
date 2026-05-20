@@ -21,7 +21,7 @@ use crate::widgets::WidgetConfig;
 use crate::widgets::base::BaseWidget;
 use crate::widgets::warn_unknown_options;
 
-const DEFAULT_EMPTY_TEXT: &str = "—";
+const DEFAULT_EMPTY_TEXT: &str = "";
 const DEFAULT_TEMPLATE: &str = "{display}";
 const DEFAULT_SHOW_APP_FALLBACK: bool = true;
 const DEFAULT_MAX_CHARS: i32 = 0;
@@ -44,6 +44,8 @@ pub struct WindowTitleConfig {
     pub max_chars: i32,
     /// Whether to show the app icon.
     pub show_icon: bool,
+    /// Icon size in pixels. `None` uses the theme/default sizing behavior.
+    pub icon_size: Option<i32>,
     /// Whether to uppercase the title.
     pub uppercase: bool,
 }
@@ -59,6 +61,7 @@ impl WidgetConfig for WindowTitleConfig {
                 "show_app_fallback",
                 "max_chars",
                 "show_icon",
+                "icon_size",
                 "uppercase",
             ],
         );
@@ -96,6 +99,12 @@ impl WidgetConfig for WindowTitleConfig {
             .and_then(|v| v.as_bool())
             .unwrap_or(DEFAULT_SHOW_ICON);
 
+        let icon_size = entry
+            .options
+            .get("icon_size")
+            .and_then(|v| v.as_integer())
+            .map(|v| (v as i32).max(8));
+
         let uppercase = entry
             .options
             .get("uppercase")
@@ -108,6 +117,7 @@ impl WidgetConfig for WindowTitleConfig {
             show_app_fallback,
             max_chars,
             show_icon,
+            icon_size,
             uppercase,
         }
     }
@@ -121,6 +131,7 @@ impl Default for WindowTitleConfig {
             show_app_fallback: DEFAULT_SHOW_APP_FALLBACK,
             max_chars: DEFAULT_MAX_CHARS,
             show_icon: DEFAULT_SHOW_ICON,
+            icon_size: None,
             uppercase: DEFAULT_UPPERCASE,
         }
     }
@@ -165,7 +176,7 @@ impl WindowTitleWidget {
             // Mirror IconsService Image backend: valign only, no halign override.
             icon_img.set_valign(Align::Center);
 
-            let icon_size = window_title_icon_size(is_vertical);
+            let icon_size = window_title_icon_size(is_vertical, config.icon_size);
             icon_img.set_pixel_size(icon_size);
 
             // Wrap in icon-root container — mirror IconsService.create_icon and
@@ -215,6 +226,9 @@ impl WindowTitleWidget {
                 .set_center_widget(Some(&title_label.label));
             content.append(&title_label.wrapper);
         }
+
+        let initial_visible = should_show_window_title(&config.empty_text, false, is_vertical);
+        base.widget().set_visible(initial_visible);
 
         // State owned by the callback.
         let app_name_cache = Rc::new(RefCell::new(HashMap::<String, String>::new()));
@@ -272,10 +286,11 @@ impl WindowTitleWidget {
     }
 }
 
-fn window_title_icon_size(is_vertical: bool) -> i32 {
+fn window_title_icon_size(is_vertical: bool, configured_icon_size: Option<i32>) -> i32 {
     let sizes = ConfigManager::global().theme_sizes();
     window_title_icon_size_from_values(
         is_vertical,
+        configured_icon_size,
         sizes.pixmap_icon_size,
         sizes.widget_height,
         sizes.bar_height,
@@ -284,16 +299,20 @@ fn window_title_icon_size(is_vertical: bool) -> i32 {
 
 fn window_title_icon_size_from_values(
     is_vertical: bool,
+    configured_icon_size: Option<i32>,
     pixmap_icon_size: u32,
     widget_height: u32,
     bar_size: u32,
 ) -> i32 {
-    let icon_size = if is_vertical {
-        (pixmap_icon_size * VERTICAL_ICON_SIZE_NUMERATOR / VERTICAL_ICON_SIZE_DENOMINATOR)
-            .min(widget_height)
+    let default_icon_size = if is_vertical {
+        pixmap_icon_size * VERTICAL_ICON_SIZE_NUMERATOR / VERTICAL_ICON_SIZE_DENOMINATOR
     } else {
         pixmap_icon_size
     };
+    let requested_icon_size = configured_icon_size
+        .map(|size| size.max(1) as u32)
+        .unwrap_or(default_icon_size);
+    let icon_size = requested_icon_size.min(widget_height);
     // Match parity to bar_size: content width inherits bar_size parity, and
     // matched parity makes (content - icon) even so centering lands on a whole
     // pixel instead of a half-pixel that biases left or right.
@@ -325,17 +344,24 @@ fn update_window_title(
     title_label.label.set_label(&text);
 
     // Update icon if enabled
+    let mut icon_visible = false;
     if let Some((icon, icon_root)) = icon_widgets {
-        update_icon(icon, icon_root, snapshot);
+        icon_visible = update_icon(icon, icon_root, snapshot);
     }
-    set_label_alignment(
-        title_label,
-        is_vertical,
-        icon_widgets.is_some() && !snapshot.app_id.is_empty(),
-    );
+    set_label_alignment(title_label, is_vertical, icon_visible);
+
+    base_widget.set_visible(should_show_window_title(&text, icon_visible, is_vertical));
 
     // Update tooltip
     update_tooltip(base_widget, config, app_name_cache, snapshot);
+}
+
+fn should_show_window_title(text: &str, icon_visible: bool, is_vertical: bool) -> bool {
+    if is_vertical {
+        icon_visible
+    } else {
+        !text.trim().is_empty() || icon_visible
+    }
 }
 
 fn set_label_alignment(title_label: &WindowTitleLabel, is_vertical: bool, icon_visible: bool) {
@@ -595,10 +621,10 @@ fn friendly_app_name(cache: &Rc<RefCell<HashMap<String, String>>>, app_id: &str)
 }
 
 /// Update the icon based on current app_id.
-fn update_icon(icon: &Image, icon_root: &GtkBox, snapshot: &WindowTitleSnapshot) {
+fn update_icon(icon: &Image, icon_root: &GtkBox, snapshot: &WindowTitleSnapshot) -> bool {
     if snapshot.app_id.is_empty() {
         icon_root.set_visible(false);
-        return;
+        return false;
     }
 
     // Use the desktop app info lookup to find the correct icon name.
@@ -614,6 +640,7 @@ fn update_icon(icon: &Image, icon_root: &GtkBox, snapshot: &WindowTitleSnapshot)
     }
 
     icon_root.set_visible(true);
+    true
 }
 
 /// Update the tooltip.
@@ -679,11 +706,12 @@ mod tests {
     fn test_window_title_config_default() {
         let entry = make_widget_entry("window_title", HashMap::new());
         let config = WindowTitleConfig::from_entry(&entry);
-        assert_eq!(config.empty_text, "—");
+        assert_eq!(config.empty_text, "");
         assert_eq!(config.template, "{display}");
         assert!(config.show_app_fallback);
         assert_eq!(config.max_chars, 0);
         assert!(config.show_icon);
+        assert_eq!(config.icon_size, None);
         assert!(!config.uppercase);
     }
 
@@ -699,13 +727,26 @@ mod tests {
             Value::String("{app}: {title}".to_string()),
         );
         options.insert("max_chars".to_string(), Value::Integer(50));
+        options.insert("icon_size".to_string(), Value::Integer(24));
         options.insert("uppercase".to_string(), Value::Boolean(true));
         let entry = make_widget_entry("window_title", options);
         let config = WindowTitleConfig::from_entry(&entry);
         assert_eq!(config.empty_text, "No window");
         assert_eq!(config.template, "{app}: {title}");
         assert_eq!(config.max_chars, 50);
+        assert_eq!(config.icon_size, Some(24));
         assert!(config.uppercase);
+    }
+
+    #[test]
+    fn test_window_title_config_icon_size_min_clamp() {
+        let mut options = HashMap::new();
+        options.insert("icon_size".to_string(), Value::Integer(2));
+
+        let entry = make_widget_entry("window_title", options);
+        let config = WindowTitleConfig::from_entry(&entry);
+
+        assert_eq!(config.icon_size, Some(8));
     }
 
     #[test]
@@ -719,17 +760,65 @@ mod tests {
     #[test]
     fn test_window_title_icon_size_vertical_is_larger_and_capped() {
         // Even bar size — even pixmap/icon stays even.
-        assert_eq!(window_title_icon_size_from_values(false, 20, 26, 32), 20);
-        assert_eq!(window_title_icon_size_from_values(true, 20, 26, 32), 24);
-        assert_eq!(window_title_icon_size_from_values(true, 24, 26, 32), 26);
+        assert_eq!(
+            window_title_icon_size_from_values(false, None, 20, 26, 32),
+            20
+        );
+        assert_eq!(
+            window_title_icon_size_from_values(true, None, 20, 26, 32),
+            24
+        );
+        assert_eq!(
+            window_title_icon_size_from_values(true, None, 24, 26, 32),
+            26
+        );
     }
 
     #[test]
     fn test_window_title_icon_size_matches_bar_parity() {
         // Odd bar size — icon parity flipped to odd so centering lands on
         // a whole pixel rather than a half-pixel.
-        assert_eq!(window_title_icon_size_from_values(false, 20, 26, 33), 19);
-        assert_eq!(window_title_icon_size_from_values(true, 20, 26, 33), 23);
+        assert_eq!(
+            window_title_icon_size_from_values(false, None, 20, 26, 33),
+            19
+        );
+        assert_eq!(
+            window_title_icon_size_from_values(true, None, 20, 26, 33),
+            23
+        );
+    }
+
+    #[test]
+    fn test_window_title_icon_size_override_applies_to_both_orientations() {
+        assert_eq!(
+            window_title_icon_size_from_values(false, Some(18), 20, 26, 32),
+            18
+        );
+        assert_eq!(
+            window_title_icon_size_from_values(true, Some(18), 20, 26, 32),
+            18
+        );
+    }
+
+    #[test]
+    fn test_window_title_icon_size_override_caps_to_widget_height() {
+        assert_eq!(
+            window_title_icon_size_from_values(false, Some(40), 20, 26, 32),
+            26
+        );
+        assert_eq!(
+            window_title_icon_size_from_values(true, Some(40), 20, 26, 32),
+            26
+        );
+    }
+
+    #[test]
+    fn test_should_show_window_title_visibility_rules() {
+        assert!(!should_show_window_title("", false, false));
+        assert!(should_show_window_title("—", false, false));
+        assert!(should_show_window_title("", true, false));
+        assert!(!should_show_window_title("anything", false, true));
+        assert!(should_show_window_title("", true, true));
     }
 
     #[test]
