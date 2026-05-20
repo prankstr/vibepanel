@@ -11,7 +11,7 @@ use crate::widgets::layer_shell_popover::{
     popover_bar_edge,
 };
 use std::time::{SystemTime, UNIX_EPOCH};
-use vibepanel_core::config::WidgetPlacement;
+use vibepanel_core::config::{BarPosition, WidgetPlacement};
 
 struct TestDir(PathBuf);
 
@@ -127,41 +127,101 @@ fn run_layer_shell_contract_subprocess(contract: &str) {
     );
 }
 
+fn test_bar_position(position: &str) -> BarPosition {
+    BarPosition::parse(position).unwrap_or_else(|| panic!("invalid bar position: {position}"))
+}
+
+fn bar_edge_for_position(position: BarPosition) -> gtk4_layer_shell::Edge {
+    match position {
+        BarPosition::Top => gtk4_layer_shell::Edge::Top,
+        BarPosition::Bottom => gtk4_layer_shell::Edge::Bottom,
+        BarPosition::Left => gtk4_layer_shell::Edge::Left,
+        BarPosition::Right => gtk4_layer_shell::Edge::Right,
+    }
+}
+
+fn expect_bar_window_anchor(position: BarPosition, edge: gtk4_layer_shell::Edge) -> bool {
+    edge == bar_edge_for_position(position)
+        || match edge {
+            gtk4_layer_shell::Edge::Top | gtk4_layer_shell::Edge::Bottom => position.is_vertical(),
+            gtk4_layer_shell::Edge::Left | gtk4_layer_shell::Edge::Right => {
+                position.is_horizontal()
+            }
+            _ => false,
+        }
+}
+
+fn expect_popover_anchor(position: BarPosition, edge: gtk4_layer_shell::Edge) -> bool {
+    edge == bar_edge_for_position(position)
+        || match edge {
+            gtk4_layer_shell::Edge::Right => position.is_horizontal(),
+            gtk4_layer_shell::Edge::Bottom => position.is_vertical(),
+            _ => false,
+        }
+}
+
+fn assert_bar_window_anchors(window: &ApplicationWindow, position: BarPosition) {
+    for edge in [
+        gtk4_layer_shell::Edge::Top,
+        gtk4_layer_shell::Edge::Right,
+        gtk4_layer_shell::Edge::Bottom,
+        gtk4_layer_shell::Edge::Left,
+    ] {
+        assert_eq!(
+            window.is_anchor(edge),
+            expect_bar_window_anchor(position, edge),
+            "bar window {edge:?} anchor should track bar.position={}",
+            position.as_str()
+        );
+    }
+}
+
+fn assert_popover_window_anchors(window: &ApplicationWindow, position: BarPosition) {
+    for edge in [
+        gtk4_layer_shell::Edge::Top,
+        gtk4_layer_shell::Edge::Right,
+        gtk4_layer_shell::Edge::Bottom,
+        gtk4_layer_shell::Edge::Left,
+    ] {
+        assert_eq!(
+            window.is_anchor(edge),
+            expect_popover_anchor(position, edge),
+            "popover {edge:?} anchor should track bar.position={}",
+            position.as_str()
+        );
+    }
+}
+
 fn run_layer_shell_bar_position_contract(position: &str) {
     let Some(context) = layer_shell_context_or_skip() else {
         return;
     };
 
-    let mut top_config = layer_shell_test_config();
-    top_config.bar.position = position.to_string();
-    let bar = present_layer_shell_bar(&context, &top_config, false);
-    let top_window = &bar.window;
+    let position = test_bar_position(position);
+    let mut config = layer_shell_test_config();
+    config.bar.position = position.as_str().to_string();
+    let bar = present_layer_shell_bar(&context, &config, false);
+    let window = &bar.window;
+    let expected_thickness = rendered_bar_height(&config);
+    let monitor_geometry = context.monitor.geometry();
+    let (default_width, default_height) = window.default_size();
 
-    let expect_bottom = position == "bottom";
+    assert!(window.is_layer_window());
+    assert_bar_window_anchors(window, position);
+    if position.is_vertical() {
+        assert_eq!(default_width, expected_thickness);
+        assert_eq!(default_height, monitor_geometry.height());
+    } else {
+        assert_eq!(default_width, monitor_geometry.width());
+        assert_eq!(default_height, expected_thickness);
+    }
+    assert_eq!(window.layer(), gtk4_layer_shell::Layer::Top);
+    assert_eq!(window.keyboard_mode(), gtk4_layer_shell::KeyboardMode::None);
+    assert!(window.auto_exclusive_zone_is_enabled());
+    assert_eq!(window.namespace().as_deref(), Some("vibepanel"));
+    assert_eq!(window.monitor().as_ref(), Some(&context.monitor));
 
-    assert!(top_window.is_layer_window());
-    assert_eq!(
-        top_window.is_anchor(gtk4_layer_shell::Edge::Top),
-        !expect_bottom,
-        "top anchor should track bar.position"
-    );
-    assert!(top_window.is_anchor(gtk4_layer_shell::Edge::Left));
-    assert!(top_window.is_anchor(gtk4_layer_shell::Edge::Right));
-    assert_eq!(
-        top_window.is_anchor(gtk4_layer_shell::Edge::Bottom),
-        expect_bottom,
-        "bottom anchor should track bar.position"
-    );
-    assert_eq!(top_window.layer(), gtk4_layer_shell::Layer::Top);
-    assert_eq!(
-        top_window.keyboard_mode(),
-        gtk4_layer_shell::KeyboardMode::None
-    );
-    assert!(top_window.auto_exclusive_zone_is_enabled());
-    assert_eq!(top_window.namespace().as_deref(), Some("vibepanel"));
-    assert_eq!(top_window.monitor().as_ref(), Some(&context.monitor));
-
-    top_window.close();
+    window.close();
     flush_gtk();
 }
 
@@ -192,8 +252,9 @@ fn run_layer_shell_popover_position_contract(position: &str) {
         return;
     };
 
+    let position = test_bar_position(position);
     let mut config = layer_shell_test_config();
-    config.bar.position = position.to_string();
+    config.bar.position = position.as_str().to_string();
     config.bar.padding = 10;
     config.bar.popover_offset = 18;
     config.bar.background_opacity = 1.0;
@@ -215,24 +276,12 @@ fn run_layer_shell_popover_position_contract(position: &str) {
         panic!("popover should create a click-catcher when shown");
     };
 
-    let expect_bottom = position == "bottom";
     let bar_edge = popover_bar_edge();
     let expected_bar_margin = calculate_popover_bar_margin();
     let expected_catcher_margin = calculate_bar_exclusive_zone();
 
     assert!(window.is_layer_window());
-    assert_eq!(
-        window.is_anchor(gtk4_layer_shell::Edge::Top),
-        !expect_bottom,
-        "popover top anchor should track bar.position"
-    );
-    assert!(window.is_anchor(gtk4_layer_shell::Edge::Right));
-    assert_eq!(
-        window.is_anchor(gtk4_layer_shell::Edge::Bottom),
-        expect_bottom,
-        "popover bottom anchor should track bar.position"
-    );
-    assert!(!window.is_anchor(gtk4_layer_shell::Edge::Left));
+    assert_popover_window_anchors(&window, position);
     assert_eq!(window.layer(), gtk4_layer_shell::Layer::Top);
     assert_ne!(window.keyboard_mode(), gtk4_layer_shell::KeyboardMode::None);
     assert_eq!(window.exclusive_zone(), 0);
@@ -272,8 +321,9 @@ fn run_layer_shell_popover_offset_contract(position: &str, background_opacity: f
         return;
     };
 
+    let position = test_bar_position(position);
     let mut config = layer_shell_test_config();
-    config.bar.position = position.to_string();
+    config.bar.position = position.as_str().to_string();
     config.bar.popover_offset = 23;
     config.bar.background_opacity = background_opacity;
     apply_layer_shell_config(&config, true);
@@ -295,23 +345,11 @@ fn run_layer_shell_popover_offset_contract(position: &str, background_opacity: f
     };
 
     let bar_edge = popover_bar_edge();
-    let expect_bottom = position == "bottom";
     let expected_bar_margin = calculate_popover_bar_margin();
     let expected_catcher_margin = calculate_bar_exclusive_zone();
 
     assert!(window.is_layer_window());
-    assert_eq!(
-        window.is_anchor(gtk4_layer_shell::Edge::Top),
-        !expect_bottom,
-        "popover top anchor should track bar.position"
-    );
-    assert!(window.is_anchor(gtk4_layer_shell::Edge::Right));
-    assert_eq!(
-        window.is_anchor(gtk4_layer_shell::Edge::Bottom),
-        expect_bottom,
-        "popover bottom anchor should track bar.position"
-    );
-    assert!(!window.is_anchor(gtk4_layer_shell::Edge::Left));
+    assert_popover_window_anchors(&window, position);
     assert_eq!(window.layer(), gtk4_layer_shell::Layer::Top);
     assert_eq!(
         window.namespace().as_deref(),
@@ -467,6 +505,16 @@ layer_shell_contract_tests!(
         run_layer_shell_bar_position_contract("bottom")
     ),
     (
+        test_layer_shell_bar_position_left,
+        "bar.position.left",
+        run_layer_shell_bar_position_contract("left")
+    ),
+    (
+        test_layer_shell_bar_position_right,
+        "bar.position.right",
+        run_layer_shell_bar_position_contract("right")
+    ),
+    (
         test_layer_shell_bar_height_visible,
         "bar.height.visible",
         run_layer_shell_bar_height_contract(1.0)
@@ -487,6 +535,16 @@ layer_shell_contract_tests!(
         run_layer_shell_popover_position_contract("bottom")
     ),
     (
+        test_layer_shell_popover_position_left,
+        "popover.position.left",
+        run_layer_shell_popover_position_contract("left")
+    ),
+    (
+        test_layer_shell_popover_position_right,
+        "popover.position.right",
+        run_layer_shell_popover_position_contract("right")
+    ),
+    (
         test_layer_shell_popover_offset_top,
         "popover.offset.top",
         run_layer_shell_popover_offset_contract("top", 0.0)
@@ -497,6 +555,16 @@ layer_shell_contract_tests!(
         run_layer_shell_popover_offset_contract("bottom", 0.0)
     ),
     (
+        test_layer_shell_popover_offset_left,
+        "popover.offset.left",
+        run_layer_shell_popover_offset_contract("left", 0.0)
+    ),
+    (
+        test_layer_shell_popover_offset_right,
+        "popover.offset.right",
+        run_layer_shell_popover_offset_contract("right", 0.0)
+    ),
+    (
         test_layer_shell_popover_offset_visible_top,
         "popover.offset.visible.top",
         run_layer_shell_popover_offset_contract("top", 1.0)
@@ -505,6 +573,16 @@ layer_shell_contract_tests!(
         test_layer_shell_popover_offset_visible_bottom,
         "popover.offset.visible.bottom",
         run_layer_shell_popover_offset_contract("bottom", 1.0)
+    ),
+    (
+        test_layer_shell_popover_offset_visible_left,
+        "popover.offset.visible.left",
+        run_layer_shell_popover_offset_contract("left", 1.0)
+    ),
+    (
+        test_layer_shell_popover_offset_visible_right,
+        "popover.offset.visible.right",
+        run_layer_shell_popover_offset_contract("right", 1.0)
     ),
     (
         test_layer_shell_clock_widget_popover,
