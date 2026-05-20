@@ -1703,8 +1703,7 @@ mod tests {
             css_var_value(&css, "--widget-height"),
             Some(expected_widget_height.as_str())
         );
-        assert_eq!(css_var_value(&css, "--bar-padding-y"), Some("10px"));
-        assert_eq!(css_var_value(&css, "--bar-padding-y-bottom"), Some("10px"));
+        assert_bar_padding_contract(&css, 10, 0, 10, 0, "visible top bar");
         assert_eq!(
             css_var_value(&css, "--color-background-bar"),
             Some("#445566")
@@ -1732,8 +1731,7 @@ mod tests {
             css_var_value(&css, "--color-background-bar"),
             Some("transparent")
         );
-        assert_eq!(css_var_value(&css, "--bar-padding-y"), Some("10px"));
-        assert_eq!(css_var_value(&css, "--bar-padding-y-bottom"), Some("0px"));
+        assert_bar_padding_contract(&css, 10, 0, 0, 0, "transparent top bar");
     }
 
     #[test]

@@ -232,9 +232,9 @@ impl TaskbarWidget {
         let content_css = CssProvider::new();
         content_css.load_from_string(&format!(
             ".taskbar .content {{ \
-               --taskbar-content-edge: max(0px, calc(var(--vp-widget-content-padding) - {pad}px)); \
-               --taskbar-button-gap: max(0px, calc(var(--vp-widget-content-gap) - {two_pad}px)); \
-               --taskbar-separator-gap: max(0px, calc(var(--vp-widget-content-gap) - {pad}px - 2px)); \
+               --vp-taskbar-content-edge: max(0px, calc(var(--vp-widget-content-padding) - {pad}px)); \
+               --vp-taskbar-button-gap: max(0px, calc(var(--vp-widget-content-gap) - {two_pad}px)); \
+               --vp-taskbar-separator-gap: max(0px, calc(var(--vp-widget-content-gap) - {pad}px - 2px)); \
             }}",
         ));
         #[allow(deprecated)]

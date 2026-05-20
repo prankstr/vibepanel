@@ -455,8 +455,18 @@ fn rust_composed_theme_var_css() -> &'static str {
     concat!(
         include_str!("services/surfaces.rs"),
         "\n",
+        include_str!("widgets/taskbar.rs"),
+        "\n",
         include_str!("widgets/osd.rs")
     )
+}
+
+fn local_runtime_css_variables() -> BTreeSet<&'static str> {
+    BTreeSet::from([
+        "--vp-taskbar-button-gap",
+        "--vp-taskbar-content-edge",
+        "--vp-taskbar-separator-gap",
+    ])
 }
 
 #[test]
@@ -469,6 +479,7 @@ fn theme_vars_have_valid_internal_consumers() {
         crate::widgets::css::utility_css(&config),
         crate::widgets::css::widget_css(&config)
     );
+    let production_declared_vars = declared_css_variables(&production_css);
     let var_uses = css_var_uses_in_css(&production_css);
     let internal_css = format!("{}\n{}", production_css, rust_composed_theme_var_css());
     let internal_var_uses = css_var_uses_in_css(&internal_css);
@@ -483,6 +494,7 @@ fn theme_vars_have_valid_internal_consumers() {
         .iter()
         .map(|var| (var.name, var))
         .collect::<BTreeMap<_, _>>();
+    let local_runtime_vars = local_runtime_css_variables();
 
     let missing_builtin_consumers = THEME_VAR_EXPECTATIONS
         .iter()
@@ -510,6 +522,8 @@ fn theme_vars_have_valid_internal_consumers() {
         .iter()
         .filter(|name| {
             !emitted_root_vars.contains(name.as_str())
+                && !production_declared_vars.contains(name.as_str())
+                && !local_runtime_vars.contains(name.as_str())
                 && !expectations_by_name.contains_key(name.as_str())
         })
         .collect::<Vec<_>>();
@@ -535,7 +549,13 @@ fn theme_vars_have_valid_internal_consumers() {
         .flat_map(|expectation| {
             let matching_uses = var_uses
                 .iter()
-                .filter(|var_use| var_use.name == expectation.name)
+                .filter(|var_use| {
+                    var_use.name == expectation.name
+                        || var_use
+                            .fallback_vars
+                            .iter()
+                            .any(|fallback| fallback == expectation.name)
+                })
                 .collect::<Vec<_>>();
             let mut errors = Vec::new();
             if matching_uses.is_empty() {
@@ -557,6 +577,9 @@ fn theme_vars_have_valid_internal_consumers() {
                         ));
                         continue;
                     };
+                    if fallback_expectation.scope == ThemeVarScope::UserHook {
+                        continue;
+                    }
                     if fallback_expectation.scope != ThemeVarScope::Root {
                         errors.push(format!(
                             "{} fallback {} is not a root variable",

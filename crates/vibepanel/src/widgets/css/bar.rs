@@ -464,24 +464,26 @@ workspace-container > .workspace-indicator:not(:last-child) {{
    Taskbar is excluded from generic child spacing because its direct
    children are buttons/separators, not the visual icons/labels that the
    generic rule targets. The runtime CSS in taskbar.rs sets per-instance
-   --taskbar-content-edge / --taskbar-button-gap / --taskbar-separator-gap
-   as calc expressions derived from --vp-widget-content-padding/gap. */
+   internal --vp-taskbar-* variables as calc expressions derived from
+   --vp-widget-content-padding/gap. Users can tune taskbar spacing via the
+   public --widget-content-padding-offset / --widget-content-gap-offset hooks
+   scoped to .taskbar. */
 
 /* Override the generic `.widget:not(.widget-group) .content` flow-axis
-   padding to use the per-instance --taskbar-content-edge variable. The
+   padding to use the per-instance --vp-taskbar-content-edge variable. The
    cross-axis padding (var(--widget-padding-y)) still comes from the generic
    rule. Specificity (.widget.taskbar:not(.widget-group) .content = 0,4,0)
    beats the generic rule (0,3,0). */
 .widget.taskbar:not(.widget-group) .content {{
-    padding-left: var(--taskbar-content-edge, 0px);
-    padding-right: var(--taskbar-content-edge, 0px);
+    padding-left: var(--vp-taskbar-content-edge, 0px);
+    padding-right: var(--vp-taskbar-content-edge, 0px);
 }}
 
 .bar--vertical .widget.taskbar:not(.widget-group) .content {{
     padding-left: 0;
     padding-right: 0;
-    padding-top: var(--taskbar-content-edge, 0px);
-    padding-bottom: var(--taskbar-content-edge, 0px);
+    padding-top: var(--vp-taskbar-content-edge, 0px);
+    padding-bottom: var(--vp-taskbar-content-edge, 0px);
 }}
 
 .taskbar .content > .taskbar-separator {{
@@ -489,24 +491,24 @@ workspace-container > .workspace-indicator:not(:last-child) {{
 }}
 
 .taskbar .content > .taskbar-button + .taskbar-button {{
-    margin-left: var(--taskbar-button-gap, 0px);
+    margin-left: var(--vp-taskbar-button-gap, 0px);
 }}
 
 .taskbar .content > .taskbar-separator {{
-    margin-left: var(--taskbar-separator-gap, 0px);
-    margin-right: var(--taskbar-separator-gap, 0px);
+    margin-left: var(--vp-taskbar-separator-gap, 0px);
+    margin-right: var(--vp-taskbar-separator-gap, 0px);
 }}
 
 .bar--vertical .taskbar .content > .taskbar-button + .taskbar-button {{
     margin-left: 0;
-    margin-top: var(--taskbar-button-gap, 0px);
+    margin-top: var(--vp-taskbar-button-gap, 0px);
 }}
 
 .bar--vertical .taskbar .content > .taskbar-separator {{
     margin-left: 0;
     margin-right: 0;
-    margin-top: var(--taskbar-separator-gap, 0px);
-    margin-bottom: var(--taskbar-separator-gap, 0px);
+    margin-top: var(--vp-taskbar-separator-gap, 0px);
+    margin-bottom: var(--vp-taskbar-separator-gap, 0px);
 }}
 
 .bar--vertical .taskbar .content > .taskbar-separator {{

@@ -1070,8 +1070,6 @@ fn config_theme_changed(old: &Config, new: &Config) -> bool {
         || old.bar.padding != new.bar.padding
         || old.bar.position != new.bar.position
         || old.bar.size != new.bar.size
-        || old.bar.position != new.bar.position
-        || old.bar.padding != new.bar.padding
         || old.bar.outline != new.bar.outline
         || old.widgets.background_color != new.widgets.background_color
         || old.widgets.background_opacity != new.widgets.background_opacity
@@ -1342,7 +1340,7 @@ mod tests {
 
     #[test]
     fn test_config_theme_changed_detects_bar_padding_tokens() {
-        // bar.padding feeds the cached ThemePalette's --bar-padding-y tokens.
+        // bar.padding feeds the cached ThemePalette's internal bar padding tokens.
         // Without a theme reload, a structural rebuild can resize the layer-shell
         // window while CSS still applies the old screen-edge padding until restart.
         let old = Config::default();
