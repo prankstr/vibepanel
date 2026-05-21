@@ -54,7 +54,11 @@ impl CpuFormat {
 pub struct CpuConfig {
     /// Whether to show an icon.
     pub show_icon: bool,
-    /// Whether to show the CPU usage percentage.
+    /// Whether to show the CPU value label.
+    ///
+    /// Deprecated: prefer leaving this enabled and using `format` to choose the
+    /// label contents. This legacy option gates the whole label, including
+    /// temperature.
     pub show_percentage: bool,
     /// Display format for CPU metrics.
     pub format: CpuFormat,
@@ -217,11 +221,7 @@ fn update_cpu_widget(
         icon_handle.remove_css_class(widget::CPU_HIGH);
     }
 
-    if options.show_icon {
-        icon_handle.widget().set_visible(true);
-    } else {
-        icon_handle.widget().set_visible(false);
-    }
+    icon_handle.widget().set_visible(options.show_icon);
 
     if options.show_percentage {
         let text = format_cpu_label(snapshot, &options.format, options.is_vertical);
@@ -258,16 +258,22 @@ fn format_cpu_label(snapshot: &SystemSnapshot, format: &CpuFormat, is_vertical: 
     match format {
         CpuFormat::Usage => format_cpu_usage(snapshot.cpu_usage, is_vertical),
         CpuFormat::Temperature => match snapshot.cpu_temp {
+            Some(temp) if is_vertical => format!("{temp:.0}°"),
             Some(temp) => format!("{temp:.0}°C"),
             None => "—".to_string(),
         },
         CpuFormat::Both => {
             let usage_part = format_cpu_usage(snapshot.cpu_usage, is_vertical);
             let temp_part = match snapshot.cpu_temp {
+                Some(temp) if is_vertical => format!("{temp:.0}°"),
                 Some(temp) => format!("{temp:.0}°C"),
                 None => "—".to_string(),
             };
-            format!("{usage_part} {temp_part}")
+            if is_vertical {
+                format!("{usage_part}\n{temp_part}")
+            } else {
+                format!("{usage_part} {temp_part}")
+            }
         }
     }
 }
@@ -320,7 +326,11 @@ mod tests {
         assert_eq!(format_cpu_label(&snapshot, &CpuFormat::Usage, true), "42");
         assert_eq!(
             format_cpu_label(&snapshot, &CpuFormat::Both, true),
-            "42 72°C"
+            "42\n72°"
+        );
+        assert_eq!(
+            format_cpu_label(&snapshot, &CpuFormat::Temperature, true),
+            "72°"
         );
     }
 
