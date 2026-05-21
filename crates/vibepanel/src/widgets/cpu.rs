@@ -56,20 +56,12 @@ pub struct CpuConfig {
     pub show_icon: bool,
     /// Whether to show the CPU value label.
     ///
-    /// Deprecated: prefer leaving this enabled and using `format` to choose the
-    /// label contents. This legacy option gates the whole label, including
-    /// temperature.
+    /// Deprecated for user configuration: prefer leaving this enabled and using
+    /// `format` to choose the label contents. This legacy option gates the whole
+    /// label, including temperature.
     pub show_percentage: bool,
     /// Display format for CPU metrics.
     pub format: CpuFormat,
-}
-
-#[derive(Clone)]
-struct CpuRenderOptions {
-    show_icon: bool,
-    show_percentage: bool,
-    format: CpuFormat,
-    is_vertical: bool,
 }
 
 impl WidgetConfig for CpuConfig {
@@ -113,7 +105,7 @@ impl Default for CpuConfig {
     }
 }
 
-/// CPU widget that displays icon, usage percentage, and opens a shared system
+/// CPU widget that displays icon, usage/temperature label, and opens a shared system
 /// popover on click.
 pub struct CpuWidget {
     /// Shared base widget container.
@@ -152,20 +144,20 @@ impl CpuWidget {
             let container = base.widget().clone();
             let icon_handle = icon_handle.clone();
             let percentage_label = percentage_label.clone();
-            let render_options = CpuRenderOptions {
-                show_icon: config.show_icon,
-                show_percentage: config.show_percentage,
-                format: config.format.clone(),
-                is_vertical: ConfigManager::global().bar_position().is_vertical(),
-            };
+            let show_icon = config.show_icon;
+            let show_percentage = config.show_percentage;
+            let format = config.format.clone();
+            let is_vertical = ConfigManager::global().bar_position().is_vertical();
             let popover_binding = popover_binding.clone();
 
             system_service.connect(move |snapshot: &SystemSnapshot| {
                 update_cpu_widget(
                     &container,
                     &icon_handle,
-                    &percentage_label,
-                    &render_options,
+                    show_percentage.then_some(&percentage_label),
+                    show_icon,
+                    &format,
+                    is_vertical,
                     snapshot,
                 );
 
@@ -195,15 +187,17 @@ impl Drop for CpuWidget {
 fn update_cpu_widget(
     container: &gtk4::Box,
     icon_handle: &IconHandle,
-    percentage_label: &Label,
-    options: &CpuRenderOptions,
+    percentage_label: Option<&Label>,
+    show_icon: bool,
+    format: &CpuFormat,
+    is_vertical: bool,
     snapshot: &SystemSnapshot,
 ) {
     if !snapshot.available {
-        if options.show_icon {
+        if show_icon {
             icon_handle.widget().set_visible(true);
         }
-        if options.show_percentage {
+        if let Some(percentage_label) = percentage_label {
             percentage_label.set_label("?");
             percentage_label.set_visible(true);
         }
@@ -221,14 +215,12 @@ fn update_cpu_widget(
         icon_handle.remove_css_class(widget::CPU_HIGH);
     }
 
-    icon_handle.widget().set_visible(options.show_icon);
+    icon_handle.widget().set_visible(show_icon);
 
-    if options.show_percentage {
-        let text = format_cpu_label(snapshot, &options.format, options.is_vertical);
+    if let Some(percentage_label) = percentage_label {
+        let text = format_cpu_label(snapshot, format, is_vertical);
         percentage_label.set_label(&text);
         percentage_label.set_visible(true);
-    } else {
-        percentage_label.set_visible(false);
     }
 
     let tooltip = match snapshot.cpu_temp {
