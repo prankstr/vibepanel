@@ -1326,8 +1326,12 @@ fn collect_display_ids(
         .map(|ws| ws.id)
         .collect();
 
-    // Include active workspaces (supports multi-tag view).
-    display_ids.extend(active_workspaces.iter());
+    // Include active workspaces (supports multi-tag view). Mango/DWL overview
+    // reports every tag as active; in compact mode, avoid expanding the widget
+    // with empty active tags when this all-tags-active shape is likely overview.
+    if !is_all_tags_active_with_empty_tags(workspaces, active_workspaces, show_unoccupied) {
+        display_ids.extend(active_workspaces.iter());
+    }
 
     if include_all_output_active {
         // In all-output mode, show each output's current workspace even when it
@@ -1339,6 +1343,20 @@ fn collect_display_ids(
     }
 
     display_ids
+}
+
+fn is_all_tags_active_with_empty_tags(
+    workspaces: &[Workspace],
+    active_workspaces: &HashSet<i32>,
+    show_unoccupied: bool,
+) -> bool {
+    !show_unoccupied
+        && workspaces.len() > 1
+        && active_workspaces.len() == workspaces.len()
+        && workspaces
+            .iter()
+            .all(|ws| active_workspaces.contains(&ws.id))
+        && workspaces.iter().any(|ws| !ws.occupied)
 }
 
 /// Update workspace indicators based on the current snapshot.
@@ -2017,6 +2035,66 @@ mod tests {
             collect_display_ids(&workspaces, &active_workspaces, &snapshot, true, false);
         assert_eq!(show_unoccupied_ids, HashSet::from([1, 2, 3]));
         assert!(!show_unoccupied_ids.contains(&4));
+    }
+
+    #[test]
+    fn test_all_tags_active_with_empty_tags_shows_only_occupied_by_default() {
+        let active_workspaces: HashSet<i32> = (1..=9).collect();
+        let workspaces: Vec<Workspace> = (1..=9)
+            .map(|id| {
+                let occupied = matches!(id, 1 | 3 | 5);
+                make_workspace(
+                    id,
+                    &id.to_string(),
+                    true,
+                    occupied,
+                    false,
+                    Some(occupied as u32),
+                )
+            })
+            .collect();
+        let snapshot = WorkspaceServiceSnapshot {
+            active_workspace: active_workspaces.clone(),
+            occupied_workspaces: HashSet::from([1, 3, 5]),
+            window_counts: HashMap::new(),
+            workspaces: workspaces.clone(),
+            per_output: HashMap::new(),
+        };
+
+        let display_ids =
+            collect_display_ids(&workspaces, &active_workspaces, &snapshot, false, false);
+
+        assert_eq!(display_ids, HashSet::from([1, 3, 5]));
+    }
+
+    #[test]
+    fn test_partial_multi_tag_active_still_shows_empty_active_tags() {
+        let active_workspaces = HashSet::from([1, 3, 5]);
+        let workspaces: Vec<Workspace> = (1..=9)
+            .map(|id| {
+                let active = active_workspaces.contains(&id);
+                make_workspace(
+                    id,
+                    &id.to_string(),
+                    active,
+                    id == 1,
+                    false,
+                    Some((id == 1) as u32),
+                )
+            })
+            .collect();
+        let snapshot = WorkspaceServiceSnapshot {
+            active_workspace: active_workspaces.clone(),
+            occupied_workspaces: HashSet::from([1]),
+            window_counts: HashMap::new(),
+            workspaces: workspaces.clone(),
+            per_output: HashMap::new(),
+        };
+
+        let display_ids =
+            collect_display_ids(&workspaces, &active_workspaces, &snapshot, false, false);
+
+        assert_eq!(display_ids, HashSet::from([1, 3, 5]));
     }
 
     // -- compute_left_count tests --
