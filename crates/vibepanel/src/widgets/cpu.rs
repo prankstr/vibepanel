@@ -27,6 +27,28 @@ use crate::widgets::{WidgetConfig, warn_unknown_options};
 const DEFAULT_SHOW_ICON: bool = true;
 const DEFAULT_SHOW_PERCENTAGE: bool = true;
 
+/// CPU display format options.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub enum CpuFormat {
+    /// "76%"
+    #[default]
+    Usage,
+    /// "72°C"
+    Temperature,
+    /// "76% 72°C"
+    Both,
+}
+
+impl CpuFormat {
+    fn from_str(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "temperature" | "temp" => Self::Temperature,
+            "both" => Self::Both,
+            _ => Self::Usage,
+        }
+    }
+}
+
 /// Configuration for the CPU widget.
 #[derive(Debug, Clone)]
 pub struct CpuConfig {
@@ -34,11 +56,21 @@ pub struct CpuConfig {
     pub show_icon: bool,
     /// Whether to show the CPU usage percentage.
     pub show_percentage: bool,
+    /// Display format for CPU metrics.
+    pub format: CpuFormat,
+}
+
+#[derive(Clone)]
+struct CpuRenderOptions {
+    show_icon: bool,
+    show_percentage: bool,
+    format: CpuFormat,
+    is_vertical: bool,
 }
 
 impl WidgetConfig for CpuConfig {
     fn from_entry(entry: &WidgetEntry) -> Self {
-        warn_unknown_options("cpu", entry, &["show_icon", "show_percentage"]);
+        warn_unknown_options("cpu", entry, &["show_icon", "show_percentage", "format"]);
 
         let show_icon = entry
             .options
@@ -52,9 +84,17 @@ impl WidgetConfig for CpuConfig {
             .and_then(|v| v.as_bool())
             .unwrap_or(DEFAULT_SHOW_PERCENTAGE);
 
+        let format = entry
+            .options
+            .get("format")
+            .and_then(|v| v.as_str())
+            .map(CpuFormat::from_str)
+            .unwrap_or_default();
+
         Self {
             show_icon,
             show_percentage,
+            format,
         }
     }
 }
@@ -64,6 +104,7 @@ impl Default for CpuConfig {
         Self {
             show_icon: DEFAULT_SHOW_ICON,
             show_percentage: DEFAULT_SHOW_PERCENTAGE,
+            format: CpuFormat::default(),
         }
     }
 }
@@ -107,9 +148,12 @@ impl CpuWidget {
             let container = base.widget().clone();
             let icon_handle = icon_handle.clone();
             let percentage_label = percentage_label.clone();
-            let show_icon = config.show_icon;
-            let show_percentage = config.show_percentage;
-            let is_vertical = ConfigManager::global().bar_position().is_vertical();
+            let render_options = CpuRenderOptions {
+                show_icon: config.show_icon,
+                show_percentage: config.show_percentage,
+                format: config.format.clone(),
+                is_vertical: ConfigManager::global().bar_position().is_vertical(),
+            };
             let popover_binding = popover_binding.clone();
 
             system_service.connect(move |snapshot: &SystemSnapshot| {
@@ -117,9 +161,7 @@ impl CpuWidget {
                     &container,
                     &icon_handle,
                     &percentage_label,
-                    show_icon,
-                    show_percentage,
-                    is_vertical,
+                    &render_options,
                     snapshot,
                 );
 
@@ -150,16 +192,14 @@ fn update_cpu_widget(
     container: &gtk4::Box,
     icon_handle: &IconHandle,
     percentage_label: &Label,
-    show_icon: bool,
-    show_percentage: bool,
-    is_vertical: bool,
+    options: &CpuRenderOptions,
     snapshot: &SystemSnapshot,
 ) {
     if !snapshot.available {
-        if show_icon {
+        if options.show_icon {
             icon_handle.widget().set_visible(true);
         }
-        if show_percentage {
+        if options.show_percentage {
             percentage_label.set_label("?");
             percentage_label.set_visible(true);
         }
@@ -177,33 +217,58 @@ fn update_cpu_widget(
         icon_handle.remove_css_class(widget::CPU_HIGH);
     }
 
-    if show_icon {
+    if options.show_icon {
         icon_handle.widget().set_visible(true);
     } else {
         icon_handle.widget().set_visible(false);
     }
 
-    if show_percentage {
-        let text = format_cpu_label(snapshot.cpu_usage, is_vertical);
+    if options.show_percentage {
+        let text = format_cpu_label(snapshot, &options.format, options.is_vertical);
         percentage_label.set_label(&text);
         percentage_label.set_visible(true);
     } else {
         percentage_label.set_visible(false);
     }
 
-    let tooltip = format!(
-        "CPU: {:.1}%\nCores: {}",
-        snapshot.cpu_usage, snapshot.cpu_core_count
-    );
+    let tooltip = match snapshot.cpu_temp {
+        Some(temp) => format!(
+            "CPU: {:.1}%\nTemp: {:.0}°C\nCores: {}",
+            snapshot.cpu_usage, temp, snapshot.cpu_core_count
+        ),
+        None => format!(
+            "CPU: {:.1}%\nCores: {}",
+            snapshot.cpu_usage, snapshot.cpu_core_count
+        ),
+    };
     let tooltip_manager = TooltipManager::global();
     tooltip_manager.set_styled_tooltip(container, &tooltip);
 }
 
-fn format_cpu_label(cpu_usage: f32, is_vertical: bool) -> String {
+fn format_cpu_usage(cpu_usage: f32, is_vertical: bool) -> String {
     if is_vertical {
         format!("{cpu_usage:.0}")
     } else {
         format!("{cpu_usage:.0}%")
+    }
+}
+
+/// Format CPU label text according to the selected format.
+fn format_cpu_label(snapshot: &SystemSnapshot, format: &CpuFormat, is_vertical: bool) -> String {
+    match format {
+        CpuFormat::Usage => format_cpu_usage(snapshot.cpu_usage, is_vertical),
+        CpuFormat::Temperature => match snapshot.cpu_temp {
+            Some(temp) => format!("{temp:.0}°C"),
+            None => "—".to_string(),
+        },
+        CpuFormat::Both => {
+            let usage_part = format_cpu_usage(snapshot.cpu_usage, is_vertical);
+            let temp_part = match snapshot.cpu_temp {
+                Some(temp) => format!("{temp:.0}°C"),
+                None => "—".to_string(),
+            };
+            format!("{usage_part} {temp_part}")
+        }
     }
 }
 
@@ -220,6 +285,7 @@ mod tests {
         let config = CpuConfig::from_entry(&entry);
         assert!(config.show_icon);
         assert!(config.show_percentage);
+        assert_eq!(config.format, CpuFormat::Usage);
     }
 
     #[test]
@@ -227,6 +293,10 @@ mod tests {
         let mut options = std::collections::HashMap::new();
         options.insert("show_icon".to_string(), toml::Value::Boolean(false));
         options.insert("show_percentage".to_string(), toml::Value::Boolean(true));
+        options.insert(
+            "format".to_string(),
+            toml::Value::String("both".to_string()),
+        );
 
         let entry = WidgetEntry {
             name: "cpu".to_string(),
@@ -235,11 +305,45 @@ mod tests {
         let config = CpuConfig::from_entry(&entry);
         assert!(!config.show_icon);
         assert!(config.show_percentage);
+        assert_eq!(config.format, CpuFormat::Both);
     }
 
     #[test]
     fn test_format_cpu_label_compacts_vertical() {
-        assert_eq!(format_cpu_label(42.4, false), "42%");
-        assert_eq!(format_cpu_label(42.4, true), "42");
+        let snapshot = SystemSnapshot {
+            available: true,
+            cpu_usage: 42.4,
+            cpu_temp: Some(72.0),
+            ..Default::default()
+        };
+        assert_eq!(format_cpu_label(&snapshot, &CpuFormat::Usage, false), "42%");
+        assert_eq!(format_cpu_label(&snapshot, &CpuFormat::Usage, true), "42");
+        assert_eq!(
+            format_cpu_label(&snapshot, &CpuFormat::Both, true),
+            "42 72°C"
+        );
+    }
+
+    #[test]
+    fn test_cpu_format_from_str() {
+        assert_eq!(CpuFormat::from_str("usage"), CpuFormat::Usage);
+        assert_eq!(CpuFormat::from_str("temperature"), CpuFormat::Temperature);
+        assert_eq!(CpuFormat::from_str("temp"), CpuFormat::Temperature);
+        assert_eq!(CpuFormat::from_str("both"), CpuFormat::Both);
+        assert_eq!(CpuFormat::from_str("unknown"), CpuFormat::Usage);
+    }
+
+    #[test]
+    fn test_format_cpu_label_temperature_unavailable() {
+        let snapshot = SystemSnapshot {
+            available: true,
+            cpu_usage: 76.0,
+            cpu_temp: None,
+            ..Default::default()
+        };
+        assert_eq!(
+            format_cpu_label(&snapshot, &CpuFormat::Temperature, false),
+            "—"
+        );
     }
 }
