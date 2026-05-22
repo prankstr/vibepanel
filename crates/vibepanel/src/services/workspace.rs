@@ -12,7 +12,7 @@ use std::rc::Rc;
 use tracing::debug;
 
 use super::callbacks::{CallbackId, Callbacks};
-use super::compositor::{CompositorManager, WorkspaceMeta, WorkspaceSnapshot};
+use super::compositor::{CompositorManager, PerOutputState, WorkspaceMeta, WorkspaceSnapshot};
 
 /// Enriched workspace object for widget consumption.
 ///
@@ -96,6 +96,49 @@ impl Workspace {
             output: meta.output.clone(),
         }
     }
+}
+
+fn active_output_overview_workspace<'a>(
+    workspaces_meta: &'a [WorkspaceMeta],
+    active_workspace: &HashSet<i32>,
+) -> Option<&'a WorkspaceMeta> {
+    workspaces_meta
+        .iter()
+        .find(|meta| is_overview_workspace_meta(meta) && active_workspace.contains(&meta.id))
+}
+
+fn is_overview_workspace_meta(meta: &WorkspaceMeta) -> bool {
+    meta.id == 0 && meta.name.eq_ignore_ascii_case("overview")
+}
+
+fn workspaces_for_output(
+    workspaces_meta: &[WorkspaceMeta],
+    snapshot: &WorkspaceSnapshot,
+    output_name: &str,
+    output_state: &PerOutputState,
+) -> Vec<Workspace> {
+    if let Some(active_output_meta) =
+        active_output_overview_workspace(workspaces_meta, &output_state.active_workspace)
+    {
+        return vec![Workspace::from_meta_per_output(
+            active_output_meta,
+            snapshot,
+            output_name,
+        )];
+    }
+
+    workspaces_meta
+        .iter()
+        .filter(|meta| {
+            if is_overview_workspace_meta(meta) {
+                return false;
+            }
+
+            // Include if workspace is global (output is None) or belongs to this output
+            meta.output.is_none() || meta.output.as_deref() == Some(output_name)
+        })
+        .map(|meta| Workspace::from_meta_per_output(meta, snapshot, output_name))
+        .collect()
 }
 
 /// Per-output workspace state for widget consumption.
@@ -265,14 +308,8 @@ impl WorkspaceService {
             // Filter workspaces for this output:
             // - For Niri: only include workspaces that belong to this output
             // - For MangoWC: include all workspaces (tags are global) but with per-output state
-            let output_workspaces: Vec<Workspace> = workspaces_meta
-                .iter()
-                .filter(|meta| {
-                    // Include if workspace is global (output is None) or belongs to this output
-                    meta.output.is_none() || meta.output.as_ref() == Some(output_name)
-                })
-                .map(|meta| Workspace::from_meta_per_output(meta, &snapshot, output_name))
-                .collect();
+            let output_workspaces =
+                workspaces_for_output(&workspaces_meta, &snapshot, output_name, output_state);
 
             per_output.insert(
                 output_name.clone(),
@@ -311,6 +348,19 @@ mod tests {
             name: id.to_string(),
             output: None,
         }
+    }
+
+    fn make_meta_with_name(id: i32, name: &str) -> WorkspaceMeta {
+        WorkspaceMeta {
+            id,
+            idx: id,
+            name: name.to_string(),
+            output: None,
+        }
+    }
+
+    fn workspace_ids(workspaces: &[Workspace]) -> Vec<i32> {
+        workspaces.iter().map(|workspace| workspace.id).collect()
     }
 
     #[test]
@@ -445,5 +495,48 @@ mod tests {
         let ws = Workspace::from_meta_per_output(&make_meta(1), &snapshot, "HDMI-1");
         assert!(ws.active);
         assert!(ws.occupied);
+    }
+
+    #[test]
+    fn test_workspaces_for_output_replaces_tags_with_active_overview() {
+        let workspaces_meta = vec![
+            make_meta(1),
+            make_meta(2),
+            make_meta_with_name(0, "Overview"),
+        ];
+        let mut snapshot = WorkspaceSnapshot::default();
+        let mut per_output_state = PerOutputState::default();
+        per_output_state.active_workspace.insert(0);
+        snapshot
+            .per_output
+            .insert("eDP-1".to_string(), per_output_state.clone());
+
+        let workspaces =
+            workspaces_for_output(&workspaces_meta, &snapshot, "eDP-1", &per_output_state);
+
+        assert_eq!(workspace_ids(&workspaces), vec![0]);
+        assert_eq!(workspaces[0].name, "Overview");
+        assert!(workspaces[0].active);
+    }
+
+    #[test]
+    fn test_workspaces_for_output_keeps_normal_tags_on_other_outputs() {
+        let workspaces_meta = vec![
+            make_meta(1),
+            make_meta(2),
+            make_meta_with_name(0, "Overview"),
+        ];
+        let mut snapshot = WorkspaceSnapshot::default();
+        let mut per_output_state = PerOutputState::default();
+        per_output_state.active_workspace.insert(2);
+        snapshot
+            .per_output
+            .insert("DP-1".to_string(), per_output_state.clone());
+
+        let workspaces =
+            workspaces_for_output(&workspaces_meta, &snapshot, "DP-1", &per_output_state);
+
+        assert_eq!(workspace_ids(&workspaces), vec![1, 2]);
+        assert!(workspaces[1].active);
     }
 }

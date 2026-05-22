@@ -14,7 +14,7 @@
 //! Events are double-buffered: state is collected and applied on `frame` events.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::io::{AsRawFd, FromRawFd};
 use std::rc::Rc;
@@ -39,6 +39,11 @@ use super::{
 
 /// Default number of workspaces/tags for DWL.
 const DEFAULT_WORKSPACE_COUNT: u32 = 9;
+const OVERVIEW_WORKSPACE_ID: i32 = 0;
+const OVERVIEW_WORKSPACE_NAME: &str = "overview";
+// Mango's DWL IPC path exposes only the layout symbol. This is Mango's
+// default overview symbol; custom compositor configs may need updating here.
+const OVERVIEW_LAYOUT_SYMBOL: &str = "󰃇";
 
 /// Per-output state accumulated during a frame.
 #[derive(Debug, Clone, Default)]
@@ -51,6 +56,8 @@ struct OutputFrameState {
     title: Option<String>,
     /// Window app_id update.
     appid: Option<String>,
+    /// Layout symbol update.
+    layout_symbol: Option<String>,
 }
 
 impl OutputFrameState {
@@ -59,6 +66,7 @@ impl OutputFrameState {
         self.tags.clear();
         self.title = None;
         self.appid = None;
+        self.layout_symbol = None;
     }
 }
 
@@ -129,6 +137,8 @@ struct WaylandState {
     snapshot: WorkspaceSnapshot,
     /// Current focused output ID.
     focused_output: Option<ObjectId>,
+    /// Outputs currently reporting Mango's overview layout symbol.
+    overview_outputs: HashSet<ObjectId>,
     /// Workspace update callback.
     on_workspace_update: Option<WorkspaceCallback>,
     /// Window update callback.
@@ -149,6 +159,7 @@ impl WaylandState {
             pending_outputs: Vec::new(),
             snapshot: WorkspaceSnapshot::default(),
             focused_output: None,
+            overview_outputs: HashSet::new(),
             on_workspace_update: None,
             on_window_update: None,
             on_keyboard_layout_update: None,
@@ -181,6 +192,17 @@ impl WaylandState {
                 },
             );
         }
+    }
+
+    fn output_name(output_id: &ObjectId, output: &TrackedOutput) -> String {
+        output
+            .name
+            .clone()
+            .unwrap_or_else(|| format!("output-{output_id:?}"))
+    }
+
+    fn is_overview_layout_symbol(symbol: &str) -> bool {
+        symbol == OVERVIEW_LAYOUT_SYMBOL || symbol.eq_ignore_ascii_case("overview")
     }
 
     /// Check for and process any pending workspace switch.
@@ -225,18 +247,15 @@ impl WaylandState {
     /// Apply buffered frame state for an output.
     fn apply_frame(&mut self, output_id: &ObjectId) {
         // First, extract all the data we need from the output
-        let (output_name, is_focused_output, frame_tags, frame_title, frame_appid) = {
+        let (output_name, is_focused_output, frame_tags, frame_title, frame_appid, layout_symbol) = {
             let Some(output) = self.outputs.get_mut(output_id) else {
                 return;
             };
 
-            let frame = &mut output.frame_state;
-
             // Get output name for per-output tracking
-            let output_name = output
-                .name
-                .clone()
-                .unwrap_or_else(|| format!("output-{:?}", output_id));
+            let output_name = Self::output_name(output_id, output);
+
+            let frame = &mut output.frame_state;
 
             // Handle active output change
             if let Some(active) = frame.active
@@ -251,12 +270,22 @@ impl WaylandState {
             let tags = frame.tags.clone();
             let title = frame.title.take();
             let appid = frame.appid.take();
+            let layout_symbol = frame.layout_symbol.take();
 
             // Clear frame state for next frame
             frame.clear();
 
-            (output_name, is_focused, tags, title, appid)
+            (output_name, is_focused, tags, title, appid, layout_symbol)
         };
+
+        if let Some(symbol) = layout_symbol {
+            if Self::is_overview_layout_symbol(&symbol) {
+                self.overview_outputs.insert(output_id.clone());
+            } else {
+                self.overview_outputs.remove(output_id);
+            }
+        }
+        let is_overview = self.overview_outputs.contains(output_id);
 
         // Get or create per-output state
         let per_output = self
@@ -281,17 +310,20 @@ impl WaylandState {
             // Tags are 0-indexed in protocol, we use 1-indexed IDs
             let workspace_id = (tag + 1) as i32;
 
-            // Update per-output state
-            per_output.window_counts.insert(workspace_id, clients);
-            if clients > 0 {
-                per_output.occupied_workspaces.insert(workspace_id);
+            // In Mango overview, ext-workspace-v1 exposes only workspace 0.
+            // Keep the widget-facing per-output tag list equally narrow.
+            if !is_overview {
+                per_output.window_counts.insert(workspace_id, clients);
+                if clients > 0 {
+                    per_output.occupied_workspaces.insert(workspace_id);
+                }
             }
-            if is_active {
+            if is_active && !is_overview {
                 per_output.active_workspace.insert(workspace_id);
             }
 
             // Update global active workspace (only for focused output)
-            if is_active && is_focused_output {
+            if is_active && is_focused_output && !is_overview {
                 self.snapshot.active_workspace.insert(workspace_id);
             }
 
@@ -306,6 +338,13 @@ impl WaylandState {
                 "Tag {} on {}: active={}, urgent={}, clients={}",
                 workspace_id, output_name, is_active, is_urgent, clients
             );
+        }
+
+        if is_overview {
+            per_output.active_workspace.insert(OVERVIEW_WORKSPACE_ID);
+            if is_focused_output {
+                self.snapshot.active_workspace.insert(OVERVIEW_WORKSPACE_ID);
+            }
         }
 
         // Rebuild global window_counts and occupied from all per-output states
@@ -524,7 +563,9 @@ impl Dispatch<ZdwlIpcOutputV2, ObjectId> for WaylandState {
             }
             zdwl_ipc_output_v2::Event::ToggleVisibility => {}
             zdwl_ipc_output_v2::Event::Layout { layout: _ } => {}
-            zdwl_ipc_output_v2::Event::LayoutSymbol { layout: _ } => {}
+            zdwl_ipc_output_v2::Event::LayoutSymbol { layout } => {
+                tracked.frame_state.layout_symbol = Some(layout);
+            }
             zdwl_ipc_output_v2::Event::Fullscreen { is_fullscreen: _ } => {}
             zdwl_ipc_output_v2::Event::Floating { is_floating: _ } => {}
             zdwl_ipc_output_v2::Event::KbLayout { kb_layout } => {
@@ -834,14 +875,30 @@ impl CompositorBackend for MangoBackend {
 
     fn list_workspaces(&self) -> Vec<WorkspaceMeta> {
         let count = self.shared.tag_count.load(Ordering::Relaxed);
-        (1..=count as i32)
+        let mut workspaces: Vec<_> = (1..=count as i32)
             .map(|id| WorkspaceMeta {
                 id,
                 idx: id,
                 name: id.to_string(),
                 output: None, // MangoWC/DWL tags are global
             })
-            .collect()
+            .collect();
+
+        let snapshot = self.shared.snapshot.read();
+        if snapshot
+            .per_output
+            .values()
+            .any(|state| state.active_workspace.contains(&OVERVIEW_WORKSPACE_ID))
+        {
+            workspaces.push(WorkspaceMeta {
+                id: OVERVIEW_WORKSPACE_ID,
+                idx: OVERVIEW_WORKSPACE_ID,
+                name: OVERVIEW_WORKSPACE_NAME.to_string(),
+                output: None,
+            });
+        }
+
+        workspaces
     }
 
     fn get_workspace_snapshot(&self) -> WorkspaceSnapshot {
@@ -956,5 +1013,53 @@ impl Drop for MangoBackend {
         self.running.store(false, Ordering::SeqCst);
         self.shared.pending_switch.store(i32::MIN, Ordering::SeqCst);
         // Eventfd is dropped automatically via OwnedFd
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::compositor::PerOutputState;
+
+    #[test]
+    fn overview_layout_symbol_matches_mango_symbol_and_name() {
+        assert!(WaylandState::is_overview_layout_symbol(
+            OVERVIEW_LAYOUT_SYMBOL
+        ));
+        assert!(WaylandState::is_overview_layout_symbol("overview"));
+        assert!(!WaylandState::is_overview_layout_symbol("tile"));
+    }
+
+    #[test]
+    fn list_workspaces_adds_single_overview_when_any_output_active() {
+        let backend = MangoBackend::new(None);
+        backend.shared.tag_count.store(2, Ordering::Relaxed);
+
+        let mut snapshot = WorkspaceSnapshot::default();
+        let mut overview_state = PerOutputState::default();
+        overview_state
+            .active_workspace
+            .insert(OVERVIEW_WORKSPACE_ID);
+        snapshot
+            .per_output
+            .insert("eDP-1".to_string(), overview_state);
+        let mut other_overview_state = PerOutputState::default();
+        other_overview_state
+            .active_workspace
+            .insert(OVERVIEW_WORKSPACE_ID);
+        snapshot
+            .per_output
+            .insert("DP-1".to_string(), other_overview_state);
+        *backend.shared.snapshot.write() = snapshot;
+
+        let workspaces = backend.list_workspaces();
+
+        assert_eq!(workspaces.len(), 3);
+        assert_eq!(workspaces[0].id, 1);
+        assert_eq!(workspaces[1].id, 2);
+        assert_eq!(workspaces[2].id, OVERVIEW_WORKSPACE_ID);
+        assert_eq!(workspaces[2].idx, OVERVIEW_WORKSPACE_ID);
+        assert_eq!(workspaces[2].name, OVERVIEW_WORKSPACE_NAME);
+        assert_eq!(workspaces[2].output, None);
     }
 }
