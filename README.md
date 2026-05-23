@@ -71,12 +71,19 @@ https://github.com/user-attachments/assets/fba27921-0886-4e7b-850d-b51341583693
    yay -S vibepanel-bin
    ```
 
-   **Fedora (COPR):**
+   **Fedora:**
 
-   ```sh
-   sudo dnf copr enable prankstr/vibepanel
-   sudo dnf install vibepanel
-   ```
+    ```sh
+    # Install RPM with the Terra Repository: https://terrapkg.com/
+    sudo dnf install --nogpgcheck --repofrompath 'terra,https://repos.fyralabs.com/terra$releasever' terra-release
+    sudo dnf install vibepanel
+    ```
+
+     ```sh
+     # Install with COPR
+     sudo dnf copr enable prankstr/vibepanel
+     sudo dnf install vibepanel
+     ```
 
    **Nix:**
 
