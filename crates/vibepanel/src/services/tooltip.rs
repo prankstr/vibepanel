@@ -365,6 +365,21 @@ impl TooltipManager {
         widget.add_controller(motion);
     }
 
+    /// Clear any styled tooltip registered for a widget.
+    pub fn clear_tooltip(&self, widget: &impl IsA<gtk4::Widget>) {
+        let widget = widget.as_ref();
+        let widget_addr = widget.as_ptr() as usize;
+
+        self.tooltip_texts.borrow_mut().remove(&widget_addr);
+
+        if let Some(ref current_weak) = *self.current_widget.borrow()
+            && let Some(current) = current_weak.upgrade()
+            && current.as_ptr() as usize == widget_addr
+        {
+            self.cancel_and_hide();
+        }
+    }
+
     /// Schedule showing a tooltip after the delay.
     fn schedule_show(&self, widget: &gtk4::Widget, text: &str) {
         // Cancel any pending show

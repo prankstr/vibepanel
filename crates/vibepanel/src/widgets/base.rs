@@ -8,6 +8,7 @@ use gtk4::{
     Align, Box as GtkBox, GestureClick, Label, Orientation, Overlay, Popover, PositionType, gdk,
 };
 use std::cell::{Cell, RefCell};
+use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::rc::Rc;
 use std::time::Duration;
@@ -498,9 +499,30 @@ fn click_target_matches(
 /// In **passive** mode (see [`new_passive`](Self::new_passive)), the overlay,
 /// ripple, menu, and gesture fields are `None` — the merge-group wrapper
 /// provides those instead.
+#[derive(Clone)]
+pub(crate) struct VisibilityHandle {
+    container: GtkBox,
+    content_visible: Rc<Cell<bool>>,
+    show_if_visible: Rc<Cell<bool>>,
+}
+
+impl VisibilityHandle {
+    pub(crate) fn set_content_visible(&self, visible: bool) {
+        self.content_visible.set(visible);
+        BaseWidget::apply_visibility(
+            &self.container,
+            &self.content_visible,
+            &self.show_if_visible,
+        );
+    }
+}
+
 pub struct BaseWidget {
     container: GtkBox,
+    surface: GtkBox,
     content: GtkBox,
+    content_visible: Rc<Cell<bool>>,
+    show_if_visible: Rc<Cell<bool>>,
     overlay: Option<Overlay>,
     ripple_handle: Option<RippleHandle>,
     menu: Option<Rc<RefCell<Option<Rc<MenuHandle>>>>>,
@@ -587,11 +609,21 @@ impl BaseWidget {
 
         if passive {
             container.append(&content);
-            let show_if_timer = Self::setup_show_if_timer(&widget_name, &container);
+            let content_visible = Rc::new(Cell::new(true));
+            let show_if_visible = Rc::new(Cell::new(true));
+            let show_if_timer = Self::setup_show_if_timer(
+                &widget_name,
+                &container,
+                Rc::clone(&content_visible),
+                Rc::clone(&show_if_visible),
+            );
 
             return Self {
+                surface: container.clone(),
                 container,
                 content,
+                content_visible,
+                show_if_visible,
                 overlay: None,
                 ripple_handle: None,
                 menu: None,
@@ -719,11 +751,21 @@ impl BaseWidget {
 
         container.add_controller(gesture_click.clone());
 
-        let show_if_timer = Self::setup_show_if_timer(&widget_name, &container);
+        let content_visible = Rc::new(Cell::new(true));
+        let show_if_visible = Rc::new(Cell::new(true));
+        let show_if_timer = Self::setup_show_if_timer(
+            &widget_name,
+            &container,
+            Rc::clone(&content_visible),
+            Rc::clone(&show_if_visible),
+        );
 
         Self {
             container,
+            surface,
             content,
+            content_visible,
+            show_if_visible,
             overlay: Some(overlay),
             ripple_handle: Some(ripple_handle),
             menu: Some(menu),
@@ -740,13 +782,19 @@ impl BaseWidget {
     /// `show_if_interval` is set (and > 0), a periodic timer continues
     /// re-evaluating after the first check. Commands that exceed
     /// `SHOW_IF_TIMEOUT_SECS` are killed and treated as "hide".
-    fn setup_show_if_timer(widget_name: &str, container: &GtkBox) -> Option<glib::SourceId> {
+    fn setup_show_if_timer(
+        widget_name: &str,
+        container: &GtkBox,
+        content_visible: Rc<Cell<bool>>,
+        show_if_visible: Rc<Cell<bool>>,
+    ) -> Option<glib::SourceId> {
         let (show_if, interval) = ConfigManager::global().get_show_if(widget_name);
 
         let cmd = show_if?;
 
         // Start hidden; async evaluation will show the widget if appropriate.
-        container.set_visible(false);
+        show_if_visible.set(false);
+        Self::apply_visibility(container, &content_visible, &show_if_visible);
 
         let has_interval = interval.filter(|&i| i > 0).is_some();
         let prev_visible = Rc::new(Cell::new(false));
@@ -757,6 +805,8 @@ impl BaseWidget {
         {
             let cmd = cmd.clone();
             let container = container_clone.clone();
+            let content_visible = content_visible.clone();
+            let show_if_visible = show_if_visible.clone();
             let name = name.clone();
             let prev_visible = prev_visible.clone();
 
@@ -765,19 +815,19 @@ impl BaseWidget {
                 let result =
                     gio::spawn_blocking(move || Self::run_show_if_command_with_timeout(&cmd)).await;
 
-                let (visible, stderr) = match result {
+                let visible = match result {
                     Ok(v) => v,
                     Err(e) => {
                         warn!(widget = %name, error = ?e, "show_if spawn_blocking failed");
-                        (false, String::new())
+                        false
                     }
                 };
 
-                container.set_visible(visible);
+                show_if_visible.set(visible);
+                Self::apply_visibility(&container, &content_visible, &show_if_visible);
                 debug!(
                     widget = %name,
                     visible,
-                    stderr = %stderr.trim(),
                     "show_if initial check"
                 );
                 prev_visible.set(visible);
@@ -789,6 +839,8 @@ impl BaseWidget {
                 // transition hidden → visible.
                 if !visible && !has_interval {
                     let container = container.clone();
+                    let content_visible = content_visible.clone();
+                    let show_if_visible = show_if_visible.clone();
                     let name = name.clone();
                     glib::timeout_add_local_once(Duration::from_millis(500), move || {
                         glib::spawn_future_local(async move {
@@ -797,7 +849,7 @@ impl BaseWidget {
                             })
                             .await;
 
-                            let (visible, _stderr) = match result {
+                            let visible = match result {
                                 Ok(v) => v,
                                 Err(e) => {
                                     warn!(
@@ -805,12 +857,17 @@ impl BaseWidget {
                                         error = ?e,
                                         "show_if retry spawn_blocking failed"
                                     );
-                                    (false, String::new())
+                                    false
                                 }
                             };
 
                             if visible {
-                                container.set_visible(true);
+                                show_if_visible.set(true);
+                                Self::apply_visibility(
+                                    &container,
+                                    &content_visible,
+                                    &show_if_visible,
+                                );
                                 debug!(widget = %name, "show_if retry: now visible");
                             }
                         });
@@ -826,6 +883,8 @@ impl BaseWidget {
             glib::timeout_add_seconds_local(interval.min(u32::MAX as u64) as u32, move || {
                 let cmd = cmd.clone();
                 let container = container_clone.clone();
+                let content_visible = content_visible.clone();
+                let show_if_visible = show_if_visible.clone();
                 let name = name.clone();
                 let prev_visible = prev_visible.clone();
 
@@ -834,20 +893,20 @@ impl BaseWidget {
                         gio::spawn_blocking(move || Self::run_show_if_command_with_timeout(&cmd))
                             .await;
 
-                    let (visible, stderr) = match result {
+                    let visible = match result {
                         Ok(v) => v,
                         Err(e) => {
                             warn!(widget = %name, error = ?e, "show_if spawn_blocking failed");
-                            (false, String::new())
+                            false
                         }
                     };
 
                     if visible != prev_visible.get() {
-                        container.set_visible(visible);
+                        show_if_visible.set(visible);
+                        Self::apply_visibility(&container, &content_visible, &show_if_visible);
                         info!(
                             widget = %name,
                             visible,
-                            stderr = %stderr.trim(),
                             "show_if visibility changed"
                         );
                         prev_visible.set(visible);
@@ -860,28 +919,28 @@ impl BaseWidget {
         Some(source_id)
     }
 
-    /// Cancel the periodic `show_if` timer, if any.
-    ///
-    /// Used by widgets that handle `show_if` themselves (e.g., custom widgets
-    /// piggyback on their exec polling cycle instead of running a separate timer).
-    pub(super) fn cancel_show_if_timer(&mut self) {
-        if let Some(source_id) = self._show_if_timer.take() {
-            source_id.remove();
-        }
+    fn apply_visibility(
+        container: &GtkBox,
+        content_visible: &Cell<bool>,
+        show_if_visible: &Cell<bool>,
+    ) {
+        container.set_visible(content_visible.get() && show_if_visible.get());
     }
 
     /// Run a `show_if` shell command synchronously with a timeout.
-    /// Returns `(visible, stderr)` where visible = exit 0.
+    /// Returns true when the command exits 0.
     /// Commands exceeding `SHOW_IF_TIMEOUT_SECS` are killed and treated as hidden.
-    pub(super) fn run_show_if_command_with_timeout(cmd: &str) -> (bool, String) {
+    pub(super) fn run_show_if_command_with_timeout(cmd: &str) -> bool {
         let mut child = match Command::new("sh")
             .args(["-c", cmd])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0)
             .spawn()
         {
             Ok(child) => child,
-            Err(_) => return (false, String::new()),
+            Err(_) => return false,
         };
 
         let pid = child.id() as libc::pid_t;
@@ -892,11 +951,12 @@ impl BaseWidget {
                 .recv_timeout(Duration::from_secs(SHOW_IF_TIMEOUT_SECS))
                 .is_err()
             {
-                // Timeout expired — kill the child.
-                // SAFETY: Sending SIGKILL to a process. If the process already
+                // Timeout expired — kill the child's process group so
+                // descendants do not outlive the predicate check.
+                // SAFETY: Sending SIGKILL to a process group. If it already
                 // exited and was reaped, kill() returns ESRCH which is harmless.
                 unsafe {
-                    libc::kill(pid, libc::SIGKILL);
+                    libc::kill(-pid, libc::SIGKILL);
                 }
             }
         });
@@ -914,27 +974,12 @@ impl BaseWidget {
                         cmd,
                         "show_if command timed out after {SHOW_IF_TIMEOUT_SECS}s"
                     );
-                    return (false, String::new());
+                    return false;
                 }
-                (s.success(), String::new())
+                s.success()
             }
-            Err(_) => (false, String::new()),
+            Err(_) => false,
         }
-    }
-
-    /// Run a `show_if` shell command synchronously (no timeout).
-    /// Returns `(visible, stderr)` where visible = exit 0.
-    pub(super) fn run_show_if_command(cmd: &str) -> (bool, String) {
-        Command::new("sh")
-            .args(["-c", cmd])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .output()
-            .map(|o| {
-                let stderr = String::from_utf8_lossy(&o.stderr).into_owned();
-                (o.status.success(), stderr)
-            })
-            .unwrap_or((false, String::new()))
     }
 
     /// Get the root GTK container for this widget.
@@ -945,6 +990,14 @@ impl BaseWidget {
         &self.container
     }
 
+    /// Get the painted surface for state/background classes.
+    ///
+    /// Passive widgets have no separate surface, so this falls back to the root
+    /// widget carrying their static classes.
+    pub(crate) fn surface(&self) -> &GtkBox {
+        &self.surface
+    }
+
     /// Get the ripple handle for triggering ripple animations.
     pub fn ripple_handle(&self) -> Option<&RippleHandle> {
         self.ripple_handle.as_ref()
@@ -953,6 +1006,16 @@ impl BaseWidget {
     /// Get the inner `.content` box for adding widget children.
     pub fn content(&self) -> &GtkBox {
         &self.content
+    }
+
+    /// Handle for composing content visibility with the BaseWidget-owned
+    /// `show_if` visibility gate.
+    pub(crate) fn visibility_handle(&self) -> VisibilityHandle {
+        VisibilityHandle {
+            container: self.container.clone(),
+            content_visible: Rc::clone(&self.content_visible),
+            show_if_visible: Rc::clone(&self.show_if_visible),
+        }
     }
 
     /// Get the overlay wrapping the content box.

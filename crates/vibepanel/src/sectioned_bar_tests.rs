@@ -2,13 +2,14 @@ use super::*;
 use crate::theme_vars::{THEME_VAR_EXPECTATIONS, ThemeVarRole, ThemeVarScope};
 use crate::ui_regression_test_support::{
     CssProviderGuard, Rgba8, assert_pixel_close, center_pixel_of_surface, edge_pixel_of_surface,
-    find_descendant_with_class, flush_gtk, init_gtk_or_skip, maybe_hold_probe_window,
-    painted_surface_fixture_with_classes, run_ignored_contract_subprocess, sample_widget_pixel,
+    find_descendant_with_class, flush_gtk, init_gtk_or_skip, label_with_text,
+    maybe_hold_probe_window, painted_surface_fixture_with_classes, run_ignored_contract_subprocess,
+    sample_widget_pixel,
 };
 use crate::widgets::css::{POPOVER_BG_WITH_OPACITY, WIDGET_BG_WITH_OPACITY};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use vibepanel_core::Config;
 
 fn bounds_in_window(
@@ -39,6 +40,20 @@ fn count_descendants_with_class(root: &gtk4::Widget, class_name: &str) -> usize 
         child = widget.next_sibling();
     }
     count
+}
+
+fn wait_until(mut condition: impl FnMut() -> bool, description: &str) {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let ctx = gtk4::glib::MainContext::default();
+    while Instant::now() < deadline {
+        ctx.iteration(false);
+        if condition() {
+            return;
+        }
+    }
+
+    flush_gtk();
+    assert!(condition(), "timed out waiting for {description}");
 }
 
 fn collect_descendants_with_class(root: &gtk4::Widget, class_name: &str) -> Vec<gtk4::Widget> {
@@ -998,6 +1013,97 @@ fn run_test_widgets_disabled() {
     flush_gtk();
 }
 
+fn custom_exec_config(id: &str, exec: &str) -> Config {
+    let mut config = test_config();
+    let widget_name = format!("custom-{id}");
+    config.widgets.left = vec![vibepanel_core::config::WidgetPlacement::Single(
+        widget_name.clone(),
+    )];
+    config.widgets.center = Vec::new();
+    config.widgets.right = Vec::new();
+
+    let mut options = vibepanel_core::config::WidgetOptions::default();
+    options.options.insert(
+        "label".to_string(),
+        toml::Value::String("fallback".to_string()),
+    );
+    options
+        .options
+        .insert("exec".to_string(), toml::Value::String(exec.to_string()));
+    options.options.insert(
+        "template".to_string(),
+        toml::Value::String("{text} {percentage}%".to_string()),
+    );
+    options.options.insert(
+        "icons".to_string(),
+        toml::Value::Table(toml::map::Map::from_iter([(
+            "high".to_string(),
+            toml::Value::String("cpu-high".to_string()),
+        )])),
+    );
+    config.widgets.widget_configs.insert(widget_name, options);
+
+    config
+}
+
+fn run_test_custom_widget_json_exec_output() {
+    let config = custom_exec_config(
+        "json",
+        "printf '%s\\n' '{\"text\":\"cpu\",\"percentage\":42,\"class\":[\"warning\"],\"alt\":\"high\",\"tooltip\":\"details\"}'",
+    );
+    let (window, bar, _state, _popover_registry_guard, _css_provider) = built_bar_fixture(&config);
+    let left_section = bar
+        .section("left")
+        .expect("bar should build a left section");
+    let surface = find_descendant_with_class(&left_section, "custom-json")
+        .expect("custom-json widget surface should be present");
+
+    wait_until(
+        || label_with_text(&surface, "cpu 42%"),
+        "custom JSON exec label update",
+    );
+
+    assert!(
+        surface.has_css_class("warning"),
+        "JSON class should be applied to the custom widget surface"
+    );
+    assert!(
+        left_section.is_visible(),
+        "non-empty JSON output should keep the custom widget visible"
+    );
+
+    maybe_hold_probe_window();
+    window.close();
+    flush_gtk();
+}
+
+fn run_test_custom_widget_empty_json_hides_without_fallback() {
+    let mut config = custom_exec_config("empty-json", "printf '%s\\n' '{\"text\":\"\"}'");
+    config
+        .widgets
+        .widget_configs
+        .get_mut("custom-empty-json")
+        .expect("custom-empty-json config should exist")
+        .options
+        .remove("template");
+    let (window, bar, _state, _popover_registry_guard, _css_provider) = built_bar_fixture(&config);
+    let left_section = bar
+        .section("left")
+        .expect("bar should build a left section");
+    let wrapper = left_section
+        .first_child()
+        .expect("custom-empty-json wrapper should be present");
+
+    wait_until(
+        || !wrapper.is_visible(),
+        "empty JSON custom output to hide the widget wrapper",
+    );
+
+    maybe_hold_probe_window();
+    window.close();
+    flush_gtk();
+}
+
 fn run_test_widgets_grouping_explicit_group() {
     let mut baseline = test_config();
     baseline.widgets.left = vec![
@@ -1823,6 +1929,16 @@ ui_regression_config_tests!(
         test_ui_regression_widgets_disabled,
         "widgets.disabled",
         run_test_widgets_disabled
+    ),
+    (
+        test_ui_regression_custom_widget_json_exec_output,
+        "custom_widget.json_exec_output",
+        run_test_custom_widget_json_exec_output
+    ),
+    (
+        test_ui_regression_custom_widget_empty_json_hides_without_fallback,
+        "custom_widget.empty_json_hides_without_fallback",
+        run_test_custom_widget_empty_json_hides_without_fallback
     ),
     (
         test_ui_regression_widgets_grouping_explicit_group,
