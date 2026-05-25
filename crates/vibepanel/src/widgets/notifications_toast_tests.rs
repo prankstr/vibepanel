@@ -40,6 +40,43 @@ fn run_toast_ui_regression_subprocess(test_case: &str) {
 }
 
 #[test]
+fn test_toast_position_parse_contract() {
+    assert_eq!(
+        ToastPosition::parse("top-right"),
+        Some(ToastPosition::TopRight)
+    );
+    assert_eq!(
+        ToastPosition::parse("top-center"),
+        Some(ToastPosition::TopCenter)
+    );
+    assert_eq!(
+        ToastPosition::parse("top-left"),
+        Some(ToastPosition::TopLeft)
+    );
+    assert_eq!(
+        ToastPosition::parse("bottom-right"),
+        Some(ToastPosition::BottomRight)
+    );
+    assert_eq!(
+        ToastPosition::parse("bottom-center"),
+        Some(ToastPosition::BottomCenter)
+    );
+    assert_eq!(
+        ToastPosition::parse("bottom-left"),
+        Some(ToastPosition::BottomLeft)
+    );
+    assert_eq!(ToastPosition::parse("auto"), None);
+    assert_eq!(ToastPosition::default(), ToastPosition::TopRight);
+}
+
+#[test]
+fn test_calculate_center_margin_contract() {
+    assert_eq!(calculate_center_margin(1920, POPOVER_WIDTH), 760);
+    assert_eq!(calculate_center_margin(400, POPOVER_WIDTH), 0);
+    assert_eq!(calculate_center_margin(320, POPOVER_WIDTH), 0);
+}
+
+#[test]
 fn test_notification_toast_critical_class_does_not_apply_visual_tokens() {
     let css = crate::widgets::css::widget_css(&Config::default());
 
@@ -266,10 +303,18 @@ fn test_notification_toast_structure_contract() {
     }
 
     let app = test_app();
-    for position in ["top", "bottom"] {
+    let cases = [
+        (ToastPosition::TopRight, Edge::Top, Some(Edge::Right)),
+        (ToastPosition::TopCenter, Edge::Top, None),
+        (ToastPosition::TopLeft, Edge::Top, Some(Edge::Left)),
+        (ToastPosition::BottomRight, Edge::Bottom, Some(Edge::Right)),
+        (ToastPosition::BottomCenter, Edge::Bottom, None),
+        (ToastPosition::BottomLeft, Edge::Bottom, Some(Edge::Left)),
+    ];
+
+    for (position, vertical_edge, horizontal_edge) in cases {
         let mut config = Config::default();
         config.theme.mode = "dark".to_string();
-        config.bar.position = position.to_string();
         config.advanced.compositor = "mango".to_string();
         ConfigManager::replace_global_for_test(config.clone());
         let _css_provider =
@@ -286,13 +331,19 @@ fn test_notification_toast_structure_contract() {
         let noop_timeout: ToastCallback = Rc::new(|_| {});
         let noop_height: ToastCallback = Rc::new(|_| {});
         let toast = NotificationToast::new(
-            &app,
+            ToastWindowContext {
+                app: &app,
+                monitor: None,
+                layout: ToastLayout {
+                    position,
+                    initial_margin: TOAST_BAR_MARGIN,
+                },
+            },
             &notification,
             noop_dismiss,
             noop_action,
             noop_timeout,
             noop_height,
-            TOAST_BAR_MARGIN,
         );
         toast.present();
         flush_gtk();
@@ -303,17 +354,7 @@ fn test_notification_toast_structure_contract() {
             .expect("toast window should contain a styled surface");
         let container = find_descendant_with_class(&child, notif::TOAST_CONTAINER)
             .expect("toast should render a styled notification container");
-        let bar_edge = if position == "bottom" {
-            Edge::Bottom
-        } else {
-            Edge::Top
-        };
-        let opposite_edge = if position == "bottom" {
-            Edge::Top
-        } else {
-            Edge::Bottom
-        };
-        let right_margin = (TOAST_MARGIN_RIGHT
+        let side_margin = (TOAST_MARGIN_RIGHT
             - SurfaceStyleManager::global().shadow_margin(SURFACE_SHADOW_MARGIN))
         .max(0);
 
@@ -322,12 +363,39 @@ fn test_notification_toast_structure_contract() {
         assert_eq!(toast.window.layer(), Layer::Overlay);
         assert_eq!(toast.window.keyboard_mode(), KeyboardMode::None);
         assert_eq!(toast.window.exclusive_zone(), 0);
-        assert!(toast.window.is_anchor(bar_edge));
-        assert!(toast.window.is_anchor(Edge::Right));
-        assert!(!toast.window.is_anchor(Edge::Left));
-        assert!(!toast.window.is_anchor(opposite_edge));
-        assert_eq!(toast.window.margin(bar_edge), TOAST_BAR_MARGIN);
-        assert_eq!(toast.window.margin(Edge::Right), right_margin);
+        assert_eq!(
+            toast.window.is_anchor(Edge::Top),
+            vertical_edge == Edge::Top
+        );
+        assert_eq!(
+            toast.window.is_anchor(Edge::Bottom),
+            vertical_edge == Edge::Bottom
+        );
+        assert_eq!(
+            toast.window.is_anchor(Edge::Left),
+            horizontal_edge == Some(Edge::Left)
+        );
+        assert_eq!(
+            toast.window.is_anchor(Edge::Right),
+            horizontal_edge == Some(Edge::Right)
+        );
+        assert_eq!(toast.window.margin(vertical_edge), TOAST_BAR_MARGIN);
+        assert_eq!(
+            toast.window.margin(Edge::Left),
+            if horizontal_edge == Some(Edge::Left) {
+                side_margin
+            } else {
+                0
+            }
+        );
+        assert_eq!(
+            toast.window.margin(Edge::Right),
+            if horizontal_edge == Some(Edge::Right) {
+                side_margin
+            } else {
+                0
+            }
+        );
 
         assert!(toast.window.has_css_class(notif::TOAST_WRAPPER));
         assert!(container.has_css_class(notif::TOAST));

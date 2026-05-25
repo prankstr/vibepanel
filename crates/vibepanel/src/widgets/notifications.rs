@@ -4,7 +4,7 @@
 //! - Bell icon with unread notification badge
 //! - CSS states: has-notifications, has-critical, backend-unavailable
 //! - Popover with scrollable notification list and dismiss controls
-//! - Toast overlay windows for new notifications (top-right stacked)
+//! - Toast overlay windows for new notifications (configurable screen position)
 //!
 //! This module is split into several files for maintainability:
 //! - `notifications.rs` (this file): Widget implementation and badge logic
@@ -19,7 +19,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tracing::debug;
+use tracing::{debug, warn};
 use vibepanel_core::config::WidgetEntry;
 
 use crate::services::callbacks::CallbackId;
@@ -28,18 +28,38 @@ use crate::services::notification::{NotificationService, URGENCY_CRITICAL};
 use crate::services::tooltip::TooltipManager;
 use crate::styles::widget;
 use crate::widgets::base::MenuHandle;
-use crate::widgets::{BaseWidget, WidgetConfig};
+use crate::widgets::{BaseWidget, WidgetConfig, warn_unknown_options};
 
 use super::notifications_popover::{ClosePopoverCallback, build_popover_content};
-use super::notifications_toast::NotificationToastManager;
+use super::notifications_toast::{NotificationToastManager, ToastPosition};
 
 /// Configuration for the notification widget.
 #[derive(Debug, Clone, Default)]
-pub struct NotificationsConfig {}
+pub struct NotificationsConfig {
+    toast_position: ToastPosition,
+}
 
 impl WidgetConfig for NotificationsConfig {
-    fn from_entry(_entry: &WidgetEntry) -> Self {
-        Self {}
+    fn from_entry(entry: &WidgetEntry) -> Self {
+        warn_unknown_options("notifications", entry, &["toast_position"]);
+
+        let toast_position = entry
+            .options
+            .get("toast_position")
+            .and_then(|v| v.as_str())
+            .and_then(|value| {
+                let position = ToastPosition::parse(value);
+                if position.is_none() {
+                    warn!(
+                        "Invalid toast_position '{}' for widget 'notifications' - expected one of: top-right, top-center, top-left, bottom-right, bottom-center, bottom-left; using top-right",
+                        value
+                    );
+                }
+                position
+            })
+            .unwrap_or_default();
+
+        Self { toast_position }
     }
 }
 
@@ -262,9 +282,10 @@ impl NotificationsWidgetInner {
             // proper initialization with callbacks.
 
             if let (Some(toast_manager), Some(app)) = (&*self.toast_manager.borrow(), app) {
+                let monitor = self.toast_monitor();
                 for id in &to_toast {
                     if let Some(notification) = service.get(*id) {
-                        toast_manager.show(&app, &notification);
+                        toast_manager.show(&app, monitor.as_ref(), &notification);
                     }
                 }
             }
@@ -291,6 +312,17 @@ impl NotificationsWidgetInner {
         Some(app)
     }
 
+    fn toast_monitor(&self) -> Option<gtk4::gdk::Monitor> {
+        self.container
+            .root()
+            .and_then(|root| root.downcast_ref::<gtk4::Window>().cloned())
+            .and_then(|window| window.surface())
+            .and_then(|surface| {
+                gtk4::gdk::Display::default()
+                    .and_then(|display| display.monitor_at_surface(&surface))
+            })
+    }
+
     /// Mark notifications as seen (called when popover opens).
     fn mark_as_seen(&self) {
         let now = SystemTime::now()
@@ -314,7 +346,7 @@ pub struct NotificationsWidget {
 
 impl NotificationsWidget {
     /// Create a new notification widget.
-    pub fn new(_config: NotificationsConfig) -> Self {
+    pub fn new(config: NotificationsConfig) -> Self {
         let base = BaseWidget::new(&[widget::NOTIFICATIONS]);
 
         // Create an overlay for badge on top of icon
@@ -409,7 +441,8 @@ impl NotificationsWidget {
                 });
             };
 
-            let manager = NotificationToastManager::new(on_action, on_toast_removed);
+            let manager =
+                NotificationToastManager::new(on_action, on_toast_removed, config.toast_position);
             *inner.toast_manager.borrow_mut() = Some(manager);
         }
 

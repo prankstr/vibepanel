@@ -47,6 +47,9 @@ background_opacity = 1.0
 #   [widgets.media]
 #   visualizer = true  # Enable/disable cava audio visualizer (default: true)
 #
+#   [widgets.notifications]
+#   toast_position = "top-right"  # "top-left", "top-center", "top-right", "bottom-left", "bottom-center", "bottom-right"
+#
 # Custom widgets use the "custom-" prefix for user-defined buttons:
 #   right = ["custom-power", "custom-os", "tray", "clock"]
 #
