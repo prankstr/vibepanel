@@ -77,6 +77,73 @@ fn test_calculate_center_margin_contract() {
 }
 
 #[test]
+fn test_toast_horizontal_layout_contract() {
+    let side_margin = 8;
+    let cases = [
+        (
+            ToastPosition::TopRight,
+            None,
+            Some(Edge::Right),
+            side_margin,
+        ),
+        (
+            ToastPosition::TopRight,
+            Some(1920),
+            Some(Edge::Right),
+            side_margin,
+        ),
+        (ToastPosition::TopLeft, None, Some(Edge::Left), side_margin),
+        (
+            ToastPosition::TopLeft,
+            Some(1920),
+            Some(Edge::Left),
+            side_margin,
+        ),
+        (
+            ToastPosition::BottomRight,
+            None,
+            Some(Edge::Right),
+            side_margin,
+        ),
+        (
+            ToastPosition::BottomRight,
+            Some(1920),
+            Some(Edge::Right),
+            side_margin,
+        ),
+        (
+            ToastPosition::BottomLeft,
+            None,
+            Some(Edge::Left),
+            side_margin,
+        ),
+        (
+            ToastPosition::BottomLeft,
+            Some(1920),
+            Some(Edge::Left),
+            side_margin,
+        ),
+        (ToastPosition::TopCenter, None, None, 0),
+        (ToastPosition::TopCenter, Some(1920), Some(Edge::Left), 760),
+        (ToastPosition::BottomCenter, None, None, 0),
+        (
+            ToastPosition::BottomCenter,
+            Some(1920),
+            Some(Edge::Left),
+            760,
+        ),
+    ];
+
+    for (position, monitor_width, expected_edge, expected_margin) in cases {
+        assert_eq!(
+            toast_horizontal_layout(position, monitor_width, side_margin),
+            (expected_edge, expected_margin),
+            "unexpected horizontal layout for {position:?} with monitor_width={monitor_width:?}"
+        );
+    }
+}
+
+#[test]
 fn test_notification_toast_critical_class_does_not_apply_visual_tokens() {
     let css = crate::widgets::css::widget_css(&Config::default());
 

@@ -81,6 +81,25 @@ fn calculate_center_margin(monitor_width: i32, window_width: i32) -> i32 {
     ((monitor_width - window_width) / 2).max(0)
 }
 
+fn toast_horizontal_layout(
+    position: ToastPosition,
+    monitor_width: Option<i32>,
+    side_margin: i32,
+) -> (Option<Edge>, i32) {
+    if position.is_centered() {
+        return monitor_width
+            .map(|width| {
+                (
+                    Some(Edge::Left),
+                    calculate_center_margin(width, POPOVER_WIDTH),
+                )
+            })
+            .unwrap_or((None, 0));
+    }
+
+    (position.horizontal_edge(), side_margin)
+}
+
 struct ToastWindowContext<'a> {
     app: &'a Application,
     monitor: Option<&'a gdk::Monitor>,
@@ -130,11 +149,6 @@ impl NotificationToast {
 
         let layout = context.layout;
         let vertical_edge = layout.position.vertical_edge();
-        let horizontal_edge = if layout.position.is_centered() && context.monitor.is_some() {
-            Some(Edge::Left)
-        } else {
-            layout.position.horizontal_edge()
-        };
 
         // Initialize layer shell
         window.init_layer_shell();
@@ -149,22 +163,20 @@ impl NotificationToast {
 
         window.set_anchor(Edge::Top, vertical_edge == Edge::Top);
         window.set_anchor(Edge::Bottom, vertical_edge == Edge::Bottom);
+        let side_margin = (TOAST_MARGIN_RIGHT
+            - SurfaceStyleManager::global().shadow_margin(SURFACE_SHADOW_MARGIN))
+        .max(0);
+        let (horizontal_edge, horizontal_margin) = toast_horizontal_layout(
+            layout.position,
+            context.monitor.map(|m| m.geometry().width()),
+            side_margin,
+        );
+
         window.set_anchor(Edge::Left, horizontal_edge == Some(Edge::Left));
         window.set_anchor(Edge::Right, horizontal_edge == Some(Edge::Right));
-
         window.set_margin(vertical_edge, layout.initial_margin);
         if let Some(horizontal_edge) = horizontal_edge {
-            let side_margin = if layout.position.is_centered() {
-                context
-                    .monitor
-                    .map(|m| calculate_center_margin(m.geometry().width(), POPOVER_WIDTH))
-                    .unwrap_or(0)
-            } else {
-                (TOAST_MARGIN_RIGHT
-                    - SurfaceStyleManager::global().shadow_margin(SURFACE_SHADOW_MARGIN))
-                .max(0)
-            };
-            window.set_margin(horizontal_edge, side_margin);
+            window.set_margin(horizontal_edge, horizontal_margin);
         }
 
         let notification_id = notification.id;
