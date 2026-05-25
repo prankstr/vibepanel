@@ -74,7 +74,7 @@ use tracing::{debug, warn};
 use vibepanel_core::config::WidgetEntry;
 
 use crate::services::config_manager::ConfigManager;
-use crate::services::icons::{IconHandle, has_material_mapping};
+use crate::services::icons::{IconHandle, IconsService, has_material_mapping};
 use crate::services::tooltip::TooltipManager;
 use crate::styles::{icon, state, widget as wgt};
 use crate::widgets::base::{BaseWidget, VisibilityHandle, describe_exit_status};
@@ -108,14 +108,47 @@ const RESTART_WINDOW_SECS: u64 = 60;
 /// Grace period after SIGTERM before continuous custom scripts are SIGKILLed.
 const CONTINUOUS_KILL_GRACE_MS: u64 = 250;
 
+/// Side-icon value for a custom widget.
+///
+/// Unprefixed values are named icons resolved through VibePanel's icon service.
+/// `glyph:<value>` renders a literal glyph/emoji/Nerd Font character in the
+/// side-icon slot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CustomIconValue {
+    Named(String),
+    Glyph(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CustomIconKind {
+    Named,
+    Glyph,
+}
+
+fn parse_custom_icon_value(custom_id: &str, value: &str) -> Option<CustomIconValue> {
+    if let Some(glyph) = value.strip_prefix("glyph:") {
+        if glyph.is_empty() {
+            warn!(
+                "Custom widget '{}': empty glyph icon value; ignoring",
+                custom_id
+            );
+            return None;
+        }
+        return Some(CustomIconValue::Glyph(glyph.to_string()));
+    }
+
+    Some(CustomIconValue::Named(value.to_string()))
+}
+
 /// Configuration for a custom widget instance.
 #[derive(Debug, Clone, Default)]
 pub struct CustomConfig {
-    /// Logical icon name (e.g., "system-shutdown-symbolic").
-    pub icon: Option<String>,
-    /// Exact `alt` -> icon-name mapping. Each key is matched literally against the
+    /// Side icon value. Unprefixed values are named icons; `glyph:<value>` renders
+    /// a literal glyph/emoji/Nerd Font character.
+    icon: Option<CustomIconValue>,
+    /// Exact `alt` -> side-icon mapping. Each key is matched literally against the
     /// JSON `alt` field; unmatched or missing `alt` falls back to the top-level `icon`.
-    pub icons: BTreeMap<String, String>,
+    icons: BTreeMap<String, CustomIconValue>,
     /// Image file path (PNG, SVG, etc.). Supports absolute paths, `file://` URIs,
     /// and `~/`. Takes precedence over `icon` if both are set.
     pub image: Option<String>,
@@ -150,7 +183,7 @@ impl WidgetConfig for CustomConfig {
             .options
             .get("icon")
             .and_then(|v| v.as_str())
-            .map(String::from);
+            .and_then(|value| parse_custom_icon_value(&entry.name, value));
 
         let icons = entry
             .options
@@ -160,9 +193,13 @@ impl WidgetConfig for CustomConfig {
                 table
                     .iter()
                     .filter_map(|(alt, icon)| {
-                        icon.as_str()
-                            .filter(|name| !name.is_empty())
-                            .map(|name| (alt.clone(), name.to_string()))
+                        icon.as_str().and_then(|value| {
+                            if value.is_empty() {
+                                return None;
+                            }
+                            parse_custom_icon_value(&entry.name, value)
+                                .map(|value| (alt.clone(), value))
+                        })
                     })
                     .collect()
             })
@@ -259,9 +296,9 @@ struct ExecState {
     widget: gtk4::Box,
     visibility: VisibilityHandle,
     class_target: gtk4::Box,
-    icon_handle: Option<IconHandle>,
-    icons: BTreeMap<String, String>,
-    static_icon: Option<String>,
+    icon_view: Option<CustomIconView>,
+    icons: BTreeMap<String, CustomIconValue>,
+    static_icon: Option<CustomIconValue>,
     static_tooltip: Option<String>,
     prev_classes: Rc<RefCell<Vec<String>>>,
     has_static_image: bool,
@@ -281,9 +318,9 @@ fn record_restart_attempt(times: &mut Vec<std::time::Instant>, now: std::time::I
 #[derive(Clone)]
 struct ContinuousContext {
     label: Label,
-    icon_handle: Option<IconHandle>,
-    icons: BTreeMap<String, String>,
-    static_icon: Option<String>,
+    icon_view: Option<CustomIconView>,
+    icons: BTreeMap<String, CustomIconValue>,
+    static_icon: Option<CustomIconValue>,
     fallback: String,
     static_tooltip: Option<String>,
     template: Option<String>,
@@ -299,11 +336,124 @@ struct ContinuousContext {
     has_static_image: bool,
 }
 
+#[derive(Clone)]
+struct CustomIconView {
+    content: gtk4::Box,
+    named: Rc<RefCell<Option<IconHandle>>>,
+    glyph_root: Rc<RefCell<Option<gtk4::Box>>>,
+    glyph_label: Rc<RefCell<Option<Label>>>,
+    active: Rc<RefCell<Option<CustomIconKind>>>,
+}
+
+impl CustomIconView {
+    fn new(content: &gtk4::Box) -> Self {
+        Self {
+            content: content.clone(),
+            named: Rc::new(RefCell::new(None)),
+            glyph_root: Rc::new(RefCell::new(None)),
+            glyph_label: Rc::new(RefCell::new(None)),
+            active: Rc::new(RefCell::new(None)),
+        }
+    }
+
+    fn set_icon(&self, icon: Option<&CustomIconValue>) {
+        match icon {
+            Some(CustomIconValue::Named(name)) => self.show_named(name),
+            Some(CustomIconValue::Glyph(glyph)) => self.show_glyph(glyph),
+            None => self.hide(),
+        }
+    }
+
+    fn show_named(&self, name: &str) {
+        if self.named.borrow().is_none() {
+            *self.named.borrow_mut() = Some(IconsService::global().create_icon(name, &[]));
+        }
+
+        let widget = {
+            let named = self.named.borrow();
+            let handle = named.as_ref().expect("named icon handle exists");
+            handle.set_icon(name);
+            handle.widget()
+        };
+
+        self.activate(CustomIconKind::Named, &widget);
+    }
+
+    fn show_glyph(&self, glyph: &str) {
+        if self.glyph_label.borrow().is_none() {
+            let root = GtkBox::new(Orientation::Horizontal, 0);
+            root.add_css_class(icon::ROOT);
+            root.set_halign(gtk4::Align::Center);
+            root.set_hexpand(true);
+
+            let label = Label::new(None);
+            label.add_css_class(wgt::CUSTOM_ICON_GLYPH);
+            label.set_halign(gtk4::Align::Center);
+            label.set_hexpand(true);
+            label.set_xalign(0.5);
+            root.append(&label);
+
+            *self.glyph_root.borrow_mut() = Some(root);
+            *self.glyph_label.borrow_mut() = Some(label);
+        }
+
+        if let Some(label) = self.glyph_label.borrow().as_ref() {
+            label.set_label(glyph);
+        }
+        let root = self
+            .glyph_root
+            .borrow()
+            .as_ref()
+            .expect("glyph root exists")
+            .clone()
+            .upcast::<gtk4::Widget>();
+
+        self.activate(CustomIconKind::Glyph, &root);
+    }
+
+    fn hide(&self) {
+        self.detach_active();
+        *self.active.borrow_mut() = None;
+    }
+
+    fn activate(&self, kind: CustomIconKind, widget: &gtk4::Widget) {
+        if *self.active.borrow() != Some(kind) {
+            self.detach_active();
+            self.content.prepend(widget);
+            *self.active.borrow_mut() = Some(kind);
+        }
+        widget.set_visible(true);
+    }
+
+    fn detach_active(&self) {
+        match *self.active.borrow() {
+            Some(CustomIconKind::Named) => {
+                if let Some(handle) = self.named.borrow().as_ref() {
+                    let widget = handle.widget();
+                    widget.set_visible(false);
+                    if widget.parent().is_some() {
+                        self.content.remove(&widget);
+                    }
+                }
+            }
+            Some(CustomIconKind::Glyph) => {
+                if let Some(root) = self.glyph_root.borrow().as_ref() {
+                    root.set_visible(false);
+                    if root.parent().is_some() {
+                        self.content.remove(root);
+                    }
+                }
+            }
+            None => {}
+        }
+    }
+}
+
 #[derive(Debug, PartialEq)]
 struct OutputPlan {
     label: String,
     tooltip: Option<String>,
-    icon: Option<String>,
+    icon: Option<CustomIconValue>,
     classes: Vec<String>,
     should_show: bool,
 }
@@ -372,8 +522,8 @@ fn plan_output(
     fallback: &str,
     tmpl: Option<&str>,
     static_tooltip: Option<&str>,
-    icons: &BTreeMap<String, String>,
-    static_icon: Option<&str>,
+    icons: &BTreeMap<String, CustomIconValue>,
+    static_icon: Option<&CustomIconValue>,
     has_static_image: bool,
 ) -> OutputPlan {
     let line = raw.trim();
@@ -431,9 +581,9 @@ fn plan_output(
 
 fn resolve_icon(
     alt: Option<&str>,
-    icons: &BTreeMap<String, String>,
-    static_icon: Option<&str>,
-) -> Option<String> {
+    icons: &BTreeMap<String, CustomIconValue>,
+    static_icon: Option<&CustomIconValue>,
+) -> Option<CustomIconValue> {
     if let Some(icon) = alt
         .filter(|value| !value.is_empty())
         .and_then(|value| icons.get(value))
@@ -441,7 +591,7 @@ fn resolve_icon(
         return Some(icon.clone());
     }
 
-    static_icon.map(String::from)
+    static_icon.cloned()
 }
 
 /// Apply a single line of output to the widget. Handles both plain text and
@@ -456,9 +606,9 @@ fn apply_output(
     label: &Label,
     fallback: &str,
     tmpl: Option<&str>,
-    icon_handle: Option<&IconHandle>,
-    icons: &BTreeMap<String, String>,
-    static_icon: Option<&str>,
+    icon_view: Option<&CustomIconView>,
+    icons: &BTreeMap<String, CustomIconValue>,
+    static_icon: Option<&CustomIconValue>,
     static_tooltip: Option<&str>,
     widget: &gtk4::Box,
     visibility: &VisibilityHandle,
@@ -490,13 +640,8 @@ fn apply_output(
 
     // Waybar-style dynamic icons: JSON `alt` selects from config `icons`.
     // Plain text or unmatched alt falls back to the static `icon`.
-    if let Some(ref name) = plan.icon
-        && let Some(h) = icon_handle
-    {
-        h.set_icon(name);
-        h.widget().set_visible(true);
-    } else if let Some(h) = icon_handle {
-        h.widget().set_visible(false);
+    if let Some(view) = icon_view {
+        view.set_icon(plan.icon.as_ref());
     }
 
     // CSS class rotation: always remove previous classes on every update.
@@ -532,7 +677,11 @@ fn resolve_image_path(value: &str) -> String {
     }
 }
 
-fn warn_invalid_icon_name(custom_id: &str, icon_name: &str) {
+fn warn_invalid_custom_icon_value(custom_id: &str, icon_value: &CustomIconValue) {
+    let CustomIconValue::Named(icon_name) = icon_value else {
+        return;
+    };
+
     if icon_name.starts_with('/') || icon_name.starts_with("~/") || icon_name.starts_with("file://")
     {
         warn!(
@@ -543,7 +692,7 @@ fn warn_invalid_icon_name(custom_id: &str, icon_name: &str) {
     } else if !has_material_mapping(icon_name) {
         warn!(
             "Custom widget '{}': icon '{}' has no Material Symbol mapping. \
-             Use theme.icons.theme = \"gtk\" or a Nerd Font glyph in the label field.",
+             Use theme.icons.theme = \"gtk\" or prefix a literal glyph with 'glyph:'.",
             custom_id, icon_name
         );
     }
@@ -554,10 +703,10 @@ fn warn_invalid_icon_name(custom_id: &str, icon_name: &str) {
 pub struct CustomWidget {
     /// Shared base widget container.
     base: BaseWidget,
-    /// Kept alive so icon handles remain registered for theme changes even
-    /// when no exec closure also owns a clone.
+    /// Kept alive so custom icon handles remain registered for theme changes
+    /// even when no exec closure also owns a clone.
     #[allow(dead_code)]
-    icon_handle: Option<IconHandle>,
+    icon_view: Option<CustomIconView>,
     /// Active timer source ID for cancellation on drop (poll mode).
     timer_source: Rc<RefCell<Option<SourceId>>>,
     /// Stop flag for the continuous-mode background reader thread.
@@ -612,7 +761,7 @@ impl CustomWidget {
         let static_icon = config.icon.clone();
         let has_static_image = config.image.is_some();
 
-        let icon_handle = if let Some(ref image_path) = config.image {
+        let icon_view = if let Some(ref image_path) = config.image {
             if config.icon.is_some() {
                 warn!(
                     "Custom widget '{}': both 'image' and 'icon' are set; using 'image'",
@@ -656,20 +805,16 @@ impl CustomWidget {
 
             None
         } else if config.icon.is_some() || !config.icons.is_empty() {
-            let initial_icon = config.icon.as_deref().unwrap_or("image-missing");
-
             if let Some(ref icon) = config.icon {
-                warn_invalid_icon_name(custom_id, icon);
+                warn_invalid_custom_icon_value(custom_id, icon);
             }
             for icon in config.icons.values() {
-                warn_invalid_icon_name(custom_id, icon);
+                warn_invalid_custom_icon_value(custom_id, icon);
             }
 
-            let handle = base.add_icon(initial_icon, &[]);
-            if config.icon.is_none() {
-                handle.widget().set_visible(false);
-            }
-            Some(handle)
+            let view = CustomIconView::new(base.content());
+            view.set_icon(config.icon.as_ref());
+            Some(view)
         } else {
             None
         };
@@ -711,7 +856,7 @@ impl CustomWidget {
                     &exec_cmd,
                     ContinuousContext {
                         label: lbl,
-                        icon_handle: icon_handle.clone(),
+                        icon_view: icon_view.clone(),
                         icons: config.icons.clone(),
                         static_icon: static_icon.clone(),
                         fallback: config.label,
@@ -745,7 +890,7 @@ impl CustomWidget {
                     widget: base.widget().clone(),
                     visibility: base.visibility_handle(),
                     class_target: base.surface().clone(),
-                    icon_handle: icon_handle.clone(),
+                    icon_view: icon_view.clone(),
                     icons: config.icons.clone(),
                     static_icon: static_icon.clone(),
                     static_tooltip: config.tooltip.clone(),
@@ -839,7 +984,7 @@ impl CustomWidget {
 
         Self {
             base,
-            icon_handle,
+            icon_view,
             timer_source,
             continuous_stop,
             continuous_pid,
@@ -919,7 +1064,7 @@ fn run_exec(state: &ExecState) {
     let visibility = state.visibility.clone();
     let class_target = state.class_target.clone();
     let exec_cmd = state.cmd.clone();
-    let icon_handle = state.icon_handle.clone();
+    let icon_view = state.icon_view.clone();
     let icons = state.icons.clone();
     let static_icon = state.static_icon.clone();
     let static_tooltip = state.static_tooltip.clone();
@@ -1005,9 +1150,9 @@ fn run_exec(state: &ExecState) {
                     &label,
                     &fallback_text,
                     template.as_deref(),
-                    icon_handle.as_ref(),
+                    icon_view.as_ref(),
                     &icons,
-                    static_icon.as_deref(),
+                    static_icon.as_ref(),
                     static_tooltip.as_deref(),
                     &widget,
                     &visibility,
@@ -1132,9 +1277,9 @@ fn start_continuous(cmd: &str, ctx: ContinuousContext) {
                         &ctx.label,
                         &ctx.fallback,
                         ctx.template.as_deref(),
-                        ctx.icon_handle.as_ref(),
+                        ctx.icon_view.as_ref(),
                         &ctx.icons,
-                        ctx.static_icon.as_deref(),
+                        ctx.static_icon.as_ref(),
                         ctx.static_tooltip.as_deref(),
                         &ctx.widget,
                         &ctx.visibility,
@@ -1293,6 +1438,14 @@ mod tests {
         assert!(config.max_chars.is_none());
     }
 
+    fn named_icon(name: &str) -> CustomIconValue {
+        CustomIconValue::Named(name.to_string())
+    }
+
+    fn glyph_icon(glyph: &str) -> CustomIconValue {
+        CustomIconValue::Glyph(glyph.to_string())
+    }
+
     #[test]
     fn test_custom_config_full() {
         let mut options = HashMap::new();
@@ -1330,14 +1483,14 @@ mod tests {
         let entry = make_entry(options);
         let config = CustomConfig::from_entry(&entry);
 
-        assert_eq!(config.icon, Some("system-shutdown-symbolic".to_string()));
+        assert_eq!(config.icon, Some(named_icon("system-shutdown-symbolic")));
         assert_eq!(
-            config.icons.get("dnd").map(String::as_str),
-            Some("notifications-disabled")
+            config.icons.get("dnd"),
+            Some(&named_icon("notifications-disabled"))
         );
         assert_eq!(
-            config.icons.get("enabled").map(String::as_str),
-            Some("notifications")
+            config.icons.get("enabled"),
+            Some(&named_icon("notifications"))
         );
         assert_eq!(config.label, "Power");
         assert_eq!(config.exec, Some("echo hello".to_string()));
@@ -1376,6 +1529,33 @@ mod tests {
     }
 
     #[test]
+    fn test_custom_config_icon_glyph_parsed() {
+        let mut options = HashMap::new();
+        options.insert("icon".to_string(), Value::String("glyph:🔋".to_string()));
+        let entry = make_entry(options);
+        let config = CustomConfig::from_entry(&entry);
+        assert_eq!(config.icon, Some(glyph_icon("🔋")));
+    }
+
+    #[test]
+    fn test_custom_config_icon_unknown_prefix_stays_named() {
+        let mut options = HashMap::new();
+        options.insert("icon".to_string(), Value::String("foo:bar".to_string()));
+        let entry = make_entry(options);
+        let config = CustomConfig::from_entry(&entry);
+        assert_eq!(config.icon, Some(named_icon("foo:bar")));
+    }
+
+    #[test]
+    fn test_custom_config_empty_prefixed_icon_ignored() {
+        let mut options = HashMap::new();
+        options.insert("icon".to_string(), Value::String("glyph:".to_string()));
+        let entry = make_entry(options);
+        let config = CustomConfig::from_entry(&entry);
+        assert!(config.icon.is_none());
+    }
+
+    #[test]
     fn test_custom_config_icons_ignores_non_string_values() {
         let mut icons = toml::map::Map::new();
         icons.insert("dnd".to_string(), Value::String("disabled".to_string()));
@@ -1387,10 +1567,22 @@ mod tests {
         let config = CustomConfig::from_entry(&entry);
 
         assert_eq!(config.icons.len(), 1);
-        assert_eq!(
-            config.icons.get("dnd").map(String::as_str),
-            Some("disabled")
-        );
+        assert_eq!(config.icons.get("dnd"), Some(&named_icon("disabled")));
+    }
+
+    #[test]
+    fn test_custom_config_icons_glyph_value_parsed() {
+        let mut icons = toml::map::Map::new();
+        icons.insert("unknown".to_string(), Value::String("glyph:?".to_string()));
+        icons.insert("dnd".to_string(), Value::String("disabled".to_string()));
+
+        let mut options = HashMap::new();
+        options.insert("icons".to_string(), Value::Table(icons));
+        let entry = make_entry(options);
+        let config = CustomConfig::from_entry(&entry);
+
+        assert_eq!(config.icons.get("unknown"), Some(&glyph_icon("?")));
+        assert_eq!(config.icons.get("dnd"), Some(&named_icon("disabled")));
     }
 
     #[test]
@@ -1581,35 +1773,46 @@ mod tests {
         assert!((out.percentage.unwrap() - 42.5).abs() < f64::EPSILON);
     }
 
-    fn icon_map(entries: &[(&str, &str)]) -> BTreeMap<String, String> {
+    fn icon_map(entries: &[(&str, &str)]) -> BTreeMap<String, CustomIconValue> {
         entries
             .iter()
-            .map(|(alt, icon)| ((*alt).to_string(), (*icon).to_string()))
+            .map(|(alt, icon)| ((*alt).to_string(), named_icon(icon)))
             .collect()
     }
 
     #[test]
     fn test_resolve_icon_exact_match_and_static_fallback() {
         let icons = icon_map(&[("dnd", "notifications-disabled")]);
+        let static_icon = named_icon("static");
         assert_eq!(
-            resolve_icon(Some("dnd"), &icons, Some("static")),
-            Some("notifications-disabled".to_string())
+            resolve_icon(Some("dnd"), &icons, Some(&static_icon)),
+            Some(named_icon("notifications-disabled"))
         );
         assert_eq!(
-            resolve_icon(Some("unknown"), &icons, Some("static")),
-            Some("static".to_string())
+            resolve_icon(Some("unknown"), &icons, Some(&static_icon)),
+            Some(named_icon("static"))
         );
         assert_eq!(
-            resolve_icon(None, &icons, Some("static")),
-            Some("static".to_string())
+            resolve_icon(None, &icons, Some(&static_icon)),
+            Some(named_icon("static"))
         );
         assert_eq!(
-            resolve_icon(Some(""), &icons, Some("static")),
-            Some("static".to_string())
+            resolve_icon(Some(""), &icons, Some(&static_icon)),
+            Some(named_icon("static"))
         );
         assert_eq!(
-            resolve_icon(Some("unknown"), &BTreeMap::new(), Some("static")),
-            Some("static".to_string())
+            resolve_icon(Some("unknown"), &BTreeMap::new(), Some(&static_icon)),
+            Some(named_icon("static"))
+        );
+    }
+
+    #[test]
+    fn test_resolve_icon_exact_match_can_return_glyph() {
+        let icons = BTreeMap::from([("unknown".to_string(), glyph_icon("?"))]);
+        let static_icon = named_icon("static");
+        assert_eq!(
+            resolve_icon(Some("unknown"), &icons, Some(&static_icon)),
+            Some(glyph_icon("?"))
         );
     }
 
@@ -1706,13 +1909,14 @@ mod tests {
     #[test]
     fn test_plan_output_json_class_and_tooltip() {
         let icons = icon_map(&[("high", "cpu-high")]);
+        let static_icon = named_icon("static-icon");
         let plan = plan_output(
             r#"{"text":"cpu 42%","tooltip":"details","class":["warning",""],"alt":"high","icon":"ignored"}"#,
             "fallback",
             Some("{text}"),
             Some("static"),
             &icons,
-            Some("static-icon"),
+            Some(&static_icon),
             false,
         );
 
@@ -1721,7 +1925,7 @@ mod tests {
             OutputPlan {
                 label: "cpu 42%".to_string(),
                 tooltip: Some("details".to_string()),
-                icon: Some("cpu-high".to_string()),
+                icon: Some(named_icon("cpu-high")),
                 classes: vec!["warning".to_string()],
                 should_show: true,
             }
@@ -1742,7 +1946,25 @@ mod tests {
         );
 
         assert_eq!(plan.label, "");
-        assert_eq!(plan.icon, Some("moon".to_string()));
+        assert_eq!(plan.icon, Some(named_icon("moon")));
+        assert!(plan.should_show);
+    }
+
+    #[test]
+    fn test_plan_output_json_alt_can_select_glyph_icon() {
+        let icons = BTreeMap::from([("unknown".to_string(), glyph_icon("?"))]);
+        let plan = plan_output(
+            r#"{"alt":"unknown"}"#,
+            "fallback",
+            None,
+            None,
+            &icons,
+            None,
+            false,
+        );
+
+        assert_eq!(plan.label, "");
+        assert_eq!(plan.icon, Some(glyph_icon("?")));
         assert!(plan.should_show);
     }
 
@@ -1764,17 +1986,18 @@ mod tests {
 
     #[test]
     fn test_plan_output_ignores_json_icon_extension() {
+        let static_icon = named_icon("static-icon");
         let plan = plan_output(
             r#"{"text":"cpu 42%","alt":"missing","icon":"json-icon"}"#,
             "fallback",
             None,
             None,
             &BTreeMap::new(),
-            Some("static-icon"),
+            Some(&static_icon),
             false,
         );
 
-        assert_eq!(plan.icon, Some("static-icon".to_string()));
+        assert_eq!(plan.icon, Some(named_icon("static-icon")));
     }
 
     #[test]

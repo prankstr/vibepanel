@@ -693,6 +693,9 @@ pub mod widget {
     /// Each instance gets a dynamic `custom-{id}` class built from this prefix.
     pub const CUSTOM_PREFIX: &str = "custom-";
 
+    /// Custom widget literal glyph icon (`.custom-icon-glyph`).
+    pub const CUSTOM_ICON_GLYPH: &str = "custom-icon-glyph";
+
     // Keyboard layout
     /// Keyboard layout widget (`.keyboard-layout`).
     pub const KEYBOARD_LAYOUT: &str = "keyboard-layout";
