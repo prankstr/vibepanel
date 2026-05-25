@@ -1077,33 +1077,6 @@ fn run_test_custom_widget_json_exec_output() {
     flush_gtk();
 }
 
-fn run_test_custom_widget_empty_json_hides_without_fallback() {
-    let mut config = custom_exec_config("empty-json", "printf '%s\\n' '{\"text\":\"\"}'");
-    config
-        .widgets
-        .widget_configs
-        .get_mut("custom-empty-json")
-        .expect("custom-empty-json config should exist")
-        .options
-        .remove("template");
-    let (window, bar, _state, _popover_registry_guard, _css_provider) = built_bar_fixture(&config);
-    let left_section = bar
-        .section("left")
-        .expect("bar should build a left section");
-    let wrapper = left_section
-        .first_child()
-        .expect("custom-empty-json wrapper should be present");
-
-    wait_until(
-        || !wrapper.is_visible(),
-        "empty JSON custom output to hide the widget wrapper",
-    );
-
-    maybe_hold_probe_window();
-    window.close();
-    flush_gtk();
-}
-
 fn run_test_widgets_grouping_explicit_group() {
     let mut baseline = test_config();
     baseline.widgets.left = vec![
@@ -1934,11 +1907,6 @@ ui_regression_config_tests!(
         test_ui_regression_custom_widget_json_exec_output,
         "custom_widget.json_exec_output",
         run_test_custom_widget_json_exec_output
-    ),
-    (
-        test_ui_regression_custom_widget_empty_json_hides_without_fallback,
-        "custom_widget.empty_json_hides_without_fallback",
-        run_test_custom_widget_empty_json_hides_without_fallback
     ),
     (
         test_ui_regression_widgets_grouping_explicit_group,

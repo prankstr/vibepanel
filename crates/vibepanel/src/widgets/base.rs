@@ -1123,3 +1123,25 @@ impl Drop for BaseWidget {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_run_show_if_command_true() {
+        assert!(BaseWidget::run_show_if_command_with_timeout("true"));
+    }
+
+    #[test]
+    fn test_run_show_if_command_false() {
+        assert!(!BaseWidget::run_show_if_command_with_timeout("false"));
+    }
+
+    #[test]
+    fn test_run_show_if_command_nonexistent_binary() {
+        assert!(!BaseWidget::run_show_if_command_with_timeout(
+            "/nonexistent/binary/that/does/not/exist"
+        ));
+    }
+}

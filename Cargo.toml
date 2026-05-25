@@ -58,6 +58,7 @@ sysinfo = { version = "0.33", default-features = false, features = ["system", "n
 nvml-wrapper = "0.12"
 
 # Synchronization
+async-channel = "2.3"
 parking_lot = "0.12"
 
 # HTTP

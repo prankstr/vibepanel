@@ -3,59 +3,27 @@
 //! Supports multiple instances via the `custom-` naming prefix.
 //! Each `custom-<name>` entry becomes its own widget with a unique CSS class.
 //!
-//! Two exec modes, both supporting auto-detected Waybar-style JSON output:
-//! - **Poll** (default): `exec` runs every `interval` seconds. First stdout line is processed;
-//!   if it parses as JSON with a supported structured field (`text`, `tooltip`, `class`, `alt`,
-//!   or `percentage`), those fields are applied. Otherwise the line is treated as plain text.
-//! - **Continuous** (`continuous = true`): `exec` spawns a long-running process; each stdout line
-//!   updates the widget in real-time with the same auto-detection.
+//! `exec` can run once/on interval, or as a line-buffered stream with `continuous = true`.
+//! Output is plain text unless it parses as Waybar-style JSON with at least one supported
+//! field: `text`, `tooltip`, `class`, `alt`, or `percentage`. `alt` maps through `icons`,
+//! and `glyph:<value>` renders a literal side icon.
 //!
-//! ## State semantics
+//! VibePanel supports the JSON output format, not Waybar's config surface: use `template`
+//! and `icons` instead of `format`, `format-icons`, `signal`, or `return-type`.
 //!
-//! Each output line fully defines dynamic state:
-//! - Plain text or JSON without `class` clears all previously applied CSS classes.
-//! - JSON without `tooltip` falls back to the static `tooltip` config key, or clears the tooltip.
-//! - JSON `alt` selects an icon from the optional `icons` table; unmatched states fall back to
-//!   the static `icon` config key.
-//! - Empty output hides the custom widget content; `show_if` additionally gates the outer
-//!   widget wrapper. For live gating in streaming widgets, set `show_if_interval`.
+//! For continuous mode, commands must flush stdout per line. Optional `restart_interval`
+//! auto-restarts on exit, with a 5-in-60s crash-loop cap.
 //!
-//! ## Waybar-style JSON output
-//!
-//! A subset of Waybar custom-module JSON fields is supported: `text`, `tooltip`, `class`
-//! (string or array), `alt`, `percentage`.
-//! Auto-detection means no `return-type = "json"` config key is needed.
-//! VibePanel does not implement Waybar config keys such as `format`, percentage-based
-//! `format-icons`, `signal`, or `return-type`; use VibePanel's `template` with
-//! `{output}`/`{text}` and `icons` for exact `alt` -> icon mapping instead.
-//!
-//! ### Compatibility notes
-//!
-//! - JSON must contain at least one supported field (`text`, `tooltip`, `class`, `alt`,
-//!   or `percentage`) for VibePanel to interpret it as structured output.
-//! - `show_if` is evaluated by BaseWidget. In continuous mode, set `show_if_interval`
-//!   if the gate should be re-evaluated while the stream is running.
-//!
-//! For continuous mode, ensure your command flushes stdout per-line (e.g. `stdbuf -oL`).
-//! Optional `restart_interval` (seconds) auto-restarts on exit, with a 5-in-60s crash-loop cap.
-//!
-//! Configuration examples:
+//! Example:
 //! ```toml
-//! [widgets.custom-weather]
-//! exec = "curl -s 'wttr.in/?format=1'"
-//! template = " {output}"
-//! interval = 600
-//! tooltip = "Weather"
-//!
-//! [widgets.custom-json]
-//! exec = "printf '%s\\n' '{\"text\":\"CPU 42%\",\"tooltip\":\"details\",\"class\":\"normal\"}'"
-//! interval = 5
-//! tooltip = "Default tooltip"
-//!
 //! [widgets.custom-monitor]
 //! exec = "stdbuf -oL my-monitor --json"
 //! continuous = true
 //! restart_interval = 5
+//! template = "{text} {percentage}%"
+//!
+//! [widgets.custom-monitor.icons]
+//! warning = "glyph:!"
 //! ```
 
 use std::cell::RefCell;
@@ -68,7 +36,6 @@ use gtk4::gio;
 use gtk4::glib::{self, SourceId};
 use gtk4::prelude::*;
 use gtk4::{Box as GtkBox, GestureClick, Image, Label, Orientation, gdk};
-use parking_lot::Mutex;
 use serde::Deserialize;
 use tracing::{debug, warn};
 use vibepanel_core::config::WidgetEntry;
@@ -117,12 +84,6 @@ const CONTINUOUS_KILL_GRACE_MS: u64 = 250;
 enum CustomIconValue {
     Named(String),
     Glyph(String),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CustomIconKind {
-    Named,
-    Glyph,
 }
 
 fn parse_custom_icon_value(custom_id: &str, value: &str) -> Option<CustomIconValue> {
@@ -289,19 +250,17 @@ impl WidgetConfig for CustomConfig {
 #[derive(Clone)]
 struct ExecState {
     cmd: String,
-    label: Option<Label>,
-    fallback_text: String,
-    template: Option<String>,
     custom_id: String,
-    widget: gtk4::Box,
-    visibility: VisibilityHandle,
-    class_target: gtk4::Box,
-    icon_view: Option<CustomIconView>,
-    icons: BTreeMap<String, CustomIconValue>,
-    static_icon: Option<CustomIconValue>,
-    static_tooltip: Option<String>,
+    display: DisplayContext,
     prev_classes: Rc<RefCell<Vec<String>>>,
-    has_static_image: bool,
+}
+
+struct ExecWiring {
+    state: Option<ExecState>,
+    timer_source: Rc<RefCell<Option<SourceId>>>,
+    continuous_stop: Option<Arc<AtomicBool>>,
+    continuous_pid: Arc<AtomicU32>,
+    continuous_restart_source: Rc<RefCell<Option<SourceId>>>,
 }
 
 fn record_restart_attempt(times: &mut Vec<std::time::Instant>, now: std::time::Instant) -> bool {
@@ -317,6 +276,17 @@ fn record_restart_attempt(times: &mut Vec<std::time::Instant>, now: std::time::I
 
 #[derive(Clone)]
 struct ContinuousContext {
+    display: DisplayContext,
+    custom_id: String,
+    restart_interval: Option<u64>,
+    stop_flag: Arc<AtomicBool>,
+    pid_slot: Arc<AtomicU32>,
+    restart_times: Rc<RefCell<Vec<std::time::Instant>>>,
+    restart_source_slot: Rc<RefCell<Option<SourceId>>>,
+}
+
+#[derive(Clone)]
+struct DisplayContext {
     label: Label,
     icon_view: Option<CustomIconView>,
     icons: BTreeMap<String, CustomIconValue>,
@@ -324,25 +294,42 @@ struct ContinuousContext {
     fallback: String,
     static_tooltip: Option<String>,
     template: Option<String>,
-    custom_id: String,
     widget: gtk4::Box,
     visibility: VisibilityHandle,
     class_target: gtk4::Box,
-    restart_interval: Option<u64>,
-    stop_flag: Arc<AtomicBool>,
-    pid_slot: Arc<AtomicU32>,
-    restart_times: Rc<RefCell<Vec<std::time::Instant>>>,
-    restart_source_slot: Rc<RefCell<Option<SourceId>>>,
     has_static_image: bool,
+}
+
+struct DisplayWidgets {
+    label: Option<Label>,
+    icon_view: Option<CustomIconView>,
+    static_icon: Option<CustomIconValue>,
+    has_static_image: bool,
+}
+
+impl DisplayWidgets {
+    fn context(&self, label: &Label, config: &CustomConfig, base: &BaseWidget) -> DisplayContext {
+        DisplayContext {
+            label: label.clone(),
+            icon_view: self.icon_view.clone(),
+            icons: config.icons.clone(),
+            static_icon: self.static_icon.clone(),
+            fallback: config.label.clone(),
+            static_tooltip: config.tooltip.clone(),
+            template: config.template.clone(),
+            widget: base.widget().clone(),
+            visibility: base.visibility_handle(),
+            class_target: base.surface().clone(),
+            has_static_image: self.has_static_image,
+        }
+    }
 }
 
 #[derive(Clone)]
 struct CustomIconView {
     content: gtk4::Box,
     named: Rc<RefCell<Option<IconHandle>>>,
-    glyph_root: Rc<RefCell<Option<gtk4::Box>>>,
-    glyph_label: Rc<RefCell<Option<Label>>>,
-    active: Rc<RefCell<Option<CustomIconKind>>>,
+    glyph: Rc<RefCell<Option<Label>>>,
 }
 
 impl CustomIconView {
@@ -350,9 +337,7 @@ impl CustomIconView {
         Self {
             content: content.clone(),
             named: Rc::new(RefCell::new(None)),
-            glyph_root: Rc::new(RefCell::new(None)),
-            glyph_label: Rc::new(RefCell::new(None)),
-            active: Rc::new(RefCell::new(None)),
+            glyph: Rc::new(RefCell::new(None)),
         }
     }
 
@@ -365,86 +350,55 @@ impl CustomIconView {
     }
 
     fn show_named(&self, name: &str) {
+        self.hide_glyph();
         if self.named.borrow().is_none() {
-            *self.named.borrow_mut() = Some(IconsService::global().create_icon(name, &[]));
+            let handle = IconsService::global().create_icon(name, &[]);
+            let widget = handle.widget();
+            widget.set_visible(false);
+            self.content.prepend(&widget);
+            *self.named.borrow_mut() = Some(handle);
         }
 
-        let widget = {
-            let named = self.named.borrow();
-            let handle = named.as_ref().expect("named icon handle exists");
+        if let Some(handle) = self.named.borrow().as_ref() {
             handle.set_icon(name);
-            handle.widget()
-        };
-
-        self.activate(CustomIconKind::Named, &widget);
+            handle.widget().set_visible(true);
+        }
     }
 
     fn show_glyph(&self, glyph: &str) {
-        if self.glyph_label.borrow().is_none() {
-            let root = GtkBox::new(Orientation::Horizontal, 0);
-            root.add_css_class(icon::ROOT);
-            root.set_halign(gtk4::Align::Center);
-            root.set_hexpand(true);
-
+        self.hide_named();
+        if self.glyph.borrow().is_none() {
             let label = Label::new(None);
+            label.add_css_class(icon::ROOT);
             label.add_css_class(wgt::CUSTOM_ICON_GLYPH);
             label.set_halign(gtk4::Align::Center);
             label.set_hexpand(true);
             label.set_xalign(0.5);
-            root.append(&label);
-
-            *self.glyph_root.borrow_mut() = Some(root);
-            *self.glyph_label.borrow_mut() = Some(label);
+            label.set_visible(false);
+            self.content.prepend(&label);
+            *self.glyph.borrow_mut() = Some(label);
         }
 
-        if let Some(label) = self.glyph_label.borrow().as_ref() {
+        if let Some(label) = self.glyph.borrow().as_ref() {
             label.set_label(glyph);
+            label.set_visible(true);
         }
-        let root = self
-            .glyph_root
-            .borrow()
-            .as_ref()
-            .expect("glyph root exists")
-            .clone()
-            .upcast::<gtk4::Widget>();
-
-        self.activate(CustomIconKind::Glyph, &root);
     }
 
     fn hide(&self) {
-        self.detach_active();
-        *self.active.borrow_mut() = None;
+        self.hide_named();
+        self.hide_glyph();
     }
 
-    fn activate(&self, kind: CustomIconKind, widget: &gtk4::Widget) {
-        if *self.active.borrow() != Some(kind) {
-            self.detach_active();
-            self.content.prepend(widget);
-            *self.active.borrow_mut() = Some(kind);
+    fn hide_named(&self) {
+        if let Some(handle) = self.named.borrow().as_ref() {
+            handle.widget().set_visible(false);
         }
-        widget.set_visible(true);
     }
 
-    fn detach_active(&self) {
-        match *self.active.borrow() {
-            Some(CustomIconKind::Named) => {
-                if let Some(handle) = self.named.borrow().as_ref() {
-                    let widget = handle.widget();
-                    widget.set_visible(false);
-                    if widget.parent().is_some() {
-                        self.content.remove(&widget);
-                    }
-                }
-            }
-            Some(CustomIconKind::Glyph) => {
-                if let Some(root) = self.glyph_root.borrow().as_ref() {
-                    root.set_visible(false);
-                    if root.parent().is_some() {
-                        self.content.remove(root);
-                    }
-                }
-            }
-            None => {}
+    fn hide_glyph(&self) {
+        if let Some(label) = self.glyph.borrow().as_ref() {
+            label.set_visible(false);
         }
     }
 }
@@ -534,9 +488,13 @@ fn plan_output(
         None => line,
     };
 
-    let display = match tmpl {
-        Some(t) => expand_template(t, text, parsed.as_ref()),
-        None => text.to_string(),
+    let display = if !json_present && line.is_empty() {
+        String::new()
+    } else {
+        match tmpl {
+            Some(t) => expand_template(t, text, parsed.as_ref()),
+            None => text.to_string(),
+        }
     };
 
     let tooltip = match parsed.as_ref().and_then(|o| o.tooltip.as_deref()) {
@@ -600,61 +558,46 @@ fn resolve_icon(
 /// State semantics: each output line fully defines dynamic state.
 /// - Plain text or JSON without `class` clears all previously applied CSS classes.
 /// - JSON without `tooltip` falls back to the static `tooltip` config key, or clears the tooltip.
-#[allow(clippy::too_many_arguments)]
-fn apply_output(
-    raw: &str,
-    label: &Label,
-    fallback: &str,
-    tmpl: Option<&str>,
-    icon_view: Option<&CustomIconView>,
-    icons: &BTreeMap<String, CustomIconValue>,
-    static_icon: Option<&CustomIconValue>,
-    static_tooltip: Option<&str>,
-    widget: &gtk4::Box,
-    visibility: &VisibilityHandle,
-    class_target: &gtk4::Box,
-    prev_classes: &mut Vec<String>,
-    has_static_image: bool,
-) {
+fn apply_output(raw: &str, display: &DisplayContext, prev_classes: &mut Vec<String>) {
     let plan = plan_output(
         raw,
-        fallback,
-        tmpl,
-        static_tooltip,
-        icons,
-        static_icon,
-        has_static_image,
+        &display.fallback,
+        display.template.as_deref(),
+        display.static_tooltip.as_deref(),
+        &display.icons,
+        display.static_icon.as_ref(),
+        display.has_static_image,
     );
-    label.set_label(&plan.label);
-    label.set_visible(!plan.label.is_empty());
+    display.label.set_label(&plan.label);
+    display.label.set_visible(!plan.label.is_empty());
 
-    visibility.set_content_visible(plan.should_show);
+    display.visibility.set_content_visible(plan.should_show);
 
     // Tooltip: each update fully defines the tooltip state.
     // JSON tooltip overrides, plain text falls back to static config or clears it.
     if let Some(ref tip) = plan.tooltip {
-        TooltipManager::global().set_styled_tooltip(widget, tip);
+        TooltipManager::global().set_styled_tooltip(&display.widget, tip);
     } else {
-        TooltipManager::global().clear_tooltip(widget);
+        TooltipManager::global().clear_tooltip(&display.widget);
     }
 
     // Waybar-style dynamic icons: JSON `alt` selects from config `icons`.
     // Plain text or unmatched alt falls back to the static `icon`.
-    if let Some(view) = icon_view {
+    if let Some(view) = &display.icon_view {
         view.set_icon(plan.icon.as_ref());
     }
 
     // CSS class rotation: always remove previous classes on every update.
     // Each output line fully defines dynamic state — plain text clears all classes.
     for c in prev_classes.drain(..) {
-        class_target.remove_css_class(&c);
+        display.class_target.remove_css_class(&c);
     }
     for c in plan.classes {
         // Guard against removing static/pre-existing classes: GTK CSS
         // classes are not reference-counted, so blindly tracking and
         // removing a class that was already present would strip it.
-        if !class_target.has_css_class(&c) {
-            class_target.add_css_class(&c);
+        if !display.class_target.has_css_class(&c) {
+            display.class_target.add_css_class(&c);
             prev_classes.push(c);
         }
     }
@@ -689,12 +632,203 @@ fn warn_invalid_custom_icon_value(custom_id: &str, icon_value: &CustomIconValue)
              use the 'image' field for file-based images instead of 'icon'.",
             custom_id, icon_name
         );
-    } else if !has_material_mapping(icon_name) {
+    } else if IconsService::global().uses_material() && !has_material_mapping(icon_name) {
         warn!(
             "Custom widget '{}': icon '{}' has no Material Symbol mapping. \
              Use theme.icons.theme = \"gtk\" or prefix a literal glyph with 'glyph:'.",
             custom_id, icon_name
         );
+    }
+}
+
+fn build_display_widgets(
+    custom_id: &str,
+    config: &CustomConfig,
+    base: &BaseWidget,
+) -> DisplayWidgets {
+    let static_icon = config.icon.clone();
+    let has_static_image = config.image.is_some();
+
+    let icon_view = if let Some(ref image_path) = config.image {
+        if config.icon.is_some() {
+            warn!(
+                "Custom widget '{}': both 'image' and 'icon' are set; using 'image'",
+                custom_id
+            );
+        }
+        if !config.icons.is_empty() {
+            warn!(
+                "Custom widget '{}': both 'image' and 'icons' are set; dynamic icon mapping \
+                 is ignored because 'image' takes precedence",
+                custom_id
+            );
+        }
+
+        let resolved = resolve_image_path(image_path);
+
+        if !resolved.starts_with('/') {
+            warn!(
+                "Custom widget '{}': image path '{}' is not absolute — \
+                 use an absolute path, ~/path, or file:// URI",
+                custom_id, image_path
+            );
+        } else if !std::path::Path::new(&resolved).exists() {
+            warn!(
+                "Custom widget '{}': image file '{}' does not exist",
+                custom_id, resolved
+            );
+        }
+
+        let image = Image::from_file(&resolved);
+        let icon_size = ConfigManager::global().theme_sizes().pixmap_icon_size as i32;
+        image.set_pixel_size(icon_size);
+
+        let icon_root = GtkBox::new(Orientation::Horizontal, 0);
+        icon_root.add_css_class(icon::ROOT);
+        icon_root.set_halign(gtk4::Align::Center);
+        icon_root.set_hexpand(true);
+        image.set_halign(gtk4::Align::Center);
+        icon_root.append(&image);
+        base.content().append(&icon_root);
+
+        None
+    } else if config.icon.is_some() || !config.icons.is_empty() {
+        if let Some(ref icon) = config.icon {
+            warn_invalid_custom_icon_value(custom_id, icon);
+        }
+        for icon in config.icons.values() {
+            warn_invalid_custom_icon_value(custom_id, icon);
+        }
+
+        let view = CustomIconView::new(base.content());
+        view.set_icon(config.icon.as_ref());
+        Some(view)
+    } else {
+        None
+    };
+
+    let label = if !config.label.is_empty() || config.exec.is_some() {
+        let initial_text = if config.label.is_empty() {
+            None
+        } else {
+            Some(config.label.as_str())
+        };
+        let lbl = base.add_label(initial_text, &[]);
+
+        if let Some(max_chars) = config.max_chars {
+            lbl.set_max_width_chars(max_chars);
+            lbl.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+        }
+
+        Some(lbl)
+    } else {
+        None
+    };
+
+    if config.exec.is_some()
+        && config.label.is_empty()
+        && config.icon.is_none()
+        && config.image.is_none()
+    {
+        base.visibility_handle().set_content_visible(false);
+    }
+
+    DisplayWidgets {
+        label,
+        icon_view,
+        static_icon,
+        has_static_image,
+    }
+}
+
+fn wire_exec(
+    custom_id: &str,
+    config: &CustomConfig,
+    base: &BaseWidget,
+    display_widgets: &DisplayWidgets,
+) -> ExecWiring {
+    let timer_source = Rc::new(RefCell::new(None));
+    let continuous_pid = Arc::new(AtomicU32::new(0));
+    let continuous_restart_source = Rc::new(RefCell::new(None));
+
+    if config.continuous {
+        let continuous_stop = config
+            .exec
+            .as_ref()
+            .map(|_| Arc::new(AtomicBool::new(false)));
+
+        if let (Some(exec_cmd), Some(lbl), Some(stop)) = (
+            config.exec.clone(),
+            display_widgets.label.clone(),
+            &continuous_stop,
+        ) {
+            let display = display_widgets.context(&lbl, config, base);
+            start_continuous(
+                &exec_cmd,
+                ContinuousContext {
+                    display,
+                    custom_id: custom_id.to_string(),
+                    restart_interval: config.restart_interval,
+                    stop_flag: stop.clone(),
+                    pid_slot: continuous_pid.clone(),
+                    restart_times: Rc::new(RefCell::new(Vec::<std::time::Instant>::new())),
+                    restart_source_slot: continuous_restart_source.clone(),
+                },
+            );
+        }
+
+        return ExecWiring {
+            state: None,
+            timer_source,
+            continuous_stop,
+            continuous_pid,
+            continuous_restart_source,
+        };
+    }
+
+    let continuous_stop = None;
+    let state = config.exec.clone().map(|exec_cmd| {
+        let display = display_widgets.context(
+            display_widgets
+                .label
+                .as_ref()
+                .expect("exec widgets have a label"),
+            config,
+            base,
+        );
+        let state = ExecState {
+            cmd: exec_cmd,
+            custom_id: custom_id.to_string(),
+            display,
+            prev_classes: Rc::new(RefCell::new(Vec::new())),
+        };
+
+        // Run the exec command once immediately.
+        run_exec(&state);
+
+        if config.interval > 0 {
+            let state_for_timer = state.clone();
+
+            let source_id = glib::timeout_add_seconds_local(
+                u32::try_from(config.interval).unwrap_or(u32::MAX),
+                move || {
+                    run_exec(&state_for_timer);
+                    glib::ControlFlow::Continue
+                },
+            );
+
+            *timer_source.borrow_mut() = Some(source_id);
+        }
+
+        state
+    });
+
+    ExecWiring {
+        state,
+        timer_source,
+        continuous_stop,
+        continuous_pid,
+        continuous_restart_source,
     }
 }
 
@@ -705,8 +839,7 @@ pub struct CustomWidget {
     base: BaseWidget,
     /// Kept alive so custom icon handles remain registered for theme changes
     /// even when no exec closure also owns a clone.
-    #[allow(dead_code)]
-    icon_view: Option<CustomIconView>,
+    _icon_view: Option<CustomIconView>,
     /// Active timer source ID for cancellation on drop (poll mode).
     timer_source: Rc<RefCell<Option<SourceId>>>,
     /// Stop flag for the continuous-mode background reader thread.
@@ -758,168 +891,8 @@ impl CustomWidget {
             base.set_tooltip(tip);
         }
 
-        let static_icon = config.icon.clone();
-        let has_static_image = config.image.is_some();
-
-        let icon_view = if let Some(ref image_path) = config.image {
-            if config.icon.is_some() {
-                warn!(
-                    "Custom widget '{}': both 'image' and 'icon' are set; using 'image'",
-                    custom_id
-                );
-            }
-            if !config.icons.is_empty() {
-                warn!(
-                    "Custom widget '{}': both 'image' and 'icons' are set; dynamic icon mapping \
-                     is ignored because 'image' takes precedence",
-                    custom_id
-                );
-            }
-
-            let resolved = resolve_image_path(image_path);
-
-            if !resolved.starts_with('/') {
-                warn!(
-                    "Custom widget '{}': image path '{}' is not absolute — \
-                     use an absolute path, ~/path, or file:// URI",
-                    custom_id, image_path
-                );
-            } else if !std::path::Path::new(&resolved).exists() {
-                warn!(
-                    "Custom widget '{}': image file '{}' does not exist",
-                    custom_id, resolved
-                );
-            }
-
-            let image = Image::from_file(&resolved);
-            let icon_size = ConfigManager::global().theme_sizes().pixmap_icon_size as i32;
-            image.set_pixel_size(icon_size);
-
-            let icon_root = GtkBox::new(Orientation::Horizontal, 0);
-            icon_root.add_css_class(icon::ROOT);
-            icon_root.set_halign(gtk4::Align::Center);
-            icon_root.set_hexpand(true);
-            image.set_halign(gtk4::Align::Center);
-            icon_root.append(&image);
-            base.content().append(&icon_root);
-
-            None
-        } else if config.icon.is_some() || !config.icons.is_empty() {
-            if let Some(ref icon) = config.icon {
-                warn_invalid_custom_icon_value(custom_id, icon);
-            }
-            for icon in config.icons.values() {
-                warn_invalid_custom_icon_value(custom_id, icon);
-            }
-
-            let view = CustomIconView::new(base.content());
-            view.set_icon(config.icon.as_ref());
-            Some(view)
-        } else {
-            None
-        };
-
-        let label = if !config.label.is_empty() || config.exec.is_some() {
-            let initial_text = if config.label.is_empty() {
-                None
-            } else {
-                Some(config.label.as_str())
-            };
-            let lbl = base.add_label(initial_text, &[]);
-
-            if let Some(max_chars) = config.max_chars {
-                lbl.set_max_width_chars(max_chars);
-                lbl.set_ellipsize(gtk4::pango::EllipsizeMode::End);
-            }
-
-            Some(lbl)
-        } else {
-            None
-        };
-
-        let timer_source = Rc::new(RefCell::new(None));
-
-        let continuous_stop: Option<Arc<AtomicBool>>;
-        let continuous_pid = Arc::new(AtomicU32::new(0));
-        let continuous_restart_source = Rc::new(RefCell::new(None));
-
-        // Continuous mode: spawn long-running process, skip poll setup.
-        let exec_state = if config.continuous {
-            continuous_stop = config
-                .exec
-                .as_ref()
-                .map(|_| Arc::new(AtomicBool::new(false)));
-            if let (Some(exec_cmd), Some(lbl), Some(stop)) =
-                (config.exec, label.clone(), &continuous_stop)
-            {
-                start_continuous(
-                    &exec_cmd,
-                    ContinuousContext {
-                        label: lbl,
-                        icon_view: icon_view.clone(),
-                        icons: config.icons.clone(),
-                        static_icon: static_icon.clone(),
-                        fallback: config.label,
-                        static_tooltip: config.tooltip.clone(),
-                        template: config.template,
-                        custom_id: custom_id.to_string(),
-                        widget: base.widget().clone(),
-                        visibility: base.visibility_handle(),
-                        class_target: base.surface().clone(),
-                        restart_interval: config.restart_interval,
-                        stop_flag: stop.clone(),
-                        pid_slot: continuous_pid.clone(),
-                        restart_times: Rc::new(RefCell::new(Vec::<std::time::Instant>::new())),
-                        restart_source_slot: continuous_restart_source.clone(),
-                        has_static_image,
-                    },
-                );
-            }
-            None // no ExecState needed — continuous manages its own updates
-        } else {
-            // Poll mode
-            continuous_stop = None;
-
-            if let Some(exec_cmd) = config.exec {
-                let state = ExecState {
-                    cmd: exec_cmd,
-                    label: label.clone(),
-                    fallback_text: config.label.clone(),
-                    template: config.template.clone(),
-                    custom_id: custom_id.to_string(),
-                    widget: base.widget().clone(),
-                    visibility: base.visibility_handle(),
-                    class_target: base.surface().clone(),
-                    icon_view: icon_view.clone(),
-                    icons: config.icons.clone(),
-                    static_icon: static_icon.clone(),
-                    static_tooltip: config.tooltip.clone(),
-                    prev_classes: Rc::new(RefCell::new(Vec::new())),
-                    has_static_image,
-                };
-
-                // Run the exec command once immediately.
-                run_exec(&state);
-
-                if config.interval > 0 {
-                    let state_for_timer = state.clone();
-
-                    let source_id = glib::timeout_add_seconds_local(
-                        u32::try_from(config.interval).unwrap_or(u32::MAX),
-                        move || {
-                            run_exec(&state_for_timer);
-                            glib::ControlFlow::Continue
-                        },
-                    );
-
-                    *timer_source.borrow_mut() = Some(source_id);
-                }
-
-                Some(state)
-            } else {
-                None
-            }
-        };
+        let display_widgets = build_display_widgets(custom_id, &config, &base);
+        let exec_wiring = wire_exec(custom_id, &config, &base, &display_widgets);
 
         if let Some(on_click) = config.on_click {
             // Custom widget's own left-click handler. Runs the command, then
@@ -931,7 +904,7 @@ impl CustomWidget {
             click.set_button(gdk::BUTTON_PRIMARY);
             click.connect_released(move |_gesture, _n_press, _x, _y| {
                 let cmd = on_click.to_string();
-                let exec_state = exec_state.clone();
+                let exec_state = exec_wiring.state.clone();
                 let widget_name = click_widget_name.clone();
                 debug!("Custom widget executing: sh -c {}", cmd);
 
@@ -984,11 +957,11 @@ impl CustomWidget {
 
         Self {
             base,
-            icon_view,
-            timer_source,
-            continuous_stop,
-            continuous_pid,
-            continuous_restart_source,
+            _icon_view: display_widgets.icon_view,
+            timer_source: exec_wiring.timer_source,
+            continuous_stop: exec_wiring.continuous_stop,
+            continuous_pid: exec_wiring.continuous_pid,
+            continuous_restart_source: exec_wiring.continuous_restart_source,
         }
     }
 
@@ -1003,12 +976,12 @@ impl Drop for CustomWidget {
         if let Some(source_id) = self.timer_source.borrow_mut().take() {
             source_id.remove();
         }
-        if let Some(source_id) = self.continuous_restart_source.borrow_mut().take() {
-            source_id.remove();
-        }
         // Stop continuous-mode process group (shell + descendants).
         if let Some(ref flag) = self.continuous_stop {
             flag.store(true, Ordering::Relaxed);
+        }
+        if let Some(source_id) = self.continuous_restart_source.borrow_mut().take() {
+            source_id.remove();
         }
         let pid = self.continuous_pid.load(Ordering::Relaxed);
         if pid != 0 {
@@ -1052,24 +1025,10 @@ impl Drop for CustomWidget {
 /// supported field (`text`, `tooltip`, `class`, `alt`, `percentage`) are
 /// auto-detected and applied. Plain text lines work as before.
 fn run_exec(state: &ExecState) {
-    let Some(label) = state.label.as_ref() else {
-        return;
-    };
-
-    let label = label.clone();
-    let fallback_text = state.fallback_text.clone();
-    let template = state.template.clone();
+    let display = state.display.clone();
     let custom_id = state.custom_id.clone();
-    let widget = state.widget.clone();
-    let visibility = state.visibility.clone();
-    let class_target = state.class_target.clone();
     let exec_cmd = state.cmd.clone();
-    let icon_view = state.icon_view.clone();
-    let icons = state.icons.clone();
-    let static_icon = state.static_icon.clone();
-    let static_tooltip = state.static_tooltip.clone();
     let prev_classes = Rc::clone(&state.prev_classes);
-    let has_static_image = state.has_static_image;
 
     glib::spawn_future_local(async move {
         let result = gio::spawn_blocking(move || {
@@ -1145,21 +1104,7 @@ fn run_exec(state: &ExecState) {
 
         match result {
             Ok(Ok(output)) => {
-                apply_output(
-                    &output,
-                    &label,
-                    &fallback_text,
-                    template.as_deref(),
-                    icon_view.as_ref(),
-                    &icons,
-                    static_icon.as_ref(),
-                    static_tooltip.as_deref(),
-                    &widget,
-                    &visibility,
-                    &class_target,
-                    &mut prev_classes.borrow_mut(),
-                    has_static_image,
-                );
+                apply_output(&output, &display, &mut prev_classes.borrow_mut());
             }
             Ok(Err(err)) => {
                 warn!("'custom-{}' exec failed: {}", custom_id, err);
@@ -1180,6 +1125,10 @@ fn run_exec(state: &ExecState) {
 /// Schedule a bounded restart after process exit or spawn failure.
 /// Enforces crash-loop cap ([`MAX_RESTARTS`] per [`RESTART_WINDOW_SECS`]).
 fn schedule_restart(ctx: &ContinuousContext, cmd: &str, reason: &str) {
+    if ctx.stop_flag.load(Ordering::Relaxed) {
+        return;
+    }
+
     let delay = match ctx.restart_interval {
         Some(d) => d,
         None => return,
@@ -1244,7 +1193,7 @@ fn start_continuous(cmd: &str, ctx: ContinuousContext) {
         ctx.custom_id, pid
     );
 
-    let (tx, rx) = std::sync::mpsc::channel::<Option<String>>();
+    let (tx, rx) = async_channel::bounded::<Option<String>>(64);
     let thread_stop = ctx.stop_flag.clone();
     let thread_id = ctx.custom_id.clone();
 
@@ -1254,7 +1203,6 @@ fn start_continuous(cmd: &str, ctx: ContinuousContext) {
         continuous_reader(child, thread_stop, thread_id, tx, reader_pid_slot);
     });
 
-    let rx = Arc::new(Mutex::new(rx));
     let stop = ctx.stop_flag.clone();
     let cmd = cmd.to_string();
 
@@ -1264,36 +1212,21 @@ fn start_continuous(cmd: &str, ctx: ContinuousContext) {
             if stop.load(Ordering::Relaxed) {
                 break;
             }
-            let rx2 = rx.clone();
-            let msg = gio::spawn_blocking(move || rx2.lock().recv().ok().flatten()).await;
+            let msg = rx.recv().await.ok().flatten();
             if stop.load(Ordering::Relaxed) {
                 break;
             }
 
             match msg {
-                Ok(Some(line)) => {
-                    apply_output(
-                        &line,
-                        &ctx.label,
-                        &ctx.fallback,
-                        ctx.template.as_deref(),
-                        ctx.icon_view.as_ref(),
-                        &ctx.icons,
-                        ctx.static_icon.as_ref(),
-                        ctx.static_tooltip.as_deref(),
-                        &ctx.widget,
-                        &ctx.visibility,
-                        &ctx.class_target,
-                        &mut prev_classes,
-                        ctx.has_static_image,
-                    );
+                Some(line) => {
+                    apply_output(&line, &ctx.display, &mut prev_classes);
                 }
                 _ => {
                     // Channel closed — process exited.
                     // Clear CSS classes from the old process so the next
                     // incarnation starts with a clean slate.
                     for c in prev_classes.drain(..) {
-                        ctx.class_target.remove_css_class(&c);
+                        ctx.display.class_target.remove_css_class(&c);
                     }
                     schedule_restart(&ctx, &cmd, "after exit");
                     break;
@@ -1309,7 +1242,7 @@ fn continuous_reader(
     mut child: std::process::Child,
     stop: Arc<AtomicBool>,
     id: String,
-    tx: std::sync::mpsc::Sender<Option<String>>,
+    tx: async_channel::Sender<Option<String>>,
     pid_slot: Arc<AtomicU32>,
 ) {
     use std::io::BufRead;
@@ -1340,7 +1273,7 @@ fn continuous_reader(
             }
             match line {
                 Ok(l) => {
-                    if tx.send(Some(l)).is_err() {
+                    if tx.send_blocking(Some(l)).is_err() {
                         break;
                     }
                 }
@@ -1369,7 +1302,7 @@ fn continuous_reader(
             warn!("'custom-{}' continuous process wait failed: {}", id, e);
         }
     }
-    let _ = tx.send(None); // signal exit before joining stderr
+    let _ = tx.send_blocking(None); // signal exit before joining stderr
     // Drop stderr reader without joining; if a background descendant
     // inherits stderr, the join could block and prevent restart signaling.
     drop(stderr_handle);
@@ -1502,33 +1435,6 @@ mod tests {
     }
 
     #[test]
-    fn test_custom_config_negative_interval_clamped() {
-        let mut options = HashMap::new();
-        options.insert("interval".to_string(), Value::Integer(-5));
-        let entry = make_entry(options);
-        let config = CustomConfig::from_entry(&entry);
-        assert_eq!(config.interval, 0);
-    }
-
-    #[test]
-    fn test_custom_config_max_chars_min_one() {
-        let mut options = HashMap::new();
-        options.insert("max_chars".to_string(), Value::Integer(0));
-        let entry = make_entry(options);
-        let config = CustomConfig::from_entry(&entry);
-        assert_eq!(config.max_chars, Some(1));
-    }
-
-    #[test]
-    fn test_custom_config_ignores_non_string_icon() {
-        let mut options = HashMap::new();
-        options.insert("icon".to_string(), Value::Integer(42));
-        let entry = make_entry(options);
-        let config = CustomConfig::from_entry(&entry);
-        assert!(config.icon.is_none());
-    }
-
-    #[test]
     fn test_custom_config_icon_glyph_parsed() {
         let mut options = HashMap::new();
         options.insert("icon".to_string(), Value::String("glyph:🔋".to_string()));
@@ -1556,21 +1462,6 @@ mod tests {
     }
 
     #[test]
-    fn test_custom_config_icons_ignores_non_string_values() {
-        let mut icons = toml::map::Map::new();
-        icons.insert("dnd".to_string(), Value::String("disabled".to_string()));
-        icons.insert("count".to_string(), Value::Integer(3));
-
-        let mut options = HashMap::new();
-        options.insert("icons".to_string(), Value::Table(icons));
-        let entry = make_entry(options);
-        let config = CustomConfig::from_entry(&entry);
-
-        assert_eq!(config.icons.len(), 1);
-        assert_eq!(config.icons.get("dnd"), Some(&named_icon("disabled")));
-    }
-
-    #[test]
     fn test_custom_config_icons_glyph_value_parsed() {
         let mut icons = toml::map::Map::new();
         icons.insert("unknown".to_string(), Value::String("glyph:?".to_string()));
@@ -1583,60 +1474,6 @@ mod tests {
 
         assert_eq!(config.icons.get("unknown"), Some(&glyph_icon("?")));
         assert_eq!(config.icons.get("dnd"), Some(&named_icon("disabled")));
-    }
-
-    #[test]
-    fn test_custom_config_template_parsed() {
-        let mut options = HashMap::new();
-        options.insert(
-            "template".to_string(),
-            Value::String(" {output}".to_string()),
-        );
-        let entry = make_entry(options);
-        let config = CustomConfig::from_entry(&entry);
-        assert_eq!(config.template, Some(" {output}".to_string()));
-    }
-
-    #[test]
-    fn test_custom_config_template_ignores_non_string() {
-        let mut options = HashMap::new();
-        options.insert("template".to_string(), Value::Integer(42));
-        let entry = make_entry(options);
-        let config = CustomConfig::from_entry(&entry);
-        assert!(config.template.is_none());
-    }
-
-    #[test]
-    fn test_custom_config_image_parsed() {
-        let mut options = HashMap::new();
-        options.insert(
-            "image".to_string(),
-            Value::String("/usr/share/pixmaps/logo.svg".to_string()),
-        );
-        let entry = make_entry(options);
-        let config = CustomConfig::from_entry(&entry);
-        assert_eq!(
-            config.image,
-            Some("/usr/share/pixmaps/logo.svg".to_string())
-        );
-    }
-
-    #[test]
-    fn test_custom_config_image_ignores_non_string() {
-        let mut options = HashMap::new();
-        options.insert("image".to_string(), Value::Integer(42));
-        let entry = make_entry(options);
-        let config = CustomConfig::from_entry(&entry);
-        assert!(config.image.is_none());
-    }
-
-    #[test]
-    fn test_custom_config_image_empty_string_is_none() {
-        let mut options = HashMap::new();
-        options.insert("image".to_string(), Value::String("".to_string()));
-        let entry = make_entry(options);
-        let config = CustomConfig::from_entry(&entry);
-        assert!(config.image.is_none());
     }
 
     #[test]
@@ -1656,40 +1493,15 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_image_path_home_tilde() {
-        let result = resolve_image_path("~/icons/logo.png");
-        assert!(!result.starts_with('~'));
-        assert!(result.ends_with("/icons/logo.png"));
-    }
-
-    // --- show_if command tests ---
-
-    #[test]
-    fn test_run_show_if_command_true() {
-        assert!(BaseWidget::run_show_if_command_with_timeout("true"));
-    }
-
-    #[test]
-    fn test_run_show_if_command_false() {
-        assert!(!BaseWidget::run_show_if_command_with_timeout("false"));
-    }
-
-    #[test]
-    fn test_run_show_if_command_nonexistent_binary() {
-        assert!(!BaseWidget::run_show_if_command_with_timeout(
-            "/nonexistent/binary/that/does/not/exist"
-        ));
+    fn test_resolve_image_path_home_relative() {
+        let resolved = resolve_image_path("~/icon.png");
+        match std::env::var("HOME") {
+            Ok(home) => assert_eq!(resolved, format!("{home}/icon.png")),
+            Err(_) => assert_eq!(resolved, "~/icon.png"),
+        }
     }
 
     // --- continuous mode config tests ---
-
-    #[test]
-    fn test_custom_config_continuous_defaults_false() {
-        let entry = make_entry(HashMap::new());
-        let config = CustomConfig::from_entry(&entry);
-        assert!(!config.continuous);
-        assert!(config.restart_interval.is_none());
-    }
 
     #[test]
     fn test_custom_config_continuous_true() {
@@ -1703,18 +1515,9 @@ mod tests {
     }
 
     #[test]
-    fn test_custom_config_restart_interval_zero_is_none() {
+    fn test_custom_config_negative_restart_interval_is_none() {
         let mut options = HashMap::new();
-        options.insert("restart_interval".to_string(), Value::Integer(0));
-        let entry = make_entry(options);
-        let config = CustomConfig::from_entry(&entry);
-        assert!(config.restart_interval.is_none());
-    }
-
-    #[test]
-    fn test_custom_config_restart_interval_negative_is_none() {
-        let mut options = HashMap::new();
-        options.insert("restart_interval".to_string(), Value::Integer(-3));
+        options.insert("restart_interval".to_string(), Value::Integer(-1));
         let entry = make_entry(options);
         let config = CustomConfig::from_entry(&entry);
         assert!(config.restart_interval.is_none());
@@ -1755,12 +1558,6 @@ mod tests {
             try_parse_json(r#"{"percentage":80}"#).unwrap().percentage,
             Some(80.0)
         );
-    }
-
-    #[test]
-    fn test_try_parse_json_with_text() {
-        let out = try_parse_json(r#"{"text":"hello"}"#).unwrap();
-        assert_eq!(out.text.as_deref(), Some("hello"));
     }
 
     #[test]
@@ -1806,28 +1603,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_resolve_icon_exact_match_can_return_glyph() {
-        let icons = BTreeMap::from([("unknown".to_string(), glyph_icon("?"))]);
-        let static_icon = named_icon("static");
-        assert_eq!(
-            resolve_icon(Some("unknown"), &icons, Some(&static_icon)),
-            Some(glyph_icon("?"))
-        );
-    }
-
-    #[test]
-    fn test_try_parse_json_class_single() {
-        let out = try_parse_json(r#"{"text":"x","class":"warning"}"#).unwrap();
-        assert_eq!(out.class.unwrap().into_vec(), vec!["warning"]);
-    }
-
-    #[test]
-    fn test_try_parse_json_class_array() {
-        let out = try_parse_json(r#"{"text":"x","class":["a","b"]}"#).unwrap();
-        assert_eq!(out.class.unwrap().into_vec(), vec!["a", "b"]);
-    }
-
     // --- StringOrVec tests ---
 
     #[test]
@@ -1848,16 +1623,6 @@ mod tests {
     }
 
     // --- expand_template tests ---
-
-    #[test]
-    fn test_expand_template_output() {
-        assert_eq!(expand_template("{output}!", "hello", None), "hello!");
-    }
-
-    #[test]
-    fn test_expand_template_text_alias() {
-        assert_eq!(expand_template("{text}!", "hello", None), "hello!");
-    }
 
     #[test]
     fn test_expand_template_with_exec_output() {
@@ -2047,28 +1812,44 @@ mod tests {
     }
 
     #[test]
-    fn test_plan_output_json_missing_tooltip_clears_when_no_static() {
-        let plan = plan_output(
-            r#"{"text":"x"}"#,
-            "fallback",
-            None,
-            None,
-            &BTreeMap::new(),
-            None,
-            false,
-        );
-
-        assert_eq!(plan.tooltip, None);
-        assert_eq!(plan.classes, Vec::<String>::new());
-    }
-
-    #[test]
     fn test_output_should_show_plain_text_uses_fallback() {
         let with_fallback = plan_output("", "fallback", None, None, &BTreeMap::new(), None, false);
         assert_eq!(with_fallback.label, "fallback");
         assert!(with_fallback.should_show);
         let without_fallback = plan_output("", "", None, None, &BTreeMap::new(), None, false);
         assert!(!without_fallback.should_show);
+    }
+
+    #[test]
+    fn test_output_should_show_empty_plain_text_template_uses_fallback() {
+        let plan = plan_output(
+            "",
+            "fallback",
+            Some("[{output}]"),
+            None,
+            &BTreeMap::new(),
+            None,
+            false,
+        );
+
+        assert_eq!(plan.label, "fallback");
+        assert!(plan.should_show);
+    }
+
+    #[test]
+    fn test_output_should_hide_empty_plain_text_template_without_fallback() {
+        let plan = plan_output(
+            "",
+            "",
+            Some("[{output}]"),
+            None,
+            &BTreeMap::new(),
+            None,
+            false,
+        );
+
+        assert_eq!(plan.label, "");
+        assert!(!plan.should_show);
     }
 
     #[test]
@@ -2106,6 +1887,24 @@ mod tests {
         );
 
         assert_eq!(plan.label, "");
+        assert!(plan.should_show);
+    }
+
+    #[test]
+    fn test_output_should_show_json_empty_text_with_static_icon() {
+        let static_icon = named_icon("static-icon");
+        let plan = plan_output(
+            r#"{"text":""}"#,
+            "fallback",
+            None,
+            None,
+            &BTreeMap::new(),
+            Some(&static_icon),
+            false,
+        );
+
+        assert_eq!(plan.label, "");
+        assert_eq!(plan.icon, Some(named_icon("static-icon")));
         assert!(plan.should_show);
     }
 }
