@@ -354,6 +354,8 @@ impl CustomIconView {
         if self.named.borrow().is_none() {
             let handle = IconsService::global().create_icon(name, &[]);
             let widget = handle.widget();
+            widget.set_halign(gtk4::Align::Center);
+            widget.set_hexpand(true);
             widget.set_visible(false);
             self.content.prepend(&widget);
             *self.named.borrow_mut() = Some(handle);
