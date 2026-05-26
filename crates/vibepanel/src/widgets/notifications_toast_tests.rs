@@ -403,7 +403,7 @@ fn test_notification_toast_structure_contract() {
                 monitor: None,
                 layout: ToastLayout {
                     position,
-                    initial_margin: TOAST_BAR_MARGIN,
+                    initial_margin: TOAST_EDGE_MARGIN,
                 },
             },
             &notification,
@@ -421,7 +421,7 @@ fn test_notification_toast_structure_contract() {
             .expect("toast window should contain a styled surface");
         let container = find_descendant_with_class(&child, notif::TOAST_CONTAINER)
             .expect("toast should render a styled notification container");
-        let side_margin = (TOAST_MARGIN_RIGHT
+        let side_margin = (TOAST_SIDE_MARGIN
             - SurfaceStyleManager::global().shadow_margin(SURFACE_SHADOW_MARGIN))
         .max(0);
 
@@ -446,7 +446,7 @@ fn test_notification_toast_structure_contract() {
             toast.window.is_anchor(Edge::Right),
             horizontal_edge == Some(Edge::Right)
         );
-        assert_eq!(toast.window.margin(vertical_edge), TOAST_BAR_MARGIN);
+        assert_eq!(toast.window.margin(vertical_edge), TOAST_EDGE_MARGIN);
         assert_eq!(
             toast.window.margin(Edge::Left),
             if horizontal_edge == Some(Edge::Left) {

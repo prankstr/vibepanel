@@ -27,8 +27,8 @@ use crate::services::surfaces::SurfaceStyleManager;
 use crate::styles::{button, color, notification as notif};
 
 use super::notifications_common::{
-    POPOVER_WIDTH, SURFACE_SHADOW_MARGIN, TOAST_BAR_MARGIN, TOAST_ESTIMATED_HEIGHT, TOAST_GAP,
-    TOAST_MARGIN_RIGHT, TOAST_TIMEOUT_CRITICAL_MS, TOAST_TIMEOUT_MS,
+    POPOVER_WIDTH, SURFACE_SHADOW_MARGIN, TOAST_EDGE_MARGIN, TOAST_ESTIMATED_HEIGHT, TOAST_GAP,
+    TOAST_SIDE_MARGIN, TOAST_TIMEOUT_CRITICAL_MS, TOAST_TIMEOUT_MS,
     create_notification_image_widget, sanitize_body_markup,
 };
 
@@ -163,7 +163,7 @@ impl NotificationToast {
 
         window.set_anchor(Edge::Top, vertical_edge == Edge::Top);
         window.set_anchor(Edge::Bottom, vertical_edge == Edge::Bottom);
-        let side_margin = (TOAST_MARGIN_RIGHT
+        let side_margin = (TOAST_SIDE_MARGIN
             - SurfaceStyleManager::global().shadow_margin(SURFACE_SHADOW_MARGIN))
         .max(0);
         let (horizontal_edge, horizontal_margin) = toast_horizontal_layout(
@@ -659,7 +659,7 @@ impl NotificationToastManager {
         let initial_margin = {
             let order = self.toast_order.borrow();
             let toasts = self.toasts.borrow();
-            let mut y_offset = (TOAST_BAR_MARGIN - sm).max(0);
+            let mut y_offset = (TOAST_EDGE_MARGIN - sm).max(0);
             for &id in order.iter() {
                 if let Some(toast) = toasts.get(&id) {
                     y_offset += (toast.height() - 2 * sm).max(0) + TOAST_GAP;
@@ -713,7 +713,7 @@ impl NotificationToastManager {
         let order = self.toast_order.borrow();
         let toasts = self.toasts.borrow();
         let sm = SurfaceStyleManager::global().shadow_margin(SURFACE_SHADOW_MARGIN);
-        let mut y_offset = (TOAST_BAR_MARGIN - sm).max(0);
+        let mut y_offset = (TOAST_EDGE_MARGIN - sm).max(0);
         for &id in order.iter() {
             if let Some(toast) = toasts.get(&id) {
                 toast.update_bar_margin(y_offset, ConfigManager::global().animations_enabled());
