@@ -23,13 +23,15 @@ const VALID_THEME_MODES: &[&str] = &["auto", "dark", "light", "gtk"];
 
 /// Light or dark polarity for the Material You color scheme.
 ///
-/// Used as `theme.scheme` in config — omit to auto-derive from wallpaper luminance
-/// when `mode = "auto"`.
+/// Used as `theme.scheme` in config. Omit to auto-derive from wallpaper luminance
+/// when `mode = "auto"`, or use `gtk` to derive from the desktop color-scheme
+/// preference in the GTK app layer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SchemePolarity {
     Dark,
     Light,
+    Gtk,
 }
 
 /// Known valid values for theme.popover.
@@ -507,16 +509,16 @@ impl Config {
         }
 
         // Warn about popover set to the same polarity as the current mode.
-        // When mode = "auto" and scheme is omitted, the effective polarity depends on
-        // wallpaper luminance which is only known at runtime — skip the warning in that case
-        // to avoid false positives.
+        // When mode = "auto" and scheme is omitted or follows GTK, the effective polarity
+        // depends on runtime state — skip the warning in that case to avoid false positives.
         if let Some(ref popover) = self.theme.popover {
             let effective_mode = match self.theme.mode.as_str() {
                 "dark" => Some("dark"),
                 "light" => Some("light"),
-                "auto" => self.theme.scheme.map(|s| match s {
-                    SchemePolarity::Dark => "dark",
-                    SchemePolarity::Light => "light",
+                "auto" => self.theme.scheme.and_then(|s| match s {
+                    SchemePolarity::Dark => Some("dark"),
+                    SchemePolarity::Light => Some("light"),
+                    SchemePolarity::Gtk => None,
                 }),
                 _ => None,
             };
@@ -1284,13 +1286,15 @@ pub struct ThemeConfig {
     /// - "gtk": derive colors from GTK theme where possible
     pub mode: String,
 
-    /// Material You color scheme polarity: "dark" or "light".
+    /// Material You color scheme polarity: "dark", "light", or "gtk".
     ///
-    /// Only meaningful when `mode = "auto"`. When omitted, the polarity is
-    /// automatically derived from the wallpaper's average WCAG relative
-    /// luminance, using the perceptual midpoint (CIELAB L*=50, linear ≈ 0.184)
-    /// as the threshold: bright wallpaper → light scheme, dark wallpaper →
-    /// dark scheme. Set explicitly to override.
+    /// Only meaningful when `mode = "auto"`. When set to `gtk`, the GTK app
+    /// layer reads the GNOME `org.gnome.desktop.interface color-scheme`
+    /// GSettings key. When omitted, or when that preference is unavailable/default,
+    /// the polarity is derived from the wallpaper's average WCAG relative luminance,
+    /// using the perceptual midpoint (CIELAB L*=50, linear ≈ 0.184) as the threshold:
+    /// bright wallpaper → light scheme, dark wallpaper → dark scheme. Set explicitly
+    /// to override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scheme: Option<SchemePolarity>,
 

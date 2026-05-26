@@ -1,7 +1,7 @@
 //! Integration tests for config parsing against the real config.toml.
 
 use std::path::PathBuf;
-use vibepanel_core::Config;
+use vibepanel_core::{Config, config::SchemePolarity};
 
 fn project_root() -> PathBuf {
     // Navigate from crates/vibepanel-core/ up to project root
@@ -285,6 +285,21 @@ fn test_validation_accepts_valid_enum_values() {
     config2
         .validate()
         .expect("Valid config should pass validation");
+}
+
+#[test]
+fn test_theme_scheme_accepts_gtk_for_auto_mode() {
+    let toml = r#"
+        [theme]
+        mode = "auto"
+        scheme = "gtk"
+    "#;
+
+    let config: Config = toml::from_str(toml).unwrap();
+    assert_eq!(config.theme.scheme, Some(SchemePolarity::Gtk));
+    config
+        .validate()
+        .expect("theme.scheme=gtk should be valid in auto mode");
 }
 
 #[test]

@@ -25,13 +25,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
-use gtk4::{glib, prelude::*};
+use gtk4::{gio, glib, prelude::*};
 use notify_debouncer_mini::{DebounceEventResult, new_debouncer, notify::RecursiveMode};
 use std::collections::HashSet;
 use tracing::{debug, error, info, warn};
 
 use vibepanel_core::theme::{BORDER_OPACITY_DARK, BORDER_OPACITY_GTK, BORDER_OPACITY_LIGHT};
-use vibepanel_core::{Config, ThemePalette, ThemeSizes, config::BarPosition};
+use vibepanel_core::{
+    Config, ThemePalette, ThemeSizes,
+    config::{BarPosition, SchemePolarity},
+};
 
 use super::callbacks::{CallbackId, Callbacks};
 use super::wallpaper::{detect_wallpaper, extract_theme_from_image, theme_from_source_color};
@@ -43,6 +46,8 @@ const FILE_CHANGE_DEBOUNCE_MS: u64 = 300;
 /// Polling interval (in seconds) for checking if the wallpaper changed.
 /// Only active when `mode = "auto"` and no explicit wallpaper path is set.
 const WALLPAPER_POLL_INTERVAL_SECS: u32 = 2;
+const GTK_INTERFACE_SCHEMA: &str = "org.gnome.desktop.interface";
+const GTK_COLOR_SCHEME_KEY: &str = "color-scheme";
 
 use crate::bar;
 use crate::services::audio::AudioService;
@@ -94,6 +99,47 @@ fn is_style_change_path(
         || symlink_canonical_target.is_some_and(|target| path == target)
 }
 
+fn config_uses_gtk_scheme(config: &Config) -> bool {
+    config.theme.mode == "auto" && config.theme.scheme == Some(SchemePolarity::Gtk)
+}
+
+fn scheme_from_gtk_color_scheme_value(value: &str) -> Option<SchemePolarity> {
+    match value {
+        "prefer-dark" => Some(SchemePolarity::Dark),
+        "prefer-light" => Some(SchemePolarity::Light),
+        "default" => None,
+        other => {
+            debug!(
+                "Unknown GTK color-scheme preference '{}', falling back to wallpaper luminance",
+                other
+            );
+            None
+        }
+    }
+}
+
+fn gtk_color_scheme_settings() -> Option<gio::Settings> {
+    let schema_source = gio::SettingsSchemaSource::default()?;
+    let schema = schema_source.lookup(GTK_INTERFACE_SCHEMA, true)?;
+    if !schema.has_key(GTK_COLOR_SCHEME_KEY) {
+        return None;
+    }
+    Some(gio::Settings::new(GTK_INTERFACE_SCHEMA))
+}
+
+fn gtk_scheme_preference() -> Option<SchemePolarity> {
+    let settings = gtk_color_scheme_settings()?;
+    scheme_from_gtk_color_scheme_value(settings.string(GTK_COLOR_SCHEME_KEY).as_str())
+}
+
+fn resolve_gtk_scheme_config(config: &Config) -> Config {
+    let mut resolved = config.clone();
+    if config_uses_gtk_scheme(&resolved) {
+        resolved.theme.scheme = gtk_scheme_preference();
+    }
+    resolved
+}
+
 /// Manages configuration state and live reload.
 ///
 /// This is a singleton service that:
@@ -131,6 +177,8 @@ pub struct ConfigManager {
     wallpaper_poll_source: RefCell<Option<glib::SourceId>>,
     /// Guard against overlapping wallpaper polls (IPC + image processing is async).
     poll_in_progress: Cell<bool>,
+    /// GSettings watcher kept alive for live `theme.scheme = "gtk"` updates.
+    gtk_color_scheme_watch: RefCell<Option<(gio::Settings, glib::SignalHandlerId)>>,
 }
 
 // Thread-local singleton storage
@@ -164,10 +212,14 @@ impl ConfigManager {
             };
 
         let source_color = material_theme.as_ref().map(|t| t.source);
+        let resolved_config = resolve_gtk_scheme_config(&config);
         let palette =
-            ThemePalette::from_config(&config, material_theme.as_ref(), initial_luminance);
-        let popover_palette =
-            ThemePalette::popover_palette(&config, material_theme.as_ref(), initial_luminance);
+            ThemePalette::from_config(&resolved_config, material_theme.as_ref(), initial_luminance);
+        let popover_palette = ThemePalette::popover_palette(
+            &resolved_config,
+            material_theme.as_ref(),
+            initial_luminance,
+        );
 
         Rc::new(Self {
             config: RefCell::new(config),
@@ -181,6 +233,7 @@ impl ConfigManager {
             cached_luminance: Cell::new(initial_luminance),
             wallpaper_poll_source: RefCell::new(None),
             poll_in_progress: Cell::new(false),
+            gtk_color_scheme_watch: RefCell::new(None),
         })
     }
 
@@ -543,6 +596,7 @@ impl ConfigManager {
     pub fn start_watching(self: &Rc<Self>) {
         // Start wallpaper polling if in auto-detect mode
         self.start_wallpaper_polling();
+        self.start_gtk_color_scheme_watching();
 
         let config_path = self.config_path.borrow().clone();
         let Some(path) = config_path else {
@@ -569,6 +623,30 @@ impl ConfigManager {
         thread::spawn(move || {
             Self::run_file_watcher(watch_path, config_dir, shutdown_flag);
         });
+    }
+
+    fn start_gtk_color_scheme_watching(self: &Rc<Self>) {
+        if self.gtk_color_scheme_watch.borrow().is_some() {
+            return;
+        }
+
+        let Some(settings) = gtk_color_scheme_settings() else {
+            debug!(
+                "GTK color-scheme preference unavailable; theme.scheme=gtk will use wallpaper luminance"
+            );
+            return;
+        };
+
+        let weak = Rc::downgrade(self);
+        let handler_id = settings.connect_changed(Some(GTK_COLOR_SCHEME_KEY), move |_, _| {
+            let Some(mgr) = weak.upgrade() else {
+                return;
+            };
+            mgr.handle_gtk_color_scheme_changed();
+        });
+
+        *self.gtk_color_scheme_watch.borrow_mut() = Some((settings, handler_id));
+        debug!("Watching GTK color-scheme preference for theme.scheme=gtk");
     }
 
     /// Compute the set of directories to watch for `style.css` changes, and
@@ -856,26 +934,11 @@ impl ConfigManager {
                 None
             };
 
-            let luminance = self.cached_luminance.get();
-            // Rebuild the cached palette once
-            let palette =
-                ThemePalette::from_config(&new_config, material_theme.as_ref(), luminance);
-            let popover_palette =
-                ThemePalette::popover_palette(&new_config, material_theme.as_ref(), luminance);
-            let surface_styles = palette.surface_styles();
-
-            // Update surface style manager
-            SurfaceStyleManager::global().reconfigure(
-                surface_styles.clone(),
-                new_config.advanced.pango_font_rendering,
+            self.rebuild_theme_from_material(
+                &new_config,
+                material_theme.as_ref(),
+                self.cached_luminance.get(),
             );
-
-            // Update the cached palettes before load_css so they're available
-            *self.palette.borrow_mut() = palette;
-            *self.popover_palette.borrow_mut() = popover_palette;
-
-            // Reload CSS with new theme values
-            bar::load_css(&new_config);
 
             debug!("Theme styles updated");
         }
@@ -915,6 +978,42 @@ impl ConfigManager {
         }
 
         info!("Configuration applied successfully");
+    }
+
+    fn rebuild_theme_from_material(
+        &self,
+        config: &Config,
+        material_theme: Option<&material_colors::theme::Theme>,
+        luminance: Option<f64>,
+    ) {
+        let resolved_config = resolve_gtk_scheme_config(config);
+        let palette = ThemePalette::from_config(&resolved_config, material_theme, luminance);
+        let popover_palette =
+            ThemePalette::popover_palette(&resolved_config, material_theme, luminance);
+        let surface_styles = palette.surface_styles();
+
+        SurfaceStyleManager::global()
+            .reconfigure(surface_styles.clone(), config.advanced.pango_font_rendering);
+
+        *self.palette.borrow_mut() = palette;
+        *self.popover_palette.borrow_mut() = popover_palette;
+        bar::load_css(config);
+    }
+
+    fn handle_gtk_color_scheme_changed(self: &Rc<Self>) {
+        let config = self.config.borrow().clone();
+        if !config_uses_gtk_scheme(&config) {
+            return;
+        }
+
+        info!("GTK color-scheme preference changed, rebuilding auto theme...");
+        let material_theme = self.cached_source_color.get().map(theme_from_source_color);
+        self.rebuild_theme_from_material(
+            &config,
+            material_theme.as_ref(),
+            self.cached_luminance.get(),
+        );
+        self.theme_callbacks.notify(&());
     }
 
     /// Start polling for wallpaper changes from supported daemons.
@@ -1012,17 +1111,7 @@ impl ConfigManager {
                 mgr.cached_source_color.set(source_color);
                 mgr.cached_luminance.set(new_luminance);
 
-                let palette =
-                    ThemePalette::from_config(&config, material_theme.as_ref(), new_luminance);
-                let popover_palette =
-                    ThemePalette::popover_palette(&config, material_theme.as_ref(), new_luminance);
-                let surface_styles = palette.surface_styles();
-
-                SurfaceStyleManager::global()
-                    .reconfigure(surface_styles.clone(), config.advanced.pango_font_rendering);
-                *mgr.palette.borrow_mut() = palette;
-                *mgr.popover_palette.borrow_mut() = popover_palette;
-                bar::load_css(&config);
+                mgr.rebuild_theme_from_material(&config, material_theme.as_ref(), new_luminance);
 
                 mgr.theme_callbacks.notify(&());
                 info!("Wallpaper theme updated");
@@ -1035,6 +1124,9 @@ impl ConfigManager {
         // Signal the watcher thread to shut down
         self.shutdown_flag.store(true, Ordering::Relaxed);
         self.stop_wallpaper_polling();
+        if let Some((settings, handler_id)) = self.gtk_color_scheme_watch.borrow_mut().take() {
+            settings.disconnect(handler_id);
+        }
         debug!("Config watcher stopped");
     }
 }
@@ -1299,6 +1391,31 @@ mod tests {
         let mut new = old.clone();
         new.theme.popover = Some("light".to_string());
         assert!(config_theme_changed(&old, &new));
+    }
+
+    #[test]
+    fn test_gtk_color_scheme_value_resolution() {
+        assert_eq!(
+            scheme_from_gtk_color_scheme_value("prefer-dark"),
+            Some(SchemePolarity::Dark)
+        );
+        assert_eq!(
+            scheme_from_gtk_color_scheme_value("prefer-light"),
+            Some(SchemePolarity::Light)
+        );
+        assert_eq!(scheme_from_gtk_color_scheme_value("default"), None);
+        assert_eq!(scheme_from_gtk_color_scheme_value("unexpected"), None);
+    }
+
+    #[test]
+    fn test_config_uses_gtk_scheme_only_for_auto_mode() {
+        let mut config = Config::default();
+        config.theme.mode = "auto".to_string();
+        config.theme.scheme = Some(SchemePolarity::Gtk);
+        assert!(config_uses_gtk_scheme(&config));
+
+        config.theme.mode = "gtk".to_string();
+        assert!(!config_uses_gtk_scheme(&config));
     }
 
     #[test]

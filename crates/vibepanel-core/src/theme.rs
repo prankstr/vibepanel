@@ -165,7 +165,7 @@ pub(crate) fn effective_scheme(scheme: Option<SchemePolarity>, luminance: Option
     match scheme {
         Some(SchemePolarity::Light) => true,
         Some(SchemePolarity::Dark) => false,
-        None => luminance
+        Some(SchemePolarity::Gtk) | None => luminance
             .map(|l| l >= PERCEPTUAL_LIGHT_DARK_THRESHOLD)
             .unwrap_or(false),
     }
@@ -2509,6 +2509,22 @@ mod tests {
     fn test_effective_scheme_no_luminance_falls_back_to_dark() {
         // No override, no luminance → fallback dark
         assert!(!effective_scheme(None, None));
+    }
+
+    #[test]
+    fn test_effective_scheme_gtk_falls_back_to_luminance() {
+        assert_eq!(
+            effective_scheme(Some(crate::config::SchemePolarity::Gtk), Some(0.7)),
+            effective_scheme(None, Some(0.7))
+        );
+        assert_eq!(
+            effective_scheme(Some(crate::config::SchemePolarity::Gtk), Some(0.1)),
+            effective_scheme(None, Some(0.1))
+        );
+        assert_eq!(
+            effective_scheme(Some(crate::config::SchemePolarity::Gtk), None),
+            effective_scheme(None, None)
+        );
     }
 
     #[test]
