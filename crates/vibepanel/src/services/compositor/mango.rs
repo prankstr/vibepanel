@@ -90,16 +90,7 @@ impl MangoSocketBackend {
         if socket_path.is_empty() {
             return None;
         }
-        match UnixStream::connect(&socket_path) {
-            Ok(_) => Some(Self::new(socket_path)),
-            Err(e) => {
-                debug!(
-                    "Mango socket IPC unavailable at {}: {}. Falling back to DWL IPC",
-                    socket_path, e
-                );
-                None
-            }
-        }
+        Some(Self::new(socket_path))
     }
 
     fn new(socket_path: String) -> Self {
@@ -112,8 +103,8 @@ impl MangoSocketBackend {
         }
     }
 
-    fn send_command_static(socket_path: &str, command: &str) -> Option<Value> {
-        let mut stream = match UnixStream::connect(socket_path) {
+    fn send_command(&self, command: &str) -> Option<Value> {
+        let mut stream = match UnixStream::connect(&self.socket_path) {
             Ok(stream) => stream,
             Err(e) => {
                 warn!("Failed to connect to Mango socket IPC: {}", e);
@@ -137,19 +128,30 @@ impl MangoSocketBackend {
         parse_json_line(&response)
     }
 
-    fn send_command(&self, command: &str) -> Option<Value> {
-        Self::send_command_static(&self.socket_path, command)
+    fn send_dispatch(&self, command: &str) {
+        let mut stream = match UnixStream::connect(&self.socket_path) {
+            Ok(stream) => stream,
+            Err(e) => {
+                warn!("Failed to connect to Mango socket IPC: {}", e);
+                return;
+            }
+        };
+        let _ = stream.set_write_timeout(Some(SOCKET_REQUEST_TIMEOUT));
+
+        if let Err(e) = writeln!(stream, "{}", command) {
+            warn!("Failed to send Mango IPC dispatch '{}': {}", command, e);
+        }
     }
 
     fn fetch_initial_state(&self) {
         if let Some(value) = self.send_command("get all-monitors") {
-            update_workspace_from_monitors(&self.shared, &value);
+            apply_workspace_from_monitors(&self.shared, &value);
         }
         if let Some(value) = self.send_command("get focusing-client") {
-            update_focused_window_from_client(&self.shared, &value);
+            apply_focused_window_from_client(&self.shared, &value);
         }
         if let Some(value) = self.send_command("get keyboardlayout") {
-            update_keyboard_layout_from_value(&self.shared, &value);
+            apply_keyboard_layout_from_value(&self.shared, &value);
         }
     }
 
@@ -161,8 +163,9 @@ impl MangoSocketBackend {
     ) -> JoinHandle<()> {
         thread::spawn(move || {
             watch_mango_command(socket_path, "watch all-monitors", running, move |value| {
-                if update_workspace_from_monitors(&shared, &value) {
-                    callback(shared.snapshot.read().clone());
+                if apply_workspace_from_monitors(&shared, &value) {
+                    let snapshot = shared.snapshot.read().clone();
+                    callback(snapshot);
                 }
             });
         })
@@ -180,10 +183,11 @@ impl MangoSocketBackend {
                 "watch focusing-client",
                 running,
                 move |value| {
-                    if update_focused_window_from_client(&shared, &value)
-                        && let Some(info) = shared.focused_window.read().clone()
-                    {
-                        callback(info);
+                    if apply_focused_window_from_client(&shared, &value) {
+                        let info = shared.focused_window.read().clone();
+                        if let Some(info) = info {
+                            callback(info);
+                        }
                     }
                 },
             );
@@ -198,10 +202,11 @@ impl MangoSocketBackend {
     ) -> JoinHandle<()> {
         thread::spawn(move || {
             watch_mango_command(socket_path, "watch keyboardlayout", running, move |value| {
-                if update_keyboard_layout_from_value(&shared, &value)
-                    && let Some(info) = shared.keyboard_layout.read().clone()
-                {
-                    callback(info);
+                if apply_keyboard_layout_from_value(&shared, &value) {
+                    let info = shared.keyboard_layout.read().clone();
+                    if let Some(info) = info {
+                        callback(info);
+                    }
                 }
             });
         })
@@ -218,8 +223,10 @@ impl CompositorBackend for MangoSocketBackend {
         debug!("Starting Mango socket IPC backend");
 
         self.fetch_initial_state();
-        on_workspace_update(self.shared.snapshot.read().clone());
-        if let Some(info) = self.shared.focused_window.read().clone() {
+        let snapshot = self.shared.snapshot.read().clone();
+        on_workspace_update(snapshot);
+        let focused_window = self.shared.focused_window.read().clone();
+        if let Some(info) = focused_window {
             on_window_update(info);
         }
         if let Some(callback) = self
@@ -227,9 +234,11 @@ impl CompositorBackend for MangoSocketBackend {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
-            && let Some(info) = self.shared.keyboard_layout.read().clone()
         {
-            callback(info);
+            let keyboard_layout = self.shared.keyboard_layout.read().clone();
+            if let Some(info) = keyboard_layout {
+                callback(info);
+            }
         }
 
         let mut threads = self.watch_threads.lock().unwrap_or_else(|e| e.into_inner());
@@ -292,12 +301,12 @@ impl CompositorBackend for MangoSocketBackend {
 
     fn switch_workspace(&self, workspace_id: i32) {
         if workspace_id > 0 {
-            let _ = self.send_command(&format!("dispatch view,{}", workspace_id));
+            self.send_dispatch(&format!("dispatch view,{}", workspace_id));
         }
     }
 
     fn quit_compositor(&self) {
-        let _ = self.send_command("dispatch quit");
+        self.send_dispatch("dispatch quit");
     }
 
     fn name(&self) -> &'static str {
@@ -316,7 +325,7 @@ impl CompositorBackend for MangoSocketBackend {
     }
 
     fn switch_keyboard_layout_next(&self) {
-        let _ = self.send_command("dispatch switch_keyboard_layout");
+        self.send_dispatch("dispatch switch_keyboard_layout");
     }
 }
 
@@ -382,28 +391,27 @@ fn watch_mango_command<F>(
                 }
             }
         }
+        if running.load(Ordering::SeqCst) {
+            thread::sleep(Duration::from_millis(SOCKET_RECONNECT_MS));
+        }
     }
 }
 
-fn update_workspace_from_monitors(shared: &Arc<MangoSocketSharedState>, value: &Value) -> bool {
-    let Some(entries) = value
-        .get("monitors")
-        .or_else(|| value.get("all_tags"))
-        .and_then(Value::as_array)
-    else {
+fn apply_workspace_from_monitors(shared: &Arc<MangoSocketSharedState>, value: &Value) -> bool {
+    let Some(entries) = value.get("monitors").and_then(Value::as_array) else {
         return false;
     };
 
     let mut snapshot = WorkspaceSnapshot::default();
     let mut max_tag = 0u32;
     for entry in entries {
-        let Some(output_name) = entry
-            .get("monitor")
-            .or_else(|| entry.get("name"))
-            .and_then(Value::as_str)
-        else {
+        let Some(output_name) = entry.get("name").and_then(Value::as_str) else {
             continue;
         };
+        let is_focused_monitor = entry
+            .get("active")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         let per_output = snapshot
             .per_output
             .entry(output_name.to_string())
@@ -418,6 +426,7 @@ fn update_workspace_from_monitors(shared: &Arc<MangoSocketSharedState>, value: &
             .flatten()
             .filter_map(|tag| tag.as_i64().map(|id| id as i32))
             .collect();
+        let is_overview = active_tags.contains(&OVERVIEW_WORKSPACE_ID);
         for tag in tags {
             let Some(workspace_id) = tag.get("index").and_then(Value::as_i64).map(|id| id as i32)
             else {
@@ -438,24 +447,30 @@ fn update_workspace_from_monitors(shared: &Arc<MangoSocketSharedState>, value: &
                 .unwrap_or(false);
             let client_count = tag.get("client_count").and_then(Value::as_u64).unwrap_or(0) as u32;
 
-            per_output.window_counts.insert(workspace_id, client_count);
-            if client_count > 0 {
-                per_output.occupied_workspaces.insert(workspace_id);
-                *snapshot.window_counts.entry(workspace_id).or_insert(0) += client_count;
-                snapshot.occupied_workspaces.insert(workspace_id);
-            }
-            if is_active {
-                per_output.active_workspace.insert(workspace_id);
-                snapshot.active_workspace.insert(workspace_id);
+            if !is_overview {
+                per_output.window_counts.insert(workspace_id, client_count);
+                if client_count > 0 {
+                    per_output.occupied_workspaces.insert(workspace_id);
+                    *snapshot.window_counts.entry(workspace_id).or_insert(0) += client_count;
+                    snapshot.occupied_workspaces.insert(workspace_id);
+                }
+                if is_active {
+                    per_output.active_workspace.insert(workspace_id);
+                    if is_focused_monitor {
+                        snapshot.active_workspace.insert(workspace_id);
+                    }
+                }
             }
             if is_urgent {
                 snapshot.urgent_workspaces.insert(workspace_id);
             }
         }
 
-        if active_tags.contains(&OVERVIEW_WORKSPACE_ID) {
+        if is_overview {
             per_output.active_workspace.insert(OVERVIEW_WORKSPACE_ID);
-            snapshot.active_workspace.insert(OVERVIEW_WORKSPACE_ID);
+            if is_focused_monitor {
+                snapshot.active_workspace.insert(OVERVIEW_WORKSPACE_ID);
+            }
         }
     }
 
@@ -466,7 +481,7 @@ fn update_workspace_from_monitors(shared: &Arc<MangoSocketSharedState>, value: &
     true
 }
 
-fn update_focused_window_from_client(shared: &Arc<MangoSocketSharedState>, value: &Value) -> bool {
+fn apply_focused_window_from_client(shared: &Arc<MangoSocketSharedState>, value: &Value) -> bool {
     let info = if value.get("id").is_some_and(Value::is_null)
         || value.get("error").and_then(Value::as_str) == Some("no focused client")
     {
@@ -503,7 +518,7 @@ fn client_value_to_window_info(value: &Value) -> WindowInfo {
     }
 }
 
-fn update_keyboard_layout_from_value(shared: &Arc<MangoSocketSharedState>, value: &Value) -> bool {
+fn apply_keyboard_layout_from_value(shared: &Arc<MangoSocketSharedState>, value: &Value) -> bool {
     let Some(short_name) = value.get("layout").and_then(Value::as_str) else {
         return false;
     };
@@ -1540,6 +1555,11 @@ impl CompositorBackend for MangoBackend {
 
 impl Drop for MangoBackend {
     fn drop(&mut self) {
+        if let Some(socket_backend) = &self.socket_backend {
+            socket_backend.stop();
+            return;
+        }
+
         // Signal stop but don't call stop() directly (may already be stopped)
         self.running.store(false, Ordering::SeqCst);
         self.shared.pending_switch.store(i32::MIN, Ordering::SeqCst);
@@ -1597,6 +1617,7 @@ mod tests {
             "monitors": [
                 {
                     "name": "eDP-1",
+                    "active": true,
                     "active_tags": [2],
                     "tags": [
                         {"index": 1, "is_active": false, "is_urgent": false, "client_count": 0},
@@ -1606,7 +1627,7 @@ mod tests {
             ]
         });
 
-        assert!(update_workspace_from_monitors(&shared, &value));
+        assert!(apply_workspace_from_monitors(&shared, &value));
         let snapshot = shared.snapshot.read();
         let output = snapshot.per_output.get("eDP-1").unwrap();
 
@@ -1614,5 +1635,95 @@ mod tests {
         assert_eq!(output.window_counts.get(&2), Some(&3));
         assert!(snapshot.active_workspace.contains(&2));
         assert!(snapshot.occupied_workspaces.contains(&2));
+    }
+
+    #[test]
+    fn socket_workspace_parser_global_active_uses_active_monitor_only() {
+        let shared = Arc::new(MangoSocketSharedState::default());
+        let value = serde_json::json!({
+            "monitors": [
+                {
+                    "name": "eDP-1",
+                    "active": true,
+                    "active_tags": [2],
+                    "tags": [
+                        {"index": 1, "is_active": false, "is_urgent": false, "client_count": 0},
+                        {"index": 2, "is_active": true, "is_urgent": false, "client_count": 1}
+                    ]
+                },
+                {
+                    "name": "DP-1",
+                    "active": false,
+                    "active_tags": [5],
+                    "tags": [
+                        {"index": 5, "is_active": true, "is_urgent": false, "client_count": 1}
+                    ]
+                }
+            ]
+        });
+
+        assert!(apply_workspace_from_monitors(&shared, &value));
+        let snapshot = shared.snapshot.read();
+
+        assert!(snapshot.per_output["eDP-1"].active_workspace.contains(&2));
+        assert!(snapshot.per_output["DP-1"].active_workspace.contains(&5));
+        assert_eq!(snapshot.active_workspace, HashSet::from([2]));
+    }
+
+    #[test]
+    fn socket_workspace_parser_suppresses_real_tags_in_overview() {
+        let shared = Arc::new(MangoSocketSharedState::default());
+        let value = serde_json::json!({
+            "monitors": [
+                {
+                    "name": "eDP-1",
+                    "active": true,
+                    "active_tags": [OVERVIEW_WORKSPACE_ID],
+                    "tags": [
+                        {"index": 1, "is_active": false, "is_urgent": false, "client_count": 2},
+                        {"index": 2, "is_active": false, "is_urgent": false, "client_count": 1}
+                    ]
+                }
+            ]
+        });
+
+        assert!(apply_workspace_from_monitors(&shared, &value));
+        let snapshot = shared.snapshot.read();
+        let output = snapshot.per_output.get("eDP-1").unwrap();
+
+        assert_eq!(output.active_workspace.len(), 1);
+        assert!(output.active_workspace.contains(&OVERVIEW_WORKSPACE_ID));
+        assert!(output.window_counts.is_empty());
+        assert!(output.occupied_workspaces.is_empty());
+        assert_eq!(snapshot.active_workspace.len(), 1);
+        assert!(snapshot.active_workspace.contains(&OVERVIEW_WORKSPACE_ID));
+        assert!(snapshot.window_counts.is_empty());
+        assert!(snapshot.occupied_workspaces.is_empty());
+    }
+
+    #[test]
+    fn socket_focused_window_parser_handles_no_client() {
+        let shared = Arc::new(MangoSocketSharedState::default());
+        let value = serde_json::json!({"id": null});
+
+        assert!(apply_focused_window_from_client(&shared, &value));
+
+        assert_eq!(
+            shared.focused_window.read().clone(),
+            Some(WindowInfo::default())
+        );
+    }
+
+    #[test]
+    fn socket_keyboard_layout_parser_maps_layout_name() {
+        let shared = Arc::new(MangoSocketSharedState::default());
+        let value = serde_json::json!({"layout": "us"});
+
+        assert!(apply_keyboard_layout_from_value(&shared, &value));
+        let info = shared.keyboard_layout.read().clone().unwrap();
+
+        assert_eq!(info.short_name, "us");
+        assert_eq!(info.layout_name, "English");
+        assert_eq!(info.layout_count, None);
     }
 }
