@@ -49,6 +49,8 @@ pub struct HyprlandBackend {
     keyboard_layout: RwLock<Option<KeyboardLayoutInfo>>,
     /// Name of the main keyboard device (auto-detected from `hyprctl devices`).
     main_keyboard_name: RwLock<Option<String>>,
+    /// Whether this Hyprland instance supports the Lua dispatch API.
+    supports_lua_dispatch: AtomicBool,
 }
 
 impl HyprlandBackend {
@@ -68,6 +70,7 @@ impl HyprlandBackend {
             keyboard_layout_callback: Mutex::new(None),
             keyboard_layout: RwLock::new(None),
             main_keyboard_name: RwLock::new(None),
+            supports_lua_dispatch: AtomicBool::new(false),
         }
     }
 
@@ -103,7 +106,7 @@ impl HyprlandBackend {
     fn apply_layer_rules(&self) {
         let cmd = "keyword layerrule no_anim on, match:namespace ^vibepanel-.*-popover$";
         match self.send_command(cmd) {
-            Some(response) if response.trim() == "ok" => {
+            Some(response) if Self::response_is_ok(&response) => {
                 info!("Applied Hyprland layerrule: no_anim for vibepanel surfaces");
             }
             Some(response) => {
@@ -111,6 +114,28 @@ impl HyprlandBackend {
             }
             None => {
                 warn!("Failed to apply Hyprland no_anim layerrule");
+            }
+        }
+    }
+
+    fn probe_lua_dispatch_support(&self) {
+        // Hyprland 0.55 documents hl.dsp.no_op() as a dispatcher that does nothing.
+        // It is a safe capability probe for the new Lua dispatch API.
+        match self.send_command("dispatch hl.dsp.no_op()") {
+            Some(response) if Self::response_is_ok(&response) => {
+                self.supports_lua_dispatch.store(true, Ordering::Relaxed);
+                info!("Hyprland Lua dispatch API detected");
+            }
+            Some(response) => {
+                self.supports_lua_dispatch.store(false, Ordering::Relaxed);
+                debug!(
+                    response = %response.trim(),
+                    "Hyprland Lua dispatch API unavailable; using legacy dispatch commands"
+                );
+            }
+            None => {
+                self.supports_lua_dispatch.store(false, Ordering::Relaxed);
+                warn!("Failed to probe Hyprland Lua dispatch API; using legacy dispatch commands");
             }
         }
     }
@@ -286,6 +311,65 @@ impl HyprlandBackend {
         }
 
         workspace_id.to_string()
+    }
+
+    fn lua_string(value: &str) -> String {
+        let mut escaped = String::with_capacity(value.len() + 2);
+        escaped.push('"');
+        for ch in value.chars() {
+            match ch {
+                '\\' => escaped.push_str("\\\\"),
+                '"' => escaped.push_str("\\\""),
+                '\n' => escaped.push_str("\\n"),
+                '\r' => escaped.push_str("\\r"),
+                '\t' => escaped.push_str("\\t"),
+                _ => escaped.push(ch),
+            }
+        }
+        escaped.push('"');
+        escaped
+    }
+
+    fn workspace_lua_target(&self, workspace_id: i32) -> String {
+        let target = self.workspace_switch_target(workspace_id);
+        if target.starts_with("name:") {
+            Self::lua_string(&target)
+        } else {
+            target
+        }
+    }
+
+    fn response_is_ok(response: &str) -> bool {
+        response.trim().eq_ignore_ascii_case("ok")
+    }
+
+    fn send_dispatch(&self, context: &str, lua: &str, legacy: &str) {
+        // TODO: Remove the legacy hyprlang dispatch path once Hyprland drops hyprlang support.
+        let command = if self.supports_lua_dispatch.load(Ordering::Relaxed) {
+            lua
+        } else {
+            legacy
+        };
+
+        match self.send_command(command) {
+            Some(response) if Self::response_is_ok(&response) => {
+                debug!(context, command, "Hyprland command succeeded");
+            }
+            Some(response) => {
+                warn!(
+                    context,
+                    command,
+                    response = %response.trim(),
+                    "Hyprland command failed"
+                );
+            }
+            None => {
+                warn!(
+                    context,
+                    command, "Hyprland command failed without a response"
+                );
+            }
+        }
     }
 
     /// Fetch monitor information from Hyprland.
@@ -939,6 +1023,8 @@ impl CompositorBackend for HyprlandBackend {
         // Disable compositor-level layer animations for our surfaces.
         self.apply_layer_rules();
 
+        self.probe_lua_dispatch_support();
+
         // Store callbacks
         *self.callbacks.lock().unwrap_or_else(|e| e.into_inner()) =
             Some((on_workspace_update, on_window_update));
@@ -982,6 +1068,9 @@ impl CompositorBackend for HyprlandBackend {
             keyboard_layout_callback: Mutex::new(kb_callback),
             keyboard_layout: RwLock::new(None),
             main_keyboard_name: RwLock::new(None),
+            supports_lua_dispatch: AtomicBool::new(
+                self.supports_lua_dispatch.load(Ordering::Relaxed),
+            ),
         });
 
         // Start event loop thread
@@ -1030,13 +1119,18 @@ impl CompositorBackend for HyprlandBackend {
     }
 
     fn switch_workspace(&self, workspace_id: i32) {
-        let target = self.workspace_switch_target(workspace_id);
-        let _ = self.send_command(&format!("dispatch workspace {target}"));
+        let legacy_target = self.workspace_switch_target(workspace_id);
+        let lua_target = self.workspace_lua_target(workspace_id);
+        self.send_dispatch(
+            "switch_workspace",
+            &format!("dispatch hl.dsp.focus({{ workspace = {lua_target} }})"),
+            &format!("dispatch workspace {legacy_target}"),
+        );
     }
 
     fn quit_compositor(&self) {
         debug!("Sending exit command to Hyprland");
-        let _ = self.send_command("dispatch exit");
+        self.send_dispatch("quit_compositor", "dispatch hl.dsp.exit()", "dispatch exit");
     }
 
     fn name(&self) -> &'static str {
@@ -1207,6 +1301,47 @@ mod tests {
         assert_eq!(backend.workspace_switch_target(-1337), "name:web");
         assert_eq!(backend.workspace_switch_target(3), "3");
         assert_eq!(backend.workspace_switch_target(-9999), "-9999");
+    }
+
+    #[test]
+    fn workspace_lua_target_quotes_named_workspaces() {
+        let backend = HyprlandBackend::new(None);
+        *backend.workspaces.write() = vec![WorkspaceMeta {
+            id: -1337,
+            idx: -1,
+            name: "web".to_string(),
+            output: None,
+        }];
+
+        assert_eq!(backend.workspace_lua_target(-1337), "\"name:web\"");
+        assert_eq!(backend.workspace_lua_target(3), "3");
+        assert_eq!(backend.workspace_lua_target(-9999), "-9999");
+    }
+
+    #[test]
+    fn lua_string_escapes_special_chars() {
+        assert_eq!(HyprlandBackend::lua_string("quote\""), "\"quote\\\"\"");
+        assert_eq!(HyprlandBackend::lua_string("slash\\"), "\"slash\\\\\"");
+        assert_eq!(HyprlandBackend::lua_string("new\nline"), "\"new\\nline\"");
+        assert_eq!(
+            HyprlandBackend::lua_string("carriage\rreturn"),
+            "\"carriage\\rreturn\""
+        );
+        assert_eq!(HyprlandBackend::lua_string("tab\tchar"), "\"tab\\tchar\"");
+    }
+
+    #[test]
+    fn response_is_ok_rejects_errors() {
+        assert!(HyprlandBackend::response_is_ok("ok"));
+        assert!(HyprlandBackend::response_is_ok("ok\n"));
+        assert!(HyprlandBackend::response_is_ok("OK"));
+        assert!(!HyprlandBackend::response_is_ok(
+            "error: return hl.dispatch(exit):1: hl.dispatch: expected a dispatcher"
+        ));
+        assert!(!HyprlandBackend::response_is_ok("invalid dispatcher"));
+        assert!(!HyprlandBackend::response_is_ok("unknown dispatcher"));
+        assert!(!HyprlandBackend::response_is_ok("workspace 1"));
+        assert!(!HyprlandBackend::response_is_ok(""));
     }
 
     #[test]
