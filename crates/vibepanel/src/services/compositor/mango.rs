@@ -14,6 +14,8 @@
 //! DWL protocol events are double-buffered: state is collected and applied on
 //! `frame` events.
 
+// TODO(mango): Remove the legacy DWL IPC fallback once Mango drops it upstream.
+
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::env;
