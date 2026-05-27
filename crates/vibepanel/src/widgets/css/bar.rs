@@ -520,14 +520,22 @@ workspace-container > .workspace-indicator:not(:last-child) {{
 
 .bar--vertical .taskbar .content > .taskbar-button + .taskbar-button {{
     margin-left: 0;
-    margin-top: var(--vp-taskbar-button-gap, 0px);
+    margin-top: calc(var(--vp-taskbar-button-gap, 0px) + 1px);
+}}
+
+.bar--vertical .taskbar .content > .taskbar-button:last-child {{
+    margin-bottom: 2px;
 }}
 
 .bar--vertical .taskbar .content > .taskbar-separator {{
     margin-left: 0;
     margin-right: 0;
+    margin-top: calc(var(--vp-taskbar-separator-gap, 0px) + 2px);
+    margin-bottom: calc(var(--vp-taskbar-separator-gap, 0px) + 2px);
+}}
+
+.bar--vertical .taskbar .content > .taskbar-separator-has-label {{
     margin-top: var(--vp-taskbar-separator-gap, 0px);
-    margin-bottom: var(--vp-taskbar-separator-gap, 0px);
 }}
 
 .bar--vertical .taskbar .content > .taskbar-separator {{
@@ -543,6 +551,26 @@ workspace-container > .workspace-indicator:not(:last-child) {{
     margin-bottom: 4px;
 }}
 
+.taskbar .content > .taskbar-separator > .taskbar-separator-label {{
+    color: currentColor;
+    opacity: 0.65;
+    font-size: 0.75em;
+    font-weight: 600;
+    min-width: 0;
+    margin-left: 2px;
+    margin-right: 2px;
+}}
+
+.taskbar .content > .taskbar-separator-active > .taskbar-separator-label {{
+    color: var(--color-accent-primary);
+    opacity: 1;
+}}
+
+.taskbar .content > .taskbar-separator-urgent > .taskbar-separator-label {{
+    color: var(--color-state-urgent);
+    opacity: 1;
+}}
+
 .taskbar .content > .taskbar-output-separator > .taskbar-separator-line {{
     opacity: 0.45;
     margin-top: 2px;
@@ -556,6 +584,17 @@ workspace-container > .workspace-indicator:not(:last-child) {{
     margin-bottom: 0;
     margin-left: 4px;
     margin-right: 4px;
+}}
+
+.bar--vertical .taskbar .content > .taskbar-separator > .taskbar-separator-label {{
+    margin-left: 0;
+    margin-right: 0;
+    margin-top: 2px;
+    margin-bottom: 0;
+}}
+
+.bar--vertical .taskbar .content > .taskbar-separator:first-child > .taskbar-separator-label {{
+    margin-top: 4px;
 }}
 
 .bar--vertical .taskbar .content > .taskbar-output-separator > .taskbar-separator-line {{

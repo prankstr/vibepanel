@@ -604,6 +604,18 @@ pub mod widget {
     /// Taskbar workspace separator (`.taskbar-separator`).
     pub const TASKBAR_SEPARATOR: &str = "taskbar-separator";
 
+    /// Taskbar workspace separator numeric label (`.taskbar-separator-label`).
+    pub const TASKBAR_SEPARATOR_LABEL: &str = "taskbar-separator-label";
+
+    /// Taskbar workspace separator with a label (`.taskbar-separator-has-label`).
+    pub const TASKBAR_SEPARATOR_HAS_LABEL: &str = "taskbar-separator-has-label";
+
+    /// Active taskbar workspace separator (`.taskbar-separator-active`).
+    pub const TASKBAR_SEPARATOR_ACTIVE: &str = "taskbar-separator-active";
+
+    /// Urgent taskbar workspace separator (`.taskbar-separator-urgent`).
+    pub const TASKBAR_SEPARATOR_URGENT: &str = "taskbar-separator-urgent";
+
     /// Taskbar output/monitor separator (`.taskbar-output-separator`).
     pub const TASKBAR_OUTPUT_SEPARATOR: &str = "taskbar-output-separator";
 

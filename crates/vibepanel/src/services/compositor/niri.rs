@@ -991,6 +991,9 @@ impl NiriBackend {
                                     kb_cb(info.clone());
                                 }
 
+                                // Workspace metadata changes can affect taskbar ordering and
+                                // separator labels: windows are sorted by workspace idx, and
+                                // labels resolve stable workspace IDs back to idx/name metadata.
                                 if (win_changed || ws_changed)
                                     && let Some(ref wl_cb) = window_list_callback
                                 {

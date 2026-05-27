@@ -191,12 +191,17 @@ impl MangoSocketBackend {
         shared: Arc<MangoSocketSharedState>,
         running: Arc<AtomicBool>,
         callback: WorkspaceCallback,
+        window_list_callback: Option<WindowListCallback>,
     ) -> JoinHandle<()> {
         thread::spawn(move || {
             watch_mango_command(socket_path, "watch all-monitors", running, move |value| {
                 if apply_workspace_from_monitors(&shared, &value) {
                     let snapshot = shared.snapshot.read().clone();
                     callback(snapshot);
+                    if let Some(callback) = &window_list_callback {
+                        let windows = shared.windows.read().clone();
+                        callback(WindowListSnapshot { windows });
+                    }
                 }
             });
         })
@@ -314,6 +319,10 @@ impl CompositorBackend for MangoSocketBackend {
             self.shared.clone(),
             self.running.clone(),
             on_workspace_update,
+            self.window_list_callback
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
         ));
         threads.push(Self::spawn_focused_window_watch(
             self.socket_path.clone(),

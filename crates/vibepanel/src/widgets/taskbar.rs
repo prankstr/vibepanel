@@ -4,16 +4,17 @@
 //! Clicking a window button focuses that window.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use gtk4::gdk::BUTTON_PRIMARY;
 use gtk4::prelude::*;
 use gtk4::{Align, Box as GtkBox, CssProvider, GestureClick, Image, Label, Orientation, Widget};
-use tracing::debug;
+use tracing::{debug, warn};
 use vibepanel_core::config::WidgetEntry;
 
 use crate::services::callbacks::CallbackId;
+use crate::services::compositor::{CompositorManager, WorkspaceMeta, WorkspaceSnapshot};
 use crate::services::config_manager::ConfigManager;
 use crate::services::icons::get_app_icon_name;
 use crate::services::tooltip::TooltipManager;
@@ -22,6 +23,29 @@ use crate::styles::{icon, state, widget};
 use crate::widgets::WidgetConfig;
 use crate::widgets::base::BaseWidget;
 use crate::widgets::warn_unknown_options;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceSeparatorLabel {
+    None,
+    Number,
+}
+
+impl WorkspaceSeparatorLabel {
+    fn from_str(value: &str) -> Self {
+        match value.to_lowercase().as_str() {
+            "none" => Self::None,
+            "number" | "numbers" => Self::Number,
+            other => {
+                warn!(
+                    "unknown taskbar workspace_separator_label {:?}, falling back to {:?}",
+                    other,
+                    Self::None
+                );
+                Self::None
+            }
+        }
+    }
+}
 
 /// Configuration for the taskbar widget.
 #[derive(Debug, Clone)]
@@ -41,6 +65,8 @@ pub struct TaskbarConfig {
     pub show_active: bool,
     /// Whether to show a separator between windows on different workspaces.
     pub show_workspace_separator: bool,
+    /// Optional workspace identity rendered inside workspace separators.
+    pub workspace_separator_label: WorkspaceSeparatorLabel,
 }
 
 /// Theme-derived layout values computed once at widget construction time.
@@ -84,10 +110,29 @@ impl WidgetConfig for TaskbarConfig {
                 "icon_size",
                 "show_active",
                 "show_workspace_separator",
+                "workspace_separator_label",
             ],
         );
 
         let defaults = Self::default();
+
+        let show_workspace_separator = entry
+            .options
+            .get("show_workspace_separator")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(defaults.show_workspace_separator);
+        let workspace_separator_label = entry
+            .options
+            .get("workspace_separator_label")
+            .and_then(|v| v.as_str())
+            .map(WorkspaceSeparatorLabel::from_str)
+            .unwrap_or(defaults.workspace_separator_label);
+
+        if !show_workspace_separator && workspace_separator_label != WorkspaceSeparatorLabel::None {
+            warn!(
+                "taskbar workspace_separator_label is ignored when show_workspace_separator is false"
+            );
+        }
 
         Self {
             show_title: entry
@@ -122,11 +167,8 @@ impl WidgetConfig for TaskbarConfig {
                 .get("show_active")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(defaults.show_active),
-            show_workspace_separator: entry
-                .options
-                .get("show_workspace_separator")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(defaults.show_workspace_separator),
+            show_workspace_separator,
+            workspace_separator_label,
         }
     }
 }
@@ -141,14 +183,26 @@ impl Default for TaskbarConfig {
             icon_size: None,
             show_active: true,
             show_workspace_separator: true,
+            workspace_separator_label: WorkspaceSeparatorLabel::None,
         }
     }
 }
 
-/// Window identity snapshot: `(window_id, workspace_id, output)`.
-/// Used to detect when the button list needs a full rebuild (window added/removed,
-/// moved to a different workspace, or reordered across outputs).
-type WindowIdList = Vec<(u64, Option<i32>, Option<String>)>;
+/// Window identity snapshot used to detect when the button list needs a full rebuild.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct WindowListKey {
+    windows: Vec<WindowEntryKey>,
+    active_workspaces: Vec<i32>,
+    urgent_workspaces: Vec<i32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WindowEntryKey {
+    id: u64,
+    workspace_id: Option<i32>,
+    output: Option<String>,
+    separator_label: Option<String>,
+}
 
 // Visual-state priority: active > urgent. Window data may have both states;
 // the rendered taskbar button intentionally picks one visual class.
@@ -252,7 +306,8 @@ impl TaskbarWidget {
 
         let window_buttons: Rc<RefCell<HashMap<u64, Widget>>> =
             Rc::new(RefCell::new(HashMap::new()));
-        let current_window_ids: Rc<RefCell<WindowIdList>> = Rc::new(RefCell::new(Vec::new()));
+        let current_window_ids: Rc<RefCell<WindowListKey>> =
+            Rc::new(RefCell::new(WindowListKey::default()));
         let output_id_for_log = output_id.clone();
 
         let window_list_callback_id = WindowListService::global().connect(move |snapshot| {
@@ -288,11 +343,51 @@ impl Drop for TaskbarWidget {
     }
 }
 
+fn workspace_separator_labels() -> HashMap<i32, String> {
+    // Grouping uses stable workspace IDs, but labels mirror the workspaces widget:
+    // display idx when meaningful, otherwise the workspace name.
+    CompositorManager::global()
+        .list_workspaces()
+        .into_iter()
+        .map(|workspace| (workspace.id, workspace_meta_label(workspace)))
+        .collect()
+}
+
+fn workspace_meta_label(workspace: WorkspaceMeta) -> String {
+    if workspace.idx >= 0 {
+        workspace.idx.to_string()
+    } else {
+        workspace.name
+    }
+}
+
+fn workspace_separator_label(workspace_id: i32, workspace_labels: &HashMap<i32, String>) -> String {
+    workspace_labels
+        .get(&workspace_id)
+        .cloned()
+        .unwrap_or_else(|| workspace_id.to_string())
+}
+
+fn taskbar_active_workspaces(
+    snapshot: &WorkspaceSnapshot,
+    output_id: Option<&str>,
+    filter_by_output: bool,
+) -> HashSet<i32> {
+    if filter_by_output
+        && let Some(output_id) = output_id
+        && let Some(per_output) = snapshot.per_output.get(output_id)
+    {
+        return per_output.active_workspace.clone();
+    }
+
+    snapshot.active_workspace.clone()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn update_window_buttons(
     container: &GtkBox,
     buttons: &Rc<RefCell<HashMap<u64, Widget>>>,
-    current_ids: &Rc<RefCell<WindowIdList>>,
+    current_ids: &Rc<RefCell<WindowListKey>>,
     snapshot: &crate::services::compositor::WindowListSnapshot,
     config: &TaskbarConfig,
     button_css: &CssProvider,
@@ -327,10 +422,52 @@ fn update_window_buttons(
         windows.truncate(config.max_windows);
     }
 
-    let new_ids: WindowIdList = windows
-        .iter()
-        .map(|w| (w.id, w.workspace_id, w.output.clone()))
-        .collect();
+    let track_active_separator = config.show_workspace_separator
+        && config.workspace_separator_label != WorkspaceSeparatorLabel::None;
+    let (
+        workspace_labels,
+        active_workspaces,
+        urgent_workspaces,
+        active_workspace_key,
+        urgent_workspace_key,
+    ) = if track_active_separator {
+        let workspace_snapshot = CompositorManager::global().get_workspace_snapshot();
+        let active_workspaces =
+            taskbar_active_workspaces(&workspace_snapshot, output_id, config.filter_by_output);
+        let urgent_workspaces = workspace_snapshot.urgent_workspaces;
+
+        let mut active_workspace_key: Vec<_> = active_workspaces.iter().copied().collect();
+        active_workspace_key.sort_unstable();
+        let mut urgent_workspace_key: Vec<_> = urgent_workspaces.iter().copied().collect();
+        urgent_workspace_key.sort_unstable();
+
+        (
+            Some(workspace_separator_labels()),
+            active_workspaces,
+            urgent_workspaces,
+            active_workspace_key,
+            urgent_workspace_key,
+        )
+    } else {
+        (None, HashSet::new(), HashSet::new(), Vec::new(), Vec::new())
+    };
+    let new_ids = WindowListKey {
+        windows: windows
+            .iter()
+            .map(|w| WindowEntryKey {
+                id: w.id,
+                workspace_id: w.workspace_id,
+                output: w.output.clone(),
+                separator_label: w.workspace_id.and_then(|id| {
+                    workspace_labels
+                        .as_ref()
+                        .map(|labels| workspace_separator_label(id, labels))
+                }),
+            })
+            .collect(),
+        active_workspaces: active_workspace_key,
+        urgent_workspaces: urgent_workspace_key,
+    };
 
     let needs_rebuild = {
         let current = current_ids.borrow();
@@ -354,13 +491,61 @@ fn update_window_buttons(
 
                 if output_changed {
                     // Output boundary — insert a more prominent separator.
-                    let sep = separator_widget(is_vertical);
+                    let sep = separator_widget(
+                        is_vertical,
+                        WorkspaceSeparatorLabel::None,
+                        None,
+                        false,
+                        false,
+                    );
                     sep.add_css_class(widget::TASKBAR_OUTPUT_SEPARATOR);
                     container.append(&sep);
+
+                    if !config.filter_by_output
+                        && config.workspace_separator_label != WorkspaceSeparatorLabel::None
+                        && let Some(cur) = window.workspace_id
+                    {
+                        let label = workspace_labels
+                            .as_ref()
+                            .map(|labels| workspace_separator_label(cur, labels));
+                        let sep = separator_widget(
+                            is_vertical,
+                            config.workspace_separator_label,
+                            label.as_deref(),
+                            active_workspaces.contains(&cur),
+                            urgent_workspaces.contains(&cur),
+                        );
+                        container.append(&sep);
+                    }
                 } else if let (Some(prev), Some(cur)) = (prev_workspace, window.workspace_id)
                     && prev != cur
                 {
-                    let sep = separator_widget(is_vertical);
+                    let label = workspace_labels
+                        .as_ref()
+                        .map(|labels| workspace_separator_label(cur, labels));
+                    let sep = separator_widget(
+                        is_vertical,
+                        config.workspace_separator_label,
+                        label.as_deref(),
+                        active_workspaces.contains(&cur),
+                        urgent_workspaces.contains(&cur),
+                    );
+                    container.append(&sep);
+                } else if prev_workspace.is_none()
+                    && config.workspace_separator_label != WorkspaceSeparatorLabel::None
+                    && let Some(cur) = window.workspace_id
+                {
+                    // Label the first workspace-bearing group, even after ungrouped windows.
+                    let label = workspace_labels
+                        .as_ref()
+                        .map(|labels| workspace_separator_label(cur, labels));
+                    let sep = separator_widget(
+                        is_vertical,
+                        config.workspace_separator_label,
+                        label.as_deref(),
+                        active_workspaces.contains(&cur),
+                        urgent_workspaces.contains(&cur),
+                    );
                     container.append(&sep);
                 }
 
@@ -405,15 +590,21 @@ fn window_tooltip(window: &crate::services::compositor::Window) -> String {
 /// Compute the padding used around each taskbar button icon.
 /// Returns `(effective_icon, pad)`.
 fn compute_button_padding(icon_size: i32, max_button_size: i32) -> (i32, i32) {
-    let min_pad = 3;
+    let min_pad = 2;
     let effective_icon = icon_size.min(max_button_size - 2 * min_pad);
     let ideal_pad = effective_icon / 4;
     let available = ((max_button_size - effective_icon) / 2).max(0);
-    let pad = ideal_pad.min(available).max(min_pad);
+    let pad = ideal_pad.min(available).saturating_sub(1).max(min_pad);
     (effective_icon, pad)
 }
 
-fn separator_widget(is_vertical: bool) -> GtkBox {
+fn separator_widget(
+    is_vertical: bool,
+    label_type: WorkspaceSeparatorLabel,
+    label_text: Option<&str>,
+    is_active_workspace: bool,
+    is_urgent_workspace: bool,
+) -> GtkBox {
     let wrapper = GtkBox::new(
         if is_vertical {
             Orientation::Vertical
@@ -423,6 +614,32 @@ fn separator_widget(is_vertical: bool) -> GtkBox {
         0,
     );
     wrapper.add_css_class(widget::TASKBAR_SEPARATOR);
+    if label_type != WorkspaceSeparatorLabel::None {
+        if is_active_workspace {
+            wrapper.add_css_class(widget::TASKBAR_SEPARATOR_ACTIVE);
+        } else if is_urgent_workspace {
+            wrapper.add_css_class(widget::TASKBAR_SEPARATOR_URGENT);
+        }
+    }
+
+    if let Some(label_text) = label_text {
+        match label_type {
+            WorkspaceSeparatorLabel::None => {}
+            WorkspaceSeparatorLabel::Number => {
+                wrapper.add_css_class(widget::TASKBAR_SEPARATOR_HAS_LABEL);
+                let label = Label::new(Some(label_text));
+                label.add_css_class(widget::TASKBAR_SEPARATOR_LABEL);
+                label.set_halign(Align::Center);
+                label.set_valign(Align::Center);
+                wrapper.append(&label);
+            }
+        }
+    }
+
+    if is_vertical {
+        wrapper.set_halign(Align::Fill);
+        wrapper.set_hexpand(true);
+    }
 
     let line = GtkBox::new(
         if is_vertical {
@@ -435,8 +652,6 @@ fn separator_widget(is_vertical: bool) -> GtkBox {
     line.add_css_class("taskbar-separator-line");
 
     if is_vertical {
-        wrapper.set_halign(Align::Fill);
-        wrapper.set_hexpand(true);
         line.set_halign(Align::Fill);
         line.set_hexpand(true);
         line.set_valign(Align::Center);
@@ -555,6 +770,15 @@ mod tests {
         }
     }
 
+    fn make_workspace_meta(id: i32, idx: i32, name: &str) -> WorkspaceMeta {
+        WorkspaceMeta {
+            id,
+            idx,
+            name: name.to_string(),
+            output: None,
+        }
+    }
+
     #[test]
     fn test_taskbar_config_default() {
         let entry = make_widget_entry("taskbar", HashMap::new());
@@ -566,6 +790,10 @@ mod tests {
         assert_eq!(config.icon_size, None); // resolved to theme default in new()
         assert!(config.show_active);
         assert!(config.show_workspace_separator);
+        assert_eq!(
+            config.workspace_separator_label,
+            WorkspaceSeparatorLabel::None
+        );
     }
 
     #[test]
@@ -581,6 +809,10 @@ mod tests {
             "show_workspace_separator".to_string(),
             Value::Boolean(false),
         );
+        options.insert(
+            "workspace_separator_label".to_string(),
+            Value::String("number".to_string()),
+        );
 
         let entry = make_widget_entry("taskbar", options);
         let config = TaskbarConfig::from_entry(&entry);
@@ -591,6 +823,10 @@ mod tests {
         assert_eq!(config.icon_size, Some(24));
         assert!(!config.show_active);
         assert!(!config.show_workspace_separator);
+        assert_eq!(
+            config.workspace_separator_label,
+            WorkspaceSeparatorLabel::Number
+        );
     }
 
     #[test]
@@ -601,5 +837,14 @@ mod tests {
         let entry = make_widget_entry("taskbar", options);
         let config = TaskbarConfig::from_entry(&entry);
         assert_eq!(config.icon_size, Some(8));
+    }
+
+    #[test]
+    fn test_workspace_display_label_uses_idx_with_name_fallback() {
+        assert_eq!(workspace_meta_label(make_workspace_meta(42, 3, "web")), "3");
+        assert_eq!(
+            workspace_meta_label(make_workspace_meta(42, -1, "web")),
+            "web"
+        );
     }
 }
