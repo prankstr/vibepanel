@@ -70,7 +70,7 @@ const DEFAULT_FONT_FAMILY: &str = "monospace";
 const WIDGET_HOVER_BG_VALUE: &str = "color-mix(in srgb, color-mix(in srgb, var(--widget-background-color) var(--widget-background-opacity), transparent) 92%, var(--widget-hover-tint))";
 
 // Size scaling factors (empirically tuned for visual balance at bar sizes 28-60px)
-const FONT_SCALE: f64 = 0.6;
+pub const DEFAULT_FONT_SCALE: f64 = 0.6;
 const TEXT_ICON_SCALE: f64 = 0.50;
 const PIXMAP_ICON_SCALE: f64 = 0.50;
 const PADDING_SCALE: f64 = 0.14;
@@ -387,6 +387,7 @@ pub struct ThemePalette {
 
     // Typography
     pub font_family: String,
+    pub font_scale: f64,
 
     // Opacities
     pub bar_opacity: f64,
@@ -860,7 +861,7 @@ impl ThemePalette {
             widget_content_gap_vertical = self.sizes.widget_content_gap_vertical,
             widget_opacity = self.widget_opacity,
             font_family = self.font_family,
-            font_scale = FONT_SCALE,
+            font_scale = self.font_scale,
             text_icon_size = self.sizes.text_icon_size,
             pixmap_icon_size = self.sizes.pixmap_icon_size,
         )
@@ -1131,6 +1132,7 @@ impl ThemePalette {
         } else {
             config.theme.typography.font_family.clone()
         };
+        self.font_scale = config.theme.typography.font_scale;
 
         // Radii percentages (now directly on bar/widgets)
         self.bar_radius_percent = config.bar.border_radius;
@@ -1467,7 +1469,7 @@ impl ThemePalette {
 
         // Sizes - ensure vertical-related sizes are even for proper centering
         let internal_spacing = (bar_size as f64 * SPACING_SCALE) as u32;
-        let font_size = round_to_even((widget_height as f64 * FONT_SCALE) as u32);
+        let font_size = round_to_even((widget_height as f64 * self.font_scale) as u32);
         let text_icon_size = round_to_even((bar_size as f64 * TEXT_ICON_SCALE) as u32);
         let pixmap_icon_size = round_to_even((bar_size as f64 * PIXMAP_ICON_SCALE) as u32);
 
@@ -1532,6 +1534,7 @@ impl Default for ThemePalette {
             slider_track_disabled: String::new(),
             row_critical_background: String::new(),
             font_family: DEFAULT_FONT_FAMILY.to_string(),
+            font_scale: DEFAULT_FONT_SCALE,
             bar_opacity: 0.0,
             widget_opacity: 1.0,
             popover_opacity: None,
@@ -1679,6 +1682,23 @@ mod tests {
         assert!(css.contains("--radius-bar:"));
         assert!(css.contains("--widget-height:"));
         assert!(css.contains("--font-family:"));
+    }
+
+    #[test]
+    fn test_configured_font_scale_controls_font_size() {
+        let mut config = Config::default();
+        config.bar.size = 40;
+        config.theme.typography.font_scale = 0.5;
+
+        let palette = ThemePalette::from_config(&config, None, None);
+        let css = palette.css_vars_block();
+
+        assert_eq!(palette.font_scale, 0.5);
+        assert_eq!(
+            palette.sizes.font_size,
+            round_to_even((palette.sizes.widget_height as f64 * 0.5) as u32)
+        );
+        assert_eq!(css_var_value(&css, "--font-scale"), Some("0.5"));
     }
 
     #[test]

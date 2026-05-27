@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use toml::Table;
 
 use crate::error::{Error, Result};
+use crate::theme::DEFAULT_FONT_SCALE;
 
 /// Known valid values for advanced.compositor.
 const VALID_COMPOSITORS: &[&str] = &[
@@ -55,6 +56,10 @@ const VALID_OUTLINE_COLOR_SYMBOLS: &[&str] = &["subtle", "accent", "foreground"]
 /// Outlines are intended for visual edge definition (1px is the typical case);
 /// thicker decorative borders should be done via user CSS.
 const MAX_OUTLINE_WIDTH: u32 = 4;
+
+/// Supported typography scale range.
+const MIN_FONT_SCALE: f64 = 0.1;
+const MAX_FONT_SCALE: f64 = 1.0;
 
 /// Validate an outline color value against the symbolic + hex contract.
 ///
@@ -428,6 +433,13 @@ impl Config {
             ));
         }
 
+        if !(MIN_FONT_SCALE..=MAX_FONT_SCALE).contains(&self.theme.typography.font_scale) {
+            errors.push(format!(
+                "theme.typography.font_scale: invalid value '{}', must be between {} and {}",
+                self.theme.typography.font_scale, MIN_FONT_SCALE, MAX_FONT_SCALE
+            ));
+        }
+
         // Per-widget outline_color validation
         for (name, opts) in &self.widgets.widget_configs {
             if let Some(ref color) = opts.outline_color
@@ -604,6 +616,10 @@ impl Config {
         lines.push(format!(
             "  font_family: {}",
             self.theme.typography.font_family
+        ));
+        lines.push(format!(
+            "  font_scale: {}",
+            self.theme.typography.font_scale
         ));
         lines.push(format!("  icon_theme: {}", self.theme.icons.theme));
         lines.push(format!("  icon_weight: {}", self.theme.icons.weight));
@@ -1439,12 +1455,16 @@ impl Default for ThemeStates {
 pub struct ThemeTypography {
     /// Base font family.
     pub font_family: String,
+
+    /// Font size as a multiplier of widget height.
+    pub font_scale: f64,
 }
 
 impl Default for ThemeTypography {
     fn default() -> Self {
         Self {
             font_family: "monospace".to_string(),
+            font_scale: DEFAULT_FONT_SCALE,
         }
     }
 }
@@ -1537,6 +1557,7 @@ mod tests {
         assert_eq!(config.theme.mode, "auto");
         assert!(config.theme.accent.is_none());
         assert_eq!(config.theme.typography.font_family, "monospace");
+        assert_eq!(config.theme.typography.font_scale, DEFAULT_FONT_SCALE);
         assert_eq!(config.theme.icons.theme, "material");
         assert_eq!(config.theme.icons.weight, 400);
     }
@@ -2678,6 +2699,7 @@ mod tests {
                 &|c| c.theme.outline_color = "rebeccapurple".to_string(),
                 "outline_color",
             ),
+            (&|c| c.theme.typography.font_scale = 1.1, "font_scale"),
         ];
         for (mutate, field) in cases {
             let mut config = Config::default();
