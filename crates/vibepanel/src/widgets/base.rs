@@ -687,8 +687,9 @@ impl BaseWidget {
                     // Skip if target is an interactive child (e.g., a Button)
                     if click_target_matches(gesture, x, y, |w| {
                         w.downcast_ref::<gtk4::Button>().is_some()
+                            || w.has_css_class(widget::TASKBAR_BUTTON)
                     }) {
-                        debug!("BaseWidget press: target is a Button, skipping");
+                        debug!("BaseWidget press: target is interactive child, skipping");
                         return;
                     }
 
@@ -720,6 +721,7 @@ impl BaseWidget {
                     && !click_target_matches(gesture, x, y, |w| {
                         w.downcast_ref::<gtk4::Button>().is_some()
                             || w.has_css_class(widget::WORKSPACE_INDICATOR)
+                            || w.has_css_class(widget::TASKBAR_BUTTON)
                     })
                 {
                     trigger_ripple_from_gesture(gesture, x, y, &ripple_for_press);

@@ -42,8 +42,9 @@ use super::dwl_ipc::{
     TagState, ZdwlIpcManagerV2, ZdwlIpcOutputV2, zdwl_ipc_manager_v2, zdwl_ipc_output_v2,
 };
 use super::{
-    CompositorBackend, KeyboardLayoutCallback, KeyboardLayoutInfo, WindowCallback, WindowInfo,
-    WorkspaceCallback, WorkspaceMeta, WorkspaceSnapshot, xkb_names,
+    CompositorBackend, KeyboardLayoutCallback, KeyboardLayoutInfo, Window, WindowCallback,
+    WindowInfo, WindowListCallback, WindowListSnapshot, WorkspaceCallback, WorkspaceMeta,
+    WorkspaceSnapshot, xkb_names,
 };
 
 const MANGO_SOCKET_ENV: &str = "MANGO_INSTANCE_SIGNATURE";
@@ -62,7 +63,10 @@ const OVERVIEW_LAYOUT_SYMBOL: &str = "󰃇";
 #[derive(Debug)]
 struct MangoSocketSharedState {
     snapshot: RwLock<WorkspaceSnapshot>,
+    output_geometry: RwLock<HashMap<String, (i64, i64)>>,
     focused_window: RwLock<Option<WindowInfo>>,
+    focused_client_id: RwLock<Option<u64>>,
+    windows: RwLock<Vec<Window>>,
     keyboard_layout: RwLock<Option<KeyboardLayoutInfo>>,
     tag_count: AtomicU32,
 }
@@ -71,7 +75,10 @@ impl Default for MangoSocketSharedState {
     fn default() -> Self {
         Self {
             snapshot: RwLock::new(WorkspaceSnapshot::default()),
+            output_geometry: RwLock::new(HashMap::new()),
             focused_window: RwLock::new(None),
+            focused_client_id: RwLock::new(None),
+            windows: RwLock::new(Vec::new()),
             keyboard_layout: RwLock::new(None),
             tag_count: AtomicU32::new(DEFAULT_WORKSPACE_COUNT),
         }
@@ -84,6 +91,7 @@ struct MangoSocketBackend {
     running: Arc<AtomicBool>,
     watch_threads: Mutex<Vec<JoinHandle<()>>>,
     keyboard_layout_callback: Mutex<Option<KeyboardLayoutCallback>>,
+    window_list_callback: Mutex<Option<WindowListCallback>>,
 }
 
 impl MangoSocketBackend {
@@ -102,6 +110,7 @@ impl MangoSocketBackend {
             running: Arc::new(AtomicBool::new(false)),
             watch_threads: Mutex::new(Vec::new()),
             keyboard_layout_callback: Mutex::new(None),
+            window_list_callback: Mutex::new(None),
         }
     }
 
@@ -138,10 +147,27 @@ impl MangoSocketBackend {
                 return;
             }
         };
+        let _ = stream.set_read_timeout(Some(SOCKET_REQUEST_TIMEOUT));
         let _ = stream.set_write_timeout(Some(SOCKET_REQUEST_TIMEOUT));
 
         if let Err(e) = writeln!(stream, "{}", command) {
             warn!("Failed to send Mango IPC dispatch '{}': {}", command, e);
+            return;
+        }
+
+        let mut response = String::new();
+        let mut reader = BufReader::new(stream);
+        if let Err(e) = reader.read_line(&mut response) {
+            warn!(
+                "Failed to read Mango IPC dispatch response '{}': {}",
+                command, e
+            );
+        } else if response.contains("\"error\"") {
+            warn!(
+                "Mango IPC dispatch '{}' returned {}",
+                command,
+                response.trim()
+            );
         }
     }
 
@@ -151,6 +177,9 @@ impl MangoSocketBackend {
         }
         if let Some(value) = self.send_command("get focusing-client") {
             apply_focused_window_from_client(&self.shared, &value);
+        }
+        if let Some(value) = self.send_command("get all-clients") {
+            apply_window_list_from_clients(&self.shared, &value);
         }
         if let Some(value) = self.send_command("get keyboardlayout") {
             apply_keyboard_layout_from_value(&self.shared, &value);
@@ -178,6 +207,7 @@ impl MangoSocketBackend {
         shared: Arc<MangoSocketSharedState>,
         running: Arc<AtomicBool>,
         callback: WindowCallback,
+        window_list_callback: Option<WindowListCallback>,
     ) -> JoinHandle<()> {
         thread::spawn(move || {
             watch_mango_command(
@@ -189,6 +219,16 @@ impl MangoSocketBackend {
                         let info = shared.focused_window.read().clone();
                         if let Some(info) = info {
                             callback(info);
+                        }
+                        // Mango leaves all-clients focus state stale when focus moves to
+                        // an empty workspace. The focusing-client watch sends id:null,
+                        // which is the only signal that taskbar buttons should all clear
+                        // active styling.
+                        if apply_window_list_focus_from_client(&shared, &value)
+                            && let Some(callback) = &window_list_callback
+                        {
+                            let windows = shared.windows.read().clone();
+                            callback(WindowListSnapshot { windows });
                         }
                     }
                 },
@@ -213,6 +253,22 @@ impl MangoSocketBackend {
             });
         })
     }
+
+    fn spawn_window_list_watch(
+        socket_path: String,
+        shared: Arc<MangoSocketSharedState>,
+        running: Arc<AtomicBool>,
+        callback: WindowListCallback,
+    ) -> JoinHandle<()> {
+        thread::spawn(move || {
+            watch_mango_command(socket_path, "watch all-clients", running, move |value| {
+                if apply_window_list_from_clients(&shared, &value) {
+                    let windows = shared.windows.read().clone();
+                    callback(WindowListSnapshot { windows });
+                }
+            });
+        })
+    }
 }
 
 impl CompositorBackend for MangoSocketBackend {
@@ -230,6 +286,15 @@ impl CompositorBackend for MangoSocketBackend {
         let focused_window = self.shared.focused_window.read().clone();
         if let Some(info) = focused_window {
             on_window_update(info);
+        }
+        if let Some(callback) = self
+            .window_list_callback
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+        {
+            let windows = self.shared.windows.read().clone();
+            callback(WindowListSnapshot { windows });
         }
         if let Some(callback) = self
             .keyboard_layout_callback
@@ -255,6 +320,10 @@ impl CompositorBackend for MangoSocketBackend {
             self.shared.clone(),
             self.running.clone(),
             on_window_update,
+            self.window_list_callback
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
         ));
         if let Some(callback) = self
             .keyboard_layout_callback
@@ -263,6 +332,19 @@ impl CompositorBackend for MangoSocketBackend {
             .clone()
         {
             threads.push(Self::spawn_keyboard_layout_watch(
+                self.socket_path.clone(),
+                self.shared.clone(),
+                self.running.clone(),
+                callback,
+            ));
+        }
+        if let Some(callback) = self
+            .window_list_callback
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+        {
+            threads.push(Self::spawn_window_list_watch(
                 self.socket_path.clone(),
                 self.shared.clone(),
                 self.running.clone(),
@@ -328,6 +410,36 @@ impl CompositorBackend for MangoSocketBackend {
 
     fn switch_keyboard_layout_next(&self) {
         self.send_dispatch("dispatch switch_keyboard_layout");
+    }
+
+    fn list_windows(&self) -> Vec<Window> {
+        self.shared.windows.read().clone()
+    }
+
+    fn set_window_list_callback(&self, callback: WindowListCallback) {
+        *self
+            .window_list_callback
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(callback.clone());
+
+        if self.running.load(Ordering::SeqCst) {
+            let windows = self.shared.windows.read().clone();
+            callback(WindowListSnapshot { windows });
+        }
+    }
+
+    fn focus_window(&self, window_id: u64) {
+        let target = self
+            .shared
+            .windows
+            .read()
+            .iter()
+            .find(|window| window.id == window_id)
+            .cloned();
+
+        for command in mango_focus_window_commands(target.as_ref(), window_id) {
+            self.send_dispatch(&command);
+        }
     }
 }
 
@@ -405,11 +517,18 @@ fn apply_workspace_from_monitors(shared: &Arc<MangoSocketSharedState>, value: &V
     };
 
     let mut snapshot = WorkspaceSnapshot::default();
+    let mut output_geometry = HashMap::new();
     let mut max_tag = 0u32;
     for entry in entries {
         let Some(output_name) = entry.get("name").and_then(Value::as_str) else {
             continue;
         };
+        if let (Some(x), Some(y)) = (
+            entry.get("x").and_then(Value::as_i64),
+            entry.get("y").and_then(Value::as_i64),
+        ) {
+            output_geometry.insert(output_name.to_string(), (x, y));
+        }
         let is_focused_monitor = entry
             .get("active")
             .and_then(Value::as_bool)
@@ -479,20 +598,34 @@ fn apply_workspace_from_monitors(shared: &Arc<MangoSocketSharedState>, value: &V
     if max_tag > 0 {
         shared.tag_count.store(max_tag, Ordering::Relaxed);
     }
+    if !output_geometry.is_empty() {
+        *shared.output_geometry.write() = output_geometry;
+    }
     *shared.snapshot.write() = snapshot;
     true
 }
 
 fn apply_focused_window_from_client(shared: &Arc<MangoSocketSharedState>, value: &Value) -> bool {
-    let info = if value.get("id").is_some_and(Value::is_null)
-        || value.get("error").and_then(Value::as_str) == Some("no focused client")
-    {
+    let focused_client_id = parse_focused_client_id(value);
+
+    let info = if focused_client_id.is_none() {
         WindowInfo::default()
     } else {
         client_value_to_window_info(value)
     };
+    *shared.focused_client_id.write() = focused_client_id;
     *shared.focused_window.write() = Some(info);
     true
+}
+
+fn parse_focused_client_id(value: &Value) -> Option<u64> {
+    if value.get("id").is_some_and(Value::is_null)
+        || value.get("error").and_then(Value::as_str) == Some("no focused client")
+    {
+        None
+    } else {
+        value.get("id").and_then(Value::as_u64)
+    }
 }
 
 fn client_value_to_window_info(value: &Value) -> WindowInfo {
@@ -518,6 +651,126 @@ fn client_value_to_window_info(value: &Value) -> WindowInfo {
             .and_then(Value::as_str)
             .map(str::to_string),
     }
+}
+
+fn apply_window_list_from_clients(shared: &Arc<MangoSocketSharedState>, value: &Value) -> bool {
+    let Some(clients) = value.get("clients").and_then(Value::as_array) else {
+        return false;
+    };
+
+    // Prefer focusing-client once seen. all-clients can keep a previously
+    // focused client marked active after switching to an empty workspace.
+    let focused_client_id = *shared.focused_client_id.read();
+    let focused_client_known = shared.focused_window.read().is_some();
+    let output_geometry = shared.output_geometry.read().clone();
+    let mut windows: Vec<_> = clients
+        .iter()
+        .filter_map(|client| {
+            client_value_to_window(client, focused_client_id, focused_client_known)
+        })
+        .enumerate()
+        .collect();
+
+    windows.sort_by(|(a_idx, a), (b_idx, b)| {
+        window_output_sort_key(a, &output_geometry)
+            .cmp(&window_output_sort_key(b, &output_geometry))
+            .then(
+                a.workspace_id
+                    .unwrap_or(i32::MAX)
+                    .cmp(&b.workspace_id.unwrap_or(i32::MAX)),
+            )
+            .then(a_idx.cmp(b_idx))
+    });
+
+    let windows = windows.into_iter().map(|(_, window)| window).collect();
+    *shared.windows.write() = windows;
+    true
+}
+
+fn window_output_sort_key<'a>(
+    window: &'a Window,
+    output_geometry: &HashMap<String, (i64, i64)>,
+) -> (i64, i64, &'a str) {
+    let output = window.output.as_deref().unwrap_or_default();
+    let (x, y) = output_geometry
+        .get(output)
+        .copied()
+        .unwrap_or((i64::MAX, i64::MAX));
+
+    (x, y, output)
+}
+
+fn mango_focus_window_commands(window: Option<&Window>, window_id: u64) -> Vec<String> {
+    let mut commands = Vec::new();
+
+    if let Some(window) = window
+        && let (Some(workspace_id), Some(output)) = (window.workspace_id, window.output.as_deref())
+        && workspace_id > 0
+        && !output.is_empty()
+    {
+        commands.push(format!("dispatch viewcrossmon,{},{}", workspace_id, output));
+    }
+
+    commands.push(format!("dispatch focusid client,{}", window_id));
+    commands
+}
+
+fn apply_window_list_focus_from_client(
+    shared: &Arc<MangoSocketSharedState>,
+    value: &Value,
+) -> bool {
+    let focused_id = parse_focused_client_id(value);
+
+    *shared.focused_client_id.write() = focused_id;
+    let mut windows = shared.windows.write();
+    for window in windows.iter_mut() {
+        window.is_focused = focused_id == Some(window.id);
+    }
+    true
+}
+
+fn client_value_to_window(
+    value: &Value,
+    focused_client_id: Option<u64>,
+    focused_client_known: bool,
+) -> Option<Window> {
+    let id = value.get("id")?.as_u64()?;
+
+    Some(Window {
+        id,
+        title: value
+            .get("title")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        app_id: value
+            .get("appid")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        workspace_id: value
+            .get("tags")
+            .and_then(Value::as_array)
+            .and_then(|tags| tags.first())
+            .and_then(Value::as_i64)
+            .map(|id| id as i32),
+        output: value
+            .get("monitor")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        is_focused: if focused_client_known {
+            focused_client_id == Some(id)
+        } else {
+            value
+                .get("is_focused")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        },
+        is_urgent: value
+            .get("is_urgent")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    })
 }
 
 fn apply_keyboard_layout_from_value(shared: &Arc<MangoSocketSharedState>, value: &Value) -> bool {
@@ -1553,6 +1806,26 @@ impl CompositorBackend for MangoBackend {
             }
         }
     }
+
+    fn list_windows(&self) -> Vec<Window> {
+        if let Some(socket_backend) = &self.socket_backend {
+            return socket_backend.list_windows();
+        }
+
+        Vec::new()
+    }
+
+    fn set_window_list_callback(&self, callback: WindowListCallback) {
+        if let Some(socket_backend) = &self.socket_backend {
+            socket_backend.set_window_list_callback(callback);
+        }
+    }
+
+    fn focus_window(&self, window_id: u64) {
+        if let Some(socket_backend) = &self.socket_backend {
+            socket_backend.focus_window(window_id);
+        }
+    }
 }
 
 impl Drop for MangoBackend {
@@ -1714,6 +1987,245 @@ mod tests {
             shared.focused_window.read().clone(),
             Some(WindowInfo::default())
         );
+    }
+
+    #[test]
+    fn socket_window_list_parser_maps_mango_clients() {
+        let shared = Arc::new(MangoSocketSharedState::default());
+        let value = serde_json::json!({
+            "clients": [
+                {
+                    "id": 7,
+                    "title": "Terminal",
+                    "appid": "foot",
+                    "monitor": "eDP-1",
+                    "tags": [2, 3],
+                    "is_focused": true,
+                    "is_urgent": false
+                },
+                {
+                    "id": 8,
+                    "title": "Browser",
+                    "appid": "firefox",
+                    "monitor": "DP-1",
+                    "tags": [5],
+                    "is_focused": false,
+                    "is_urgent": true
+                }
+            ]
+        });
+
+        assert!(apply_window_list_from_clients(&shared, &value));
+        let windows = shared.windows.read();
+
+        assert_eq!(windows.len(), 2);
+        let terminal = windows.iter().find(|window| window.id == 7).unwrap();
+        assert_eq!(terminal.title, "Terminal");
+        assert_eq!(terminal.app_id, "foot");
+        assert_eq!(terminal.workspace_id, Some(2));
+        assert_eq!(terminal.output.as_deref(), Some("eDP-1"));
+        assert!(terminal.is_focused);
+        assert!(!terminal.is_urgent);
+
+        let browser = windows.iter().find(|window| window.id == 8).unwrap();
+        assert_eq!(browser.workspace_id, Some(5));
+        assert_eq!(browser.output.as_deref(), Some("DP-1"));
+        assert!(!browser.is_focused);
+        assert!(browser.is_urgent);
+    }
+
+    #[test]
+    fn socket_window_list_parser_orders_by_workspace() {
+        let shared = Arc::new(MangoSocketSharedState::default());
+        let value = serde_json::json!({
+            "clients": [
+                {"id": 30, "monitor": "eDP-1", "tags": [3]},
+                {"id": 10, "monitor": "eDP-1", "tags": [1]},
+                {"id": 20, "monitor": "eDP-1", "tags": [2]}
+            ]
+        });
+
+        assert!(apply_window_list_from_clients(&shared, &value));
+        let ids: Vec<_> = shared
+            .windows
+            .read()
+            .iter()
+            .map(|window| window.id)
+            .collect();
+
+        assert_eq!(ids, vec![10, 20, 30]);
+    }
+
+    #[test]
+    fn socket_window_list_parser_orders_outputs_by_geometry() {
+        let shared = Arc::new(MangoSocketSharedState::default());
+        let monitors = serde_json::json!({
+            "monitors": [
+                {"name": "DP-1", "x": 1920, "y": 0, "tags": []},
+                {"name": "HDMI-A-1", "x": 0, "y": 0, "tags": []}
+            ]
+        });
+        let clients = serde_json::json!({
+            "clients": [
+                {"id": 20, "monitor": "DP-1", "tags": [1]},
+                {"id": 10, "monitor": "HDMI-A-1", "tags": [1]}
+            ]
+        });
+
+        assert!(apply_workspace_from_monitors(&shared, &monitors));
+        assert!(apply_window_list_from_clients(&shared, &clients));
+        let ids: Vec<_> = shared
+            .windows
+            .read()
+            .iter()
+            .map(|window| window.id)
+            .collect();
+
+        assert_eq!(ids, vec![10, 20]);
+    }
+
+    #[test]
+    fn socket_window_list_focus_update_clears_empty_workspace_focus() {
+        let shared = Arc::new(MangoSocketSharedState::default());
+        let clients = serde_json::json!({
+            "clients": [
+                {"id": 10, "tags": [1], "is_focused": true},
+                {"id": 20, "tags": [2], "is_focused": false}
+            ]
+        });
+
+        assert!(apply_window_list_from_clients(&shared, &clients));
+        assert!(shared.windows.read()[0].is_focused);
+
+        assert!(apply_window_list_focus_from_client(
+            &shared,
+            &serde_json::json!({"id": null})
+        ));
+
+        assert!(
+            shared
+                .windows
+                .read()
+                .iter()
+                .all(|window| !window.is_focused)
+        );
+    }
+
+    #[test]
+    fn socket_window_list_focus_update_moves_active_window() {
+        let shared = Arc::new(MangoSocketSharedState::default());
+        let clients = serde_json::json!({
+            "clients": [
+                {"id": 10, "tags": [1], "is_focused": true},
+                {"id": 20, "tags": [2], "is_focused": false}
+            ]
+        });
+
+        assert!(apply_window_list_from_clients(&shared, &clients));
+        assert!(apply_window_list_focus_from_client(
+            &shared,
+            &serde_json::json!({"id": 20})
+        ));
+        let windows = shared.windows.read();
+
+        assert!(
+            !windows
+                .iter()
+                .find(|window| window.id == 10)
+                .unwrap()
+                .is_focused
+        );
+        assert!(
+            windows
+                .iter()
+                .find(|window| window.id == 20)
+                .unwrap()
+                .is_focused
+        );
+    }
+
+    #[test]
+    fn socket_window_list_parser_ignores_stale_all_clients_focus() {
+        let shared = Arc::new(MangoSocketSharedState::default());
+
+        assert!(apply_focused_window_from_client(
+            &shared,
+            &serde_json::json!({"id": 20})
+        ));
+        assert!(apply_window_list_from_clients(
+            &shared,
+            &serde_json::json!({
+                "clients": [
+                    {"id": 10, "tags": [1], "is_focused": true},
+                    {"id": 20, "tags": [2], "is_focused": false}
+                ]
+            })
+        ));
+        let windows = shared.windows.read();
+
+        assert!(
+            !windows
+                .iter()
+                .find(|window| window.id == 10)
+                .unwrap()
+                .is_focused
+        );
+        assert!(
+            windows
+                .iter()
+                .find(|window| window.id == 20)
+                .unwrap()
+                .is_focused
+        );
+    }
+
+    #[test]
+    fn socket_focus_window_commands_switch_target_output_workspace_first() {
+        let window = Window {
+            id: 13,
+            workspace_id: Some(5),
+            output: Some("DP-1".to_string()),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            mango_focus_window_commands(Some(&window), window.id),
+            vec![
+                "dispatch viewcrossmon,5,DP-1".to_string(),
+                "dispatch focusid client,13".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn socket_focus_window_commands_focus_directly_without_location() {
+        assert_eq!(
+            mango_focus_window_commands(None, 13),
+            vec!["dispatch focusid client,13".to_string()]
+        );
+    }
+
+    #[test]
+    fn socket_window_list_parser_handles_optional_fields() {
+        let shared = Arc::new(MangoSocketSharedState::default());
+        let value = serde_json::json!({
+            "clients": [
+                {"id": 9, "tags": []},
+                {"title": "missing id"}
+            ]
+        });
+
+        assert!(apply_window_list_from_clients(&shared, &value));
+        let windows = shared.windows.read();
+
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].id, 9);
+        assert!(windows[0].title.is_empty());
+        assert!(windows[0].app_id.is_empty());
+        assert_eq!(windows[0].workspace_id, None);
+        assert_eq!(windows[0].output, None);
+        assert!(!windows[0].is_focused);
+        assert!(!windows[0].is_urgent);
     }
 
     #[test]
