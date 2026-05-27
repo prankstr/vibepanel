@@ -1437,6 +1437,51 @@ fn run_test_widgets_scoped_content_spacing_contract() {
     );
 }
 
+fn custom_widget_surface_widths(override_css: Option<&str>) -> (i32, i32) {
+    let mut config = test_config();
+    for widget_name in ["custom-a", "custom-b"] {
+        config
+            .widgets
+            .widget_configs
+            .entry(widget_name.to_string())
+            .or_default()
+            .options
+            .insert(
+                "label".to_string(),
+                toml::Value::String("MMMMMMMMMMMM".to_string()),
+            );
+    }
+
+    let fixture = painted_bar_fixture_with_override_css(&config, override_css);
+    let first_bounds = bounds_in_window(&fixture.first_surface, &fixture.window);
+    let second_bounds = bounds_in_window(&fixture.second_surface, &fixture.window);
+
+    fixture.window.close();
+    flush_gtk();
+
+    (first_bounds.2, second_bounds.2)
+}
+
+fn run_test_widgets_scoped_font_scale_contract() {
+    let (baseline_first, baseline_second) = custom_widget_surface_widths(None);
+    assert_eq!(
+        baseline_first, baseline_second,
+        "same-label custom widgets should start with matching widths"
+    );
+
+    let (scaled_first, scaled_second) =
+        custom_widget_surface_widths(Some(".custom-a { --font-scale: 0.1; }"));
+
+    assert!(
+        scaled_first < baseline_first / 2,
+        "widget-scoped --font-scale should shrink only the targeted widget width"
+    );
+    assert_eq!(
+        scaled_second, baseline_second,
+        "widget-scoped --font-scale should not affect adjacent widgets"
+    );
+}
+
 fn run_test_widgets_background_color_pixel() {
     let color = "#445566";
     let mut config = test_config();
@@ -2143,6 +2188,11 @@ ui_regression_config_tests!(
         test_ui_regression_widgets_scoped_content_spacing,
         "widgets.scoped-content-spacing",
         run_test_widgets_scoped_content_spacing_contract
+    ),
+    (
+        test_ui_regression_widgets_scoped_font_scale,
+        "widgets.scoped-font-scale",
+        run_test_widgets_scoped_font_scale_contract
     ),
     (
         test_ui_regression_widgets_background_color_pixel,

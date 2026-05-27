@@ -123,6 +123,8 @@ sectioned-bar.bar.bar--vertical {{
 .widget:not(.widget-group) > overlay > .content {{
     --vp-widget-content-padding: max(0px, calc(var(--vp-widget-content-padding-h) + var(--widget-content-padding-offset, 0px)));
     --vp-widget-content-gap: max(0px, calc(var(--vp-widget-content-gap-h) + var(--widget-content-gap-offset, 0px)));
+    --font-size: calc(var(--widget-height) * var(--font-scale));
+    font-size: var(--font-size);
 }}
 
 .bar--vertical .widget:not(.widget-group) > overlay > .content {{
@@ -154,6 +156,8 @@ sectioned-bar.bar.bar--vertical {{
 .widget-group > .content > .widget-item .content,
 .widget-item.passive > .content {{
     padding: var(--widget-padding-y) var(--vp-widget-content-padding);
+    --font-size: calc(var(--widget-height) * var(--font-scale));
+    font-size: var(--font-size);
 }}
 
 .bar--vertical .widget-group > .content > .widget-item .content,
