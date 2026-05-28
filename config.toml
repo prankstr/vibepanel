@@ -108,6 +108,17 @@ show_value = false  # Show current value after the bar
 # Allow output and microphone volume over 100% (over-amplification), capped at PulseAudio's recommended UI max.
 allow_overdrive = false
 
+[weather]
+# Shared weather data settings for the weather widget and future surfaces.
+# enabled = true          # Force weather fetching on/off. Omit to enable only when a surface uses weather.
+# auto_locate = false     # Use GeoClue/IP fallback when no location or coordinates are configured.
+# location = "Berlin"
+# latitude = 52.5200
+# longitude = 13.4050
+# units = "metric"       # "metric" or "imperial"
+# forecast_days = 5       # 1-7 days
+# refresh_interval = 900  # Seconds; minimum 600
+
 [advanced]
 # compositor = "auto"  # "auto", "hyprland", "niri", "mango"
 

@@ -605,6 +605,8 @@ fn run_gtk_app(config: Config, config_source: Option<PathBuf>) -> ExitCode {
     app.connect_activate(move |app| {
         info!("GTK application activated");
 
+        ConfigManager::global().apply_weather_config();
+
         // Load CSS styling
         bar::load_css(&config_for_activate);
 

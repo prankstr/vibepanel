@@ -48,6 +48,7 @@ const FILE_CHANGE_DEBOUNCE_MS: u64 = 300;
 const WALLPAPER_POLL_INTERVAL_SECS: u32 = 2;
 const GTK_INTERFACE_SCHEMA: &str = "org.gnome.desktop.interface";
 const GTK_COLOR_SCHEME_KEY: &str = "color-scheme";
+const WEATHER_WIDGET_NAME: &str = "weather";
 
 use crate::bar;
 use crate::services::audio::AudioService;
@@ -55,6 +56,7 @@ use crate::services::bar_manager::BarManager;
 use crate::services::icons::IconsService;
 use crate::services::network::NetworkService;
 use crate::services::surfaces::SurfaceStyleManager;
+use crate::services::weather::{ResolvedWeatherConfig, WeatherService};
 
 /// Messages sent from the file watcher thread to the GTK main thread.
 #[derive(Debug)]
@@ -130,6 +132,33 @@ fn gtk_color_scheme_settings() -> Option<gio::Settings> {
 fn gtk_scheme_preference() -> Option<SchemePolarity> {
     let settings = gtk_color_scheme_settings()?;
     scheme_from_gtk_color_scheme_value(settings.string(GTK_COLOR_SCHEME_KEY).as_str())
+}
+
+fn weather_config_from_config(config: &Config) -> ResolvedWeatherConfig {
+    let weather = &config.weather;
+    let referenced_widgets = config.widgets.all_referenced_widgets();
+    let widget_enabled = |name: &str| {
+        referenced_widgets.iter().any(|referenced| {
+            let base_name = widget_base_name(referenced);
+            base_name == name && !config.widgets.is_disabled(base_name)
+        })
+    };
+    let consumer_enabled = widget_enabled(WEATHER_WIDGET_NAME);
+
+    ResolvedWeatherConfig {
+        enabled: weather.enabled.unwrap_or(consumer_enabled),
+        auto_locate: weather.auto_locate,
+        latitude: weather.latitude,
+        longitude: weather.longitude,
+        location: weather.location.clone(),
+        units: weather.units,
+        forecast_days: weather.forecast_days,
+        refresh_interval: weather.refresh_interval,
+    }
+}
+
+fn widget_base_name(name: &str) -> &str {
+    name.split_once(':').map(|(base, _)| base).unwrap_or(name)
 }
 
 fn resolve_gtk_scheme_config(config: &Config) -> Config {
@@ -274,8 +303,14 @@ impl ConfigManager {
         config_path: Option<PathBuf>,
     ) {
         CONFIG_MANAGER_INSTANCE.with(|cell| {
+            WeatherService::global().configure(weather_config_from_config(&config));
             *cell.borrow_mut() = Some(ConfigManager::new(config, config_path));
         });
+    }
+
+    /// Apply the current weather configuration to the shared weather service.
+    pub fn apply_weather_config(&self) {
+        WeatherService::global().configure(weather_config_from_config(&self.config.borrow()));
     }
 
     /// Get the computed theme sizes from the current configuration.
@@ -845,6 +880,7 @@ impl ConfigManager {
             ConfigMessage::Reloaded(new_config) => {
                 AudioService::global().set_allow_overdrive(new_config.audio.allow_overdrive);
                 self.apply_config(*new_config);
+                self.apply_weather_config();
             }
             ConfigMessage::Error(err) => {
                 // Just log the error - keep using the old config
@@ -1290,11 +1326,96 @@ fn widget_names(config: &Config) -> Vec<String> {
 mod tests {
     use super::*;
     use std::path::Path;
+    use vibepanel_core::config::{WeatherUnits, WidgetOptions, WidgetPlacement};
 
     #[test]
     fn test_make_absolute_passthrough_for_absolute_path() {
         let absolute = Path::new("/tmp/vibepanel-style.css");
         assert_eq!(make_absolute(absolute), absolute.to_path_buf());
+    }
+
+    #[test]
+    fn test_weather_config_enabled_when_referenced() {
+        let mut config = Config::default();
+        config
+            .widgets
+            .right
+            .push(WidgetPlacement::Single("weather".to_string()));
+
+        let weather = weather_config_from_config(&config);
+
+        assert!(weather.enabled);
+    }
+
+    #[test]
+    fn test_weather_config_enabled_when_referenced_with_inline_arg() {
+        let mut config = Config::default();
+        config
+            .widgets
+            .right
+            .push(WidgetPlacement::Single("weather:compact".to_string()));
+
+        let weather = weather_config_from_config(&config);
+
+        assert!(weather.enabled);
+    }
+
+    #[test]
+    fn test_weather_config_disabled_widget_does_not_enable_service() {
+        let mut config = Config::default();
+        config
+            .widgets
+            .right
+            .push(WidgetPlacement::Single("weather".to_string()));
+        config.widgets.widget_configs.insert(
+            "weather".to_string(),
+            WidgetOptions {
+                disabled: true,
+                ..WidgetOptions::default()
+            },
+        );
+
+        let weather = weather_config_from_config(&config);
+
+        assert!(!weather.enabled);
+    }
+
+    #[test]
+    fn test_weather_config_explicit_disabled_wins_over_consumer() {
+        let mut config = Config::default();
+        config.weather.enabled = Some(false);
+        config
+            .widgets
+            .right
+            .push(WidgetPlacement::Single("weather".to_string()));
+
+        let weather = weather_config_from_config(&config);
+
+        assert!(!weather.enabled);
+    }
+
+    #[test]
+    fn test_weather_config_parses_top_level_options() {
+        let mut config = Config::default();
+        config.weather.enabled = Some(true);
+        config.weather.auto_locate = true;
+        config.weather.latitude = Some(40.7128);
+        config.weather.longitude = Some(-74.0060);
+        config.weather.location = Some("New York".to_string());
+        config.weather.units = WeatherUnits::Imperial;
+        config.weather.forecast_days = 3;
+        config.weather.refresh_interval = 1200;
+
+        let weather = weather_config_from_config(&config);
+
+        assert!(weather.enabled);
+        assert!(weather.auto_locate);
+        assert_eq!(weather.latitude, Some(40.7128));
+        assert_eq!(weather.longitude, Some(-74.0060));
+        assert_eq!(weather.location.as_deref(), Some("New York"));
+        assert_eq!(weather.units, WeatherUnits::Imperial);
+        assert_eq!(weather.forecast_days, 3);
+        assert_eq!(weather.refresh_interval, 1200);
     }
 
     #[test]

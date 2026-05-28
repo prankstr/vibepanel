@@ -21,6 +21,7 @@
 //! - **gpu**: GPU utilization and VRAM monitoring (AMD sysfs, NVIDIA NVML)
 //! - **media**: MPRIS media player control and monitoring
 //! - **sleep_watcher**: Shared resume-from-sleep notifications via logind
+//! - **weather**: Open-Meteo-backed weather and forecast data
 
 pub mod audio;
 pub mod background_effect;
@@ -51,6 +52,7 @@ pub mod updates;
 pub mod vpn;
 pub mod vpn_secret_agent;
 pub mod wallpaper;
+pub mod weather;
 pub mod window_list;
 pub mod window_title;
 pub mod workspace;
