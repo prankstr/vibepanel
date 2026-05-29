@@ -13,7 +13,7 @@ use crate::services::config_manager::ConfigManager;
 use crate::services::icons::IconHandle;
 use crate::services::tooltip::TooltipManager;
 use crate::services::weather::{CurrentWeather, WeatherService, WeatherSnapshot};
-use crate::styles::{class, state, widget};
+use crate::styles::{class, widget};
 use crate::widgets::base::BaseWidget;
 use crate::widgets::{WidgetConfig, warn_unknown_options};
 
@@ -125,12 +125,10 @@ fn update_weather_widget(
 ) {
     if !snapshot.available {
         container.set_visible(false);
-        icon_handle.set_spinning(false);
         return;
     }
 
     container.set_visible(true);
-    container.remove_css_class(state::SERVICE_UNAVAILABLE);
     container.remove_css_class(widget::WEATHER_ERROR);
     container.remove_css_class(widget::WEATHER_LOADING);
     container.remove_css_class(widget::WEATHER_STALE);
@@ -147,14 +145,12 @@ fn update_weather_widget(
 
     if show_icon {
         icon_handle.widget().set_visible(true);
-        icon_handle.set_spinning(snapshot.loading && snapshot.current.is_none());
         if let Some(current) = &snapshot.current {
             icon_handle.set_icon(icon_for_current(current));
         } else {
             icon_handle.set_icon("weather-unknown");
         }
     } else {
-        icon_handle.set_spinning(false);
         icon_handle.widget().set_visible(false);
     }
 
@@ -166,15 +162,13 @@ fn update_weather_widget(
     TooltipManager::global().set_styled_tooltip(container, &tooltip);
 }
 
+/// Placeholder shown when no current weather data is available (no cached
+/// snapshot yet and the first fetch has not landed). Kept minimal per design.
+const PLACEHOLDER_LABEL: &str = "-";
+
 fn format_label(snapshot: &WeatherSnapshot, format: &str, is_vertical: bool) -> String {
     let Some(current) = snapshot.current.as_ref() else {
-        if snapshot.loading {
-            return "...".to_string();
-        }
-        if snapshot.error.is_some() {
-            return "!".to_string();
-        }
-        return "?".to_string();
+        return PLACEHOLDER_LABEL.to_string();
     };
 
     format
@@ -436,15 +430,17 @@ mod tests {
     }
 
     #[test]
-    fn test_format_label_fallback_states() {
+    fn test_format_label_placeholder_when_no_current() {
         let mut snapshot = test_snapshot();
         snapshot.current = None;
+        snapshot.is_ready = false;
         snapshot.loading = true;
-        assert_eq!(format_label(&snapshot, DEFAULT_FORMAT, false), "...");
+        assert_eq!(format_label(&snapshot, DEFAULT_FORMAT, false), "-");
 
         snapshot.loading = false;
+        snapshot.is_ready = true;
         snapshot.error = Some("Weather location is not configured".to_string());
-        assert_eq!(format_label(&snapshot, DEFAULT_FORMAT, false), "!");
+        assert_eq!(format_label(&snapshot, DEFAULT_FORMAT, false), "-");
     }
 
     #[test]

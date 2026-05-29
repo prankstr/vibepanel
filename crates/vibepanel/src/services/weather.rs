@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime};
 
 use gtk4::glib::{self, SourceId};
 use gtk4::{gio, prelude::*};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 use vibepanel_core::config::{
     DEFAULT_WEATHER_FORECAST_DAYS, DEFAULT_WEATHER_REFRESH_INTERVAL, MAX_WEATHER_FORECAST_DAYS,
@@ -40,6 +40,14 @@ struct GeocodeCache {
 struct AutoLocationCache {
     location: WeatherLocation,
     cached_at: SystemTime,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedWeatherCache {
+    location_key: Option<String>,
+    units: WeatherUnits,
+    wind_units: WeatherWindUnits,
+    snapshot: WeatherSnapshot,
 }
 
 static GEOCODE_CACHE: OnceLock<Mutex<Option<GeocodeCache>>> = OnceLock::new();
@@ -92,7 +100,7 @@ impl ResolvedWeatherConfig {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WeatherSnapshot {
     pub available: bool,
     pub is_ready: bool,
@@ -125,14 +133,14 @@ impl WeatherSnapshot {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WeatherLocation {
     pub name: String,
     pub latitude: f64,
     pub longitude: f64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CurrentWeather {
     pub temperature: f64,
     pub feels_like: Option<f64>,
@@ -143,11 +151,10 @@ pub struct CurrentWeather {
     pub is_day: Option<bool>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DailyForecast {
     pub date: String,
     pub condition: String,
-    #[expect(dead_code, reason = "reserved for forecast icon mapping")]
     pub weather_code: Option<i32>,
     pub temperature_min: Option<f64>,
     pub temperature_max: Option<f64>,
@@ -224,12 +231,25 @@ impl WeatherService {
             return;
         }
 
-        self.set_snapshot(WeatherSnapshot {
+        // Seed from the on-disk cache so the bar shows the last known weather
+        // (marked stale) immediately instead of a placeholder while we refetch.
+        let seeded = load_cached_snapshot()
+            .filter(|cached| cached_matches_config(cached, &config))
+            .map(|cached| {
+                let mut snapshot = cached.snapshot;
+                snapshot.stale = true;
+                snapshot.loading = true;
+                snapshot.error = None;
+                snapshot
+            });
+
+        self.set_snapshot(seeded.unwrap_or(WeatherSnapshot {
             available: true,
+            loading: true,
             units: config.units,
             wind_units: resolved_wind_units(&config),
             ..WeatherSnapshot::unknown()
-        });
+        }));
         self.refresh();
         self.start_timer();
     }
@@ -247,12 +267,15 @@ impl WeatherService {
         self.callbacks.unregister(id)
     }
 
-    #[cfg(test)]
+    #[allow(dead_code)]
     pub fn snapshot(&self) -> WeatherSnapshot {
         self.snapshot.borrow().clone()
     }
 
     pub fn refresh(&self) {
+        // NOTE: Unlike UpdatesService, weather does NOT gate on NetworkService.
+        // HTTP failures already degrade to stale-data retention; a second
+        // reachability gate risks false negatives (captive portals, VPN-only).
         let config = self.config.borrow().clone();
         if !config.enabled || !config.has_location() || self.fetch_in_progress.get() {
             return;
@@ -293,8 +316,8 @@ impl WeatherService {
             s.loading = true;
             s.available = true;
             s.error = None;
-            s.stale = false;
             s.units = config.units;
+            s.wind_units = resolved_wind_units(&config);
         });
 
         std::thread::spawn(move || {
@@ -312,7 +335,10 @@ impl WeatherService {
         self.fetch_in_progress.set(false);
 
         match result {
-            Ok(snapshot) => self.set_snapshot(snapshot),
+            Ok(snapshot) => {
+                save_cached_snapshot(&snapshot, &self.config.borrow());
+                self.set_snapshot(snapshot);
+            }
             Err(error) => self.apply_error(error),
         }
     }
@@ -387,6 +413,112 @@ fn resolve_location(config: &ResolvedWeatherConfig) -> Result<WeatherLocation, S
     }
 
     Err("Weather location is not configured".to_string())
+}
+
+/// Path to the persisted last-known weather snapshot.
+///
+/// Location: `$XDG_CACHE_HOME/vibepanel/weather.json`
+/// Default: `~/.cache/vibepanel/weather.json`
+fn weather_cache_path() -> Option<std::path::PathBuf> {
+    let cache_home = std::env::var("XDG_CACHE_HOME")
+        .map(std::path::PathBuf::from)
+        .ok()
+        .or_else(|| {
+            std::env::var("HOME")
+                .ok()
+                .map(|home| std::path::PathBuf::from(home).join(".cache"))
+        })?;
+    Some(cache_home.join("vibepanel").join("weather.json"))
+}
+
+/// Load the last successfully fetched weather snapshot from disk, if any.
+fn load_cached_snapshot() -> Option<PersistedWeatherCache> {
+    let path = weather_cache_path()?;
+    let contents = std::fs::read_to_string(&path).ok()?;
+    match serde_json::from_str::<PersistedWeatherCache>(&contents) {
+        Ok(cache) if cache.snapshot.current.is_some() => Some(cache),
+        Ok(_) => None,
+        Err(err) => {
+            debug!(
+                "Ignoring unreadable weather cache {}: {err}",
+                path.display()
+            );
+            None
+        }
+    }
+}
+
+/// Persist a successful weather snapshot to disk for fast stale display on the
+/// next startup. Failures are non-fatal.
+fn save_cached_snapshot(snapshot: &WeatherSnapshot, config: &ResolvedWeatherConfig) {
+    if snapshot.current.is_none() {
+        return;
+    }
+    let Some(path) = weather_cache_path() else {
+        return;
+    };
+    if let Some(parent) = path.parent()
+        && let Err(err) = std::fs::create_dir_all(parent)
+    {
+        debug!(
+            "Failed to create weather cache dir {}: {err}",
+            parent.display()
+        );
+        return;
+    }
+    let cache = PersistedWeatherCache {
+        location_key: cache_location_key(config),
+        units: config.units,
+        wind_units: resolved_wind_units(config),
+        snapshot: snapshot.clone(),
+    };
+    match serde_json::to_string(&cache) {
+        Ok(json) => {
+            if let Err(err) = std::fs::write(&path, json) {
+                debug!("Failed to write weather cache {}: {err}", path.display());
+            }
+        }
+        Err(err) => debug!("Failed to serialize weather snapshot: {err}"),
+    }
+}
+
+/// Whether a cached snapshot matches the configured location closely enough to
+/// reuse as stale display. Units must match and the location key — which encodes
+/// the location source mode (coordinates, named location, or auto) — must be
+/// identical, so caches from different modes never cross-populate.
+fn cached_matches_config(cache: &PersistedWeatherCache, config: &ResolvedWeatherConfig) -> bool {
+    cache.units == config.units
+        && cache.wind_units == resolved_wind_units(config)
+        && cache.location_key == cache_location_key(config)
+        && cache.snapshot.location.is_some()
+}
+
+/// Build a cache key that encodes the configured location source mode so
+/// explicit coordinates, named locations, and auto-location never share a key.
+fn cache_location_key(config: &ResolvedWeatherConfig) -> Option<String> {
+    if let (Some(lat), Some(lon)) = (config.latitude, config.longitude) {
+        return Some(format!("coords:{lat:.4},{lon:.4}"));
+    }
+    if let Some(location) = config
+        .location
+        .as_deref()
+        .map(str::trim)
+        .filter(|location| !location.is_empty())
+    {
+        return Some(format!("location:{}", normalize_location(location)));
+    }
+    if config.auto_locate {
+        return Some("auto".to_string());
+    }
+    None
+}
+
+fn normalize_location(location: &str) -> String {
+    location
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
 }
 
 fn geocode_city_cached(city: &str) -> Result<WeatherLocation, String> {
@@ -969,6 +1101,135 @@ mod tests {
     #[test]
     fn encodes_query_values() {
         assert_eq!(encode_query("New York, NY"), "New+York%2C+NY");
+    }
+
+    #[test]
+    fn cached_matches_config_respects_explicit_coordinates() {
+        let mut snapshot = WeatherSnapshot::unknown();
+        snapshot.location = Some(WeatherLocation {
+            name: "Cached".to_string(),
+            latitude: 52.52,
+            longitude: 13.40,
+        });
+        snapshot.current = Some(CurrentWeather {
+            temperature: 20.0,
+            feels_like: None,
+            humidity: None,
+            wind_speed: None,
+            condition: "Clear".to_string(),
+            weather_code: None,
+            is_day: None,
+        });
+        let cache = PersistedWeatherCache {
+            location_key: Some("coords:52.5000,13.4100".to_string()),
+            units: WeatherUnits::Metric,
+            wind_units: WeatherWindUnits::MetersPerSecond,
+            snapshot,
+        };
+
+        // Matching explicit coords (same rounded key) are accepted.
+        assert!(cached_matches_config(
+            &cache,
+            &ResolvedWeatherConfig {
+                latitude: Some(52.50),
+                longitude: Some(13.41),
+                ..ResolvedWeatherConfig::default()
+            }
+        ));
+
+        // Different explicit coords produce a different key and are rejected.
+        assert!(!cached_matches_config(
+            &cache,
+            &ResolvedWeatherConfig {
+                latitude: Some(40.71),
+                longitude: Some(-74.0),
+                ..ResolvedWeatherConfig::default()
+            }
+        ));
+
+        // A coords cache must not satisfy an auto-location config (different mode).
+        assert!(!cached_matches_config(
+            &cache,
+            &ResolvedWeatherConfig {
+                auto_locate: true,
+                ..ResolvedWeatherConfig::default()
+            }
+        ));
+
+        // No cached location is never a match.
+        let empty_cache = PersistedWeatherCache {
+            location_key: Some("auto".to_string()),
+            units: WeatherUnits::Metric,
+            wind_units: WeatherWindUnits::MetersPerSecond,
+            snapshot: WeatherSnapshot::unknown(),
+        };
+        assert!(!cached_matches_config(
+            &empty_cache,
+            &ResolvedWeatherConfig {
+                auto_locate: true,
+                ..ResolvedWeatherConfig::default()
+            }
+        ));
+    }
+
+    #[test]
+    fn cached_matches_config_rejects_different_units_or_location_query() {
+        let mut snapshot = WeatherSnapshot::unknown();
+        snapshot.location = Some(WeatherLocation {
+            name: "Berlin".to_string(),
+            latitude: 52.52,
+            longitude: 13.40,
+        });
+        snapshot.current = Some(CurrentWeather {
+            temperature: 20.0,
+            feels_like: None,
+            humidity: None,
+            wind_speed: None,
+            condition: "Clear".to_string(),
+            weather_code: None,
+            is_day: None,
+        });
+        let cache = PersistedWeatherCache {
+            location_key: Some("location:berlin".to_string()),
+            units: WeatherUnits::Metric,
+            wind_units: WeatherWindUnits::MetersPerSecond,
+            snapshot,
+        };
+
+        assert!(cached_matches_config(
+            &cache,
+            &ResolvedWeatherConfig {
+                location: Some("  BERLIN  ".to_string()),
+                wind_units: Some(WeatherWindUnits::MetersPerSecond),
+                ..ResolvedWeatherConfig::default()
+            }
+        ));
+        assert!(!cached_matches_config(
+            &cache,
+            &ResolvedWeatherConfig {
+                location: Some("Paris".to_string()),
+                wind_units: Some(WeatherWindUnits::MetersPerSecond),
+                ..ResolvedWeatherConfig::default()
+            }
+        ));
+        assert!(!cached_matches_config(
+            &cache,
+            &ResolvedWeatherConfig {
+                location: Some("Berlin".to_string()),
+                units: WeatherUnits::Imperial,
+                wind_units: Some(WeatherWindUnits::MetersPerSecond),
+                ..ResolvedWeatherConfig::default()
+            }
+        ));
+        // Same location but a differing wind unit must not match.
+        assert!(!cached_matches_config(
+            &cache,
+            &ResolvedWeatherConfig {
+                location: Some("Berlin".to_string()),
+                wind_units: Some(WeatherWindUnits::Kmh),
+                ..ResolvedWeatherConfig::default()
+            }
+        ));
     }
 
     #[test]
