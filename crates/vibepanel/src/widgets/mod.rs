@@ -45,6 +45,7 @@ mod taskbar;
 mod tray;
 mod updates;
 mod updates_common;
+mod weather;
 mod window_title;
 mod workspaces;
 
@@ -65,6 +66,7 @@ pub use spacer::{SpacerConfig, SpacerWidget};
 pub use taskbar::{TaskbarConfig, TaskbarWidget};
 pub use tray::{TrayConfig, TrayWidget};
 pub use updates::{UpdatesConfig, UpdatesWidget};
+pub use weather::{WeatherConfig, WeatherWidget};
 pub use window_title::{WindowTitleConfig, WindowTitleWidget};
 pub use workspaces::{WorkspacesConfig, WorkspacesWidget};
 
@@ -297,6 +299,12 @@ impl WidgetFactory {
                 let updates = UpdatesWidget::new(cfg);
                 let root = updates.widget().clone().upcast::<Widget>();
                 Some(BuiltWidget::new(root, updates))
+            }
+            "weather" => {
+                let cfg = WeatherConfig::from_entry(entry);
+                let weather = WeatherWidget::new(cfg);
+                let root = weather.widget().clone().upcast::<Widget>();
+                Some(BuiltWidget::new(root, weather))
             }
             "cpu" => {
                 let cfg = CpuConfig::from_entry(entry);

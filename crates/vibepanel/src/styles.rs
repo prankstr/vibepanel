@@ -638,6 +638,25 @@ pub mod widget {
     /// Updates checking state (`.updates-checking`).
     pub const UPDATES_CHECKING: &str = "updates-checking";
 
+    // Weather
+    /// Weather widget (`.weather`).
+    pub const WEATHER: &str = "weather";
+
+    /// Weather icon (`.weather-icon`).
+    pub const WEATHER_ICON: &str = "weather-icon";
+
+    /// Weather label (`.weather-label`).
+    pub const WEATHER_LABEL: &str = "weather-label";
+
+    /// Weather error state (`.weather-error`).
+    pub const WEATHER_ERROR: &str = "weather-error";
+
+    /// Weather loading state (`.weather-loading`).
+    pub const WEATHER_LOADING: &str = "weather-loading";
+
+    /// Weather stale data state (`.weather-stale`).
+    pub const WEATHER_STALE: &str = "weather-stale";
+
     // Quick Settings bar widget
     /// Quick Settings bar widget (`.quick-settings`).
     pub const QUICK_SETTINGS: &str = "quick-settings";

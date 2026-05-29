@@ -152,6 +152,7 @@ fn weather_config_from_config(config: &Config) -> ResolvedWeatherConfig {
         longitude: weather.longitude,
         location: weather.location.clone(),
         units: weather.units,
+        wind_units: weather.wind_units,
         forecast_days: weather.forecast_days,
         refresh_interval: weather.refresh_interval,
     }

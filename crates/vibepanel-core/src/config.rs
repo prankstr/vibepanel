@@ -1572,6 +1572,17 @@ pub enum WeatherUnits {
     Imperial,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WeatherWindUnits {
+    #[default]
+    #[serde(rename = "km/h", alias = "kmh")]
+    Kmh,
+    #[serde(rename = "mph")]
+    Mph,
+    #[serde(rename = "m/s", alias = "ms")]
+    MetersPerSecond,
+}
+
 /// Shared weather data configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -1599,6 +1610,10 @@ pub struct WeatherConfig {
     /// Temperature/unit system.
     pub units: WeatherUnits,
 
+    /// Wind speed units. Defaults to km/h for metric and mph for imperial.
+    #[serde(default)]
+    pub wind_units: Option<WeatherWindUnits>,
+
     /// Number of daily forecast entries to fetch.
     pub forecast_days: u8,
 
@@ -1615,6 +1630,7 @@ impl Default for WeatherConfig {
             longitude: None,
             location: None,
             units: WeatherUnits::Metric,
+            wind_units: None,
             forecast_days: DEFAULT_WEATHER_FORECAST_DAYS,
             refresh_interval: DEFAULT_WEATHER_REFRESH_INTERVAL,
         }
@@ -1834,6 +1850,7 @@ mod tests {
             longitude = -74.0060
             location = "New York"
             units = "imperial"
+            wind_units = "m/s"
             forecast_days = 3
             refresh_interval = 1200
         "#;
@@ -1846,8 +1863,24 @@ mod tests {
         assert_eq!(config.weather.longitude, Some(-74.0060));
         assert_eq!(config.weather.location.as_deref(), Some("New York"));
         assert_eq!(config.weather.units, WeatherUnits::Imperial);
+        assert_eq!(
+            config.weather.wind_units,
+            Some(WeatherWindUnits::MetersPerSecond)
+        );
         assert_eq!(config.weather.forecast_days, 3);
         assert_eq!(config.weather.refresh_interval, 1200);
+    }
+
+    #[test]
+    fn test_load_with_defaults_weather_wind_units_aliases() {
+        let config = Config::load_with_defaults("[weather]\nwind_units = \"ms\"").unwrap();
+        assert_eq!(
+            config.weather.wind_units,
+            Some(WeatherWindUnits::MetersPerSecond)
+        );
+
+        let config = Config::load_with_defaults("[weather]\nwind_units = \"kmh\"").unwrap();
+        assert_eq!(config.weather.wind_units, Some(WeatherWindUnits::Kmh));
     }
 
     #[test]

@@ -272,6 +272,19 @@ fn material_symbol_lookup(icon_name: &str) -> Option<&'static str> {
         "software-update-available" => "download",
         "software-update-urgent" => "download",
 
+        // Weather
+        "weather-clear" => "sunny",
+        "weather-clear-night" => "bedtime",
+        "weather-partly-cloudy" => "partly_cloudy_day",
+        "weather-partly-cloudy-night" => "partly_cloudy_night",
+        "weather-cloudy" => "cloud",
+        "weather-fog" => "foggy",
+        "weather-drizzle" => "rainy_light",
+        "weather-rain" => "rainy",
+        "weather-snow" => "weather_snowy",
+        "weather-thunderstorm" => "thunderstorm",
+        "weather-unknown" => "cloud",
+
         // Power menu icons
         "system-shutdown-symbolic" => "power_settings_new",
         "system-reboot-symbolic" => "restart_alt",
@@ -788,6 +801,63 @@ pub fn gtk_icon_candidates(logical: &str) -> &'static [&'static str] {
             "software-update-urgent",
             "software-update-available-symbolic",
             "system-software-update-symbolic",
+        ],
+
+        // Weather
+        "weather-clear" => &[
+            "weather-clear-symbolic",
+            "weather-clear",
+            "daytime-sunrise-symbolic",
+        ],
+        "weather-clear-night" => &[
+            "weather-clear-night-symbolic",
+            "weather-clear-night",
+            "weather-clear-symbolic",
+        ],
+        "weather-partly-cloudy" => &[
+            "weather-few-clouds-symbolic",
+            "weather-few-clouds",
+            "weather-clear-symbolic",
+        ],
+        "weather-partly-cloudy-night" => &[
+            "weather-few-clouds-night-symbolic",
+            "weather-few-clouds-night",
+            "weather-few-clouds-symbolic",
+        ],
+        "weather-cloudy" => &[
+            "weather-overcast-symbolic",
+            "weather-overcast",
+            "weather-few-clouds-symbolic",
+        ],
+        "weather-fog" => &[
+            "weather-fog-symbolic",
+            "weather-fog",
+            "weather-overcast-symbolic",
+        ],
+        "weather-drizzle" => &[
+            "weather-showers-scattered-symbolic",
+            "weather-showers-symbolic",
+            "weather-rain-symbolic",
+        ],
+        "weather-rain" => &[
+            "weather-showers-symbolic",
+            "weather-showers",
+            "weather-showers-scattered-symbolic",
+        ],
+        "weather-snow" => &[
+            "weather-snow-symbolic",
+            "weather-snow",
+            "weather-overcast-symbolic",
+        ],
+        "weather-thunderstorm" => &[
+            "weather-storm-symbolic",
+            "weather-storm",
+            "weather-showers-symbolic",
+        ],
+        "weather-unknown" => &[
+            "weather-severe-alert-symbolic",
+            "weather-overcast-symbolic",
+            "weather-clear-symbolic",
         ],
 
         // Power menu icons
@@ -2322,6 +2392,27 @@ mod tests {
     }
 
     #[test]
+    fn test_material_symbol_mapping_weather() {
+        assert_eq!(material_symbol_name("weather-clear"), "sunny");
+        assert_eq!(material_symbol_name("weather-clear-night"), "bedtime");
+        assert_eq!(
+            material_symbol_name("weather-partly-cloudy"),
+            "partly_cloudy_day"
+        );
+        assert_eq!(
+            material_symbol_name("weather-partly-cloudy-night"),
+            "partly_cloudy_night"
+        );
+        assert_eq!(material_symbol_name("weather-cloudy"), "cloud");
+        assert_eq!(material_symbol_name("weather-fog"), "foggy");
+        assert_eq!(material_symbol_name("weather-drizzle"), "rainy_light");
+        assert_eq!(material_symbol_name("weather-rain"), "rainy");
+        assert_eq!(material_symbol_name("weather-snow"), "weather_snowy");
+        assert_eq!(material_symbol_name("weather-thunderstorm"), "thunderstorm");
+        assert_eq!(material_symbol_name("weather-unknown"), "cloud");
+    }
+
+    #[test]
     fn test_material_symbol_mapping_charging() {
         assert_eq!(
             material_symbol_name("battery-full-charging"),
@@ -2437,6 +2528,30 @@ mod tests {
         assert!(!candidates.is_empty());
         assert_eq!(candidates[0], "battery-level-10-charging-symbolic");
         assert!(candidates.contains(&"battery-caution-charging-symbolic"));
+    }
+
+    #[test]
+    fn test_gtk_icon_candidates_weather() {
+        assert_eq!(
+            gtk_icon_candidates("weather-clear")[0],
+            "weather-clear-symbolic"
+        );
+        assert_eq!(
+            gtk_icon_candidates("weather-clear-night")[0],
+            "weather-clear-night-symbolic"
+        );
+        assert_eq!(
+            gtk_icon_candidates("weather-partly-cloudy-night")[0],
+            "weather-few-clouds-night-symbolic"
+        );
+        assert_eq!(
+            gtk_icon_candidates("weather-rain")[0],
+            "weather-showers-symbolic"
+        );
+        assert_eq!(
+            gtk_icon_candidates("weather-unknown")[0],
+            "weather-severe-alert-symbolic"
+        );
     }
 
     #[test]

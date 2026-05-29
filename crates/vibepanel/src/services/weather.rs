@@ -1,7 +1,5 @@
 //! Shared Open-Meteo weather service.
 
-#![allow(dead_code)]
-
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::{Mutex, OnceLock};
@@ -13,10 +11,12 @@ use serde::Deserialize;
 use tracing::{debug, warn};
 use vibepanel_core::config::{
     DEFAULT_WEATHER_FORECAST_DAYS, DEFAULT_WEATHER_REFRESH_INTERVAL, MAX_WEATHER_FORECAST_DAYS,
-    MIN_WEATHER_REFRESH_INTERVAL, WeatherUnits,
+    MIN_WEATHER_REFRESH_INTERVAL, WeatherUnits, WeatherWindUnits,
 };
 
 use super::callbacks::{CallbackId, Callbacks};
+#[cfg(not(test))]
+use super::sleep_watcher::SleepWatcher;
 
 const HTTP_TIMEOUT_SECONDS: u64 = 15;
 const GEOCLUE_SERVICE: &str = "org.freedesktop.GeoClue2";
@@ -53,6 +53,7 @@ pub struct ResolvedWeatherConfig {
     pub longitude: Option<f64>,
     pub location: Option<String>,
     pub units: WeatherUnits,
+    pub wind_units: Option<WeatherWindUnits>,
     pub forecast_days: u8,
     pub refresh_interval: u64,
 }
@@ -66,6 +67,7 @@ impl Default for ResolvedWeatherConfig {
             longitude: None,
             location: None,
             units: WeatherUnits::Metric,
+            wind_units: None,
             forecast_days: DEFAULT_WEATHER_FORECAST_DAYS,
             refresh_interval: DEFAULT_WEATHER_REFRESH_INTERVAL,
         }
@@ -102,6 +104,7 @@ pub struct WeatherSnapshot {
     pub daily: Vec<DailyForecast>,
     pub last_update: Option<SystemTime>,
     pub units: WeatherUnits,
+    pub wind_units: WeatherWindUnits,
 }
 
 impl WeatherSnapshot {
@@ -117,6 +120,7 @@ impl WeatherSnapshot {
             daily: Vec::new(),
             last_update: None,
             units: WeatherUnits::Metric,
+            wind_units: WeatherWindUnits::Kmh,
         }
     }
 }
@@ -143,6 +147,7 @@ pub struct CurrentWeather {
 pub struct DailyForecast {
     pub date: String,
     pub condition: String,
+    #[expect(dead_code, reason = "reserved for forecast icon mapping")]
     pub weather_code: Option<i32>,
     pub temperature_min: Option<f64>,
     pub temperature_max: Option<f64>,
@@ -160,14 +165,26 @@ pub struct WeatherService {
 
 impl WeatherService {
     fn new() -> Rc<Self> {
-        Rc::new(Self {
+        let service = Rc::new(Self {
             config: RefCell::new(ResolvedWeatherConfig::default()),
             snapshot: RefCell::new(WeatherSnapshot::unknown()),
             callbacks: Callbacks::new(),
             timer_source: RefCell::new(None),
             fetch_in_progress: Cell::new(false),
             generation: Cell::new(0),
-        })
+        });
+
+        #[cfg(not(test))]
+        {
+            // WeatherService is a process-lifetime singleton; refresh after resume
+            // so stale laptop wake data is corrected promptly. Unregistration is
+            // intentionally not needed for process-lifetime service callbacks.
+            let _resume_callback_id = SleepWatcher::global().on_resume(|| {
+                WeatherService::global().refresh();
+            });
+        }
+
+        service
     }
 
     pub fn global() -> Rc<Self> {
@@ -201,6 +218,7 @@ impl WeatherService {
                 is_ready: true,
                 error: Some("Weather location is not configured".to_string()),
                 units: config.units,
+                wind_units: resolved_wind_units(&config),
                 ..WeatherSnapshot::unknown()
             });
             return;
@@ -209,6 +227,7 @@ impl WeatherService {
         self.set_snapshot(WeatherSnapshot {
             available: true,
             units: config.units,
+            wind_units: resolved_wind_units(&config),
             ..WeatherSnapshot::unknown()
         });
         self.refresh();
@@ -228,6 +247,7 @@ impl WeatherService {
         self.callbacks.unregister(id)
     }
 
+    #[cfg(test)]
     pub fn snapshot(&self) -> WeatherSnapshot {
         self.snapshot.borrow().clone()
     }
@@ -342,6 +362,7 @@ fn fetch_weather(config: &ResolvedWeatherConfig) -> Result<WeatherSnapshot, Stri
         daily: parse_daily(&response),
         last_update: Some(SystemTime::now()),
         units: config.units,
+        wind_units: resolved_wind_units(config),
     })
 }
 
@@ -697,15 +718,34 @@ fn fetch_open_meteo(
     location: &WeatherLocation,
     config: &ResolvedWeatherConfig,
 ) -> Result<OpenMeteoResponse, String> {
-    let (temp_unit, wind_unit, precip_unit) = match config.units {
-        WeatherUnits::Metric => ("celsius", "kmh", "mm"),
-        WeatherUnits::Imperial => ("fahrenheit", "mph", "inch"),
+    let (temp_unit, precip_unit) = match config.units {
+        WeatherUnits::Metric => ("celsius", "mm"),
+        WeatherUnits::Imperial => ("fahrenheit", "inch"),
     };
+    let wind_unit = open_meteo_wind_unit(resolved_wind_units(config));
     let url = format!(
         "https://api.open-meteo.com/v1/forecast?latitude={:.6}&longitude={:.6}&current=temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,wind_speed_10m,is_day&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max&forecast_days={}&timezone=auto&temperature_unit={temp_unit}&wind_speed_unit={wind_unit}&precipitation_unit={precip_unit}",
         location.latitude, location.longitude, config.forecast_days,
     );
     parse_json(&http_get(&url)?, "weather")
+}
+
+fn resolved_wind_units(config: &ResolvedWeatherConfig) -> WeatherWindUnits {
+    // m/s is the SI standard and the common everyday unit in many metric
+    // regions (e.g. the Nordics), so default to it when unset. Imperial still
+    // defaults to mph; users can override either via `wind_units`.
+    config.wind_units.unwrap_or(match config.units {
+        WeatherUnits::Metric => WeatherWindUnits::MetersPerSecond,
+        WeatherUnits::Imperial => WeatherWindUnits::Mph,
+    })
+}
+
+fn open_meteo_wind_unit(units: WeatherWindUnits) -> &'static str {
+    match units {
+        WeatherWindUnits::Kmh => "kmh",
+        WeatherWindUnits::Mph => "mph",
+        WeatherWindUnits::MetersPerSecond => "ms",
+    }
 }
 
 fn http_get(url: &str) -> Result<String, String> {
@@ -929,6 +969,25 @@ mod tests {
     #[test]
     fn encodes_query_values() {
         assert_eq!(encode_query("New York, NY"), "New+York%2C+NY");
+    }
+
+    #[test]
+    fn resolves_default_wind_units_from_unit_system() {
+        let mut config = ResolvedWeatherConfig::default();
+        assert_eq!(
+            resolved_wind_units(&config),
+            WeatherWindUnits::MetersPerSecond
+        );
+
+        config.units = WeatherUnits::Imperial;
+        assert_eq!(resolved_wind_units(&config), WeatherWindUnits::Mph);
+
+        config.wind_units = Some(WeatherWindUnits::Kmh);
+        assert_eq!(resolved_wind_units(&config), WeatherWindUnits::Kmh);
+        assert_eq!(
+            open_meteo_wind_unit(WeatherWindUnits::MetersPerSecond),
+            "ms"
+        );
     }
 
     #[test]
