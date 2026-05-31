@@ -11,7 +11,7 @@
 //! - Expander: Actions appear as ListRows in accordion
 
 use std::cell::{Cell, RefCell};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -30,6 +30,7 @@ use crate::services::icons::{IconHandle, IconsService};
 use crate::styles::{button, card, color, qs, row, surface};
 use crate::widgets::base::configure_popover;
 
+use super::bar_widget::PowerCommandsConfig;
 use super::components::{CardLabel, ToggleCard};
 use super::ui_helpers::{ExpandableCard, ExpandableCardBase, create_qs_list_box};
 
@@ -48,9 +49,6 @@ struct PowerAction {
     label: &'static str,
     /// Icon name (GTK/Material mapped).
     icon: &'static str,
-    /// Command to execute (first element is program, rest are args).
-    /// Empty slice means special handling (e.g., logout via compositor IPC).
-    command: &'static [&'static str],
 }
 
 /// Available power actions.
@@ -59,57 +57,97 @@ const POWER_ACTIONS: &[PowerAction] = &[
         id: "shutdown",
         label: "Shut Down",
         icon: "system-shutdown-symbolic",
-        command: &["systemctl", "poweroff"],
     },
     PowerAction {
         id: "reboot",
         label: "Reboot",
         icon: "system-reboot-symbolic",
-        command: &["systemctl", "reboot"],
     },
     PowerAction {
         id: "suspend",
         label: "Suspend",
         icon: "system-suspend-symbolic",
-        command: &["systemctl", "suspend"],
     },
     PowerAction {
         id: "lock",
         label: "Lock",
         icon: "system-lock-screen-symbolic",
-        command: &["loginctl", "lock-session"],
     },
     PowerAction {
         id: "logout",
         label: "Log Out",
         icon: "system-log-out-symbolic",
-        // Empty command - handled specially via compositor IPC
-        command: &[],
     },
 ];
 
+fn command_for_action<'a>(action: &PowerAction, commands: &'a PowerCommandsConfig) -> &'a str {
+    match action.id {
+        "shutdown" => &commands.shutdown,
+        "reboot" => &commands.reboot,
+        "suspend" => &commands.suspend,
+        "lock" => &commands.lock,
+        "logout" => &commands.logout,
+        _ => "",
+    }
+}
+
 /// Execute a power action command.
-fn execute_power_action(action: &PowerAction) {
-    // Special handling for logout - use compositor IPC
-    if action.id == "logout" {
+fn execute_power_action(action: &PowerAction, command: &str) {
+    let command = command.trim();
+
+    // Special handling for logout - use compositor IPC unless overridden.
+    if action.id == "logout" && command.is_empty() {
         debug!("Executing logout via compositor IPC");
         CompositorManager::global().quit_compositor();
         return;
     }
 
-    if action.command.is_empty() {
+    if command.is_empty() {
         warn!("Power action {} has no command", action.id);
         return;
     }
 
-    debug!("Executing power action {}: {:?}", action.id, action.command);
+    debug!("Executing power action {}: sh -c {}", action.id, command);
 
-    match Command::new(action.command[0])
-        .args(&action.command[1..])
+    let action_id = action.id;
+    let command = command.to_string();
+    match Command::new("sh")
+        .arg("-c")
+        .arg(&command)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
     {
-        Ok(_) => debug!("Power action {} spawned successfully", action.id),
-        Err(e) => warn!("Failed to execute power action {}: {}", action.id, e),
+        Ok(child) => {
+            debug!("Power action {} spawned successfully", action_id);
+            std::thread::spawn(move || match child.wait_with_output() {
+                Ok(output) if output.status.success() => {}
+                Ok(output) => {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    let stderr = stderr.trim();
+                    if stderr.is_empty() {
+                        warn!(
+                            "Power action {} command {:?} exited with {}",
+                            action_id, command, output.status
+                        );
+                    } else {
+                        warn!(
+                            "Power action {} command {:?} exited with {}: {}",
+                            action_id, command, output.status, stderr
+                        );
+                    }
+                }
+                Err(e) => warn!(
+                    "Failed to wait for power action {} command {:?}: {}",
+                    action_id, command, e
+                ),
+            });
+        }
+        Err(e) => warn!(
+            "Failed to execute power action {} with command {:?}: {}",
+            action_id, command, e
+        ),
     }
 }
 
@@ -449,7 +487,9 @@ impl ExpandableCard for PowerCardExpanderState {
 }
 
 /// Build power card with popover menu (hold-to-open).
-pub fn build_power_card_popover() -> (gtk4::Widget, Rc<PowerCardState>) {
+pub fn build_power_card_popover(
+    commands: PowerCommandsConfig,
+) -> (gtk4::Widget, Rc<PowerCardState>) {
     let state = Rc::new(PowerCardState::new());
 
     // Create the card wrapper box
@@ -466,11 +506,12 @@ pub fn build_power_card_popover() -> (gtk4::Widget, Rc<PowerCardState>) {
 
     // Set up hold-to-confirm that opens popover
     let button_weak = button.downgrade();
+    let commands_for_popover = commands.clone();
     setup_hold_to_confirm(&button, &button, &progress, move || {
         let Some(btn) = button_weak.upgrade() else {
             return;
         };
-        show_power_popover(&btn);
+        show_power_popover(&btn, commands_for_popover.clone());
     });
 
     card_box.append(&overlay);
@@ -478,7 +519,7 @@ pub fn build_power_card_popover() -> (gtk4::Widget, Rc<PowerCardState>) {
 }
 
 /// Show the power actions popover.
-fn show_power_popover(parent: &Button) {
+fn show_power_popover(parent: &Button, commands: PowerCommandsConfig) {
     let popover = Popover::new();
     configure_popover(&popover);
 
@@ -494,7 +535,8 @@ fn show_power_popover(parent: &Button) {
 
     // Add a hold-to-confirm button for each power action
     for action in POWER_ACTIONS {
-        let action_widget = create_power_popover_action(action);
+        let command = command_for_action(action, &commands).to_string();
+        let action_widget = create_power_popover_action(action, command);
         content.append(&action_widget);
     }
 
@@ -509,7 +551,7 @@ fn show_power_popover(parent: &Button) {
 }
 
 /// Create a power action button for the popover (with hold-to-confirm).
-fn create_power_popover_action(action: &'static PowerAction) -> Overlay {
+fn create_power_popover_action(action: &'static PowerAction, command: String) -> Overlay {
     let overlay = Overlay::new();
     overlay.add_css_class(qs::POWER_ROW);
 
@@ -548,7 +590,7 @@ fn create_power_popover_action(action: &'static PowerAction) -> Overlay {
 
     // Set up hold-to-confirm
     setup_hold_to_confirm(&btn, &btn, &progress, move || {
-        execute_power_action(action);
+        execute_power_action(action, &command);
     });
 
     overlay
@@ -564,7 +606,9 @@ fn create_power_popover_action(action: &'static PowerAction) -> Overlay {
 /// setting up the expander button click handler via `AccordionManager::setup_expander_with_callback`,
 /// which handles accordion behavior, revealer toggling, and arrow CSS updates.
 /// The caller can provide an `on_toggle` callback to update the subtitle text.
-pub fn build_power_card_expander() -> (
+pub fn build_power_card_expander(
+    commands: PowerCommandsConfig,
+) -> (
     gtk4::Widget,
     Revealer,
     Rc<PowerCardExpanderState>,
@@ -595,7 +639,7 @@ pub fn build_power_card_expander() -> (
     revealer.set_transition_type(RevealerTransitionType::SlideDown);
     revealer.set_transition_duration(ConfigManager::global().animation_duration(250));
 
-    let details = build_power_details();
+    let details = build_power_details_with_commands(&commands);
     revealer.set_child(Some(&details.container));
 
     *state.base.revealer.borrow_mut() = Some(revealer.clone());
@@ -622,8 +666,9 @@ pub fn build_power_card_expander() -> (
     // Gesture on toggle button, but width calculated from card_overlay (full card width)
     {
         let shutdown_action = &POWER_ACTIONS[0]; // Shutdown action (index 0)
+        let shutdown_command = command_for_action(shutdown_action, &commands).to_string();
         setup_hold_to_confirm(&card.toggle, &card_overlay, &progress, move || {
-            execute_power_action(shutdown_action);
+            execute_power_action(shutdown_action, &shutdown_command);
         });
     }
 
@@ -645,8 +690,7 @@ struct PowerDetailsResult {
     list_box: ListBox,
 }
 
-/// Build the power details section with action rows.
-fn build_power_details() -> PowerDetailsResult {
+fn build_power_details_with_commands(commands: &PowerCommandsConfig) -> PowerDetailsResult {
     let container = GtkBox::new(Orientation::Vertical, 0);
     container.add_css_class(qs::POWER_DETAILS);
 
@@ -654,7 +698,8 @@ fn build_power_details() -> PowerDetailsResult {
 
     // Add a row for each power action
     for action in POWER_ACTIONS {
-        let row = build_power_action_row(action);
+        let command = command_for_action(action, commands).to_string();
+        let row = build_power_action_row_with_command(action, command);
         list_box.append(&row);
     }
 
@@ -667,7 +712,10 @@ fn build_power_details() -> PowerDetailsResult {
 }
 
 /// Build a power action row with hold-to-confirm.
-fn build_power_action_row(action: &'static PowerAction) -> ListBoxRow {
+fn build_power_action_row_with_command(
+    action: &'static PowerAction,
+    command: String,
+) -> ListBoxRow {
     let list_row = ListBoxRow::new();
     list_row.add_css_class(row::QS);
     list_row.add_css_class(row::BASE);
@@ -714,7 +762,7 @@ fn build_power_action_row(action: &'static PowerAction) -> ListBoxRow {
 
     // Set up hold-to-confirm on the row
     setup_hold_to_confirm(&list_row, &list_row, &progress, move || {
-        execute_power_action(action);
+        execute_power_action(action, &command);
     });
 
     list_row
@@ -744,12 +792,12 @@ pub enum PowerCardBuildResult {
 /// accordion behavior. Note that the Power card already handles its own expand/collapse
 /// with subtitle updates, so the caller should use a custom accordion setup that
 /// calls `accordion.collapse_others()` before the card's built-in handler runs.
-pub fn build_power_card() -> PowerCardBuildResult {
+pub fn build_power_card(commands: PowerCommandsConfig) -> PowerCardBuildResult {
     if USE_POPOVER_VARIANT {
-        let (card, state) = build_power_card_popover();
+        let (card, state) = build_power_card_popover(commands);
         PowerCardBuildResult::Popover { card, state }
     } else {
-        let (card, revealer, state, expander_button) = build_power_card_expander();
+        let (card, revealer, state, expander_button) = build_power_card_expander(commands);
         PowerCardBuildResult::Expander {
             card,
             revealer,

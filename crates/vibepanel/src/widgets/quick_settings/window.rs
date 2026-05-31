@@ -41,7 +41,7 @@ use crate::widgets::scale_box::ScaleBox;
 use super::audio_card::{
     self, AudioCardState, build_audio_details, build_audio_hint_label, build_audio_row,
 };
-use super::bar_widget::{QuickSettingsCardsConfig, QuickSettingsConfig};
+use super::bar_widget::{PowerCommandsConfig, QuickSettingsCardsConfig, QuickSettingsConfig};
 use super::bluetooth_card::{self, BluetoothCardState, bt_icon_name, build_bluetooth_details};
 use super::brightness_card::{self, BrightnessCardState, build_brightness_row};
 use super::components::ToggleCard;
@@ -162,6 +162,7 @@ pub struct QuickSettingsWindow {
     /// tick callbacks and idle callbacks.
     anim_generation: Rc<Cell<u32>>,
     cards_config: QuickSettingsCardsConfig,
+    power_commands: PowerCommandsConfig,
     audio_scroll_percentage: i32,
     scroll_container: ScrolledWindow,
     /// Service callback IDs, used to disconnect/unsubscribe on close.
@@ -255,6 +256,7 @@ impl QuickSettingsWindow {
             anim_state: Rc::new(RefCell::new(AnimState::new_idle())),
             anim_generation: Rc::new(Cell::new(0)),
             cards_config: config.cards,
+            power_commands: config.power_commands,
             audio_scroll_percentage: config.audio_scroll_percentage,
             scroll_container,
             network_callback_id: Cell::new(None),
@@ -536,7 +538,7 @@ impl QuickSettingsWindow {
         }
         // Power card (always last in the grid)
         if cfg.power {
-            match power_card::build_power_card() {
+            match power_card::build_power_card(qs.power_commands.clone()) {
                 PowerCardBuildResult::Popover { card, state: _ } => {
                     toggle_cards.push(ToggleCardInfo {
                         card,

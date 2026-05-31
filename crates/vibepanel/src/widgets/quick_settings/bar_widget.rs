@@ -29,6 +29,29 @@ use crate::widgets::layer_shell_popover::PopoverAnchor;
 use crate::widgets::warn_unknown_options;
 use vibepanel_core::config::WidgetEntry;
 
+/// Configurable shell commands used by the Quick Settings power card.
+#[derive(Debug, Clone)]
+pub struct PowerCommandsConfig {
+    pub shutdown: String,
+    pub reboot: String,
+    pub suspend: String,
+    pub lock: String,
+    /// Empty means use the compositor-aware logout implementation.
+    pub logout: String,
+}
+
+impl Default for PowerCommandsConfig {
+    fn default() -> Self {
+        Self {
+            shutdown: "systemctl poweroff".to_string(),
+            reboot: "systemctl reboot".to_string(),
+            suspend: "systemctl suspend".to_string(),
+            lock: "loginctl lock-session".to_string(),
+            logout: String::new(),
+        }
+    }
+}
+
 /// Configuration for which cards are shown in Quick Settings.
 ///
 /// These options are set in the `[widgets.quick_settings]` TOML section
@@ -88,6 +111,8 @@ pub struct QuickSettingsConfig {
     pub cards: QuickSettingsCardsConfig,
     /// Volume delta (percentage points) for scroll on QS widget/window.
     pub audio_scroll_percentage: i32,
+    /// Shell commands used by the power card.
+    pub power_commands: PowerCommandsConfig,
 }
 
 impl WidgetConfig for QuickSettingsConfig {
@@ -104,6 +129,11 @@ impl WidgetConfig for QuickSettingsConfig {
             "power",
             "vpn_close_on_connect",
             "audio_scroll_percentage",
+            "shutdown_command",
+            "reboot_command",
+            "suspend_command",
+            "lock_command",
+            "logout_command",
         ];
         warn_unknown_options("quick_settings", entry, known_options);
 
@@ -133,6 +163,16 @@ impl WidgetConfig for QuickSettingsConfig {
                 .unwrap_or(true) // default to true (shown)
         };
 
+        let default_commands = PowerCommandsConfig::default();
+        let get_command = |key: &str, default: &str| -> String {
+            entry
+                .options
+                .get(key)
+                .and_then(|v| v.as_str())
+                .unwrap_or(default)
+                .to_string()
+        };
+
         Self {
             cards: QuickSettingsCardsConfig {
                 network: get_bool("network"),
@@ -147,6 +187,13 @@ impl WidgetConfig for QuickSettingsConfig {
                 vpn_close_on_connect: get_bool("vpn_close_on_connect"),
             },
             audio_scroll_percentage,
+            power_commands: PowerCommandsConfig {
+                shutdown: get_command("shutdown_command", &default_commands.shutdown),
+                reboot: get_command("reboot_command", &default_commands.reboot),
+                suspend: get_command("suspend_command", &default_commands.suspend),
+                lock: get_command("lock_command", &default_commands.lock),
+                logout: get_command("logout_command", &default_commands.logout),
+            },
         }
     }
 }
@@ -156,6 +203,7 @@ impl Default for QuickSettingsConfig {
         Self {
             cards: QuickSettingsCardsConfig::default(),
             audio_scroll_percentage: Self::DEFAULT_AUDIO_SCROLL_PERCENTAGE,
+            power_commands: PowerCommandsConfig::default(),
         }
     }
 }
@@ -630,5 +678,61 @@ impl Drop for QuickSettingsWidget {
         if let Some(id) = self.vpn_callback_id.take() {
             VpnService::global().disconnect(id);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::widgets::WidgetConfig;
+    use std::collections::HashMap;
+    use toml::Value;
+
+    #[test]
+    fn quick_settings_power_commands_default_to_existing_behavior() {
+        let config = QuickSettingsConfig::from_entry(&WidgetEntry::new("quick_settings"));
+
+        assert_eq!(config.power_commands.shutdown, "systemctl poweroff");
+        assert_eq!(config.power_commands.reboot, "systemctl reboot");
+        assert_eq!(config.power_commands.suspend, "systemctl suspend");
+        assert_eq!(config.power_commands.lock, "loginctl lock-session");
+        assert_eq!(config.power_commands.logout, "");
+    }
+
+    #[test]
+    fn quick_settings_power_commands_parse_overrides() {
+        let mut options = HashMap::new();
+        options.insert(
+            "shutdown_command".to_string(),
+            Value::String("loginctl poweroff".to_string()),
+        );
+        options.insert(
+            "reboot_command".to_string(),
+            Value::String("loginctl reboot".to_string()),
+        );
+        options.insert(
+            "suspend_command".to_string(),
+            Value::String("loginctl suspend".to_string()),
+        );
+        options.insert(
+            "lock_command".to_string(),
+            Value::String("swaylock".to_string()),
+        );
+        options.insert(
+            "logout_command".to_string(),
+            Value::String("niri msg action quit".to_string()),
+        );
+
+        let entry = WidgetEntry {
+            name: "quick_settings".to_string(),
+            options,
+        };
+        let config = QuickSettingsConfig::from_entry(&entry);
+
+        assert_eq!(config.power_commands.shutdown, "loginctl poweroff");
+        assert_eq!(config.power_commands.reboot, "loginctl reboot");
+        assert_eq!(config.power_commands.suspend, "loginctl suspend");
+        assert_eq!(config.power_commands.lock, "swaylock");
+        assert_eq!(config.power_commands.logout, "niri msg action quit");
     }
 }

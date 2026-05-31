@@ -44,6 +44,13 @@ background_opacity = 1.0
 #   [widgets.battery]
 #   disabled = true
 #
+#   [widgets.quick_settings]
+#   # shutdown_command = "loginctl poweroff"
+#   # reboot_command = "loginctl reboot"
+#   # suspend_command = "loginctl suspend"
+#   # lock_command = "loginctl lock-session"
+#   # logout_command = "niri msg action quit"  # unset/empty = compositor IPC logout
+#
 #   [widgets.media]
 #   visualizer = true  # Enable/disable cava audio visualizer (default: true)
 #
@@ -51,14 +58,7 @@ background_opacity = 1.0
 #   toast_position = "top-right"  # "top-left", "top-center", "top-right", "bottom-left", "bottom-center", "bottom-right"
 #
 # Custom widgets use the "custom-" prefix for user-defined buttons:
-#   right = ["custom-power", "custom-os", "tray", "clock"]
-#
-#   [widgets.custom-power]
-#   icon = "system-shutdown-symbolic"
-#   label = "Power"
-#   tooltip = "Power menu"
-#   on_click = "wlogout"
-#   on_click_right = "systemctl suspend"
+#   right = ["custom-os", "tray", "clock"]
 #
 #   [widgets.custom-os]
 #   image = "/usr/share/pixmaps/distro-logo.svg"  # file path (PNG, SVG, etc.)
