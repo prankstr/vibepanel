@@ -188,6 +188,27 @@ pub(crate) fn snap_anim_shell(shell: &ScaleBox, widget_name: &str, opacity: f64,
     SurfaceStyleManager::global().apply_animated_surface_outline(shell, widget_name, false);
 }
 
+fn measured_popover_size(widget: &gtk4::Widget) -> Option<(i32, i32)> {
+    let (_, natural_width, _, _) = widget.measure(Orientation::Horizontal, -1);
+    if natural_width <= POPOVER_MIN_VALID_WIDTH {
+        return None;
+    }
+
+    let (_, natural_height_for_width, _, _) = widget.measure(Orientation::Vertical, natural_width);
+    let natural_height = if natural_height_for_width > POPOVER_MIN_VALID_HEIGHT {
+        natural_height_for_width
+    } else {
+        let (_, natural_height, _, _) = widget.measure(Orientation::Vertical, -1);
+        natural_height
+    };
+
+    if natural_height <= POPOVER_MIN_VALID_HEIGHT {
+        return None;
+    }
+
+    Some((natural_width, natural_height))
+}
+
 /// Calculate the margin for a popover on the bar-adjacent edge.
 ///
 /// When the bar has a visible background (opacity > 0), the popover needs to
@@ -880,9 +901,10 @@ impl LayerShellPopover {
             return;
         }
 
-        // Not mid-close — full open from scratch.
-        // Fresh content will be built below, so clear any pending dirty flag.
-        self.content_dirty.set(false);
+        // Not mid-close — full open from scratch. If reused content was marked
+        // dirty while hidden, rebuild it before attaching instead of mutating
+        // the mapped content during on_show.
+        let rebuild_cached_content = self.content_dirty.take();
         // Bump generation to cancel any stale tick callbacks or idle callbacks.
         let generation = self.anim_generation.get().wrapping_add(1);
         self.anim_generation.set(generation);
@@ -915,7 +937,7 @@ impl LayerShellPopover {
         // and the widget is cached for subsequent opens. This avoids per-cycle
         // widget allocation which leaks memory in GTK4 for complex widgets.
         let content = if self.reuse_content.get() {
-            if let Some(ref cached) = *self.cached_content.borrow() {
+            if !rebuild_cached_content && let Some(ref cached) = *self.cached_content.borrow() {
                 cached.clone()
             } else {
                 let fresh = (self.builder)();
@@ -950,9 +972,7 @@ impl LayerShellPopover {
             window.set_monitor(Some(monitor));
         }
 
-        // Set the shell to the hidden state (will be animated to visible).
-        anim_shell.set_opacity(0.0);
-        anim_shell.set_scale(ANIM_SCALE_FROM);
+        let animations_enabled = ConfigManager::global().animations_enabled();
 
         // Ensure the outer wrapper is set as the window's child (persists).
         if window.child().is_none() {
@@ -976,41 +996,69 @@ impl LayerShellPopover {
         catcher.set_margin(popover_bar_edge(), calculate_bar_exclusive_zone());
         catcher.set_visible(true);
 
-        // Show window with opacity trick to avoid flicker during positioning.
-        window.set_opacity(0.0);
-        window.set_visible(true);
-        window.present();
+        if animations_enabled {
+            // Set the shell to the hidden state — animation will grow in via tick.
+            anim_shell.set_opacity(0.0);
+            anim_shell.set_scale(ANIM_SCALE_FROM);
 
-        // Install deferred Tab controller so keyboard nav activates on first
-        // Tab press (for both mouse and IPC opens). Must run after present()
-        // because present() auto-focuses a widget which we need to clear.
-        self.prepare_keyboard_nav();
+            // Show window with opacity trick to avoid flicker during positioning.
+            window.set_opacity(0.0);
+            window.set_visible(true);
+            window.present();
 
-        // After window is mapped, update position and start the open animation.
-        let weak_self = Rc::downgrade(self);
-        let gen_rc = Rc::clone(&self.anim_generation);
-        glib::idle_add_local_once(move || {
-            // Bail if a newer show/hide cycle started before this idle fired.
-            if gen_rc.get() != generation {
-                return;
-            }
+            // present() may assign auto-focus, so install after mapping to clear
+            // it and keep focus rings hidden until the first keynav press.
+            self.prepare_keyboard_nav();
 
-            if let Some(popover) = weak_self.upgrade() {
-                popover.update_position();
-                if let Some(ref window) = *popover.window.borrow() {
-                    window.set_opacity(1.0);
+            // After window is mapped, update position and start the open animation.
+            let weak_self = Rc::downgrade(self);
+            let gen_rc = Rc::clone(&self.anim_generation);
+            glib::idle_add_local_once(move || {
+                if gen_rc.get() != generation {
+                    return;
                 }
-
-                if ConfigManager::global().animations_enabled() {
-                    popover.start_animation(AnimDirection::Opening, generation);
-                } else {
-                    // Animations disabled — snap open immediately.
-                    if let Some(ref shell) = *popover.anim_shell.borrow() {
-                        snap_anim_shell(shell, &popover.widget_name, 1.0, 1.0);
+                if let Some(popover) = weak_self.upgrade() {
+                    popover.update_position();
+                    if let Some(ref window) = *popover.window.borrow() {
+                        window.set_opacity(1.0);
                     }
+                    popover.start_animation(AnimDirection::Opening, generation);
                 }
-            }
-        });
+            });
+        } else {
+            // Animations disabled: snap everything visible before mapping so a
+            // close/open cycle cannot leave the reused layer-shell surface
+            // transparent if GTK skips or delays the idle positioning pass.
+            snap_anim_shell(&anim_shell, &self.widget_name, 1.0, 1.0);
+            window.set_opacity(1.0);
+
+            // Position before map using GTK's natural size so the first visible
+            // frame is already placed correctly. The idle pass below still uses
+            // real allocation for final placement after map.
+            self.update_position_for_size(
+                window
+                    .child()
+                    .and_then(|child| measured_popover_size(&child)),
+            );
+            window.set_visible(true);
+            window.present();
+
+            // present() may assign auto-focus, so install after mapping to clear
+            // it and keep focus rings hidden until the first keynav press.
+            self.prepare_keyboard_nav();
+
+            // Still need idle update_position for correct margin calculation
+            // after the compositor has allocated the surface.
+            let weak_self = Rc::downgrade(self);
+            glib::idle_add_local_once(move || {
+                if let Some(popover) = weak_self.upgrade() {
+                    if !popover.logically_open.get() {
+                        return;
+                    }
+                    popover.update_position();
+                }
+            });
+        }
     }
 
     /// Ensure the window shell exists, creating it lazily if needed.
@@ -1233,6 +1281,10 @@ impl LayerShellPopover {
     }
 
     fn update_position(&self) {
+        self.update_position_for_size(None);
+    }
+
+    fn update_position_for_size(&self, size_override: Option<(i32, i32)>) {
         let Some(ref window) = *self.window.borrow() else {
             return;
         };
@@ -1265,7 +1317,9 @@ impl LayerShellPopover {
         if ConfigManager::global().bar_position().is_horizontal() {
             // Calculate horizontal position (center on anchor.x)
             if anchor.x > 0 {
-                let window_width = {
+                let window_width = if let Some((width, _)) = size_override {
+                    width
+                } else {
                     let w = window.width();
                     if w > POPOVER_MIN_VALID_WIDTH {
                         w
@@ -1286,7 +1340,9 @@ impl LayerShellPopover {
                 window.set_margin(Edge::Right, fallback_margin);
             }
         } else if anchor.y > 0 {
-            let window_height = {
+            let window_height = if let Some((_, height)) = size_override {
+                height
+            } else {
                 let h = window.height();
                 if h > POPOVER_MIN_VALID_HEIGHT {
                     h
