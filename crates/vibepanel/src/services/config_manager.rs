@@ -303,8 +303,8 @@ impl ConfigManager {
         config_path: Option<PathBuf>,
     ) {
         CONFIG_MANAGER_INSTANCE.with(|cell| {
+            *cell.borrow_mut() = Some(ConfigManager::new(config.clone(), config_path));
             WeatherService::global().configure(weather_config_from_config(&config));
-            *cell.borrow_mut() = Some(ConfigManager::new(config, config_path));
         });
     }
 

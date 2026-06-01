@@ -5,6 +5,7 @@
 
 use gtk4::Label;
 use gtk4::prelude::*;
+use std::rc::Rc;
 use std::time::{Duration, SystemTime};
 use vibepanel_core::config::{WeatherUnits, WeatherWindUnits, WidgetEntry};
 
@@ -75,10 +76,10 @@ impl WeatherWidget {
 
         icon_handle.widget().set_visible(config.show_icon);
 
-        // Click opens a detailed weather popover. Content is rebuilt on each
-        // open so it always reflects the latest snapshot (current conditions
-        // and forecast change over time).
-        base.create_menu(crate::widgets::weather_popover::build_weather_popover);
+        let menu_handle = base.create_menu(move || {
+            crate::widgets::weather_popover::build_weather_content_reactive().0
+        });
+        menu_handle.set_reuse_content(true);
 
         let service = WeatherService::global();
         let weather_callback_id = {
@@ -87,6 +88,7 @@ impl WeatherWidget {
             let label = label.clone();
             let show_icon = config.show_icon;
             let format = config.format.clone();
+            let menu_handle = Rc::clone(&menu_handle);
 
             service.connect(move |snapshot: &WeatherSnapshot| {
                 update_weather_widget(
@@ -98,6 +100,7 @@ impl WeatherWidget {
                     is_vertical,
                     snapshot,
                 );
+                menu_handle.refresh_if_visible();
             })
         };
 
@@ -361,7 +364,6 @@ mod tests {
     fn test_snapshot() -> WeatherSnapshot {
         WeatherSnapshot {
             available: true,
-            is_ready: true,
             loading: false,
             stale: false,
             error: None,
@@ -442,12 +444,10 @@ mod tests {
     fn test_format_label_placeholder_when_no_current() {
         let mut snapshot = test_snapshot();
         snapshot.current = None;
-        snapshot.is_ready = false;
         snapshot.loading = true;
         assert_eq!(format_label(&snapshot, DEFAULT_FORMAT, false), "-");
 
         snapshot.loading = false;
-        snapshot.is_ready = true;
         snapshot.error = Some("Weather location is not configured".to_string());
         assert_eq!(format_label(&snapshot, DEFAULT_FORMAT, false), "-");
     }

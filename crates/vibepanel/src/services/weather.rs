@@ -108,7 +108,6 @@ impl ResolvedWeatherConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WeatherSnapshot {
     pub available: bool,
-    pub is_ready: bool,
     pub loading: bool,
     pub stale: bool,
     pub error: Option<String>,
@@ -124,7 +123,6 @@ impl WeatherSnapshot {
     pub fn unknown() -> Self {
         Self {
             available: false,
-            is_ready: false,
             loading: false,
             stale: false,
             error: None,
@@ -241,7 +239,6 @@ impl WeatherService {
         if !config.has_location() {
             self.set_snapshot(WeatherSnapshot {
                 available: true,
-                is_ready: true,
                 error: Some("Weather location is not configured".to_string()),
                 units: config.units,
                 wind_units: resolved_wind_units(&config),
@@ -379,7 +376,6 @@ impl WeatherService {
         warn!("WeatherService: {error}");
         self.update_snapshot(|s| {
             s.loading = false;
-            s.is_ready = true;
             s.stale = s.current.is_some();
             if mode == RefreshMode::Resume && s.current.is_some() {
                 s.error = None;
@@ -415,7 +411,6 @@ fn fetch_weather(config: &ResolvedWeatherConfig) -> Result<WeatherSnapshot, Stri
 
     Ok(WeatherSnapshot {
         available: true,
-        is_ready: true,
         loading: false,
         stale: false,
         error: None,
@@ -1324,7 +1319,6 @@ mod tests {
 
         let snapshot = service.snapshot();
         assert!(snapshot.available);
-        assert!(snapshot.is_ready);
         assert_eq!(
             snapshot.error.as_deref(),
             Some("Weather location is not configured")
@@ -1391,7 +1385,6 @@ mod tests {
     fn snapshot_with_current_weather() -> WeatherSnapshot {
         WeatherSnapshot {
             available: true,
-            is_ready: true,
             current: Some(CurrentWeather {
                 temperature: 21.0,
                 feels_like: Some(20.0),
