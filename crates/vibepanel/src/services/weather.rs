@@ -28,7 +28,12 @@ const DBUS_TIMEOUT_MS: i32 = 5000;
 const GEOCLUE_FIX_ATTEMPTS: usize = 10;
 const GEOCLUE_FIX_POLL_INTERVAL: Duration = Duration::from_millis(200);
 const AUTO_LOCATION_CACHE_TTL: Duration = Duration::from_secs(6 * 60 * 60);
-const WEATHER_FORECAST_DAYS: u8 = 6;
+const WEATHER_FORECAST_DAYS: u8 = 5;
+const NOMINATIM_USER_AGENT: &str = concat!(
+    "vibepanel/",
+    env!("CARGO_PKG_VERSION"),
+    " weather auto-location"
+);
 #[cfg(not(test))]
 const RESUME_REFRESH_DELAY_SECONDS: u32 = 15;
 
@@ -253,6 +258,9 @@ impl WeatherService {
             .filter(|cached| cached_matches_config(cached, &config))
             .map(|cached| {
                 let mut snapshot = cached.snapshot;
+                if let Some(location) = snapshot.location.as_mut() {
+                    apply_configured_location_label(location, &config);
+                }
                 snapshot.stale = true;
                 snapshot.loading = true;
                 snapshot.error = None;
@@ -426,9 +434,7 @@ fn fetch_weather(config: &ResolvedWeatherConfig) -> Result<WeatherSnapshot, Stri
 fn resolve_location(config: &ResolvedWeatherConfig) -> Result<WeatherLocation, String> {
     if let (Some(latitude), Some(longitude)) = (config.latitude, config.longitude) {
         return Ok(WeatherLocation {
-            name: config
-                .location
-                .clone()
+            name: configured_location_label(config)
                 .unwrap_or_else(|| format!("{latitude:.4}, {longitude:.4}")),
             latitude,
             longitude,
@@ -436,7 +442,9 @@ fn resolve_location(config: &ResolvedWeatherConfig) -> Result<WeatherLocation, S
     }
 
     if let Some(location) = &config.location {
-        return geocode_city_cached(location);
+        let mut resolved = geocode_city_cached(location)?;
+        apply_configured_location_label(&mut resolved, config);
+        return Ok(resolved);
     }
 
     if config.auto_locate {
@@ -590,16 +598,34 @@ fn geocode_city(city: &str) -> Result<WeatherLocation, String> {
 
 fn auto_locate() -> Result<WeatherLocation, String> {
     if let Some(location) = cached_auto_location(SystemTime::now()) {
+        debug!(
+            "Weather auto-location: using cached fix ({})",
+            location.name
+        );
         return Ok(location);
     }
 
     let location = match geoclue_locate() {
-        Ok(location) => Ok(location),
+        Ok(location) => {
+            let location = with_reverse_geocoded_label(location);
+            debug!(
+                "Weather auto-location: resolved via GeoClue2 ({:.4}, {:.4}) -> {}",
+                location.latitude, location.longitude, location.name
+            );
+            Ok(location)
+        }
         Err(error) => {
             warn!("GeoClue2 auto-location failed: {error}; falling back to IP geolocation");
-            ip_auto_locate().map_err(|ip_error| {
-                format!("GeoClue2 failed: {error}; IP geolocation failed: {ip_error}")
-            })
+            ip_auto_locate()
+                .inspect(|location| {
+                    debug!(
+                        "Weather auto-location: resolved via IP geolocation ({:.4}, {:.4}) -> {}",
+                        location.latitude, location.longitude, location.name
+                    );
+                })
+                .map_err(|ip_error| {
+                    format!("GeoClue2 failed: {error}; IP geolocation failed: {ip_error}")
+                })
         }
     }?;
     cache_auto_location(location.clone(), SystemTime::now());
@@ -647,7 +673,7 @@ fn ip_auto_locate() -> Result<WeatherLocation, String> {
     let latitude = response.lat.ok_or("Auto-location missing latitude")?;
     let longitude = response.lon.ok_or("Auto-location missing longitude")?;
     Ok(WeatherLocation {
-        name: join_location_name_or_coords(response.city, response.country, latitude, longitude),
+        name: ip_location_label(response.city, response.country, latitude, longitude),
         latitude,
         longitude,
     })
@@ -809,6 +835,71 @@ fn location_from_coords(latitude: f64, longitude: f64) -> WeatherLocation {
     }
 }
 
+fn with_reverse_geocoded_label(mut location: WeatherLocation) -> WeatherLocation {
+    match reverse_geocode_location(location.latitude, location.longitude) {
+        Ok(Some(name)) => location.name = name,
+        Ok(None) => {}
+        Err(err) => debug!("Reverse geocoding auto-location failed: {err}"),
+    }
+    location
+}
+
+fn reverse_geocode_location(latitude: f64, longitude: f64) -> Result<Option<String>, String> {
+    let url = format!(
+        "https://nominatim.openstreetmap.org/reverse?lat={latitude:.6}&lon={longitude:.6}&format=json&addressdetails=1&accept-language=en"
+    );
+    let response: ReverseGeocodingResponse = parse_json(
+        &http_get_with_user_agent(&url, NOMINATIM_USER_AGENT)?,
+        "reverse geocoding",
+    )?;
+    Ok(response.address.and_then(reverse_geocoded_location_name))
+}
+
+fn reverse_geocoded_location_name(address: ReverseGeocodingAddress) -> Option<String> {
+    let locality = first_non_empty([
+        address.city,
+        address.town,
+        address.village,
+        address.hamlet,
+        address.municipality,
+    ])
+    .or_else(|| first_non_empty([address.county, address.state]));
+
+    // Produce "City, Country" so the popover can collapse to just the city when
+    // the full label would exceed the available width.
+    match (locality, non_empty(address.country)) {
+        (Some(locality), Some(country)) => Some(format!("{locality}, {country}")),
+        (Some(locality), None) => Some(locality),
+        (None, Some(country)) => Some(country),
+        (None, None) => None,
+    }
+}
+
+fn first_non_empty(values: impl IntoIterator<Item = Option<String>>) -> Option<String> {
+    values.into_iter().find_map(non_empty)
+}
+
+fn non_empty(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn configured_location_label(config: &ResolvedWeatherConfig) -> Option<String> {
+    config
+        .location
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+}
+
+fn apply_configured_location_label(location: &mut WeatherLocation, config: &ResolvedWeatherConfig) {
+    if let Some(name) = configured_location_label(config) {
+        location.name = name;
+    }
+}
+
 fn set_dbus_property(
     proxy: &gio::DBusProxy,
     interface: &str,
@@ -912,7 +1003,15 @@ fn open_meteo_wind_unit(units: WeatherWindUnits) -> &'static str {
 }
 
 fn http_get(url: &str) -> Result<String, String> {
-    let response = minreq::get(url)
+    send_http_get(minreq::get(url))
+}
+
+fn http_get_with_user_agent(url: &str, user_agent: &str) -> Result<String, String> {
+    send_http_get(minreq::get(url).with_header("User-Agent", user_agent))
+}
+
+fn send_http_get(request: minreq::Request) -> Result<String, String> {
+    let response = request
         .with_timeout(HTTP_TIMEOUT_SECONDS)
         .send()
         .map_err(|err| format!("Weather request failed: {err}"))?;
@@ -1006,16 +1105,19 @@ fn join_location_name(name: &str, admin1: Option<String>, country: Option<String
     }
 }
 
-fn join_location_name_or_coords(
+fn ip_location_label(
     city: Option<String>,
     country: Option<String>,
     latitude: f64,
     longitude: f64,
 ) -> String {
-    match (city, country) {
+    // "City, Country" so the popover can collapse to just the city when the full
+    // label would exceed the available width.
+    match (non_empty(city), non_empty(country)) {
         (Some(city), Some(country)) => format!("{city}, {country}"),
         (Some(city), None) => city,
-        _ => format!("{latitude:.4}, {longitude:.4}"),
+        (None, Some(country)) => country,
+        (None, None) => format!("{latitude:.4}, {longitude:.4}"),
     }
 }
 
@@ -1054,6 +1156,23 @@ struct AutoLocateResponse {
     lat: Option<f64>,
     lon: Option<f64>,
     city: Option<String>,
+    country: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReverseGeocodingResponse {
+    address: Option<ReverseGeocodingAddress>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ReverseGeocodingAddress {
+    city: Option<String>,
+    town: Option<String>,
+    village: Option<String>,
+    hamlet: Option<String>,
+    municipality: Option<String>,
+    county: Option<String>,
+    state: Option<String>,
     country: Option<String>,
 }
 
@@ -1138,6 +1257,92 @@ mod tests {
 
         assert_eq!(location.name, "Test");
         assert_eq!(location.latitude, 1.0);
+    }
+
+    #[test]
+    fn configured_location_label_replaces_geocoder_expansion() {
+        let config = ResolvedWeatherConfig {
+            location: Some("  Stockholm  ".to_string()),
+            ..ResolvedWeatherConfig::default()
+        };
+        let mut location = WeatherLocation {
+            name: "Stockholm, Stockholm County, Sweden".to_string(),
+            latitude: 59.3293,
+            longitude: 18.0686,
+        };
+
+        apply_configured_location_label(&mut location, &config);
+
+        assert_eq!(location.name, "Stockholm");
+    }
+
+    #[test]
+    fn reverse_geocoded_location_name_prefers_city_country() {
+        assert_eq!(
+            reverse_geocoded_location_name(ReverseGeocodingAddress {
+                city: Some("Stockholm".to_string()),
+                country: Some("Sweden".to_string()),
+                ..ReverseGeocodingAddress::default()
+            }),
+            Some("Stockholm, Sweden".to_string())
+        );
+    }
+
+    #[test]
+    fn reverse_geocoded_location_name_uses_locality_fallbacks() {
+        assert_eq!(
+            reverse_geocoded_location_name(ReverseGeocodingAddress {
+                village: Some("Test Village".to_string()),
+                country: Some("Sweden".to_string()),
+                ..ReverseGeocodingAddress::default()
+            }),
+            Some("Test Village, Sweden".to_string())
+        );
+        assert_eq!(
+            reverse_geocoded_location_name(ReverseGeocodingAddress {
+                county: Some("Stockholm County".to_string()),
+                country: Some("Sweden".to_string()),
+                ..ReverseGeocodingAddress::default()
+            }),
+            Some("Stockholm County, Sweden".to_string())
+        );
+    }
+
+    #[test]
+    fn reverse_geocoded_location_name_falls_back_to_country() {
+        assert_eq!(
+            reverse_geocoded_location_name(ReverseGeocodingAddress {
+                city: Some(" ".to_string()),
+                country: Some("Sweden".to_string()),
+                ..ReverseGeocodingAddress::default()
+            }),
+            Some("Sweden".to_string())
+        );
+        assert_eq!(
+            reverse_geocoded_location_name(ReverseGeocodingAddress::default()),
+            None
+        );
+    }
+
+    #[test]
+    fn ip_location_label_prefers_city_country() {
+        assert_eq!(
+            ip_location_label(
+                Some("Mölndal".to_string()),
+                Some("Sweden".to_string()),
+                57.6583,
+                12.016
+            ),
+            "Mölndal, Sweden"
+        );
+        assert_eq!(
+            ip_location_label(None, Some("Sweden".to_string()), 57.6583, 12.016),
+            "Sweden"
+        );
+        assert_eq!(
+            ip_location_label(None, None, 57.6583, 12.016),
+            "57.6583, 12.0160"
+        );
     }
 
     #[test]

@@ -15,6 +15,8 @@ use crate::styles::{color, weather_popover as wp};
 use crate::widgets::weather::{format_temperature, format_wind, icon_for_current};
 use vibepanel_core::config::WeatherUnits;
 
+const HERO_DETAIL_MAX_WIDTH_CHARS: i32 = 16;
+
 /// Build reusable weather content plus a refresh callback for reused popovers.
 pub fn build_weather_content_reactive() -> (Widget, Rc<dyn Fn()>) {
     let snapshot = WeatherService::global().snapshot();
@@ -94,23 +96,17 @@ fn build_hero(snapshot: &WeatherSnapshot, current: &CurrentWeather) -> GtkBox {
     text_column.append(&condition);
 
     if let Some(feels_like) = current.feels_like {
-        let detail = Label::new(Some(&format!(
+        let detail = build_hero_detail_label(&format!(
             "Feels like {}",
             format_temperature(feels_like, snapshot.units, false)
-        )));
-        detail.add_css_class(wp::DETAIL);
-        detail.add_css_class(color::MUTED);
-        detail.set_halign(Align::Start);
+        ));
         text_column.append(&detail);
     }
 
     if let Some(location) = &snapshot.location {
-        let name = location.name.trim();
+        let name = fit_location_label(location.name.trim());
         if !name.is_empty() {
-            let location_label = Label::new(Some(name));
-            location_label.add_css_class(wp::DETAIL);
-            location_label.add_css_class(color::MUTED);
-            location_label.set_halign(Align::Start);
+            let location_label = build_hero_detail_label(&name);
             text_column.append(&location_label);
         }
     }
@@ -122,6 +118,32 @@ fn build_hero(snapshot: &WeatherSnapshot, current: &CurrentWeather) -> GtkBox {
     hero.append(&build_metrics(snapshot, current));
 
     hero
+}
+
+fn build_hero_detail_label(text: &str) -> Label {
+    let label = Label::new(Some(text));
+    label.add_css_class(wp::DETAIL);
+    label.add_css_class(color::MUTED);
+    label.set_halign(Align::Start);
+    label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+    label.set_max_width_chars(HERO_DETAIL_MAX_WIDTH_CHARS);
+    label
+}
+
+/// Choose the widest location label that fits the hero detail budget:
+/// 1. full `City, Country` if it fits,
+/// 2. otherwise the leading segment (city) alone,
+/// 3. otherwise the city, left to ellipsize at render time.
+fn fit_location_label(name: &str) -> String {
+    let max = HERO_DETAIL_MAX_WIDTH_CHARS as usize;
+
+    if name.chars().count() <= max {
+        return name.to_string();
+    }
+
+    // Labels are formatted as "City, Country"; the city is the first segment.
+    let city = name.split(',').next().map(str::trim).unwrap_or(name);
+    city.to_string()
 }
 
 fn build_metrics(snapshot: &WeatherSnapshot, current: &CurrentWeather) -> GtkBox {
@@ -430,6 +452,27 @@ mod tests {
             sunrise: Some("2026-05-30T05:31".to_string()),
             sunset: Some("2026-05-30T20:42".to_string()),
         }
+    }
+
+    #[test]
+    fn fit_location_label_keeps_full_when_short() {
+        // "City, Country" is within the 16-char budget.
+        assert_eq!(fit_location_label("City, Country"), "City, Country");
+    }
+
+    #[test]
+    fn fit_location_label_drops_country_when_too_long() {
+        // "LongCity, LongCountry" is over the budget, so country is dropped.
+        assert_eq!(fit_location_label("LongCity, LongCountry"), "LongCity");
+    }
+
+    #[test]
+    fn fit_location_label_keeps_long_city_for_ellipsize() {
+        // Single long segment is kept as-is; ellipsizing happens at render time.
+        assert_eq!(
+            fit_location_label("Llanfairpwllgwyngyll"),
+            "Llanfairpwllgwyngyll"
+        );
     }
 
     #[test]
