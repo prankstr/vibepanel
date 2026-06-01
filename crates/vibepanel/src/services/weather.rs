@@ -29,6 +29,14 @@ const DBUS_TIMEOUT_MS: i32 = 5000;
 const GEOCLUE_FIX_ATTEMPTS: usize = 10;
 const GEOCLUE_FIX_POLL_INTERVAL: Duration = Duration::from_millis(200);
 const AUTO_LOCATION_CACHE_TTL: Duration = Duration::from_secs(6 * 60 * 60);
+#[cfg(not(test))]
+const RESUME_REFRESH_DELAY_SECONDS: u32 = 15;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RefreshMode {
+    Normal,
+    Resume,
+}
 
 #[derive(Debug, Clone)]
 struct GeocodeCache {
@@ -183,11 +191,14 @@ impl WeatherService {
 
         #[cfg(not(test))]
         {
-            // WeatherService is a process-lifetime singleton; refresh after resume
-            // so stale laptop wake data is corrected promptly. Unregistration is
-            // intentionally not needed for process-lifetime service callbacks.
+            // WeatherService is a process-lifetime singleton. Delay the resume
+            // refresh slightly so Wi-Fi/DNS/VPN have time to reconnect after wake.
+            // Unregistration is intentionally not needed for process-lifetime
+            // service callbacks.
             let _resume_callback_id = SleepWatcher::global().on_resume(|| {
-                WeatherService::global().refresh();
+                glib::timeout_add_seconds_local_once(RESUME_REFRESH_DELAY_SECONDS, || {
+                    WeatherService::global().refresh_with_mode(RefreshMode::Resume);
+                });
             });
         }
 
@@ -273,6 +284,10 @@ impl WeatherService {
     }
 
     pub fn refresh(&self) {
+        self.refresh_with_mode(RefreshMode::Normal);
+    }
+
+    fn refresh_with_mode(&self, mode: RefreshMode) {
         // NOTE: Unlike UpdatesService, weather does NOT gate on NetworkService.
         // HTTP failures already degrade to stale-data retention; a second
         // reachability gate risks false negatives (captive portals, VPN-only).
@@ -281,7 +296,7 @@ impl WeatherService {
             return;
         }
 
-        self.fetch_weather_async(config, self.generation.get());
+        self.fetch_weather_async(config, self.generation.get(), mode);
     }
 
     fn start_timer(self: &Rc<Self>) {
@@ -309,7 +324,12 @@ impl WeatherService {
         }
     }
 
-    fn fetch_weather_async(&self, config: ResolvedWeatherConfig, generation: u64) {
+    fn fetch_weather_async(
+        &self,
+        config: ResolvedWeatherConfig,
+        generation: u64,
+        mode: RefreshMode,
+    ) {
         debug!("WeatherService: starting refresh");
         self.fetch_in_progress.set(true);
         self.update_snapshot(|s| {
@@ -323,12 +343,17 @@ impl WeatherService {
         std::thread::spawn(move || {
             let result = fetch_weather(&config);
             glib::idle_add_once(move || {
-                WeatherService::global().apply_fetch_result(generation, result);
+                WeatherService::global().apply_fetch_result(generation, mode, result);
             });
         });
     }
 
-    fn apply_fetch_result(&self, generation: u64, result: Result<WeatherSnapshot, String>) {
+    fn apply_fetch_result(
+        &self,
+        generation: u64,
+        mode: RefreshMode,
+        result: Result<WeatherSnapshot, String>,
+    ) {
         if generation != self.generation.get() {
             return;
         }
@@ -339,17 +364,21 @@ impl WeatherService {
                 save_cached_snapshot(&snapshot, &self.config.borrow());
                 self.set_snapshot(snapshot);
             }
-            Err(error) => self.apply_error(error),
+            Err(error) => self.apply_error(error, mode),
         }
     }
 
-    fn apply_error(&self, error: String) {
+    fn apply_error(&self, error: String, mode: RefreshMode) {
         warn!("WeatherService: {error}");
         self.update_snapshot(|s| {
             s.loading = false;
             s.is_ready = true;
             s.stale = s.current.is_some();
-            s.error = Some(error);
+            if mode == RefreshMode::Resume && s.current.is_some() {
+                s.error = None;
+            } else {
+                s.error = Some(error);
+            }
         });
     }
 
@@ -1265,6 +1294,63 @@ mod tests {
 
         assert!(auto_location_cache_is_fresh(&fresh, now));
         assert!(!auto_location_cache_is_fresh(&expired, now));
+    }
+
+    fn snapshot_with_current_weather() -> WeatherSnapshot {
+        WeatherSnapshot {
+            available: true,
+            is_ready: true,
+            current: Some(CurrentWeather {
+                temperature: 20.0,
+                feels_like: None,
+                humidity: None,
+                wind_speed: None,
+                condition: "Clear".to_string(),
+                weather_code: Some(0),
+                is_day: Some(true),
+            }),
+            ..WeatherSnapshot::unknown()
+        }
+    }
+
+    #[test]
+    fn normal_error_with_current_weather_stays_visible() {
+        let service = WeatherService::new();
+        service.set_snapshot(snapshot_with_current_weather());
+
+        service.apply_error("network unavailable".to_string(), RefreshMode::Normal);
+
+        let snapshot = service.snapshot();
+        assert!(snapshot.stale);
+        assert_eq!(snapshot.error.as_deref(), Some("network unavailable"));
+    }
+
+    #[test]
+    fn resume_error_with_current_weather_is_quiet() {
+        let service = WeatherService::new();
+        service.set_snapshot(snapshot_with_current_weather());
+
+        service.apply_error("network unavailable".to_string(), RefreshMode::Resume);
+
+        let snapshot = service.snapshot();
+        assert!(snapshot.stale);
+        assert_eq!(snapshot.error, None);
+    }
+
+    #[test]
+    fn resume_error_without_current_weather_stays_visible() {
+        let service = WeatherService::new();
+        service.set_snapshot(WeatherSnapshot {
+            available: true,
+            loading: true,
+            ..WeatherSnapshot::unknown()
+        });
+
+        service.apply_error("network unavailable".to_string(), RefreshMode::Resume);
+
+        let snapshot = service.snapshot();
+        assert!(!snapshot.stale);
+        assert_eq!(snapshot.error.as_deref(), Some("network unavailable"));
     }
 
     #[test]
