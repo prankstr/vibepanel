@@ -75,6 +75,11 @@ impl WeatherWidget {
 
         icon_handle.widget().set_visible(config.show_icon);
 
+        // Click opens a detailed weather popover. Content is rebuilt on each
+        // open so it always reflects the latest snapshot (current conditions
+        // and forecast change over time).
+        base.create_menu(crate::widgets::weather_popover::build_weather_popover);
+
         let service = WeatherService::global();
         let weather_callback_id = {
             let container = base.widget().clone();
@@ -105,6 +110,10 @@ impl WeatherWidget {
     /// Get the root GTK widget for embedding in the bar.
     pub fn widget(&self) -> &gtk4::Box {
         self.base.widget()
+    }
+
+    pub(crate) fn edge_interaction(&self) -> Option<crate::widgets::EdgeInteraction> {
+        self.base.edge_interaction()
     }
 }
 
@@ -286,7 +295,7 @@ fn format_last_update(last_update: SystemTime) -> String {
     }
 }
 
-fn format_temperature(value: f64, units: WeatherUnits, is_vertical: bool) -> String {
+pub(crate) fn format_temperature(value: f64, units: WeatherUnits, is_vertical: bool) -> String {
     if is_vertical {
         format!("{value:.0}")
     } else {
@@ -301,7 +310,7 @@ fn temperature_unit_symbol(units: WeatherUnits) -> &'static str {
     }
 }
 
-fn format_wind(value: Option<f64>, units: WeatherWindUnits) -> String {
+pub(crate) fn format_wind(value: Option<f64>, units: WeatherWindUnits) -> String {
     match value {
         Some(value) => format!("{value:.0} {}", wind_unit_label(units)),
         None => "—".to_string(),
@@ -316,7 +325,7 @@ fn wind_unit_label(units: WeatherWindUnits) -> &'static str {
     }
 }
 
-fn icon_for_current(current: &CurrentWeather) -> &'static str {
+pub(crate) fn icon_for_current(current: &CurrentWeather) -> &'static str {
     let night = current.is_day == Some(false);
 
     match current.weather_code {

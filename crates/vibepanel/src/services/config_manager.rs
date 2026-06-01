@@ -153,7 +153,6 @@ fn weather_config_from_config(config: &Config) -> ResolvedWeatherConfig {
         location: weather.location.clone(),
         units: weather.units,
         wind_units: weather.wind_units,
-        forecast_days: weather.forecast_days,
         refresh_interval: weather.refresh_interval,
     }
 }
@@ -1404,7 +1403,6 @@ mod tests {
         config.weather.longitude = Some(-74.0060);
         config.weather.location = Some("New York".to_string());
         config.weather.units = WeatherUnits::Imperial;
-        config.weather.forecast_days = 3;
         config.weather.refresh_interval = 1200;
 
         let weather = weather_config_from_config(&config);
@@ -1415,7 +1413,6 @@ mod tests {
         assert_eq!(weather.longitude, Some(-74.0060));
         assert_eq!(weather.location.as_deref(), Some("New York"));
         assert_eq!(weather.units, WeatherUnits::Imperial);
-        assert_eq!(weather.forecast_days, 3);
         assert_eq!(weather.refresh_interval, 1200);
     }
 

@@ -16,6 +16,7 @@
 //! - `osd` - On-screen display overlays
 //! - `media` - Media player widget
 //! - `system` - System info popover
+//! - `weather` - Weather popover
 
 /// Widget background with opacity applied via `color-mix()`.
 pub const WIDGET_BG_WITH_OPACITY: &str = "color-mix(in srgb, var(--widget-background-color) var(--widget-background-opacity), transparent)";
@@ -46,6 +47,7 @@ mod osd;
 mod quick_settings;
 mod system;
 mod tray;
+mod weather;
 
 use vibepanel_core::Config;
 
@@ -83,8 +85,9 @@ pub fn widget_css(config: &Config) -> String {
     let osd_css = osd::css();
     let media_css = media::css(animations);
     let system_css = system::css();
+    let weather_css = weather::css();
 
     format!(
-        "{bar_css}\n{tray_css}\n{buttons_css}\n{calendar_css}\n{quick_settings_css}\n{battery_css}\n{notifications_css}\n{osd_css}\n{media_css}\n{system_css}"
+        "{bar_css}\n{tray_css}\n{buttons_css}\n{calendar_css}\n{quick_settings_css}\n{battery_css}\n{notifications_css}\n{osd_css}\n{media_css}\n{system_css}\n{weather_css}"
     )
 }

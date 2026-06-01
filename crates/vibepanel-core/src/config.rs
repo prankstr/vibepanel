@@ -61,12 +61,6 @@ const MAX_OUTLINE_WIDTH: u32 = 4;
 const MIN_FONT_SCALE: f64 = 0.1;
 const MAX_FONT_SCALE: f64 = 1.0;
 
-/// Default number of daily weather forecast entries.
-pub const DEFAULT_WEATHER_FORECAST_DAYS: u8 = 5;
-
-/// Maximum number of daily weather forecast entries.
-pub const MAX_WEATHER_FORECAST_DAYS: u8 = 7;
-
 /// Default weather refresh interval in seconds.
 pub const DEFAULT_WEATHER_REFRESH_INTERVAL: u64 = 900;
 
@@ -400,14 +394,6 @@ impl Config {
 
         if self.osd.timeout_ms == 0 {
             errors.push("osd.timeout_ms: must be greater than 0".to_string());
-        }
-
-        if self.weather.forecast_days == 0 || self.weather.forecast_days > MAX_WEATHER_FORECAST_DAYS
-        {
-            errors.push(format!(
-                "weather.forecast_days: must be between 1 and {}, got {}",
-                MAX_WEATHER_FORECAST_DAYS, self.weather.forecast_days
-            ));
         }
 
         if self.weather.refresh_interval < MIN_WEATHER_REFRESH_INTERVAL {
@@ -1614,9 +1600,6 @@ pub struct WeatherConfig {
     #[serde(default)]
     pub wind_units: Option<WeatherWindUnits>,
 
-    /// Number of daily forecast entries to fetch.
-    pub forecast_days: u8,
-
     /// Refresh interval in seconds.
     pub refresh_interval: u64,
 }
@@ -1631,7 +1614,6 @@ impl Default for WeatherConfig {
             location: None,
             units: WeatherUnits::Metric,
             wind_units: None,
-            forecast_days: DEFAULT_WEATHER_FORECAST_DAYS,
             refresh_interval: DEFAULT_WEATHER_REFRESH_INTERVAL,
         }
     }
@@ -1687,7 +1669,6 @@ mod tests {
         assert!(!config.audio.allow_overdrive);
         assert_eq!(config.weather.enabled, None);
         assert_eq!(config.weather.units, WeatherUnits::Metric);
-        assert_eq!(config.weather.forecast_days, 5);
         assert_eq!(config.advanced.compositor, "auto");
         assert_eq!(config.theme.mode, "auto");
         assert!(config.theme.accent.is_none());
@@ -1851,7 +1832,6 @@ mod tests {
             location = "New York"
             units = "imperial"
             wind_units = "m/s"
-            forecast_days = 3
             refresh_interval = 1200
         "#;
 
@@ -1867,7 +1847,6 @@ mod tests {
             config.weather.wind_units,
             Some(WeatherWindUnits::MetersPerSecond)
         );
-        assert_eq!(config.weather.forecast_days, 3);
         assert_eq!(config.weather.refresh_interval, 1200);
     }
 
@@ -1911,15 +1890,6 @@ mod tests {
 
         let err = config.validate().unwrap_err();
         assert!(err.to_string().contains("weather.refresh_interval"));
-    }
-
-    #[test]
-    fn test_validate_weather_forecast_days_range() {
-        let mut config = Config::default();
-        config.weather.forecast_days = MAX_WEATHER_FORECAST_DAYS + 1;
-
-        let err = config.validate().unwrap_err();
-        assert!(err.to_string().contains("weather.forecast_days"));
     }
 
     #[test]

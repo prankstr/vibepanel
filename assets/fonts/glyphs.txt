@@ -1,3 +1,4 @@
+air
 album
 arrow_downward
 arrow_upward
@@ -40,6 +41,7 @@ foggy
 fullscreen
 headphones
 headset_mic
+humidity_low
 keyboard
 keyboard_arrow_down
 keyboard_arrow_left
@@ -55,6 +57,7 @@ mic_off
 more_horiz
 more_vert
 mouse
+nest_sunblock
 network_check
 notifications
 notifications_active

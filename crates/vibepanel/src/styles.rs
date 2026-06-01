@@ -1036,6 +1036,84 @@ pub mod calendar {
     pub const SHOW_TODAY: &str = "show-today";
 }
 
+/// Weather popover classes.
+pub mod weather_popover {
+    /// Hero card (`.weather-popover-hero`).
+    pub const HERO: &str = "weather-popover-hero";
+
+    /// Hero weather icon (`.weather-popover-hero-icon`).
+    pub const HERO_ICON: &str = "weather-popover-hero-icon";
+
+    /// Hero temperature (`.weather-popover-temp`).
+    pub const TEMP: &str = "weather-popover-temp";
+
+    /// Hero condition (`.weather-popover-condition`).
+    pub const CONDITION: &str = "weather-popover-condition";
+
+    /// Hero feels-like / location detail line (`.weather-popover-detail`).
+    pub const DETAIL: &str = "weather-popover-detail";
+
+    /// Metrics grid (`.weather-popover-metrics`).
+    pub const METRICS: &str = "weather-popover-metrics";
+
+    /// Single metric cell (`.weather-popover-metric`).
+    pub const METRIC: &str = "weather-popover-metric";
+
+    /// Metric icon (`.weather-popover-metric-icon`).
+    pub const METRIC_ICON: &str = "weather-popover-metric-icon";
+
+    /// Metric label (`.weather-popover-metric-label`).
+    pub const METRIC_LABEL: &str = "weather-popover-metric-label";
+
+    /// Metric value (`.weather-popover-metric-value`).
+    pub const METRIC_VALUE: &str = "weather-popover-metric-value";
+
+    /// Forecast strip (`.weather-popover-forecast`).
+    pub const FORECAST: &str = "weather-popover-forecast";
+
+    /// Single forecast day card (`.weather-popover-day`).
+    pub const DAY: &str = "weather-popover-day";
+
+    /// Forecast day name (`.weather-popover-day-name`).
+    pub const DAY_NAME: &str = "weather-popover-day-name";
+
+    /// Forecast day icon (`.weather-popover-day-icon`).
+    pub const DAY_ICON: &str = "weather-popover-day-icon";
+
+    /// Forecast day high temperature (`.weather-popover-day-high`).
+    pub const DAY_HIGH: &str = "weather-popover-day-high";
+
+    /// Forecast day temperature stack (`.weather-popover-day-temps`).
+    pub const DAY_TEMPS: &str = "weather-popover-day-temps";
+
+    /// Forecast day low temperature (`.weather-popover-day-low`).
+    pub const DAY_LOW: &str = "weather-popover-day-low";
+
+    /// Forecast day metrics block (`.weather-popover-day-metrics`).
+    pub const DAY_METRICS: &str = "weather-popover-day-metrics";
+
+    /// Forecast day metric row (`.weather-popover-day-metric`).
+    pub const DAY_METRIC: &str = "weather-popover-day-metric";
+
+    /// Forecast day metric icon (`.weather-popover-day-metric-icon`).
+    pub const DAY_METRIC_ICON: &str = "weather-popover-day-metric-icon";
+
+    /// Forecast day metric value (`.weather-popover-day-metric-value`).
+    pub const DAY_METRIC_VALUE: &str = "weather-popover-day-metric-value";
+
+    /// Status banner for errors (`.weather-popover-banner`).
+    pub const BANNER: &str = "weather-popover-banner";
+
+    /// Empty / unavailable state container (`.weather-popover-empty`).
+    pub const EMPTY: &str = "weather-popover-empty";
+
+    /// Empty state icon (`.weather-popover-empty-icon`).
+    pub const EMPTY_ICON: &str = "weather-popover-empty-icon";
+
+    /// Empty state label (`.weather-popover-empty-label`).
+    pub const EMPTY_LABEL: &str = "weather-popover-empty-label";
+}
+
 /// Tooltip classes.
 pub mod tooltip {
     /// Tooltip window (`.vibepanel-tooltip`).

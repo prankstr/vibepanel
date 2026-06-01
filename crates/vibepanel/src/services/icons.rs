@@ -284,6 +284,13 @@ fn material_symbol_lookup(icon_name: &str) -> Option<&'static str> {
         "weather-snow" => "weather_snowy",
         "weather-thunderstorm" => "thunderstorm",
         "weather-unknown" => "cloud",
+        // Weather popover metric icons
+        "weather-humidity" => "humidity_low",
+        "weather-wind" => "air",
+        "weather-precipitation" => "rainy",
+        "weather-uv-index" => "nest_sunblock",
+        "weather-sunrise" => "sunny",
+        "weather-sunset" => "bedtime",
 
         // Power menu icons
         "system-shutdown-symbolic" => "power_settings_new",
@@ -859,6 +866,15 @@ pub fn gtk_icon_candidates(logical: &str) -> &'static [&'static str] {
             "weather-overcast-symbolic",
             "weather-clear-symbolic",
         ],
+        "weather-humidity" => &["weather-showers-scattered-symbolic", "weather-fog-symbolic"],
+        "weather-wind" => &["weather-windy-symbolic", "weather-fog-symbolic"],
+        "weather-precipitation" => &[
+            "weather-showers-symbolic",
+            "weather-showers-scattered-symbolic",
+        ],
+        "weather-uv-index" => &["weather-clear-symbolic", "daytime-sunrise-symbolic"],
+        "weather-sunrise" => &["daytime-sunrise-symbolic", "weather-clear-symbolic"],
+        "weather-sunset" => &["weather-clear-night-symbolic", "weather-clear-symbolic"],
 
         // Power menu icons
         "system-shutdown-symbolic" => &[
@@ -2410,6 +2426,7 @@ mod tests {
         assert_eq!(material_symbol_name("weather-snow"), "weather_snowy");
         assert_eq!(material_symbol_name("weather-thunderstorm"), "thunderstorm");
         assert_eq!(material_symbol_name("weather-unknown"), "cloud");
+        assert_eq!(material_symbol_name("weather-uv-index"), "nest_sunblock");
     }
 
     #[test]

@@ -10,8 +10,7 @@ use gtk4::{gio, prelude::*};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 use vibepanel_core::config::{
-    DEFAULT_WEATHER_FORECAST_DAYS, DEFAULT_WEATHER_REFRESH_INTERVAL, MAX_WEATHER_FORECAST_DAYS,
-    MIN_WEATHER_REFRESH_INTERVAL, WeatherUnits, WeatherWindUnits,
+    DEFAULT_WEATHER_REFRESH_INTERVAL, MIN_WEATHER_REFRESH_INTERVAL, WeatherUnits, WeatherWindUnits,
 };
 
 use super::callbacks::{CallbackId, Callbacks};
@@ -29,6 +28,7 @@ const DBUS_TIMEOUT_MS: i32 = 5000;
 const GEOCLUE_FIX_ATTEMPTS: usize = 10;
 const GEOCLUE_FIX_POLL_INTERVAL: Duration = Duration::from_millis(200);
 const AUTO_LOCATION_CACHE_TTL: Duration = Duration::from_secs(6 * 60 * 60);
+const WEATHER_FORECAST_DAYS: u8 = 6;
 #[cfg(not(test))]
 const RESUME_REFRESH_DELAY_SECONDS: u32 = 15;
 
@@ -70,7 +70,6 @@ pub struct ResolvedWeatherConfig {
     pub location: Option<String>,
     pub units: WeatherUnits,
     pub wind_units: Option<WeatherWindUnits>,
-    pub forecast_days: u8,
     pub refresh_interval: u64,
 }
 
@@ -84,7 +83,6 @@ impl Default for ResolvedWeatherConfig {
             location: None,
             units: WeatherUnits::Metric,
             wind_units: None,
-            forecast_days: DEFAULT_WEATHER_FORECAST_DAYS,
             refresh_interval: DEFAULT_WEATHER_REFRESH_INTERVAL,
         }
     }
@@ -92,7 +90,6 @@ impl Default for ResolvedWeatherConfig {
 
 impl ResolvedWeatherConfig {
     fn normalized(mut self) -> Self {
-        self.forecast_days = self.forecast_days.clamp(1, MAX_WEATHER_FORECAST_DAYS);
         self.refresh_interval = self.refresh_interval.max(MIN_WEATHER_REFRESH_INTERVAL);
         self.location = self
             .location
@@ -166,7 +163,18 @@ pub struct DailyForecast {
     pub weather_code: Option<i32>,
     pub temperature_min: Option<f64>,
     pub temperature_max: Option<f64>,
+    #[serde(default)]
+    pub wind_speed_max: Option<f64>,
+    #[serde(default)]
+    pub precipitation_sum: Option<f64>,
+    #[serde(default)]
     pub precipitation_probability: Option<u8>,
+    #[serde(default)]
+    pub uv_index_max: Option<f64>,
+    #[serde(default)]
+    pub sunrise: Option<String>,
+    #[serde(default)]
+    pub sunset: Option<String>,
 }
 
 pub struct WeatherService {
@@ -278,7 +286,6 @@ impl WeatherService {
         self.callbacks.unregister(id)
     }
 
-    #[allow(dead_code)]
     pub fn snapshot(&self) -> WeatherSnapshot {
         self.snapshot.borrow().clone()
     }
@@ -885,8 +892,8 @@ fn fetch_open_meteo(
     };
     let wind_unit = open_meteo_wind_unit(resolved_wind_units(config));
     let url = format!(
-        "https://api.open-meteo.com/v1/forecast?latitude={:.6}&longitude={:.6}&current=temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,wind_speed_10m,is_day&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max&forecast_days={}&timezone=auto&temperature_unit={temp_unit}&wind_speed_unit={wind_unit}&precipitation_unit={precip_unit}",
-        location.latitude, location.longitude, config.forecast_days,
+        "https://api.open-meteo.com/v1/forecast?latitude={:.6}&longitude={:.6}&current=temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,wind_speed_10m,is_day&daily=weather_code,temperature_2m_max,temperature_2m_min,wind_speed_10m_max,precipitation_sum,precipitation_probability_max,uv_index_max,sunrise,sunset&forecast_days={WEATHER_FORECAST_DAYS}&timezone=auto&temperature_unit={temp_unit}&wind_speed_unit={wind_unit}&precipitation_unit={precip_unit}",
+        location.latitude, location.longitude,
     );
     parse_json(&http_get(&url)?, "weather")
 }
@@ -961,8 +968,13 @@ fn parse_daily(response: &OpenMeteoResponse) -> Vec<DailyForecast> {
                 weather_code,
                 temperature_min: at(&daily.temperature_2m_min, i),
                 temperature_max: at(&daily.temperature_2m_max, i),
+                wind_speed_max: at(&daily.wind_speed_10m_max, i),
+                precipitation_sum: at(&daily.precipitation_sum, i),
                 precipitation_probability: at(&daily.precipitation_probability_max, i)
                     .and_then(to_u8),
+                uv_index_max: at(&daily.uv_index_max, i),
+                sunrise: daily.sunrise.get(i).cloned().flatten(),
+                sunset: daily.sunset.get(i).cloned().flatten(),
             }
         })
         .collect()
@@ -1072,7 +1084,15 @@ struct OpenMeteoDaily {
     weather_code: Vec<Option<i32>>,
     temperature_2m_max: Vec<Option<f64>>,
     temperature_2m_min: Vec<Option<f64>>,
+    wind_speed_10m_max: Vec<Option<f64>>,
+    precipitation_sum: Vec<Option<f64>>,
     precipitation_probability_max: Vec<Option<i64>>,
+    #[serde(default)]
+    uv_index_max: Vec<Option<f64>>,
+    #[serde(default)]
+    sunrise: Vec<Option<String>>,
+    #[serde(default)]
+    sunset: Vec<Option<String>>,
 }
 
 #[cfg(test)]
@@ -1080,15 +1100,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn clamps_config_limits() {
+    fn clamps_refresh_interval() {
         let config = ResolvedWeatherConfig {
-            forecast_days: 99,
             refresh_interval: 1,
             ..ResolvedWeatherConfig::default()
         }
         .normalized();
 
-        assert_eq!(config.forecast_days, MAX_WEATHER_FORECAST_DAYS);
         assert_eq!(config.refresh_interval, MIN_WEATHER_REFRESH_INTERVAL);
     }
 
@@ -1296,21 +1314,38 @@ mod tests {
         assert!(!auto_location_cache_is_fresh(&expired, now));
     }
 
-    fn snapshot_with_current_weather() -> WeatherSnapshot {
-        WeatherSnapshot {
-            available: true,
-            is_ready: true,
-            current: Some(CurrentWeather {
-                temperature: 20.0,
-                feels_like: None,
-                humidity: None,
-                wind_speed: None,
-                condition: "Clear".to_string(),
-                weather_code: Some(0),
-                is_day: Some(true),
-            }),
-            ..WeatherSnapshot::unknown()
-        }
+    #[test]
+    fn missing_location_is_available_with_actionable_error() {
+        let service = WeatherService::new();
+        service.configure(ResolvedWeatherConfig {
+            enabled: true,
+            ..ResolvedWeatherConfig::default()
+        });
+
+        let snapshot = service.snapshot();
+        assert!(snapshot.available);
+        assert!(snapshot.is_ready);
+        assert_eq!(
+            snapshot.error.as_deref(),
+            Some("Weather location is not configured")
+        );
+    }
+
+    #[test]
+    fn unchanged_configure_does_not_reset_snapshot() {
+        let service = WeatherService::new();
+        let config = ResolvedWeatherConfig {
+            enabled: true,
+            ..ResolvedWeatherConfig::default()
+        };
+
+        service.configure(config.clone());
+        service.update_snapshot(|snapshot| {
+            snapshot.error = Some("kept".to_string());
+        });
+        service.configure(config);
+
+        assert_eq!(service.snapshot().error.as_deref(), Some("kept"));
     }
 
     #[test]
@@ -1353,37 +1388,21 @@ mod tests {
         assert_eq!(snapshot.error.as_deref(), Some("network unavailable"));
     }
 
-    #[test]
-    fn missing_location_is_available_with_actionable_error() {
-        let service = WeatherService::new();
-        service.configure(ResolvedWeatherConfig {
-            enabled: true,
-            ..ResolvedWeatherConfig::default()
-        });
-
-        let snapshot = service.snapshot();
-        assert!(snapshot.available);
-        assert!(snapshot.is_ready);
-        assert_eq!(
-            snapshot.error.as_deref(),
-            Some("Weather location is not configured")
-        );
-    }
-
-    #[test]
-    fn unchanged_configure_does_not_reset_snapshot() {
-        let service = WeatherService::new();
-        let config = ResolvedWeatherConfig {
-            enabled: true,
-            ..ResolvedWeatherConfig::default()
-        };
-
-        service.configure(config.clone());
-        service.update_snapshot(|snapshot| {
-            snapshot.error = Some("kept".to_string());
-        });
-        service.configure(config);
-
-        assert_eq!(service.snapshot().error.as_deref(), Some("kept"));
+    fn snapshot_with_current_weather() -> WeatherSnapshot {
+        WeatherSnapshot {
+            available: true,
+            is_ready: true,
+            current: Some(CurrentWeather {
+                temperature: 21.0,
+                feels_like: Some(20.0),
+                humidity: Some(60),
+                wind_speed: Some(4.0),
+                condition: "Clear".to_string(),
+                weather_code: Some(0),
+                is_day: Some(true),
+            }),
+            last_update: Some(SystemTime::UNIX_EPOCH),
+            ..WeatherSnapshot::unknown()
+        }
     }
 }

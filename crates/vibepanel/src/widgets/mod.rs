@@ -46,6 +46,7 @@ mod tray;
 mod updates;
 mod updates_common;
 mod weather;
+mod weather_popover;
 mod window_title;
 mod workspaces;
 
@@ -304,7 +305,8 @@ impl WidgetFactory {
                 let cfg = WeatherConfig::from_entry(entry);
                 let weather = WeatherWidget::new(cfg);
                 let root = weather.widget().clone().upcast::<Widget>();
-                Some(BuiltWidget::new(root, weather))
+                let edge_interaction = weather.edge_interaction();
+                Some(BuiltWidget::new(root, weather).with_edge_interaction(edge_interaction))
             }
             "cpu" => {
                 let cfg = CpuConfig::from_entry(entry);

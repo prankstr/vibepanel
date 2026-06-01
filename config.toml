@@ -116,7 +116,6 @@ allow_overdrive = false
 # latitude = 52.5200
 # longitude = 13.4050
 # units = "metric"       # "metric" or "imperial"
-# forecast_days = 5       # 1-7 days
 # refresh_interval = 900  # Seconds; minimum 600
 
 [advanced]
