@@ -1020,6 +1020,9 @@ pub mod calendar {
     /// Calendar popover (`.calendar-popover`).
     pub const POPOVER: &str = "calendar-popover";
 
+    /// Calendar card container (`.calendar-popover-card`).
+    pub const CARD: &str = "calendar-popover-card";
+
     /// Calendar header (`.calendar-header`).
     pub const HEADER: &str = "calendar-header";
 

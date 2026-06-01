@@ -1573,11 +1573,6 @@ pub enum WeatherWindUnits {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct WeatherConfig {
-    /// Explicitly enable or disable weather fetching.
-    /// If omitted, weather is enabled only when a configured surface needs it.
-    #[serde(default)]
-    pub enabled: Option<bool>,
-
     /// Resolve location automatically when no explicit location is configured.
     pub auto_locate: bool,
 
@@ -1607,7 +1602,6 @@ pub struct WeatherConfig {
 impl Default for WeatherConfig {
     fn default() -> Self {
         Self {
-            enabled: None,
             auto_locate: false,
             latitude: None,
             longitude: None,
@@ -1667,7 +1661,6 @@ mod tests {
         assert_eq!(config.bar.background_opacity, 0.0);
         assert_eq!(config.widgets.background_opacity, 1.0);
         assert!(!config.audio.allow_overdrive);
-        assert_eq!(config.weather.enabled, None);
         assert_eq!(config.weather.units, WeatherUnits::Metric);
         assert_eq!(config.advanced.compositor, "auto");
         assert_eq!(config.theme.mode, "auto");
@@ -1825,7 +1818,6 @@ mod tests {
     fn test_load_with_defaults_weather_config() {
         let user_toml = r#"
             [weather]
-            enabled = true
             auto_locate = true
             latitude = 40.7128
             longitude = -74.0060
@@ -1837,7 +1829,6 @@ mod tests {
 
         let config = Config::load_with_defaults(user_toml).unwrap();
 
-        assert_eq!(config.weather.enabled, Some(true));
         assert!(config.weather.auto_locate);
         assert_eq!(config.weather.latitude, Some(40.7128));
         assert_eq!(config.weather.longitude, Some(-74.0060));

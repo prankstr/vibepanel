@@ -39,6 +39,7 @@ background_opacity = 1.0
 # Example:
 #   [widgets.clock]
 #   format = "%H:%M"
+#   show_weather = true # Embed weather content in the clock/calendar popover
 #   outline_color = "accent"  # Per-widget outline color: "subtle" | "accent" | "foreground" | "#rrggbb"
 #
 #   [widgets.battery]
@@ -109,8 +110,7 @@ show_value = false  # Show current value after the bar
 allow_overdrive = false
 
 [weather]
-# Shared weather data settings for the weather widget and future surfaces.
-# enabled = true          # Force weather fetching on/off. Omit to enable only when a surface uses weather.
+# Shared weather data settings for the weather widget and weather-enabled surfaces.
 # auto_locate = false     # Use GeoClue/IP fallback when no location or coordinates are configured.
 # location = "Berlin"
 # latitude = 52.5200

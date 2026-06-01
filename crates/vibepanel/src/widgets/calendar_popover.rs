@@ -7,6 +7,9 @@ use gtk4::{Align, Box as GtkBox, Calendar, Label, Orientation, Overlay, Widget};
 
 use crate::services::icons::IconsService;
 use crate::styles::{calendar as cal, icon, surface};
+use crate::widgets::weather_popover::build_weather_content_reactive;
+
+pub type ClockPopoverRefresh = Rc<dyn Fn()>;
 
 /// Build a calendar popover for the clock widget.
 ///
@@ -17,7 +20,10 @@ use crate::styles::{calendar as cal, icon, surface};
 /// Returns the widget and a refresh callback. The refresh callback navigates
 /// the calendar to the real current date — call it on each open so the user
 /// always sees today's month, even when the widget is reused across cycles.
-pub fn build_clock_calendar_popover(show_week_numbers: bool) -> (Widget, Rc<dyn Fn()>) {
+pub fn build_clock_calendar_popover(
+    show_week_numbers: bool,
+    show_weather: bool,
+) -> (Widget, ClockPopoverRefresh, Option<ClockPopoverRefresh>) {
     // "Today" is stored in a Cell so the on_show refresh callback can update
     // it when the popover is reused across midnight boundaries.
     let today = Rc::new(Cell::new(Local::now().date_naive()));
@@ -26,8 +32,13 @@ pub fn build_clock_calendar_popover(show_week_numbers: bool) -> (Widget, Rc<dyn 
     let updating = Rc::new(Cell::new(false));
 
     // Main container
-    let container = GtkBox::new(Orientation::Vertical, 0);
+    let container = GtkBox::new(Orientation::Vertical, 12);
     container.add_css_class(cal::POPOVER);
+
+    let calendar_card = GtkBox::new(Orientation::Vertical, 0);
+    if show_weather {
+        calendar_card.add_css_class(cal::CARD);
+    }
 
     // Header: left-aligned label + right-aligned navigation buttons
     let header_box = GtkBox::new(Orientation::Horizontal, 8);
@@ -71,7 +82,7 @@ pub fn build_clock_calendar_popover(show_week_numbers: bool) -> (Widget, Rc<dyn 
     nav_box.append(&next_button);
 
     header_box.append(&nav_box);
-    container.append(&header_box);
+    calendar_card.append(&header_box);
 
     // Calendar widget
     let calendar = Calendar::new();
@@ -106,7 +117,16 @@ pub fn build_clock_calendar_popover(show_week_numbers: bool) -> (Widget, Rc<dyn 
         wrapper.append(&calendar);
     }
 
-    container.append(&wrapper);
+    calendar_card.append(&wrapper);
+    container.append(&calendar_card);
+
+    let weather_refresh = if show_weather {
+        let (weather, refresh) = build_weather_content_reactive();
+        container.append(&weather);
+        Some(refresh)
+    } else {
+        None
+    };
 
     // Helper closures --------------------------------------------------------
 
@@ -259,7 +279,8 @@ pub fn build_clock_calendar_popover(show_week_numbers: bool) -> (Widget, Rc<dyn 
 
     // Refresh callback — navigates calendar to the real current date.
     // Called by on_show when the popover is reused across open/close cycles.
-    let refresh: Rc<dyn Fn()> = {
+    let weather_refresh_for_show = weather_refresh.clone();
+    let refresh: ClockPopoverRefresh = {
         Rc::new(move || {
             let new_today = Local::now().date_naive();
             today.set(new_today);
@@ -267,10 +288,13 @@ pub fn build_clock_calendar_popover(show_week_numbers: bool) -> (Widget, Rc<dyn 
             *current_date.borrow_mut() = new_date;
             update_header(new_date);
             update_calendar(new_date);
+            if let Some(refresh_weather) = &weather_refresh_for_show {
+                refresh_weather();
+            }
         })
     };
 
-    (container.upcast::<Widget>(), refresh)
+    (container.upcast::<Widget>(), refresh, weather_refresh)
 }
 
 #[cfg(test)]
@@ -284,13 +308,15 @@ mod tests {
             return;
         }
 
-        let (with_week_numbers, _refresh) = build_clock_calendar_popover(true);
+        let (with_week_numbers, _refresh, _weather_refresh) =
+            build_clock_calendar_popover(true, false);
         assert!(
             find_descendant_with_class(&with_week_numbers, "week-number-header").is_some(),
             "calendar popover should render the week-number header when week numbers are enabled"
         );
 
-        let (without_week_numbers, _refresh) = build_clock_calendar_popover(false);
+        let (without_week_numbers, _refresh, _weather_refresh) =
+            build_clock_calendar_popover(false, false);
         assert!(
             find_descendant_with_class(&without_week_numbers, "week-number-header").is_none(),
             "calendar popover should omit the week-number header when week numbers are disabled"

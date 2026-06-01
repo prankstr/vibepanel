@@ -18,6 +18,7 @@ use vibepanel_core::config::WidgetEntry;
 use crate::services::callbacks::CallbackId;
 use crate::services::config_manager::ConfigManager;
 use crate::services::sleep_watcher::SleepWatcher;
+use crate::services::weather::WeatherService;
 use crate::styles::widget as wgt;
 use crate::widgets::WidgetConfig;
 use crate::widgets::base::BaseWidget;
@@ -48,6 +49,8 @@ pub struct ClockConfig {
     pub format_vertical: Option<String>,
     /// Whether to show week numbers in the calendar popover.
     pub show_week_numbers: bool,
+    /// Whether to embed weather content in the calendar popover.
+    pub show_weather: bool,
 }
 
 impl WidgetConfig for ClockConfig {
@@ -55,7 +58,12 @@ impl WidgetConfig for ClockConfig {
         warn_unknown_options(
             "clock",
             entry,
-            &["format", "format_vertical", "show_week_numbers"],
+            &[
+                "format",
+                "format_vertical",
+                "show_week_numbers",
+                "show_weather",
+            ],
         );
 
         let format = entry
@@ -77,10 +85,17 @@ impl WidgetConfig for ClockConfig {
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
 
+        let show_weather = entry
+            .options
+            .get("show_weather")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
         Self {
             format,
             format_vertical,
             show_week_numbers,
+            show_weather,
         }
     }
 }
@@ -91,6 +106,7 @@ impl Default for ClockConfig {
             format: DEFAULT_FORMAT.to_string(),
             format_vertical: None,
             show_week_numbers: true,
+            show_weather: false,
         }
     }
 }
@@ -112,6 +128,7 @@ pub struct ClockWidget {
     /// The Rc<RefCell<>> lets self-rescheduling callbacks replace the ID.
     timer_source: Rc<RefCell<Option<SourceId>>>,
     resume_callback_id: Option<CallbackId>,
+    weather_callback_id: Option<CallbackId>,
 }
 
 impl ClockWidget {
@@ -129,16 +146,22 @@ impl ClockWidget {
         }
 
         let show_week_numbers = config.show_week_numbers;
+        let show_weather = config.show_weather;
 
-        // Shared slot for the calendar refresh callback. Populated by the
-        // builder on first open, invoked by on_show on every subsequent open.
+        // Shared slots populated by the popover builder on first open. Calendar
+        // refresh runs on show; weather refresh runs on weather service updates
+        // so the calendar month is not reset while the popover is open.
         type RefreshSlot = Rc<RefCell<Option<Rc<dyn Fn()>>>>;
-        let refresh_slot: RefreshSlot = Rc::new(RefCell::new(None));
+        let calendar_refresh_slot: RefreshSlot = Rc::new(RefCell::new(None));
+        let weather_refresh_slot: RefreshSlot = Rc::new(RefCell::new(None));
 
-        let refresh_for_builder = refresh_slot.clone();
+        let calendar_refresh_for_builder = calendar_refresh_slot.clone();
+        let weather_refresh_for_builder = weather_refresh_slot.clone();
         let menu_handle = base.create_menu(move || {
-            let (widget, refresh) = build_clock_calendar_popover(show_week_numbers);
-            *refresh_for_builder.borrow_mut() = Some(refresh);
+            let (widget, calendar_refresh, weather_refresh) =
+                build_clock_calendar_popover(show_week_numbers, show_weather);
+            *calendar_refresh_for_builder.borrow_mut() = Some(calendar_refresh);
+            *weather_refresh_for_builder.borrow_mut() = weather_refresh;
             widget
         });
 
@@ -146,10 +169,24 @@ impl ClockWidget {
         // unbounded memory growth from GTK4.
         menu_handle.set_reuse_content(true);
         menu_handle.set_on_show(move || {
-            if let Some(ref cb) = *refresh_slot.borrow() {
+            if let Some(ref cb) = *calendar_refresh_slot.borrow() {
                 cb();
             }
         });
+
+        let weather_callback_id = if show_weather {
+            let menu_handle = Rc::clone(&menu_handle);
+            let weather_refresh_slot = weather_refresh_slot.clone();
+            Some(WeatherService::global().connect(move |_| {
+                if menu_handle.is_visible()
+                    && let Some(ref cb) = *weather_refresh_slot.borrow()
+                {
+                    cb();
+                }
+            }))
+        } else {
+            None
+        };
 
         let format = validated_clock_format(config.format, DEFAULT_FORMAT, "format");
         let format_vertical = config.format_vertical.map(|format| {
@@ -185,6 +222,7 @@ impl ClockWidget {
             scheduling_mode,
             timer_source,
             resume_callback_id,
+            weather_callback_id,
         };
 
         widget.update_time();
@@ -403,6 +441,9 @@ impl Drop for ClockWidget {
         if let Some(id) = self.resume_callback_id.take() {
             SleepWatcher::global().disconnect(id);
         }
+        if let Some(id) = self.weather_callback_id.take() {
+            WeatherService::global().disconnect(id);
+        }
         debug!("Clock timer cancelled on drop");
     }
 }
@@ -426,6 +467,7 @@ mod tests {
         let config = ClockConfig::from_entry(&entry);
         assert_eq!(config.format, "%a %d %H:%M");
         assert_eq!(config.format_vertical, None);
+        assert!(!config.show_weather);
     }
 
     #[test]
@@ -470,10 +512,20 @@ mod tests {
     }
 
     #[test]
+    fn test_clock_config_show_weather() {
+        let mut options = HashMap::new();
+        options.insert("show_weather".to_string(), Value::Boolean(true));
+        let entry = make_widget_entry("clock", options);
+        let config = ClockConfig::from_entry(&entry);
+        assert!(config.show_weather);
+    }
+
+    #[test]
     fn test_clock_config_default_impl() {
         let config = ClockConfig::default();
         assert_eq!(config.format, "%a %d %H:%M");
         assert_eq!(config.format_vertical, None);
+        assert!(!config.show_weather);
     }
 
     #[test]

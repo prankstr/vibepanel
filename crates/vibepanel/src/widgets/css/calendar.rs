@@ -6,6 +6,12 @@ pub fn css() -> &'static str {
 /* ===== CALENDAR ===== */
 
 /* Popover padding comes from the shared .popover rule. */
+.calendar-popover-card {
+    padding: 12px;
+    border-radius: var(--radius-card);
+    background: var(--color-card-overlay);
+}
+
 .calendar-popover .vp-popover-icon-btn {
     margin-top: 0;
 }

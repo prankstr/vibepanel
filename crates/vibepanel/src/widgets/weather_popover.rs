@@ -1,12 +1,13 @@
 //! Weather popover - current conditions hero, key metrics, and a daily
 //! forecast strip.
 //!
-//! The content is rebuilt from the latest `WeatherService` snapshot each time
+//! The content is refreshed from the latest `WeatherService` snapshot each time
 //! the popover opens, so it always reflects current data.
 
 use chrono::NaiveDate;
 use gtk4::prelude::*;
 use gtk4::{Align, Box as GtkBox, Label, Orientation, Widget};
+use std::rc::Rc;
 
 use crate::services::icons::IconsService;
 use crate::services::weather::{CurrentWeather, DailyForecast, WeatherService, WeatherSnapshot};
@@ -14,38 +15,51 @@ use crate::styles::{color, weather_popover as wp};
 use crate::widgets::weather::{format_temperature, format_wind, icon_for_current};
 use vibepanel_core::config::WeatherUnits;
 
-/// Build the weather popover content from the current service snapshot.
-///
-/// Returns a small snapshot-only widget tree. Weather intentionally rebuilds on
-/// each open instead of using popover content reuse, so no separate refresh hook
-/// is needed to keep the view current.
-pub fn build_weather_popover() -> Widget {
+/// Build reusable weather content plus a refresh callback for reused popovers.
+pub fn build_weather_content_reactive() -> (Widget, Rc<dyn Fn()>) {
     let snapshot = WeatherService::global().snapshot();
+    let container = build_weather_content_box(&snapshot);
 
+    let refresh_container = container.clone();
+    let refresh = Rc::new(move || {
+        while let Some(child) = refresh_container.first_child() {
+            refresh_container.remove(&child);
+        }
+
+        let snapshot = WeatherService::global().snapshot();
+        populate_weather_content(&refresh_container, &snapshot);
+    });
+
+    (container.upcast::<Widget>(), refresh)
+}
+
+fn build_weather_content_box(snapshot: &WeatherSnapshot) -> GtkBox {
     let container = GtkBox::new(Orientation::Vertical, 12);
+    populate_weather_content(&container, snapshot);
+    container
+}
 
+fn populate_weather_content(container: &GtkBox, snapshot: &WeatherSnapshot) {
     if !snapshot.available || (snapshot.current.is_none() && snapshot.error.is_some()) {
-        container.append(&build_empty_state(&snapshot));
-        return container.upcast::<Widget>();
+        container.append(&build_empty_state(snapshot));
+        return;
     }
 
     let Some(current) = snapshot.current.as_ref() else {
         // Available but no data yet (first fetch in flight, no cache).
-        container.append(&build_empty_state(&snapshot));
-        return container.upcast::<Widget>();
+        container.append(&build_empty_state(snapshot));
+        return;
     };
 
-    container.append(&build_hero(&snapshot, current));
+    container.append(&build_hero(snapshot, current));
 
     if !snapshot.daily.is_empty() {
-        container.append(&build_forecast_strip(&snapshot));
+        container.append(&build_forecast_strip(snapshot));
     }
 
-    if let Some(banner) = build_status_banner(&snapshot) {
+    if let Some(banner) = build_status_banner(snapshot) {
         container.append(&banner);
     }
-
-    container.upcast::<Widget>()
 }
 
 fn build_hero(snapshot: &WeatherSnapshot, current: &CurrentWeather) -> GtkBox {

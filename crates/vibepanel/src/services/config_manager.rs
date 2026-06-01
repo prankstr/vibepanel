@@ -48,6 +48,7 @@ const FILE_CHANGE_DEBOUNCE_MS: u64 = 300;
 const WALLPAPER_POLL_INTERVAL_SECS: u32 = 2;
 const GTK_INTERFACE_SCHEMA: &str = "org.gnome.desktop.interface";
 const GTK_COLOR_SCHEME_KEY: &str = "color-scheme";
+const CLOCK_WIDGET_NAME: &str = "clock";
 const WEATHER_WIDGET_NAME: &str = "weather";
 
 use crate::bar;
@@ -143,10 +144,17 @@ fn weather_config_from_config(config: &Config) -> ResolvedWeatherConfig {
             base_name == name && !config.widgets.is_disabled(base_name)
         })
     };
-    let consumer_enabled = widget_enabled(WEATHER_WIDGET_NAME);
+    let clock_weather_enabled = widget_enabled(CLOCK_WIDGET_NAME)
+        && config
+            .widgets
+            .get_options(CLOCK_WIDGET_NAME)
+            .and_then(|opts| opts.options.get("show_weather"))
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+    let consumer_enabled = widget_enabled(WEATHER_WIDGET_NAME) || clock_weather_enabled;
 
     ResolvedWeatherConfig {
-        enabled: weather.enabled.unwrap_or(consumer_enabled),
+        enabled: consumer_enabled,
         auto_locate: weather.auto_locate,
         latitude: weather.latitude,
         longitude: weather.longitude,
@@ -1381,13 +1389,9 @@ mod tests {
     }
 
     #[test]
-    fn test_weather_config_explicit_disabled_wins_over_consumer() {
+    fn test_weather_config_location_without_consumer_does_not_enable_service() {
         let mut config = Config::default();
-        config.weather.enabled = Some(false);
-        config
-            .widgets
-            .right
-            .push(WidgetPlacement::Single("weather".to_string()));
+        config.weather.location = Some("Berlin".to_string());
 
         let weather = weather_config_from_config(&config);
 
@@ -1395,9 +1399,30 @@ mod tests {
     }
 
     #[test]
+    fn test_weather_config_enabled_when_clock_embeds_weather() {
+        let mut config = Config::default();
+        config
+            .widgets
+            .right
+            .push(WidgetPlacement::Single("clock".to_string()));
+        config.widgets.widget_configs.insert(
+            "clock".to_string(),
+            WidgetOptions {
+                options: [("show_weather".to_string(), toml::Value::Boolean(true))]
+                    .into_iter()
+                    .collect(),
+                ..WidgetOptions::default()
+            },
+        );
+
+        let weather = weather_config_from_config(&config);
+
+        assert!(weather.enabled);
+    }
+
+    #[test]
     fn test_weather_config_parses_top_level_options() {
         let mut config = Config::default();
-        config.weather.enabled = Some(true);
         config.weather.auto_locate = true;
         config.weather.latitude = Some(40.7128);
         config.weather.longitude = Some(-74.0060);
@@ -1407,7 +1432,7 @@ mod tests {
 
         let weather = weather_config_from_config(&config);
 
-        assert!(weather.enabled);
+        assert!(!weather.enabled);
         assert!(weather.auto_locate);
         assert_eq!(weather.latitude, Some(40.7128));
         assert_eq!(weather.longitude, Some(-74.0060));
