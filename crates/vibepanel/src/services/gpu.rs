@@ -7,17 +7,23 @@
 //! - **NVIDIA**: NVML via the `nvml-wrapper` crate (runtime-loaded
 //!   `libnvidia-ml.so`, see [`init_nvml`])
 //!
-//! All GPUs are discovered at startup and polled while the widget or popover is
-//! visible. One preferred GPU is selected only to order the displayed list and
-//! populate the compact summary fields based on:
+//! All GPUs are discovered at startup, but only the configured display set is
+//! polled while the widget or popover is visible.
 //!
-//! 1. **Explicit config**: `device = N` in `[widgets.gpu]` selects a specific index.
-//! 2. **Auto heuristic** (default): Prefers the primary discrete GPU, then any
-//!    discrete GPU, then the primary GPU.
-//!    AMD discrete detection queries the kernel driver's FUSION flag; primary
-//!    detection uses `boot_vga`.
-//!    NVIDIA GPUs are always treated as discrete.
-//!    Falls back to index 0 if no better match is found.
+//! 1. **`devices = "auto"`** (default): shows only the preferred GPU.
+//! 2. **`devices = "all"`**: shows all detected GPUs, ordered with the
+//!    preferred GPU first.
+//! 3. **`devices = [N, M]`** or **`devices = N`**: shows explicit GPU indices
+//!    in the configured order.
+//! 4. **Legacy compatibility**: `device = N` remains accepted as an alias for a
+//!    single explicit GPU selection.
+//!
+//! Preferred GPU auto-selection uses the existing heuristic: prefer the primary
+//! discrete GPU, then any discrete GPU, then the primary GPU.
+//! AMD discrete detection queries the kernel driver's FUSION flag; primary
+//! detection uses `boot_vga`.
+//! NVIDIA GPUs are always treated as discrete.
+//! Falls back to index 0 if no better match is found.
 //!
 //! ## Usage
 //!
@@ -324,6 +330,14 @@ impl GpuDevice {
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+enum GpuDisplaySelection {
+    #[default]
+    Auto,
+    All,
+    Explicit(Vec<usize>),
+}
+
 /// Shared, process-wide GPU monitoring service.
 ///
 /// Discovers all available GPUs at startup and polls them at regular intervals
@@ -344,8 +358,8 @@ pub struct GpuService {
     /// All discovered GPU devices.
     devices: Vec<GpuDevice>,
 
-    /// Preferred GPU index used for display ordering and summary fields.
-    selected_index: Cell<Option<usize>>,
+    /// GPU indices currently configured for display and polling.
+    display_indices: Vec<usize>,
 
     /// Polling interval in seconds.
     poll_interval: Cell<u32>,
@@ -359,26 +373,24 @@ impl GpuService {
         debug!("GpuService: initializing");
 
         let devices = Self::discover_all_gpus();
-        let device_selection = Self::read_device_config();
+        let display_selection = Self::read_display_config();
+        let display_indices = Self::resolve_display_indices(&devices, &display_selection);
 
-        let selected_index = Self::select_gpu(&devices, &device_selection);
-
-        if let Some(idx) = selected_index {
-            let method = match device_selection {
-                Some(i) => format!("config (device = {})", i),
-                None => "auto".to_string(),
-            };
+        if let Some(idx) = display_indices.first().copied() {
             debug!(
                 "GpuService: selected GPU {} ({:?}) via {}",
                 idx,
                 devices[idx].name().unwrap_or("unknown"),
-                method,
+                Self::display_selection_description(&display_selection),
             );
+            if display_indices.len() > 1 {
+                debug!("GpuService: displaying GPU indices {:?}", display_indices);
+            }
         } else {
             debug!("GpuService: no GPU selected");
         }
 
-        let initial_snapshot = if selected_index.is_some() {
+        let initial_snapshot = if !display_indices.is_empty() {
             GpuSnapshot {
                 available: true,
                 ..Default::default()
@@ -392,7 +404,7 @@ impl GpuService {
             callbacks: Callbacks::new(),
             timer_source: RefCell::new(None),
             devices,
-            selected_index: Cell::new(selected_index),
+            display_indices,
             poll_interval: Cell::new(DEFAULT_POLL_INTERVAL_SECS),
             poll_requests: Cell::new(0),
         })
@@ -486,23 +498,16 @@ impl GpuService {
     }
 
     fn poll(&self) {
-        if self.devices.is_empty() {
+        if self.display_indices.is_empty() {
             return;
         }
 
-        let mut snapshots = Vec::with_capacity(self.devices.len());
+        let mut snapshots = Vec::with_capacity(self.display_indices.len());
 
-        if let Some(selected_index) = self.selected_index.get()
-            && let Some(device) = self.devices.get(selected_index)
-        {
-            snapshots.push(Self::poll_device(selected_index, device));
-        }
-
-        for (idx, device) in self.devices.iter().enumerate() {
-            if Some(idx) == self.selected_index.get() {
-                continue;
+        for &idx in &self.display_indices {
+            if let Some(device) = self.devices.get(idx) {
+                snapshots.push(Self::poll_device(idx, device));
             }
-            snapshots.push(Self::poll_device(idx, device));
         }
 
         let snapshot = GpuSnapshot::from_devices(snapshots);
@@ -774,21 +779,148 @@ impl GpuService {
         devices
     }
 
-    /// Read the `device` config option from `[widgets.gpu]`.
-    fn read_device_config() -> Option<u32> {
-        ConfigManager::global()
-            .get_widget_option("gpu", "device")
-            .and_then(|v| match v {
-                toml::Value::Integer(i) if i >= 0 => Some(i as u32),
-                toml::Value::String(ref s) if s == "auto" => None,
-                other => {
-                    warn!("GpuService: invalid 'device' config value: {other}, using auto");
+    /// Read the `devices` config option from `[widgets.gpu]`.
+    fn read_display_config() -> GpuDisplaySelection {
+        let config = ConfigManager::global();
+
+        if let Some(value) = config.get_widget_option("gpu", "devices") {
+            return Self::parse_display_selection_value(&value, "devices").unwrap_or_default();
+        }
+
+        if let Some(value) = config.get_widget_option("gpu", "device") {
+            debug!("GpuService: using legacy 'device' option; prefer 'devices'");
+            return Self::parse_display_selection_value(&value, "device").unwrap_or_default();
+        }
+
+        GpuDisplaySelection::Auto
+    }
+
+    fn parse_display_selection_value(
+        value: &toml::Value,
+        option_name: &str,
+    ) -> Option<GpuDisplaySelection> {
+        match value {
+            toml::Value::Integer(index) if *index >= 0 => {
+                Some(GpuDisplaySelection::Explicit(vec![*index as usize]))
+            }
+            toml::Value::Integer(index) => {
+                warn!(
+                    "GpuService: invalid '{}' config value {} (must be >= 0), using auto",
+                    option_name, index,
+                );
+                None
+            }
+            toml::Value::String(mode) => match mode.to_lowercase().as_str() {
+                "auto" => Some(GpuDisplaySelection::Auto),
+                "all" => Some(GpuDisplaySelection::All),
+                _ => {
+                    warn!(
+                        "GpuService: invalid '{}' config value {:?}, expected 'auto', 'all', an integer, or an array of integers; using auto",
+                        option_name, mode,
+                    );
                     None
                 }
-            })
+            },
+            toml::Value::Array(entries) => {
+                let mut indices = Vec::new();
+                for entry in entries {
+                    match entry {
+                        toml::Value::Integer(index) if *index >= 0 => {
+                            let index = *index as usize;
+                            if !indices.contains(&index) {
+                                indices.push(index);
+                            }
+                        }
+                        other => {
+                            warn!(
+                                "GpuService: ignoring invalid '{}' array entry {other}; expected non-negative integers",
+                                option_name,
+                            );
+                        }
+                    }
+                }
+
+                if indices.is_empty() {
+                    warn!(
+                        "GpuService: '{}' array contained no valid GPU indices, using auto",
+                        option_name,
+                    );
+                    None
+                } else {
+                    Some(GpuDisplaySelection::Explicit(indices))
+                }
+            }
+            other => {
+                warn!(
+                    "GpuService: invalid '{}' config value: {other}, expected 'auto', 'all', an integer, or an array of integers; using auto",
+                    option_name,
+                );
+                None
+            }
+        }
+    }
+
+    fn display_selection_description(selection: &GpuDisplaySelection) -> String {
+        match selection {
+            GpuDisplaySelection::Auto => "auto".to_string(),
+            GpuDisplaySelection::All => "config (devices = all)".to_string(),
+            GpuDisplaySelection::Explicit(indices) if indices.len() == 1 => {
+                format!("config (devices = {})", indices[0])
+            }
+            GpuDisplaySelection::Explicit(indices) => {
+                format!("config (devices = {:?})", indices)
+            }
+        }
+    }
+
+    fn resolve_display_indices(
+        devices: &[GpuDevice],
+        selection: &GpuDisplaySelection,
+    ) -> Vec<usize> {
+        match selection {
+            GpuDisplaySelection::Auto => Self::auto_select(devices).into_iter().collect(),
+            GpuDisplaySelection::All => {
+                let Some(selected_index) = Self::auto_select(devices) else {
+                    return Vec::new();
+                };
+
+                let mut display_indices = Vec::with_capacity(devices.len());
+                display_indices.push(selected_index);
+                display_indices.extend((0..devices.len()).filter(|idx| *idx != selected_index));
+                display_indices
+            }
+            GpuDisplaySelection::Explicit(indices) => {
+                let mut valid_indices = Vec::with_capacity(indices.len());
+                for &idx in indices {
+                    if idx < devices.len() {
+                        if !valid_indices.contains(&idx) {
+                            valid_indices.push(idx);
+                        }
+                    } else {
+                        warn!(
+                            "GpuService: configured GPU index {} out of range (have {} GPU(s)), ignoring it",
+                            idx,
+                            devices.len(),
+                        );
+                    }
+                }
+
+                if valid_indices.is_empty() {
+                    warn!(
+                        "GpuService: configured GPU list {:?} contains no valid indices (have {} GPU(s)), falling back to auto",
+                        indices,
+                        devices.len(),
+                    );
+                    Self::auto_select(devices).into_iter().collect()
+                } else {
+                    valid_indices
+                }
+            }
+        }
     }
 
     /// Select GPU: explicit config index > first discrete > index 0.
+    #[cfg(test)]
     fn select_gpu(devices: &[GpuDevice], selection: &Option<u32>) -> Option<usize> {
         if devices.is_empty() {
             return None;
@@ -1337,6 +1469,96 @@ mod tests {
         assert!(is_amd_discrete_gpu_sysfs_fallback(&dgpu));
 
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn test_parse_display_selection_accepts_strings() {
+        assert_eq!(
+            GpuService::parse_display_selection_value(
+                &toml::Value::String("auto".to_string()),
+                "devices"
+            ),
+            Some(GpuDisplaySelection::Auto)
+        );
+        assert_eq!(
+            GpuService::parse_display_selection_value(
+                &toml::Value::String("all".to_string()),
+                "devices"
+            ),
+            Some(GpuDisplaySelection::All)
+        );
+    }
+
+    #[test]
+    fn test_parse_display_selection_accepts_integer_and_array() {
+        assert_eq!(
+            GpuService::parse_display_selection_value(&toml::Value::Integer(2), "devices"),
+            Some(GpuDisplaySelection::Explicit(vec![2]))
+        );
+        assert_eq!(
+            GpuService::parse_display_selection_value(
+                &toml::Value::Array(vec![toml::Value::Integer(2), toml::Value::Integer(1)]),
+                "devices",
+            ),
+            Some(GpuDisplaySelection::Explicit(vec![2, 1]))
+        );
+    }
+
+    #[test]
+    fn test_resolve_display_indices_auto_shows_selected_only() {
+        let devices = vec![
+            dummy_amd("iGPU", false, true),
+            dummy_amd("dGPU", true, false),
+        ];
+
+        assert_eq!(
+            GpuService::resolve_display_indices(&devices, &GpuDisplaySelection::Auto),
+            vec![1]
+        );
+    }
+
+    #[test]
+    fn test_resolve_display_indices_all_orders_selected_first() {
+        let devices = vec![
+            dummy_amd("iGPU", false, true),
+            dummy_amd("dGPU", true, false),
+            dummy_amd("dGPU-2", true, false),
+        ];
+
+        assert_eq!(
+            GpuService::resolve_display_indices(&devices, &GpuDisplaySelection::All),
+            vec![1, 0, 2]
+        );
+    }
+
+    #[test]
+    fn test_resolve_display_indices_explicit_preserves_order() {
+        let devices = vec![
+            dummy_amd("gpu-0", false, true),
+            dummy_amd("gpu-1", true, false),
+            dummy_amd("gpu-2", true, false),
+        ];
+
+        assert_eq!(
+            GpuService::resolve_display_indices(
+                &devices,
+                &GpuDisplaySelection::Explicit(vec![2, 1]),
+            ),
+            vec![2, 1]
+        );
+    }
+
+    #[test]
+    fn test_resolve_display_indices_invalid_list_falls_back_to_auto() {
+        let devices = vec![
+            dummy_amd("iGPU", false, true),
+            dummy_amd("dGPU", true, false),
+        ];
+
+        assert_eq!(
+            GpuService::resolve_display_indices(&devices, &GpuDisplaySelection::Explicit(vec![9]),),
+            vec![1]
+        );
     }
 
     #[test]

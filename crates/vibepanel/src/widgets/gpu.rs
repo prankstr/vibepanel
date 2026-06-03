@@ -65,7 +65,7 @@ impl WidgetConfig for GpuConfig {
         warn_unknown_options(
             "gpu",
             entry,
-            &["show_icon", "format", "device", "stable_width"],
+            &["show_icon", "format", "device", "devices", "stable_width"],
         );
 
         let show_icon = entry

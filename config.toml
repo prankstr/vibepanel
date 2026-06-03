@@ -66,6 +66,9 @@ background_opacity = 1.0
 #   stable_width = false # Disable width stabilization; default stabilizes common 2-digit metric values
 #   # Also supported by [widgets.memory] and [widgets.gpu]
 #
+#   [widgets.gpu]
+#   devices = "auto"  # "auto" (default) shows the preferred GPU only; "all" shows every detected GPU; [1, 2] shows explicit GPU indices
+#
 #   [widgets.notifications]
 #   toast_position = "top-right"  # "top-left", "top-center", "top-right", "bottom-left", "bottom-center", "bottom-right"
 #
