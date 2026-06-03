@@ -359,7 +359,7 @@ pub struct GpuService {
     devices: Vec<GpuDevice>,
 
     /// GPU indices currently configured for display and polling.
-    display_indices: Vec<usize>,
+    display_indices: RefCell<Vec<usize>>,
 
     /// Polling interval in seconds.
     poll_interval: Cell<u32>,
@@ -376,19 +376,7 @@ impl GpuService {
         let display_selection = Self::read_display_config();
         let display_indices = Self::resolve_display_indices(&devices, &display_selection);
 
-        if let Some(idx) = display_indices.first().copied() {
-            debug!(
-                "GpuService: selected GPU {} ({:?}) via {}",
-                idx,
-                devices[idx].name().unwrap_or("unknown"),
-                Self::display_selection_description(&display_selection),
-            );
-            if display_indices.len() > 1 {
-                debug!("GpuService: displaying GPU indices {:?}", display_indices);
-            }
-        } else {
-            debug!("GpuService: no GPU selected");
-        }
+        Self::log_display_selection(&devices, &display_selection, &display_indices);
 
         let initial_snapshot = if !display_indices.is_empty() {
             GpuSnapshot {
@@ -404,7 +392,7 @@ impl GpuService {
             callbacks: Callbacks::new(),
             timer_source: RefCell::new(None),
             devices,
-            display_indices,
+            display_indices: RefCell::new(display_indices),
             poll_interval: Cell::new(DEFAULT_POLL_INTERVAL_SECS),
             poll_requests: Cell::new(0),
         })
@@ -436,6 +424,29 @@ impl GpuService {
 
     pub fn snapshot(&self) -> GpuSnapshot {
         self.snapshot.borrow().clone()
+    }
+
+    pub fn reconfigure(&self) {
+        if !self.refresh_display_selection() {
+            return;
+        }
+
+        if self.poll_requests.get() > 0 {
+            self.poll();
+            return;
+        }
+
+        let snapshot = if self.display_indices.borrow().is_empty() {
+            GpuSnapshot::unknown()
+        } else {
+            GpuSnapshot {
+                available: true,
+                ..Default::default()
+            }
+        };
+
+        *self.snapshot.borrow_mut() = snapshot;
+        self.callbacks.notify(&self.snapshot.borrow());
     }
 
     fn start_polling(this: &Rc<Self>) {
@@ -498,19 +509,22 @@ impl GpuService {
     }
 
     fn poll(&self) {
-        if self.display_indices.is_empty() {
-            return;
-        }
+        let display_indices = self.display_indices.borrow();
+        let snapshot = if display_indices.is_empty() {
+            GpuSnapshot::unknown()
+        } else {
+            let mut snapshots = Vec::with_capacity(display_indices.len());
 
-        let mut snapshots = Vec::with_capacity(self.display_indices.len());
-
-        for &idx in &self.display_indices {
-            if let Some(device) = self.devices.get(idx) {
-                snapshots.push(Self::poll_device(idx, device));
+            for &idx in display_indices.iter() {
+                if let Some(device) = self.devices.get(idx) {
+                    snapshots.push(Self::poll_device(idx, device));
+                }
             }
-        }
 
-        let snapshot = GpuSnapshot::from_devices(snapshots);
+            GpuSnapshot::from_devices(snapshots)
+        };
+        drop(display_indices);
+
         *self.snapshot.borrow_mut() = snapshot;
         self.callbacks.notify(&self.snapshot.borrow());
     }
@@ -871,6 +885,39 @@ impl GpuService {
                 format!("config (devices = {:?})", indices)
             }
         }
+    }
+
+    fn log_display_selection(
+        devices: &[GpuDevice],
+        selection: &GpuDisplaySelection,
+        display_indices: &[usize],
+    ) {
+        if let Some(idx) = display_indices.first().copied() {
+            debug!(
+                "GpuService: selected GPU {} ({:?}) via {}",
+                idx,
+                devices[idx].name().unwrap_or("unknown"),
+                Self::display_selection_description(selection),
+            );
+            if display_indices.len() > 1 {
+                debug!("GpuService: displaying GPU indices {:?}", display_indices);
+            }
+        } else {
+            debug!("GpuService: no GPU selected");
+        }
+    }
+
+    fn refresh_display_selection(&self) -> bool {
+        let display_selection = Self::read_display_config();
+        let display_indices = Self::resolve_display_indices(&self.devices, &display_selection);
+        let changed = *self.display_indices.borrow() != display_indices;
+
+        if changed {
+            Self::log_display_selection(&self.devices, &display_selection, &display_indices);
+            *self.display_indices.borrow_mut() = display_indices;
+        }
+
+        changed
     }
 
     fn resolve_display_indices(
