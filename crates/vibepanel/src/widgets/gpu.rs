@@ -15,7 +15,7 @@ use vibepanel_core::config::WidgetEntry;
 
 use crate::services::callbacks::CallbackId;
 use crate::services::config_manager::ConfigManager;
-use crate::services::gpu::{GpuPowerState, GpuService, GpuSnapshot};
+use crate::services::gpu::{GpuDeviceSnapshot, GpuPowerState, GpuService, GpuSnapshot};
 use crate::services::icons::IconHandle;
 use crate::services::system::{SystemService, SystemSnapshot, format_bytes_long};
 use crate::services::tooltip::TooltipManager;
@@ -225,9 +225,28 @@ impl Drop for GpuWidget {
 
 /// Format GPU label text according to the selected format.
 fn format_gpu_label(snapshot: &GpuSnapshot, format: &GpuFormat, is_vertical: bool) -> String {
+    let devices = snapshot.devices_for_display();
+    if devices.is_empty() {
+        return "—".to_string();
+    }
+
+    let separator = if is_vertical { "\n" } else { " | " };
+    devices
+        .iter()
+        .map(|device| format_gpu_device_label(device, format, is_vertical))
+        .collect::<Vec<_>>()
+        .join(separator)
+}
+
+fn format_gpu_device_label(
+    snapshot: &GpuDeviceSnapshot,
+    format: &GpuFormat,
+    is_vertical: bool,
+) -> String {
     if snapshot.power_state == GpuPowerState::Suspended {
         return "Idle".to_string();
     }
+
     match format {
         GpuFormat::Usage => match snapshot.gpu_usage {
             Some(usage) => format_gpu_usage(usage, is_vertical),
@@ -265,6 +284,61 @@ fn format_gpu_usage(usage: f32, is_vertical: bool) -> String {
     }
 }
 
+fn format_gpu_tooltip(snapshot: &GpuSnapshot) -> String {
+    let devices = snapshot.devices_for_display();
+    if devices.is_empty() {
+        return "GPU: No supported GPU detected".to_string();
+    }
+
+    devices
+        .iter()
+        .enumerate()
+        .map(|(index, device)| format_gpu_tooltip_block(index, device))
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn format_gpu_tooltip_block(index: usize, snapshot: &GpuDeviceSnapshot) -> String {
+    let mut lines = Vec::new();
+    let title = match snapshot.device_name.as_deref() {
+        Some(name) => format!("GPU {}: {}", index + 1, name),
+        None => format!("GPU {}", index + 1),
+    };
+    lines.push(title);
+
+    if snapshot.power_state == GpuPowerState::Suspended {
+        lines.push("State: Idle (suspended)".to_string());
+    } else if let Some(usage) = snapshot.gpu_usage {
+        lines.push(format!("Usage: {:.1}%", usage));
+    } else {
+        lines.push("Usage: --".to_string());
+    }
+
+    if let Some(temp) = snapshot.temperature {
+        lines.push(format!("Temp: {:.0}°C", temp));
+    }
+
+    match (snapshot.vram_used, snapshot.vram_total) {
+        (Some(used), Some(total)) => lines.push(format!(
+            "VRAM: {} / {}",
+            format_bytes_long(used),
+            format_bytes_long(total)
+        )),
+        (Some(used), None) => lines.push(format!("VRAM: {} used", format_bytes_long(used))),
+        _ => {}
+    }
+
+    if let Some(mhz) = snapshot.clock_mhz {
+        lines.push(format!("Clock: {} MHz", mhz));
+    }
+
+    if let Some(watts) = snapshot.power_watts {
+        lines.push(format!("Power: {:.1} W", watts));
+    }
+
+    lines.join("\n")
+}
+
 /// Update GPU widget visuals and tooltip from a snapshot.
 fn update_gpu_widget(
     container: &gtk4::Box,
@@ -298,7 +372,7 @@ fn update_gpu_widget(
         icon_handle.remove_css_class(widget::GPU_HIGH);
     }
 
-    if snapshot.power_state == GpuPowerState::Suspended {
+    if snapshot.all_devices_suspended() {
         container.add_css_class(widget::GPU_SUSPENDED);
     } else {
         container.remove_css_class(widget::GPU_SUSPENDED);
@@ -310,41 +384,7 @@ fn update_gpu_widget(
     gpu_label.set_label(&text);
     gpu_label.set_visible(true);
 
-    let mut lines = Vec::new();
-
-    if snapshot.power_state == GpuPowerState::Suspended {
-        lines.push("GPU: Idle (suspended)".to_string());
-    } else if let Some(usage) = snapshot.gpu_usage {
-        lines.push(format!("GPU: {:.1}%", usage));
-    } else {
-        lines.push("GPU: --".to_string());
-    }
-
-    if let Some(temp) = snapshot.temperature {
-        lines.push(format!("Temp: {:.0}°C", temp));
-    }
-
-    if let (Some(used), Some(total)) = (snapshot.vram_used, snapshot.vram_total) {
-        lines.push(format!(
-            "VRAM: {} / {}",
-            format_bytes_long(used),
-            format_bytes_long(total)
-        ));
-    }
-
-    if let Some(mhz) = snapshot.clock_mhz {
-        lines.push(format!("Clock: {} MHz", mhz));
-    }
-
-    if let Some(watts) = snapshot.power_watts {
-        lines.push(format!("Power: {:.1} W", watts));
-    }
-
-    if let Some(ref name) = snapshot.device_name {
-        lines.push(name.clone());
-    }
-
-    let tooltip = lines.join("\n");
+    let tooltip = format_gpu_tooltip(snapshot);
     let tooltip_manager = TooltipManager::global();
     tooltip_manager.set_styled_tooltip(container, &tooltip);
 }
@@ -352,6 +392,27 @@ fn update_gpu_widget(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn multi_gpu_snapshot() -> GpuSnapshot {
+        GpuSnapshot {
+            available: true,
+            devices: vec![
+                GpuDeviceSnapshot {
+                    gpu_usage: Some(76.0),
+                    temperature: Some(72.0),
+                    device_name: Some("AMD Radeon".to_string()),
+                    ..Default::default()
+                },
+                GpuDeviceSnapshot {
+                    gpu_usage: Some(41.0),
+                    temperature: Some(61.0),
+                    device_name: Some("NVIDIA RTX".to_string()),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        }
+    }
 
     #[test]
     fn test_gpu_config_defaults() {
@@ -497,5 +558,27 @@ mod tests {
             "—"
         );
         assert_eq!(format_gpu_label(&snapshot, &GpuFormat::Both, false), "— —");
+    }
+
+    #[test]
+    fn test_format_gpu_label_multiple_devices() {
+        let snapshot = multi_gpu_snapshot();
+        assert_eq!(
+            format_gpu_label(&snapshot, &GpuFormat::Usage, false),
+            "76% | 41%"
+        );
+        assert_eq!(
+            format_gpu_label(&snapshot, &GpuFormat::Usage, true),
+            "76\n41"
+        );
+    }
+
+    #[test]
+    fn test_format_gpu_tooltip_multiple_devices() {
+        let tooltip = format_gpu_tooltip(&multi_gpu_snapshot());
+        assert!(tooltip.contains("GPU 1: AMD Radeon"));
+        assert!(tooltip.contains("GPU 2: NVIDIA RTX"));
+        assert!(tooltip.contains("Usage: 76.0%"));
+        assert!(tooltip.contains("Usage: 41.0%"));
     }
 }
