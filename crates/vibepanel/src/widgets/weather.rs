@@ -183,6 +183,10 @@ fn format_label(snapshot: &WeatherSnapshot, format: &str, is_vertical: bool) -> 
         return PLACEHOLDER_LABEL.to_string();
     };
 
+    if is_vertical {
+        return format_temperature(current.temperature, snapshot.units, true);
+    }
+
     format
         .replace(
             "{temperature}",
@@ -434,9 +438,28 @@ mod tests {
     #[test]
     fn test_format_label_compacts_temperature_in_vertical_mode() {
         assert_eq!(format_label(&test_snapshot(), "{temperature}", true), "21");
+    }
+
+    #[test]
+    fn test_format_label_ignores_user_format_in_vertical_mode() {
+        let snapshot = test_snapshot();
+
+        // Wide or compound format strings collapse to just the temperature
+        // in vertical mode to prevent them from breaking the vertical bar.
         assert_eq!(
-            format_label(&test_snapshot(), "{temperature} {feels_like}", true),
-            "21 21"
+            format_label(&snapshot, "{temperature} {feels_like}", true),
+            "21"
+        );
+        assert_eq!(format_label(&snapshot, "{condition}", true), "21");
+        assert_eq!(format_label(&snapshot, "{wind}", true), "21");
+        assert_eq!(format_label(&snapshot, "{humidity}", true), "21");
+        assert_eq!(
+            format_label(
+                &snapshot,
+                "{temperature} {condition} {feels_like} {humidity} {wind}",
+                true
+            ),
+            "21"
         );
     }
 
