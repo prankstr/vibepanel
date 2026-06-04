@@ -3,14 +3,14 @@
 //! This service provides GPU utilization, VRAM usage, temperature, clock speed,
 //! and power draw by reading vendor-specific interfaces:
 //!
-//! - **AMD**: sysfs files under `/sys/class/drm/cardN/device/`
+//! - **AMD**: sysfs files under `/sys/class/drm/cardN/device/` plus AMDGPU ioctls
 //! - **NVIDIA**: NVML via the `nvml-wrapper` crate (runtime-loaded `libnvidia-ml.so`)
 //!
 //! All GPUs are discovered at startup. One is selected for active polling based on:
 //!
 //! 1. **Explicit config**: `device = N` in `[widgets.gpu]` selects a specific index.
 //! 2. **Auto heuristic** (default): Prefers discrete GPUs over integrated.
-//!    AMD discrete detection uses `boot_vga` sysfs (0 = discrete).
+//!    AMD discrete detection queries the kernel driver's FUSION flag.
 //!    NVIDIA GPUs are always treated as discrete.
 //!    Falls back to index 0 if no discrete GPU is found.
 //!
@@ -26,7 +26,9 @@
 //! ```
 
 use std::cell::{Cell, RefCell};
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::mem;
+use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -44,6 +46,64 @@ const DEFAULT_POLL_INTERVAL_SECS: u32 = 3;
 pub(crate) const GPU_HIGH_USAGE_THRESHOLD: f32 = 90.0;
 
 const DRM_CLASS_PATH: &str = "/sys/class/drm";
+const DRI_DEV_PATH: &str = "/dev/dri";
+
+// Linux DRM/AMDGPU UAPI constants from drm.h and amdgpu_drm.h.
+// Kept local to avoid adding a libdrm binding dependency for one query.
+const DRM_COMMAND_BASE: u8 = 0x40;
+const DRM_AMDGPU_INFO: u8 = 0x05;
+const AMDGPU_INFO_DEV_INFO: u32 = 0x16;
+const AMDGPU_IDS_FLAGS_FUSION: u64 = 0x1;
+
+const IOC_NRBITS: u8 = 8;
+const IOC_TYPEBITS: u8 = 8;
+const IOC_SIZEBITS: u8 = 14;
+const IOC_WRITE: u8 = 1;
+
+const IOC_NRSHIFT: u8 = 0;
+const IOC_TYPESHIFT: u8 = IOC_NRSHIFT + IOC_NRBITS;
+const IOC_SIZESHIFT: u8 = IOC_TYPESHIFT + IOC_TYPEBITS;
+const IOC_DIRSHIFT: u8 = IOC_SIZESHIFT + IOC_SIZEBITS;
+
+const fn linux_iow(nr: u8, size: usize) -> libc::c_ulong {
+    ((IOC_WRITE as libc::c_ulong) << IOC_DIRSHIFT)
+        | ((b'd' as libc::c_ulong) << IOC_TYPESHIFT)
+        | ((nr as libc::c_ulong) << IOC_NRSHIFT)
+        | ((size as libc::c_ulong) << IOC_SIZESHIFT)
+}
+
+#[repr(C)]
+#[derive(Default)]
+struct DrmAmdgpuInfo {
+    return_pointer: u64,
+    return_size: u32,
+    query: u32,
+    // The largest input union member in drm_amdgpu_info is 16 bytes.
+    payload: [u32; 4],
+}
+
+#[repr(C)]
+#[derive(Default)]
+struct DrmAmdgpuInfoDeviceIds {
+    device_id: u32,
+    chip_rev: u32,
+    external_rev: u32,
+    pci_rev: u32,
+    family: u32,
+    num_shader_engines: u32,
+    num_shader_arrays_per_engine: u32,
+    gpu_counter_freq: u32,
+    max_engine_clock: u64,
+    max_memory_clock: u64,
+    cu_active_number: u32,
+    cu_ao_mask: u32,
+    cu_bitmap: [[u32; 4]; 4],
+    enabled_rb_pipes_mask: u32,
+    num_rb_pipes: u32,
+    num_hw_gfx_contexts: u32,
+    pcie_gen: u32,
+    ids_flags: u64,
+}
 
 /// GPU hardware power state, read from sysfs `power/runtime_status`.
 ///
@@ -117,7 +177,7 @@ struct AmdGpuDevice {
 
     device_name: Option<String>,
 
-    /// Whether this is a discrete GPU (determined via `boot_vga` sysfs attribute).
+    /// Whether this is a discrete GPU (determined via AMDGPU FUSION flag or fallback markers).
     is_discrete: bool,
 }
 
@@ -504,9 +564,7 @@ impl GpuService {
                     let hwmon_path = discover_hwmon(&device_path);
                     let device_name = read_device_name(&device_path);
 
-                    // boot_vga: 1 = primary (typically integrated), 0 = secondary (typically discrete).
-                    let boot_vga = read_sysfs_u32(&device_path.join("boot_vga"));
-                    let is_discrete = boot_vga.map(|v| v == 0).unwrap_or(false);
+                    let is_discrete = is_amd_discrete_gpu(&device_path);
 
                     // Resolve the PCI device path for runtime_status.
                     // device_path is a symlink like /sys/class/drm/card1/device ->
@@ -699,6 +757,72 @@ fn read_device_name(device_path: &Path) -> Option<String> {
     ))
 }
 
+/// Prefer the AMDGPU kernel driver's FUSION flag for integrated/discrete
+/// classification and fall back to sysfs files exposed for dedicated AMD GPUs.
+fn is_amd_discrete_gpu(device_path: &Path) -> bool {
+    match query_amd_fusion_flag(device_path) {
+        Some(is_fusion) => !is_fusion,
+        None => is_amd_discrete_gpu_sysfs_fallback(device_path),
+    }
+}
+
+fn query_amd_fusion_flag(device_path: &Path) -> Option<bool> {
+    let render_node = render_node_for_device(device_path)?;
+    let file = OpenOptions::new().read(true).open(&render_node).ok()?;
+
+    let mut device_info = DrmAmdgpuInfoDeviceIds::default();
+    let mut query = DrmAmdgpuInfo {
+        return_pointer: (&mut device_info as *mut DrmAmdgpuInfoDeviceIds) as u64,
+        return_size: mem::size_of::<DrmAmdgpuInfoDeviceIds>() as u32,
+        query: AMDGPU_INFO_DEV_INFO,
+        payload: [0; 4],
+    };
+    let request = linux_iow(
+        DRM_COMMAND_BASE + DRM_AMDGPU_INFO,
+        mem::size_of::<DrmAmdgpuInfo>(),
+    );
+
+    // SAFETY: `file` is an open DRM render node, `query` points to a valid
+    // drm_amdgpu_info-compatible struct, and `return_pointer` points to a
+    // writable buffer sized by `return_size`.
+    let result = unsafe { libc::ioctl(file.as_raw_fd(), request, &mut query) };
+    if result < 0 {
+        debug!(
+            "GpuService: AMDGPU_INFO_DEV_INFO failed for {:?}",
+            render_node,
+        );
+        return None;
+    }
+
+    Some(device_info.ids_flags & AMDGPU_IDS_FLAGS_FUSION != 0)
+}
+
+fn render_node_for_device(device_path: &Path) -> Option<PathBuf> {
+    let target = fs::canonicalize(device_path).ok()?;
+    let entries = fs::read_dir(DRM_CLASS_PATH).ok()?;
+
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if !name_str.starts_with("renderD") {
+            continue;
+        }
+
+        let render_device = fs::canonicalize(entry.path().join("device")).ok();
+        if render_device.as_ref() == Some(&target) {
+            return Some(Path::new(DRI_DEV_PATH).join(name));
+        }
+    }
+
+    None
+}
+
+fn is_amd_discrete_gpu_sysfs_fallback(device_path: &Path) -> bool {
+    device_path.join("mem_info_vram_vendor").exists()
+        || device_path.join("board_info").exists()
+        || device_path.join("unique_id").exists()
+}
+
 fn read_sysfs_u32(path: &Path) -> Option<u32> {
     let content = fs::read_to_string(path).ok()?;
     content.trim().parse::<u32>().ok()
@@ -734,6 +858,7 @@ fn read_runtime_status(path: &Path) -> GpuPowerState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn test_gpu_snapshot_defaults() {
@@ -830,5 +955,44 @@ mod tests {
     fn test_select_gpu_none_config_uses_auto() {
         let devices = vec![dummy_amd("iGPU", false), dummy_amd("dGPU", true)];
         assert_eq!(GpuService::select_gpu(&devices, &None), Some(1));
+    }
+
+    fn unique_test_dir(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("vibepanel-{name}-{nanos}"))
+    }
+
+    #[test]
+    fn test_amd_ioctl_uapi_layout() {
+        let request = linux_iow(
+            DRM_COMMAND_BASE + DRM_AMDGPU_INFO,
+            mem::size_of::<DrmAmdgpuInfo>(),
+        );
+        assert_eq!(mem::size_of::<DrmAmdgpuInfo>(), 32);
+        assert_eq!(request, 0x4020_6445);
+
+        let device_info = DrmAmdgpuInfoDeviceIds::default();
+        let base = &device_info as *const _ as usize;
+        let ids_flags = &device_info.ids_flags as *const _ as usize;
+        assert_eq!(ids_flags - base, 136);
+    }
+
+    #[test]
+    fn test_amd_discrete_sysfs_fallback_uses_dgpu_markers() {
+        let root = unique_test_dir("amd-gpu-detection");
+        let igpu = root.join("igpu");
+        let dgpu = root.join("dgpu");
+        fs::create_dir_all(&igpu).unwrap();
+        fs::create_dir_all(&dgpu).unwrap();
+
+        fs::write(dgpu.join("mem_info_vram_vendor"), "samsung\n").unwrap();
+
+        assert!(!is_amd_discrete_gpu_sysfs_fallback(&igpu));
+        assert!(is_amd_discrete_gpu_sysfs_fallback(&dgpu));
+
+        fs::remove_dir_all(root).unwrap();
     }
 }
