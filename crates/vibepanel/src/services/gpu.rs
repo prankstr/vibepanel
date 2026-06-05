@@ -20,8 +20,8 @@
 //!
 //! Preferred GPU auto-selection uses the existing heuristic: prefer the primary
 //! discrete GPU, then any discrete GPU, then the primary GPU.
-//! AMD discrete detection queries the kernel driver's FUSION flag; primary
-//! detection uses `boot_vga`.
+//! AMD discrete detection uses the AMDGPU FUSION flag with sysfs fallback markers.
+//! AMD primary detection uses `boot_vga` sysfs.
 //! NVIDIA GPUs are always treated as discrete.
 //! Falls back to index 0 if no better match is found.
 //!
