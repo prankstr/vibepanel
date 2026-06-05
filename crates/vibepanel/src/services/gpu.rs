@@ -509,21 +509,22 @@ impl GpuService {
     }
 
     fn poll(&self) {
-        let display_indices = self.display_indices.borrow();
-        let snapshot = if display_indices.is_empty() {
-            GpuSnapshot::unknown()
-        } else {
-            let mut snapshots = Vec::with_capacity(display_indices.len());
+        let snapshot = {
+            let display_indices = self.display_indices.borrow();
+            if display_indices.is_empty() {
+                GpuSnapshot::unknown()
+            } else {
+                let mut snapshots = Vec::with_capacity(display_indices.len());
 
-            for &idx in display_indices.iter() {
-                if let Some(device) = self.devices.get(idx) {
-                    snapshots.push(Self::poll_device(idx, device));
+                for &idx in display_indices.iter() {
+                    if let Some(device) = self.devices.get(idx) {
+                        snapshots.push(Self::poll_device(idx, device));
+                    }
                 }
-            }
 
-            GpuSnapshot::from_devices(snapshots)
+                GpuSnapshot::from_devices(snapshots)
+            }
         };
-        drop(display_indices);
 
         *self.snapshot.borrow_mut() = snapshot;
         self.callbacks.notify(&self.snapshot.borrow());
@@ -824,17 +825,17 @@ impl GpuService {
                 );
                 None
             }
-            toml::Value::String(mode) => match mode.to_lowercase().as_str() {
-                "auto" => Some(GpuDisplaySelection::Auto),
-                "all" => Some(GpuDisplaySelection::All),
-                _ => {
+            toml::Value::String(mode) => {
+                if let Some(selection) = Self::parse_display_selection_mode(mode) {
+                    Some(selection)
+                } else {
                     warn!(
                         "GpuService: invalid '{}' config value {:?}, expected 'auto', 'all', an integer, or an array of integers; using auto",
                         option_name, mode,
                     );
                     None
                 }
-            },
+            }
             toml::Value::Array(entries) => {
                 let mut indices = Vec::new();
                 for entry in entries {
@@ -871,6 +872,14 @@ impl GpuService {
                 );
                 None
             }
+        }
+    }
+
+    fn parse_display_selection_mode(mode: &str) -> Option<GpuDisplaySelection> {
+        match mode.trim().to_ascii_lowercase().as_str() {
+            "auto" => Some(GpuDisplaySelection::Auto),
+            "all" => Some(GpuDisplaySelection::All),
+            _ => None,
         }
     }
 
@@ -1252,7 +1261,6 @@ fn sysfs_pci_device_path_from_nvml_bus_id(bus_id: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn nvml_lib_candidates_are_absolute_sonames() {
