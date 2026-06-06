@@ -261,9 +261,7 @@ window.quick-settings-window {{
     color: var(--color-accent-primary);
 }}
 
-/* Radio indicator for unselected audio/mic device rows.
- * Replaces the radio-symbolic icon so the shape scales with --radius-factor
- * (square at border_radius: 0, circular at border_radius: 50). */
+/* CSS-drawn radio indicator for unselected audio/mic device rows. */
 .qs-radio-indicator {{
     min-width: calc(var(--slider-height-thick) * 1.2);
     min-height: calc(var(--slider-height-thick) * 1.2);

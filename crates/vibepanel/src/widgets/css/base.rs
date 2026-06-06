@@ -119,13 +119,13 @@ window.layer-shell-click-catcher {{
     padding-left: 0;
     padding-right: 0;
     /* Extra flow padding on the bottom so the UL row doesn't crowd the edge. */
-    padding-bottom: calc(var(--vp-widget-content-padding) + 1px);
+    padding-bottom: calc(var(--vp-widget-padding) + 1px);
 }}
 
 /* Wider gap between the DL and UL groups in vertical mode. */
 .bar.bar--vertical .widget.network-speed:not(.widget-group) > overlay > .content > *:not(:last-child),
 .bar.bar--vertical .widget.network-speed:not(.widget-group) > .content > *:not(:last-child) {{
-    margin-bottom: calc(var(--vp-widget-content-gap) + 2px);
+    margin-bottom: calc(var(--vp-widget-gap) + 2px);
 }}
 
 /* Tighter icon ↔ DL gap so it visually matches the within-group arrow ↔ label
@@ -146,8 +146,8 @@ window.layer-shell-click-catcher {{
  * em box (which includes descender slack the digits never use), making the
  * block visually sit too high otherwise. */
 .bar.bar--vertical .widget.clock:not(.widget-group) .content {{
-    padding-top: calc(var(--vp-widget-content-padding) + 3px);
-    padding-bottom: calc(var(--vp-widget-content-padding) + 1px);
+    padding-top: calc(var(--vp-widget-padding) + 3px);
+    padding-bottom: calc(var(--vp-widget-padding) + 1px);
 }}
 
 /* ===== NATIVE GTK TOOLTIPS ===== */

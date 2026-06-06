@@ -295,15 +295,18 @@ impl TaskbarWidget {
         // would push the result negative.
         let two_pad = 2 * pad;
         let (theme_padding_var, theme_gap_var) = if is_vertical {
-            ("--vp-widget-content-padding-v", "--vp-widget-content-gap-v")
+            (
+                "--vp-widget-padding-cross-base",
+                "--vp-widget-gap-cross-base",
+            )
         } else {
-            ("--vp-widget-content-padding-h", "--vp-widget-content-gap-h")
+            ("--vp-widget-padding-flow-base", "--vp-widget-gap-flow-base")
         };
         let content_css = CssProvider::new();
         content_css.load_from_string(&format!(
             ".taskbar .content {{ \
-               --vp-taskbar-widget-content-padding: max(0px, calc(var({theme_padding_var}) + var(--widget-content-padding-offset, 0px))); \
-               --vp-taskbar-widget-content-gap: max(0px, calc(var({theme_gap_var}) + var(--widget-content-gap-offset, 0px))); \
+               --vp-taskbar-widget-content-padding: max(0px, calc(var({theme_padding_var}) + var(--widget-padding-adjust, 0px))); \
+               --vp-taskbar-widget-content-gap: max(0px, calc(var({theme_gap_var}) + var(--widget-gap-adjust, 0px))); \
                --vp-taskbar-content-edge: max(0px, calc(var(--vp-taskbar-widget-content-padding) - {pad}px)); \
                --vp-taskbar-button-gap: max(0px, calc(var(--vp-taskbar-widget-content-gap) - {two_pad}px)); \
                --vp-taskbar-separator-gap: max(0px, calc(var(--vp-taskbar-widget-content-gap) - {pad}px - 2px)); \

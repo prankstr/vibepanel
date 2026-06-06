@@ -1436,7 +1436,7 @@ pub struct ThemeConfig {
     /// Outline opacity (0.0..=1.0). Default: 1.0.
     pub outline_opacity: f64,
 
-    /// State colors (success, warning, urgent).
+    /// State colors (warning, urgent).
     pub states: ThemeStates,
 
     /// Typography settings.
@@ -1474,9 +1474,6 @@ impl Default for ThemeConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ThemeStates {
-    /// Success state color.
-    pub success: String,
-
     /// Warning state color.
     pub warning: String,
 
@@ -1487,7 +1484,6 @@ pub struct ThemeStates {
 impl Default for ThemeStates {
     fn default() -> Self {
         Self {
-            success: "#4a7a4a".to_string(),
             warning: "#e5c07b".to_string(),
             urgent: "#ff6b6b".to_string(),
         }

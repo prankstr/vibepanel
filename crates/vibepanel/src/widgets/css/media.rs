@@ -27,7 +27,7 @@ pub fn css(animations: bool) -> String {
 
 .bar--vertical .widget.media:not(.widget-group) > overlay > .content > .media-art-small:not(:last-child) {{
     margin-top: 2px;
-    margin-bottom: calc(var(--vp-widget-content-gap) + 4px);
+    margin-bottom: calc(var(--vp-widget-gap) + 4px);
 }}
 
 /* Player icon (app icon like Spotify, Firefox) in bar */

@@ -502,9 +502,15 @@ fn local_runtime_css_variables() -> BTreeSet<&'static str> {
 fn theme_vars_have_valid_internal_consumers() {
     let config = test_config();
     let palette = vibepanel_core::ThemePalette::from_config(&config, None, None);
+    let popover_palette = vibepanel_core::ThemePalette::popover_palette(&config, None, None);
+    let popover_block = popover_palette
+        .as_ref()
+        .map(|p| p.css_popover_vars_block())
+        .unwrap_or_default();
     let emitted_root_vars = declared_css_variables(&palette.css_vars_block());
     let production_css = format!(
-        "{}\n{}",
+        "{}\n{}\n{}",
+        popover_block,
         crate::widgets::css::utility_css(&config),
         crate::widgets::css::widget_css(&config)
     );
@@ -528,6 +534,10 @@ fn theme_vars_have_valid_internal_consumers() {
     let missing_builtin_consumers = THEME_VAR_EXPECTATIONS
         .iter()
         .filter(|var| var.role == ThemeVarRole::BuiltinCss)
+        // Vars composed in Rust outside `widget_css` (e.g. taskbar) still
+        // flow through the consumer check via `rust_composed_theme_var_css`,
+        // but are exempt from the production-CSS requirement.
+        .filter(|var| !local_runtime_vars.contains(var.name))
         .filter(|var| !consumed.contains(var.name))
         .map(|var| var.name)
         .collect::<Vec<_>>();
@@ -559,6 +569,22 @@ fn theme_vars_have_valid_internal_consumers() {
     assert!(
         unknown_consumed.is_empty(),
         "production CSS consumes theme vars that are neither emitted nor expected user hooks; unknown={unknown_consumed:?}"
+    );
+
+    // Generic anti-dead-var guard: every `:root` declaration must be tracked
+    // either as an expected theme var or as a Rust-composed runtime var.
+    // Prevents reintroducing undocumented dead emissions like the spacing
+    // scale, `--widget-opacity`, or alias-only roots.
+    let untracked_emitted = emitted_root_vars
+        .iter()
+        .filter(|name| {
+            !expectations_by_name.contains_key(name.as_str())
+                && !local_runtime_vars.contains(name.as_str())
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        untracked_emitted.is_empty(),
+        "root CSS declarations must be tracked in THEME_VAR_EXPECTATIONS; untracked={untracked_emitted:?}"
     );
 
     let missing_expected_root_vars = THEME_VAR_EXPECTATIONS
@@ -630,6 +656,75 @@ fn theme_vars_have_valid_internal_consumers() {
         optional_builtin_errors.is_empty(),
         "optional built-in CSS variables must be consumed with expected fallbacks; errors={optional_builtin_errors:?}"
     );
+}
+
+#[test]
+fn bar_padding_reads_physically_in_horizontal_and_vertical() {
+    // Regression: .bar--vertical must not re-swap padding — the generator
+    // already emits correct physical sides and the base rule reads them
+    // physically (see theme.rs css_vars_block).
+    let config = test_config();
+    let css = strip_css_comments(&crate::widgets::css::widget_css(&config));
+
+    let horizontal_block =
+        block_after_selector(&css, "sectioned-bar.bar {").expect("horizontal bar block must exist");
+    let vertical_block = block_after_selector(&css, "sectioned-bar.bar.bar--vertical {")
+        .expect("vertical bar block must exist");
+
+    fn pick<'a>(css: &'a str, property: &str) -> &'a str {
+        for line in css.lines() {
+            let trimmed = line.trim_start();
+            if let Some(rest) = trimmed.strip_prefix(property) {
+                return rest.trim_start().trim_end_matches(';').trim();
+            }
+        }
+        ""
+    }
+
+    let h_top = pick(horizontal_block, "padding-top:");
+    let h_right = pick(horizontal_block, "padding-right:");
+    assert!(
+        h_top.contains("--vp-internal-bar-padding-top"),
+        "horizontal bar padding-top should read --vp-internal-bar-padding-top; got {h_top:?}"
+    );
+    assert!(
+        h_right.contains("--vp-internal-bar-padding-right"),
+        "horizontal bar padding-right should read --vp-internal-bar-padding-right; got {h_right:?}"
+    );
+
+    // .bar--vertical must not rotate physical padding onto the flow axis.
+    for property in [
+        "padding-top:",
+        "padding-right:",
+        "padding-bottom:",
+        "padding-left:",
+    ] {
+        assert!(
+            !vertical_block.contains(property),
+            ".bar--vertical must not override {property} — bar padding reads \
+             physically from --vp-internal-bar-padding-* in the base rule. \
+             Reintroducing this swap rotates the cross-axis padding onto the \
+             flow axis and is a user-visible regression.\n\
+             Vertical block:\n{vertical_block}"
+        );
+    }
+}
+
+fn block_after_selector<'a>(css: &'a str, selector: &str) -> Option<&'a str> {
+    let start = css.find(selector)?;
+    let brace_open = css[start..].find('{')? + start;
+    let depth_open = brace_open + 1;
+    let mut depth = 1usize;
+    let mut idx = depth_open;
+    while idx < css.len() && depth > 0 {
+        match css.as_bytes()[idx] {
+            b'{' => depth += 1,
+            b'}' => depth -= 1,
+            _ => {}
+        }
+        idx += 1;
+    }
+    Some(&css[depth_open..idx - 1])
 }
 
 #[test]
@@ -1290,8 +1385,7 @@ fn run_test_widgets_grouping_merge_spacing_contract() {
     );
 
     let offset = 6;
-    let override_css =
-        format!(".widget-merge-group.cpu {{ --widget-content-gap-offset: {offset}px; }}");
+    let override_css = format!(".widget-merge-group.cpu {{ --widget-gap-adjust: {offset}px; }}");
     let offset_gap = merge_group_child_label_gap(Some(&override_css));
     assert_eq!(
         offset_gap,
@@ -1362,7 +1456,7 @@ fn run_test_widgets_grouping_explicit_spacing_contract() {
     );
 
     let offset = 6;
-    let override_css = format!(".widget-group {{ --widget-content-gap-offset: {offset}px; }}");
+    let override_css = format!(".widget-group {{ --widget-gap-adjust: {offset}px; }}");
     let offset_gap = explicit_group_child_gap(Some(&override_css));
     assert_eq!(
         offset_gap,
@@ -1421,7 +1515,7 @@ fn run_test_widgets_scoped_content_spacing_contract() {
     let padding_offset = 7;
     let gap_offset = 5;
     let override_css = format!(
-        ".custom-a {{ --widget-content-padding-offset: {padding_offset}px; --widget-content-gap-offset: {gap_offset}px; }}"
+        ".custom-a {{ --widget-padding-adjust: {padding_offset}px; --widget-gap-adjust: {gap_offset}px; }}"
     );
     let changed = standalone_custom_widget_content_spacing(Some(&override_css));
 

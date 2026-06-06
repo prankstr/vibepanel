@@ -18,8 +18,6 @@ const OVERLAY_OPACITY_LIGHT: f64 = 0.14;
 
 // Overlay multipliers for interactive states
 const HOVER_MULTIPLIER: f64 = 2.2;
-const ACTIVE_MULTIPLIER: f64 = 2.0;
-const SUBTLE_MULTIPLIER: f64 = 0.5;
 
 // Click catcher: nearly invisible but clickable
 const CLICK_CATCHER_OPACITY: f64 = 0.005;
@@ -38,7 +36,6 @@ const SHADOW_TIGHT_BLUR: u32 = 2;
 const SHADOW_TIGHT_OPACITY_FACTOR: f64 = 0.5;
 const SHADOW_DIFFUSE_OFFSET_Y: u32 = 1;
 const SHADOW_DIFFUSE_BLUR_SOFT: u32 = 3;
-const SHADOW_DIFFUSE_BLUR_STRONG: u32 = 5;
 const SHADOW_DIFFUSE_OPACITY_FACTOR: f64 = 0.6;
 
 // Slider track opacities
@@ -62,7 +59,6 @@ const DEFAULT_BAR_BG_DARK: &str = "#1a1a1f";
 const DEFAULT_BAR_BG_LIGHT: &str = "#e8e8e8";
 const DEFAULT_WIDGET_BG_DARK: &str = "#111217";
 const DEFAULT_WIDGET_BG_LIGHT: &str = "#ffffff";
-const DEFAULT_STATE_SUCCESS: &str = "#4a7a4a";
 const DEFAULT_STATE_WARNING: &str = "#e5c07b";
 const DEFAULT_STATE_URGENT: &str = "#ff6b6b";
 const DEFAULT_FONT_FAMILY: &str = "monospace";
@@ -214,13 +210,11 @@ pub fn rgba_str(r: u8, g: u8, b: u8, a: f64) -> String {
 }
 
 /// Format layered shadow CSS values (tight + diffuse) for a given color and opacity.
-///
-/// Returns `(shadow_soft, shadow_strong)` using the shared shadow geometry constants.
-fn format_shadows(r: u8, g: u8, b: u8, shadow_opacity: f64) -> (String, String) {
+fn format_shadow(r: u8, g: u8, b: u8, shadow_opacity: f64) -> String {
     let tight_opacity = shadow_opacity * SHADOW_TIGHT_OPACITY_FACTOR;
     let diffuse_opacity = shadow_opacity * SHADOW_DIFFUSE_OPACITY_FACTOR;
 
-    let soft = format!(
+    format!(
         "0 {}px {}px rgba({}, {}, {}, {:.2}), 0 {}px {}px rgba({}, {}, {}, {:.2})",
         SHADOW_TIGHT_OFFSET_Y,
         SHADOW_TIGHT_BLUR,
@@ -234,24 +228,7 @@ fn format_shadows(r: u8, g: u8, b: u8, shadow_opacity: f64) -> (String, String) 
         g,
         b,
         diffuse_opacity
-    );
-    let strong = format!(
-        "0 {}px {}px rgba({}, {}, {}, {:.2}), 0 {}px {}px rgba({}, {}, {}, {:.2})",
-        SHADOW_TIGHT_OFFSET_Y,
-        SHADOW_TIGHT_BLUR,
-        r,
-        g,
-        b,
-        tight_opacity,
-        SHADOW_DIFFUSE_OFFSET_Y,
-        SHADOW_DIFFUSE_BLUR_STRONG,
-        r,
-        g,
-        b,
-        diffuse_opacity
-    );
-
-    (soft, strong)
+    )
 }
 
 /// Build a `color-mix()` expression that blends `@window_fg_color` at the given
@@ -272,10 +249,10 @@ pub struct ThemeSizes {
     pub pixmap_icon_size: u32,
     pub internal_spacing: u32,
     /// Roomy content padding inside widgets. User CSS can tune this via the
-    /// additive `--widget-content-padding-offset` value.
+    /// additive `--widget-padding-adjust` value.
     pub widget_content_padding: u32,
     /// Roomy gap between children inside widget content. User CSS can tune this
-    /// via the additive `--widget-content-gap-offset` value.
+    /// via the additive `--widget-gap-adjust` value.
     pub widget_content_gap: u32,
     /// Compact vertical content padding for label-bearing widgets. Vertical bars
     /// put rounded widget ends above and below content instead of beside it;
@@ -352,7 +329,6 @@ pub struct ThemePalette {
     pub accent_source: AccentSource,
     /// Primary accent color (only meaningful when accent_source is Custom).
     pub accent_primary: String,
-    pub accent_subtle: String,
     pub accent_text: String,
     /// Pre-computed accent hover background (color-mix with luminance-aware tint and ratio).
     pub accent_hover_bg: String,
@@ -360,27 +336,22 @@ pub struct ThemePalette {
     // CSS vars --color-accent-icon and --color-accent-slider now alias to --color-accent-primary.
 
     // State colors
-    pub state_success: String,
     pub state_warning: String,
     pub state_urgent: String,
 
     // Overlay colors
     pub card_overlay: String,
     pub card_overlay_hover: String,
-    pub card_overlay_subtle: String,
-    pub card_overlay_strong: String,
     pub click_catcher_overlay: String,
 
     // Border and shadows
     pub border_subtle: String,
     pub shadow_soft: String,
-    pub shadow_strong: String,
     /// Whether CSS box-shadows are enabled (from `theme.shadows` config).
     pub shadows_enabled: bool,
 
     // Slider tracks
     pub slider_track: String,
-    pub slider_track_disabled: String,
 
     // Critical backgrounds
     pub row_critical_background: String,
@@ -518,12 +489,9 @@ impl ThemePalette {
     /// hover tint, and widget background). Size, spacing, radius, and typography
     /// variables are inherited from `:root` and not overridden.
     pub fn css_popover_vars_block(&self) -> String {
-        let (accent_primary_css, accent_subtle_css) = match &self.accent_source {
-            AccentSource::Gtk => (
-                "@accent_color".to_string(),
-                "color-mix(in srgb, @accent_color 20%, transparent)".to_string(),
-            ),
-            _ => (self.accent_primary.clone(), self.accent_subtle.clone()),
+        let accent_primary_css = match &self.accent_source {
+            AccentSource::Gtk => "@accent_color".to_string(),
+            _ => self.accent_primary.clone(),
         };
 
         let hover_tint = if self.is_gtk_mode {
@@ -549,24 +517,19 @@ impl ThemePalette {
 
     /* Accent */
     --color-accent-primary: {accent_primary};
-    --color-accent-subtle: {accent_subtle};
     --color-accent-text: {accent_text};
     --color-accent-hover-bg: {accent_hover_bg};
 
     /* Card overlays */
     --color-card-overlay: {card_overlay};
     --color-card-overlay-hover: {card_overlay_hover};
-    --color-card-overlay-subtle: {card_overlay_subtle};
-    --color-card-overlay-strong: {card_overlay_strong};
 
     /* Borders & shadows */
     --color-border-subtle: {border_subtle};
     --shadow-soft: {shadow_soft};
-    --shadow-strong: {shadow_strong};
 
     /* Slider tracks */
     --color-slider-track: {slider_track};
-    --color-slider-track-disabled: {slider_track_disabled};
 
     /* Contextual backgrounds */
     --color-row-critical-background: {row_critical_bg};
@@ -579,18 +542,13 @@ impl ThemePalette {
             fg_disabled = self.foreground_disabled,
             fg_faint = self.foreground_faint,
             accent_primary = accent_primary_css,
-            accent_subtle = accent_subtle_css,
             accent_text = self.accent_text,
             accent_hover_bg = self.accent_hover_bg,
             card_overlay = self.card_overlay,
             card_overlay_hover = self.card_overlay_hover,
-            card_overlay_subtle = self.card_overlay_subtle,
-            card_overlay_strong = self.card_overlay_strong,
             border_subtle = self.border_subtle,
             shadow_soft = self.shadow_soft,
-            shadow_strong = self.shadow_strong,
             slider_track = self.slider_track,
-            slider_track_disabled = self.slider_track_disabled,
             row_critical_bg = self.row_critical_background,
         )
     }
@@ -598,24 +556,21 @@ impl ThemePalette {
     /// Generate the :root CSS variable block.
     /// NOTE: polarity-dependent variables are also emitted in `css_popover_vars_block()`.
     pub fn css_vars_block(&self) -> String {
-        // For GTK accent mode, we reference @accent_color in CSS.
-        // For custom/none modes, we use computed values.
-        let (accent_primary_css, accent_subtle_css) = match &self.accent_source {
-            AccentSource::Gtk => (
-                // Reference GTK's accent color
-                "@accent_color".to_string(),
-                "color-mix(in srgb, @accent_color 20%, transparent)".to_string(),
-            ),
-            _ => (self.accent_primary.clone(), self.accent_subtle.clone()),
+        // GTK mode emits the @accent_color CSS token; other modes emit a computed color.
+        let accent_primary_css = match &self.accent_source {
+            AccentSource::Gtk => "@accent_color".to_string(),
+            _ => self.accent_primary.clone(),
         };
 
         let pad = self.bar_padding;
         let is_island = self.bar_opacity == 0.0;
 
-        // Public bar padding hooks (`--bar-padding-y`, `--bar-padding-x`, and
-        // `--bar-padding-{side}`) are intentionally left unset. They exist as
-        // user override slots in bar CSS; generated defaults live in internal
-        // applied-side vars so island-mode asymmetry does not leak into the API.
+        // Generated bar padding defaults are emitted per-side as
+        // --vp-internal-bar-padding-{top,right,bottom,left} values. Vertical
+        // bars get the cross-axis values on left/right; horizontal bars get
+        // them on top/bottom. Island mode puts the value on a single side
+        // matching the bar's position. Users override bar padding via the
+        // .bar / .bar--vertical classes in their own style.css.
         let (bar_padding_top, bar_padding_right, bar_padding_bottom, bar_padding_left) =
             if is_island {
                 match self.bar_position {
@@ -662,28 +617,23 @@ impl ThemePalette {
 
     /* ===== Accent Colors ===== */
     --color-accent-primary: {accent_primary};
-    --color-accent-subtle: {accent_subtle};
     /* Slider accent - alias for user CSS overrides */
     --color-accent-slider: var(--color-accent-primary);
     --color-accent-text: {accent_text};
     --color-accent-hover-bg: {accent_hover_bg};
 
     /* ===== State Colors ===== */
-    --color-state-success: {state_success};
     --color-state-warning: {state_warning};
     --color-state-urgent: {state_urgent};
 
     /* ===== Card Overlays ===== */
     --color-card-overlay: {card_overlay};
     --color-card-overlay-hover: {card_overlay_hover};
-    --color-card-overlay-subtle: {card_overlay_subtle};
-    --color-card-overlay-strong: {card_overlay_strong};
     --color-click-catcher-overlay: {click_catcher_overlay};
 
     /* ===== Borders & Shadows ===== */
     --color-border-subtle: {border_subtle};
     --shadow-soft: {shadow_soft};
-    --shadow-strong: {shadow_strong};
 
     /* ===== Outlines =====
      * Base values are theme-level. Per-scope `--*-outline-width` resolves
@@ -706,11 +656,8 @@ impl ThemePalette {
 
     /* ===== Slider Tracks ===== */
     --color-slider-track: {slider_track};
-    --color-slider-track-disabled: {slider_track_disabled};
 
     /* ===== Contextual Backgrounds ===== */
-    --color-row-background: var(--color-card-overlay-subtle);
-    --color-row-background-hover: var(--color-card-overlay-hover);
     --color-row-critical-background: {row_critical_bg};
 
     /* ===== Radii ===== */
@@ -721,7 +668,6 @@ impl ThemePalette {
     --radius-pill: {radius_pill}px;
     --radius-card: {radius_card}px;                        /* Cards/containers - never goes pill */
     --radius-round: 9999px;                                /* Always circular */
-    --radius-factor: {radius_factor};                      /* 0.0 at 0%, 1.0 at 50%+ for fixed-size elements */
 
     /* ===== Sizes & Spacing ===== */
     --bar-height: {bar_height}px;
@@ -730,34 +676,19 @@ impl ThemePalette {
     --vp-internal-bar-padding-bottom: {bar_padding_bottom}px;
     --vp-internal-bar-padding-left: {bar_padding_left}px;
     --widget-height: {widget_height}px;
-    --widget-padding-y: {widget_padding_y}px;
-    --spacing-internal: {internal_spacing}px;
-    --vp-widget-content-padding-h: {widget_content_padding}px;
-    --vp-widget-content-gap-h: {widget_content_gap}px;
-    --vp-widget-content-padding-v: {widget_content_padding_vertical}px;
-    --vp-widget-content-gap-v: {widget_content_gap_vertical}px;
+    --widget-padding-cross: {widget_padding_y}px;
+    --vp-widget-padding-flow-base: {widget_content_padding}px;
+    --vp-widget-gap-flow-base: {widget_content_gap}px;
+    --vp-widget-padding-cross-base: {widget_content_padding_vertical}px;
+    --vp-widget-gap-cross-base: {widget_content_gap_vertical}px;
     /* Public density offsets: user values are added to each widget's tuned base. */
-    --widget-content-padding-offset: 0px;
-    --widget-content-gap-offset: 0px;
-    --widget-opacity: {widget_opacity};
-
-    /* Spacing tokens - consistent spacing scale */
-    --spacing-xs: 4px;
-    --spacing-sm: 8px;
-    --spacing-md: 12px;
-    --spacing-lg: 16px;
-    --spacing-xl: 24px;
-
-    /* Component tokens */
-    --card-padding: var(--spacing-md);
-    --row-padding-v: var(--spacing-sm);
-    --row-padding-h: var(--spacing-md);
+    --widget-padding-adjust: 0px;
+    --widget-gap-adjust: 0px;
 
     /* ===== Typography ===== */
     --font-family: {font_family};
     --font-scale: {font_scale};
     --font-size: calc(var(--widget-height) * var(--font-scale));
-    --font-size-text-icon: {text_icon_size}px;
 
     /* Slider height - scales with widget height */
     --slider-height: calc(var(--widget-height) * 0.25);
@@ -776,7 +707,6 @@ impl ThemePalette {
     --font-size-xs: 0.7em;    /* De-emphasized (timestamps, week numbers) */
 
     /* ===== Icon Sizes ===== */
-    --pixmap-icon-size: {pixmap_icon_size}px;
     /* Canonical icon box size for bar widgets - all icons sit in this size container */
     --icon-size: {text_icon_size}px;
 }}
@@ -802,20 +732,15 @@ impl ThemePalette {
             fg_disabled = self.foreground_disabled,
             fg_faint = self.foreground_faint,
             accent_primary = accent_primary_css,
-            accent_subtle = accent_subtle_css,
             accent_text = self.accent_text,
             accent_hover_bg = self.accent_hover_bg,
-            state_success = self.state_success,
             state_warning = self.state_warning,
             state_urgent = self.state_urgent,
             card_overlay = self.card_overlay,
             card_overlay_hover = self.card_overlay_hover,
-            card_overlay_subtle = self.card_overlay_subtle,
-            card_overlay_strong = self.card_overlay_strong,
             click_catcher_overlay = self.click_catcher_overlay,
             border_subtle = self.border_subtle,
             shadow_soft = self.shadow_soft,
-            shadow_strong = self.shadow_strong,
             outline_width = self.outline_width_px,
             outline_color = self.outline_color_resolved,
             outline_opacity = self.outline_opacity_pct,
@@ -835,7 +760,6 @@ impl ThemePalette {
                 "0px"
             },
             slider_track = self.slider_track,
-            slider_track_disabled = self.slider_track_disabled,
             row_critical_bg = self.row_critical_background,
             radius_bar = self.bar_border_radius,
             radius_surface = self.surface_border_radius,
@@ -854,16 +778,13 @@ impl ThemePalette {
             bar_padding_left = bar_padding_left,
             widget_height = self.sizes.widget_height,
             widget_padding_y = self.sizes.widget_padding_y,
-            internal_spacing = self.sizes.internal_spacing,
             widget_content_padding = self.sizes.widget_content_padding,
             widget_content_gap = self.sizes.widget_content_gap,
             widget_content_padding_vertical = self.sizes.widget_content_padding_vertical,
             widget_content_gap_vertical = self.sizes.widget_content_gap_vertical,
-            widget_opacity = self.widget_opacity,
             font_family = self.font_family,
             font_scale = self.font_scale,
             text_icon_size = self.sizes.text_icon_size,
-            pixmap_icon_size = self.sizes.pixmap_icon_size,
         )
     }
 
@@ -970,7 +891,6 @@ impl ThemePalette {
         self.widget_opacity = config.widgets.background_opacity;
         self.popover_opacity = config.widgets.popover_background_opacity;
         self.shadows_enabled = config.theme.shadows;
-        self.state_success = config.theme.states.success.clone();
         self.state_warning = config.theme.states.warning.clone();
         self.state_urgent = config.theme.states.urgent.clone();
 
@@ -1195,7 +1115,6 @@ impl ThemePalette {
 
         match &self.accent_source {
             AccentSource::Custom(color) => {
-                self.accent_subtle = format!("color-mix(in srgb, {} 20%, transparent)", color);
                 self.accent_text = accent_text_color;
                 // Bright accent → darken on hover (80/20); dark accent → lighten (90/10, subtler)
                 self.accent_hover_bg = if is_dark_color(color) {
@@ -1206,8 +1125,6 @@ impl ThemePalette {
             }
             AccentSource::Gtk => {
                 // GTK accent - use @accent_color references
-                self.accent_subtle =
-                    "color-mix(in srgb, @accent_color 20%, transparent)".to_string();
                 self.accent_text = accent_text_color;
                 // GTK accents are almost always bright → darken on hover
                 self.accent_hover_bg = "color-mix(in srgb, @accent_color 80%, black)".to_string();
@@ -1215,19 +1132,16 @@ impl ThemePalette {
             AccentSource::None => {
                 // Monochrome mode - adapt to theme
                 if self.is_gtk_mode {
-                    self.accent_subtle = gtk_fg_mix(8.0);
                     self.accent_text = self.foreground_primary.clone();
                     self.accent_hover_bg = format!(
                         "color-mix(in srgb, {} 90%, @window_fg_color)",
                         self.accent_primary
                     );
                 } else if self.is_dark_mode {
-                    self.accent_subtle = "rgba(255, 255, 255, 0.08)".to_string();
                     self.accent_text = self.foreground_primary.clone();
                     self.accent_hover_bg =
                         format!("color-mix(in srgb, {} 90%, white)", self.accent_primary);
                 } else {
-                    self.accent_subtle = "rgba(0, 0, 0, 0.06)".to_string();
                     self.accent_text = self.foreground_primary.clone();
                     self.accent_hover_bg =
                         format!("color-mix(in srgb, {} 80%, black)", self.accent_primary);
@@ -1245,8 +1159,6 @@ impl ThemePalette {
             let base = OVERLAY_OPACITY_DARK * 100.0;
             self.card_overlay = gtk_fg_mix(base);
             self.card_overlay_hover = gtk_fg_mix(base * HOVER_MULTIPLIER);
-            self.card_overlay_subtle = gtk_fg_mix(base * SUBTLE_MULTIPLIER);
-            self.card_overlay_strong = gtk_fg_mix(base * ACTIVE_MULTIPLIER);
             self.click_catcher_overlay = rgba_str(128, 128, 128, CLICK_CATCHER_OPACITY);
             return;
         }
@@ -1259,8 +1171,6 @@ impl ThemePalette {
 
         self.card_overlay = rgba_str(r, g, b, base_opacity);
         self.card_overlay_hover = rgba_str(r, g, b, base_opacity * HOVER_MULTIPLIER);
-        self.card_overlay_subtle = rgba_str(r, g, b, base_opacity * SUBTLE_MULTIPLIER);
-        self.card_overlay_strong = rgba_str(r, g, b, base_opacity * ACTIVE_MULTIPLIER);
         self.click_catcher_overlay = rgba_str(128, 128, 128, CLICK_CATCHER_OPACITY);
     }
 
@@ -1283,7 +1193,6 @@ impl ThemePalette {
                 };
             }
             self.shadow_soft = "none".to_string();
-            self.shadow_strong = "none".to_string();
             return;
         }
 
@@ -1301,20 +1210,16 @@ impl ThemePalette {
             SHADOW_OPACITY_LIGHT
         };
 
-        (self.shadow_soft, self.shadow_strong) = format_shadows(0, 0, 0, shadow_opacity);
+        self.shadow_soft = format_shadow(0, 0, 0, shadow_opacity);
     }
 
     fn compute_slider_tracks(&mut self) {
         if self.is_gtk_mode {
             self.slider_track = gtk_fg_mix(TRACK_OPACITY_DARK * 100.0);
-            self.slider_track_disabled = gtk_fg_mix(TRACK_OPACITY_DARK * 0.6 * 100.0);
         } else if self.is_dark_mode {
             self.slider_track = format!("rgba(255, 255, 255, {:.2})", TRACK_OPACITY_DARK);
-            self.slider_track_disabled =
-                format!("rgba(255, 255, 255, {:.2})", TRACK_OPACITY_DARK * 0.6);
         } else {
             self.slider_track = format!("rgba(0, 0, 0, {:.2})", TRACK_OPACITY_LIGHT);
-            self.slider_track_disabled = format!("rgba(0, 0, 0, {:.2})", TRACK_OPACITY_LIGHT * 0.6);
         }
     }
 
@@ -1382,7 +1287,6 @@ impl ThemePalette {
         } else {
             self.accent_source = AccentSource::Custom(argb_to_hex(&scheme.primary));
             self.accent_primary = argb_to_hex(&scheme.primary);
-            self.accent_subtle = argb_to_rgba(&scheme.primary, 0.20);
             self.accent_text = argb_to_hex(&scheme.on_primary);
             self.accent_hover_bg = argb_to_hex(&scheme.primary_container);
         }
@@ -1401,10 +1305,6 @@ impl ThemePalette {
         self.card_overlay = argb_to_rgba(&scheme.surface_tint, base_opacity);
         self.card_overlay_hover =
             argb_to_rgba(&scheme.surface_tint, base_opacity * HOVER_MULTIPLIER);
-        self.card_overlay_subtle =
-            argb_to_rgba(&scheme.surface_tint, base_opacity * SUBTLE_MULTIPLIER);
-        self.card_overlay_strong =
-            argb_to_rgba(&scheme.surface_tint, base_opacity * ACTIVE_MULTIPLIER);
         self.click_catcher_overlay = rgba_str(128, 128, 128, CLICK_CATCHER_OPACITY);
 
         // Borders
@@ -1418,7 +1318,7 @@ impl ThemePalette {
         };
 
         if self.shadows_enabled {
-            (self.shadow_soft, self.shadow_strong) = format_shadows(
+            self.shadow_soft = format_shadow(
                 scheme.shadow.red,
                 scheme.shadow.green,
                 scheme.shadow.blue,
@@ -1426,12 +1326,10 @@ impl ThemePalette {
             );
         } else {
             self.shadow_soft = "none".to_string();
-            self.shadow_strong = "none".to_string();
         }
 
         // Slider tracks
         self.slider_track = argb_to_hex(&scheme.surface_container_highest);
-        self.slider_track_disabled = argb_to_rgba(&scheme.surface_container_highest, 0.6);
 
         // Critical backgrounds
         let error_hex = argb_to_hex(&scheme.error);
@@ -1515,23 +1413,17 @@ impl Default for ThemePalette {
             foreground_faint: String::new(),
             accent_source: AccentSource::Gtk, // Default to GTK accent
             accent_primary: "@accent_color".to_string(),
-            accent_subtle: String::new(),
             accent_text: String::new(),
             accent_hover_bg: "color-mix(in srgb, @accent_color 80%, black)".to_string(),
-            state_success: DEFAULT_STATE_SUCCESS.to_string(),
             state_warning: DEFAULT_STATE_WARNING.to_string(),
             state_urgent: DEFAULT_STATE_URGENT.to_string(),
             card_overlay: String::new(),
             card_overlay_hover: String::new(),
-            card_overlay_subtle: String::new(),
-            card_overlay_strong: String::new(),
             click_catcher_overlay: String::new(),
             border_subtle: String::new(),
             shadow_soft: String::new(),
-            shadow_strong: String::new(),
             shadows_enabled: true,
             slider_track: String::new(),
-            slider_track_disabled: String::new(),
             row_critical_background: String::new(),
             font_family: DEFAULT_FONT_FAMILY.to_string(),
             font_scale: DEFAULT_FONT_SCALE,
@@ -1859,12 +1751,10 @@ mod tests {
         }
 
         for public_var in [
+            "--bar-padding-flow:",
+            "--bar-padding-cross:",
             "--bar-padding-y:",
             "--bar-padding-x:",
-            "--bar-padding-top:",
-            "--bar-padding-right:",
-            "--bar-padding-bottom:",
-            "--bar-padding-left:",
             "--bar-padding-y-top:",
             "--bar-padding-y-bottom:",
             "--bar-padding-x-left:",
@@ -2000,10 +1890,6 @@ mod tests {
         assert_eq!(palette.accent_source, AccentSource::Gtk);
         // Verify derived values for GTK accent in GTK mode
         assert_eq!(palette.accent_primary, "@accent_color");
-        assert_eq!(
-            palette.accent_subtle,
-            "color-mix(in srgb, @accent_color 20%, transparent)"
-        );
         assert_eq!(
             palette.accent_hover_bg,
             "color-mix(in srgb, @accent_color 80%, black)"
@@ -2146,18 +2032,11 @@ mod tests {
             "slider_track should reference @window_fg_color, got: {}",
             palette.slider_track
         );
-        assert!(
-            palette.slider_track_disabled.contains("@window_fg_color"),
-            "slider_track_disabled should reference @window_fg_color, got: {}",
-            palette.slider_track_disabled
-        );
 
         // Overlay variants
         for (name, value) in [
             ("card_overlay", &palette.card_overlay),
             ("card_overlay_hover", &palette.card_overlay_hover),
-            ("card_overlay_subtle", &palette.card_overlay_subtle),
-            ("card_overlay_strong", &palette.card_overlay_strong),
         ] {
             assert!(
                 value.contains("@window_fg_color"),
@@ -2195,11 +2074,6 @@ mod tests {
             "monochrome accent in GTK mode should use @window_fg_color, got: {}",
             palette.accent_primary
         );
-        assert!(
-            palette.accent_subtle.contains("@window_fg_color"),
-            "monochrome accent_subtle in GTK mode should use @window_fg_color, got: {}",
-            palette.accent_subtle
-        );
     }
 
     #[test]
@@ -2234,7 +2108,6 @@ mod tests {
             palette.border_subtle
         );
         assert_eq!(palette.shadow_soft, "none");
-        assert_eq!(palette.shadow_strong, "none");
     }
 
     #[test]

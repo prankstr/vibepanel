@@ -1286,7 +1286,6 @@ pub fn load_css(config: &Config) {
     debug!("  accent_primary = {}", palette.accent_primary);
     debug!("  state_warning = {}", palette.state_warning);
     debug!("  state_urgent = {}", palette.state_urgent);
-    debug!("  state_success = {}", palette.state_success);
 
     provider.load_from_string(&css);
 
