@@ -5,6 +5,55 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.0](https://github.com/prankstr/vibepanel/compare/v0.14.1...v0.15.0) (2026-06-07)
+
+
+### ⚠ BREAKING CHANGES
+
+* **theme:** clean up CSS variables ([#162](https://github.com/prankstr/vibepanel/issues/162))
+
+### Features
+
+* **audio:** add overdrive setting to raise volume limits ([#123](https://github.com/prankstr/vibepanel/issues/123)) ([99c2d14](https://github.com/prankstr/vibepanel/commit/99c2d1440d4ba90e8e8699478024646e3fae5284))
+* **bar:** add left and right positions and scope creep ([#126](https://github.com/prankstr/vibepanel/issues/126)) ([504f8c2](https://github.com/prankstr/vibepanel/commit/504f8c2993837f1fa9ac186ce2a7de03227164b5))
+* **cpu:** add format option to match gpu/mem and show temp ([#140](https://github.com/prankstr/vibepanel/issues/140)) ([6a99fac](https://github.com/prankstr/vibepanel/commit/6a99fac57a6432ae34616b8df4d339ada0632d7b))
+* **custom:** support Waybar JSON format and streaming mode ([#144](https://github.com/prankstr/vibepanel/issues/144)) ([b612e83](https://github.com/prankstr/vibepanel/commit/b612e830ea6026892a8794c2c36a633e4fe93257))
+* **mango:** migrate to new independant json ipc ([#150](https://github.com/prankstr/vibepanel/issues/150)) ([d9fe245](https://github.com/prankstr/vibepanel/commit/d9fe2459bddd0d01fe9e7ac14eab6ff75426ff3a))
+* **mango:** show overview as a single workspace in workspace widget ([#141](https://github.com/prankstr/vibepanel/issues/141)) ([1c05526](https://github.com/prankstr/vibepanel/commit/1c055266efc118ec16d3a1604a0f3af7343ea08f))
+* **mango:** support taskbar windows ([#151](https://github.com/prankstr/vibepanel/issues/151)) ([a632965](https://github.com/prankstr/vibepanel/commit/a632965a7be17210efde46bf3fe4277e42deece5))
+* **notifications:** add configurable notificiations toast position ([#146](https://github.com/prankstr/vibepanel/issues/146)) ([ad3ebe8](https://github.com/prankstr/vibepanel/commit/ad3ebe8bb2cda88c4f6668ce4cb65aeabb2b6733))
+* **quick_settings:** add options to override commands for power actions ([#156](https://github.com/prankstr/vibepanel/issues/156)) ([d471384](https://github.com/prankstr/vibepanel/commit/d471384090c40107bf1eaa2ae2884f5780858e8a))
+* set font scale from toml and widget scoped vars ([#153](https://github.com/prankstr/vibepanel/issues/153)) ([9bde4dc](https://github.com/prankstr/vibepanel/commit/9bde4dc3b8d4375bcec377dea76fd4edc879b24f))
+* **taskbar:** add numeric workspace indicators ([#152](https://github.com/prankstr/vibepanel/issues/152)) ([d048768](https://github.com/prankstr/vibepanel/commit/d04876847f84edfab4a7b44d7e1ce178db75df2b))
+* **taskbar:** add option to toggle scratchpad inclusion ([c4482e5](https://github.com/prankstr/vibepanel/commit/c4482e5baddec4bf0f5d152e4e80556a224ec755))
+* **theme:** add option to make scheme follow gtk in auto mode ([#148](https://github.com/prankstr/vibepanel/issues/148)) ([a690ddb](https://github.com/prankstr/vibepanel/commit/a690ddb2cfcf9fd87b39bbfd412de64c4dd5f7a0))
+* **widgets:** add weather widget and popover([#159](https://github.com/prankstr/vibepanel/issues/159)) ([8ec9707](https://github.com/prankstr/vibepanel/commit/8ec9707c3e96c0f1bcc4e14231ac307de41dce34))
+* **widgets:** make the space between widgets and screen edge clickable ([a2175cb](https://github.com/prankstr/vibepanel/commit/a2175cbc3190fb1a448dcf25e01d5c00d6a25dc4))
+
+
+### Bug Fixes
+
+* **bar:** include padding in islands-mode exclusive zone and hot reload ([4cc7e01](https://github.com/prankstr/vibepanel/commit/4cc7e0178d7dc16c9409e895b4ab0727ea6c0b46))
+* **clock:** resume immediately after sleep, sleepwatcher service ([956a30b](https://github.com/prankstr/vibepanel/commit/956a30b6d13a0f9d444a62b3f97865ccec88f926))
+* **gpu:** ioctl based detection of dedicated/integrated amd gpus ([#160](https://github.com/prankstr/vibepanel/issues/160)) ([22e53ed](https://github.com/prankstr/vibepanel/commit/22e53edca181abf0384e2fc271bfc82fe9099a6d))
+* **hyprland:** prefer the new lua dispatch syntax ([#149](https://github.com/prankstr/vibepanel/issues/149)) ([e69dc59](https://github.com/prankstr/vibepanel/commit/e69dc59d5cba858834b8bf20f8bbe76fc4127fa7))
+* **media:** vertical styling and lifecycle bug ([6cc334d](https://github.com/prankstr/vibepanel/commit/6cc334de80d51e2a4083a4d0d9215f8c4a3c79b3))
+* **notifications:** adjust wiget icon margon ([9ed4f2c](https://github.com/prankstr/vibepanel/commit/9ed4f2cf492c29c62a022be86b8dc896deced742))
+* **quick_settings:** correctly closes on vpn connect again ([d344bed](https://github.com/prankstr/vibepanel/commit/d344bed87496e81f4e55a43cac56f44feffa82dd))
+* show urgent windows in workspace and taskbar widgets ([11b14c2](https://github.com/prankstr/vibepanel/commit/11b14c25a32153ae3088047d84dcd94cb6b75c6d))
+* **taskbar:** do not show scratchpad clients for mango ([9b6ccb4](https://github.com/prankstr/vibepanel/commit/9b6ccb425aad42466bae1aa885855977c96fde92))
+* **theme:** adjust spacing for gtk icons in vertical bar mode ([52b324f](https://github.com/prankstr/vibepanel/commit/52b324fbf02cde4090bf082cbec5578a6ac5d7b9))
+* **theme:** prevent background bleed around outline with rounded corners ([27912f7](https://github.com/prankstr/vibepanel/commit/27912f768e2f1ef60db7b8a21a08a4f5f4d9fe10))
+* **theme:** respect state colors in auto mode ([fa95f5f](https://github.com/prankstr/vibepanel/commit/fa95f5f30ffea4a90e099bf0ee702e73ad2469d4))
+* **widgets:** apply scoped content spacing variables ([a68d930](https://github.com/prankstr/vibepanel/commit/a68d930c39dbcfbdfa5dc581d1b8cea3db46b381))
+* **widgets:** spacers can be in merge groups and gets a background ([#127](https://github.com/prankstr/vibepanel/issues/127)) ([ac66fc8](https://github.com/prankstr/vibepanel/commit/ac66fc8355554ce4b0fc6b0a098164abde4a3af5))
+* **workspaces:** correctly clear urgent status for hyprland workspaces ([0e51429](https://github.com/prankstr/vibepanel/commit/0e514298c785517986f2fe525163d4c6b954731d))
+
+
+### Code Refactoring
+
+* **theme:** clean up CSS variables ([#162](https://github.com/prankstr/vibepanel/issues/162)) ([5cfc297](https://github.com/prankstr/vibepanel/commit/5cfc2975893a44ad5b4d568ebf78347c35d34970))
+
 ## [0.14.1](https://github.com/prankstr/vibepanel/compare/v0.14.0...v0.14.1) (2026-05-05)
 
 
