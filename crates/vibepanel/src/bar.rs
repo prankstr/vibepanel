@@ -17,9 +17,9 @@ use crate::services::config_manager::{ConfigManager, ThemeCallbackGuard};
 use crate::services::tooltip::TooltipManager;
 use crate::styles::{class, state, widget as style_widget};
 use crate::widgets::{
-    self, BarState, EdgeInteraction, MenuHandle, PopoverKind, QuickSettingsConfig, RippleHandle,
-    SystemPopoverBinding, WidgetConfig, WidgetFactory, popover_kind_for,
-    trigger_ripple_from_gesture,
+    self, BarState, CalendarWeatherPopoverBinding, ClockConfig, EdgeInteraction, MenuHandle,
+    PopoverKind, QuickSettingsConfig, RippleHandle, SystemPopoverBinding, WidgetConfig,
+    WidgetFactory, popover_kind_for, trigger_ripple_from_gesture,
 };
 
 /// Total bar window/content height reserved for the shell.
@@ -847,7 +847,11 @@ fn build_widget_or_group(
                         MergeKind::Spacer
                     } else {
                         let (right, middle) = ConfigManager::global().get_click_handlers(&e.name);
-                        if right.is_some() || middle.is_some() {
+                        let has_custom_click = right.is_some() || middle.is_some();
+                        let clock_weather_opt_out = e.name == "clock"
+                            && e.options.get("show_weather").and_then(|v| v.as_bool())
+                                == Some(false);
+                        if has_custom_click || clock_weather_opt_out {
                             MergeKind::Popover(PopoverKind::Unmergeable)
                         } else {
                             MergeKind::Popover(popover_kind_for(&e.name))
@@ -1094,18 +1098,6 @@ fn build_merge_group(
     let widget_name = representative.name.clone();
     let menu_handle = MenuHandle::new_placeholder(widget_name, wrapper.clone());
 
-    let binding = match kind {
-        PopoverKind::System => Some(SystemPopoverBinding::new_for_menu(&menu_handle)),
-        _ => {
-            warn!("Merge group for {:?} popover not yet supported", kind);
-            None
-        }
-    };
-
-    let Some(binding) = binding else {
-        return 0;
-    };
-
     // Primary click toggles the shared popover. Right/middle-click handlers
     // are not forwarded — the merge group is a single button, and per-widget
     // click commands don't have a meaningful target here.
@@ -1134,12 +1126,37 @@ fn build_merge_group(
 
     wrapper.add_controller(gesture_click.clone());
 
-    let mut built_widgets: Vec<widgets::BuiltWidget> = Vec::new();
-    for entry in entries {
-        if let Some(built) = WidgetFactory::build_passive(entry, &binding) {
-            built_widgets.push(built);
-        }
-    }
+    let (binding_handle, built_widgets): (Box<dyn std::any::Any>, Vec<widgets::BuiltWidget>) =
+        match kind {
+            PopoverKind::System => {
+                let binding = SystemPopoverBinding::new_for_menu(&menu_handle);
+                let built_widgets = entries
+                    .iter()
+                    .filter_map(|entry| WidgetFactory::build_passive(entry, &binding))
+                    .collect();
+                (Box::new(binding), built_widgets)
+            }
+            PopoverKind::CalendarWeather => {
+                let Some(clock_entry) = entries.iter().find(|entry| entry.name == "clock") else {
+                    warn!("Calendar/weather merge group requires a clock widget");
+                    return 0;
+                };
+                let clock_config = ClockConfig::from_entry(clock_entry);
+                let binding = CalendarWeatherPopoverBinding::new_for_menu(
+                    &menu_handle,
+                    clock_config.show_week_numbers,
+                );
+                let built_widgets = entries
+                    .iter()
+                    .filter_map(WidgetFactory::build_calendar_weather_passive)
+                    .collect();
+                (Box::new(binding), built_widgets)
+            }
+            PopoverKind::Unmergeable => {
+                warn!("Merge group for {:?} popover not supported", kind);
+                return 0;
+            }
+        };
 
     // If only 0–1 widgets survived (e.g. GPU unavailable), don't wrap in a
     // merge group — return 0 so the caller rebuilds via the normal active path.
@@ -1177,6 +1194,7 @@ fn build_merge_group(
     }
 
     // Keep the menu handle, gesture, and ripple alive
+    state.add_handle(binding_handle);
     state.add_handle(Box::new(menu_handle));
     state.add_handle(Box::new(gesture_click));
     state.add_handle(Box::new(ripple_handle));

@@ -1271,6 +1271,57 @@ fn run_test_widgets_grouping_system_merge() {
     flush_gtk();
 }
 
+fn clock_weather_group_counts(show_weather: Option<bool>) -> (usize, usize, usize, usize, usize) {
+    let mut config = test_config();
+    config.widgets.left = vec![vibepanel_core::config::WidgetPlacement::Group {
+        group: vec!["clock".to_string(), "weather".to_string()],
+    }];
+    config.widgets.center = Vec::new();
+    config.widgets.right = Vec::new();
+    if let Some(show_weather) = show_weather {
+        config
+            .widgets
+            .widget_configs
+            .entry("clock".to_string())
+            .or_default()
+            .options
+            .insert(
+                "show_weather".to_string(),
+                toml::Value::Boolean(show_weather),
+            );
+    }
+
+    let (window, bar, _state, _popover_registry_guard, _css_provider) = built_bar_fixture(&config);
+    let left_section = bar
+        .section("left")
+        .expect("bar should build a left section");
+    let counts = (
+        count_descendants_with_class(&left_section, crate::styles::class::WIDGET_GROUP),
+        count_descendants_with_class(&left_section, crate::styles::class::WIDGET_MERGE_GROUP),
+        count_descendants_with_class(&left_section, crate::styles::class::PASSIVE),
+        count_descendants_with_class(&left_section, "clock"),
+        count_descendants_with_class(&left_section, "weather"),
+    );
+
+    window.close();
+    flush_gtk();
+    counts
+}
+
+fn run_test_widgets_grouping_clock_weather_merge() {
+    let (groups, merge_groups, passive, clock, weather) = clock_weather_group_counts(None);
+    assert_eq!((groups, merge_groups, passive), (1, 1, 2));
+    assert!(clock > 0);
+    assert!(weather > 0);
+}
+
+fn run_test_widgets_grouping_clock_weather_explicit_opt_out() {
+    let (groups, merge_groups, passive, clock, weather) = clock_weather_group_counts(Some(false));
+    assert_eq!((groups, merge_groups, passive), (1, 0, 0));
+    assert!(clock > 0);
+    assert!(weather > 0);
+}
+
 fn run_test_widgets_grouping_spacing_contract() {
     let mut config = test_config();
     config.bar.spacing = 18;
@@ -2267,6 +2318,16 @@ ui_regression_config_tests!(
         test_ui_regression_widgets_grouping_system_merge,
         "widgets.grouping.system-merge",
         run_test_widgets_grouping_system_merge
+    ),
+    (
+        test_ui_regression_widgets_grouping_clock_weather_merge,
+        "widgets.grouping.clock-weather-merge",
+        run_test_widgets_grouping_clock_weather_merge
+    ),
+    (
+        test_ui_regression_widgets_grouping_clock_weather_opt_out,
+        "widgets.grouping.clock-weather-opt-out",
+        run_test_widgets_grouping_clock_weather_explicit_opt_out
     ),
     (
         test_ui_regression_widgets_grouping_spacing,

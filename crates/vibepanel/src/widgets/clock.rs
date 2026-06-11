@@ -21,7 +21,7 @@ use crate::services::sleep_watcher::SleepWatcher;
 use crate::services::weather::WeatherService;
 use crate::styles::widget as wgt;
 use crate::widgets::WidgetConfig;
-use crate::widgets::base::BaseWidget;
+use crate::widgets::base::{BaseWidget, MenuHandle};
 use crate::widgets::calendar_popover::build_clock_calendar_popover;
 use crate::widgets::warn_unknown_options;
 
@@ -111,6 +111,28 @@ impl Default for ClockConfig {
     }
 }
 
+/// Shared calendar/weather popover binding used by clock+weather merge groups.
+pub(crate) struct CalendarWeatherPopoverBinding {
+    weather_callback_id: Option<CallbackId>,
+}
+
+impl CalendarWeatherPopoverBinding {
+    pub(crate) fn new_for_menu(menu_handle: &Rc<MenuHandle>, show_week_numbers: bool) -> Self {
+        let weather_callback_id = wire_clock_popover(menu_handle, show_week_numbers, true);
+        Self {
+            weather_callback_id,
+        }
+    }
+}
+
+impl Drop for CalendarWeatherPopoverBinding {
+    fn drop(&mut self) {
+        if let Some(id) = self.weather_callback_id.take() {
+            WeatherService::global().disconnect(id);
+        }
+    }
+}
+
 /// Clock widget that displays and updates the current time.
 pub struct ClockWidget {
     /// Shared base widget container.
@@ -135,6 +157,16 @@ impl ClockWidget {
     /// Create a new clock widget with the given configuration.
     pub fn new(config: ClockConfig) -> Self {
         let base = BaseWidget::new(&[wgt::CLOCK]);
+        Self::build(config, base, true)
+    }
+
+    /// Create a passive clock widget for use in a merge group.
+    pub fn new_passive(config: ClockConfig) -> Self {
+        let base = BaseWidget::new_passive(&[wgt::CLOCK]);
+        Self::build(config, base, false)
+    }
+
+    fn build(config: ClockConfig, base: BaseWidget, create_popover: bool) -> Self {
         let is_vertical = ConfigManager::global().bar_position().is_vertical();
 
         let label = base.add_label(Some("--:--"), &[wgt::CLOCK_LABEL]);
@@ -146,44 +178,9 @@ impl ClockWidget {
         }
 
         let show_week_numbers = config.show_week_numbers;
-        let show_weather = config.show_weather;
-
-        // Shared slots populated by the popover builder on first open. Calendar
-        // refresh runs on show; weather refresh runs on weather service updates
-        // so the calendar month is not reset while the popover is open.
-        type RefreshSlot = Rc<RefCell<Option<Rc<dyn Fn()>>>>;
-        let calendar_refresh_slot: RefreshSlot = Rc::new(RefCell::new(None));
-        let weather_refresh_slot: RefreshSlot = Rc::new(RefCell::new(None));
-
-        let calendar_refresh_for_builder = calendar_refresh_slot.clone();
-        let weather_refresh_for_builder = weather_refresh_slot.clone();
-        let menu_handle = base.create_menu(move || {
-            let (widget, calendar_refresh, weather_refresh) =
-                build_clock_calendar_popover(show_week_numbers, show_weather);
-            *calendar_refresh_for_builder.borrow_mut() = Some(calendar_refresh);
-            *weather_refresh_for_builder.borrow_mut() = weather_refresh;
-            widget
-        });
-
-        // Reuse the calendar widget across open/close cycles to avoid
-        // unbounded memory growth from GTK4.
-        menu_handle.set_reuse_content(true);
-        menu_handle.set_on_show(move || {
-            if let Some(ref cb) = *calendar_refresh_slot.borrow() {
-                cb();
-            }
-        });
-
-        let weather_callback_id = if show_weather {
-            let menu_handle = Rc::clone(&menu_handle);
-            let weather_refresh_slot = weather_refresh_slot.clone();
-            Some(WeatherService::global().connect(move |_| {
-                if menu_handle.is_visible()
-                    && let Some(ref cb) = *weather_refresh_slot.borrow()
-                {
-                    cb();
-                }
-            }))
+        let weather_callback_id = if create_popover {
+            let menu_handle = base.create_menu(|| gtk4::Label::new(None).upcast());
+            wire_clock_popover(&menu_handle, show_week_numbers, config.show_weather)
         } else {
             None
         };
@@ -268,6 +265,51 @@ impl ClockWidget {
             self.scheduling_mode,
             Rc::clone(&self.timer_source),
         );
+    }
+}
+
+type RefreshSlot = Rc<RefCell<Option<Rc<dyn Fn()>>>>;
+
+fn wire_clock_popover(
+    menu_handle: &Rc<MenuHandle>,
+    show_week_numbers: bool,
+    show_weather: bool,
+) -> Option<CallbackId> {
+    let calendar_refresh_slot: RefreshSlot = Rc::new(RefCell::new(None));
+    let weather_refresh_slot: RefreshSlot = Rc::new(RefCell::new(None));
+
+    let calendar_refresh_for_builder = calendar_refresh_slot.clone();
+    let weather_refresh_for_builder = weather_refresh_slot.clone();
+    menu_handle.set_builder(move || {
+        let (widget, calendar_refresh, weather_refresh) =
+            build_clock_calendar_popover(show_week_numbers, show_weather);
+        *calendar_refresh_for_builder.borrow_mut() = Some(calendar_refresh);
+        *weather_refresh_for_builder.borrow_mut() = weather_refresh;
+        widget
+    });
+
+    // Reuse the calendar widget across open/close cycles to avoid
+    // unbounded memory growth from GTK4.
+    menu_handle.set_reuse_content(true);
+    let calendar_refresh_for_show = calendar_refresh_slot.clone();
+    menu_handle.set_on_show(move || {
+        if let Some(ref cb) = *calendar_refresh_for_show.borrow() {
+            cb();
+        }
+    });
+
+    if show_weather {
+        let menu_handle = Rc::clone(menu_handle);
+        let weather_refresh_slot = weather_refresh_slot.clone();
+        Some(WeatherService::global().connect(move |_| {
+            if menu_handle.is_visible()
+                && let Some(ref cb) = *weather_refresh_slot.borrow()
+            {
+                cb();
+            }
+        }))
+    } else {
+        None
     }
 }
 
@@ -518,6 +560,12 @@ mod tests {
         let entry = make_widget_entry("clock", options);
         let config = ClockConfig::from_entry(&entry);
         assert!(config.show_weather);
+
+        let mut options = HashMap::new();
+        options.insert("show_weather".to_string(), Value::Boolean(false));
+        let entry = make_widget_entry("clock", options);
+        let config = ClockConfig::from_entry(&entry);
+        assert!(!config.show_weather);
     }
 
     #[test]

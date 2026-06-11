@@ -5,7 +5,6 @@
 
 use gtk4::Label;
 use gtk4::prelude::*;
-use std::rc::Rc;
 use std::time::{Duration, SystemTime};
 use vibepanel_core::config::{WeatherUnits, WeatherWindUnits, WidgetEntry};
 
@@ -68,6 +67,16 @@ impl WeatherWidget {
     /// Create a new weather widget with the given presentation config.
     pub fn new(config: WeatherConfig) -> Self {
         let base = BaseWidget::new(&[widget::WEATHER]);
+        Self::build(config, base, true)
+    }
+
+    /// Create a passive weather widget for use in a merge group.
+    pub fn new_passive(config: WeatherConfig) -> Self {
+        let base = BaseWidget::new_passive(&[widget::WEATHER]);
+        Self::build(config, base, false)
+    }
+
+    fn build(config: WeatherConfig, base: BaseWidget, create_popover: bool) -> Self {
         base.set_tooltip("Weather: loading...");
 
         let icon_handle = base.add_icon("weather-unknown", &[widget::WEATHER_ICON]);
@@ -76,10 +85,15 @@ impl WeatherWidget {
 
         icon_handle.widget().set_visible(config.show_icon);
 
-        let menu_handle = base.create_menu(move || {
-            crate::widgets::weather_popover::build_weather_content_reactive().0
-        });
-        menu_handle.set_reuse_content(true);
+        let menu_handle = if create_popover {
+            let menu_handle = base.create_menu(move || {
+                crate::widgets::weather_popover::build_weather_content_reactive().0
+            });
+            menu_handle.set_reuse_content(true);
+            Some(menu_handle)
+        } else {
+            None
+        };
 
         let service = WeatherService::global();
         let weather_callback_id = {
@@ -88,7 +102,7 @@ impl WeatherWidget {
             let label = label.clone();
             let show_icon = config.show_icon;
             let format = config.format.clone();
-            let menu_handle = Rc::clone(&menu_handle);
+            let menu_handle = menu_handle.clone();
 
             service.connect(move |snapshot: &WeatherSnapshot| {
                 update_weather_widget(
@@ -100,7 +114,9 @@ impl WeatherWidget {
                     is_vertical,
                     snapshot,
                 );
-                menu_handle.refresh_if_visible();
+                if let Some(menu_handle) = menu_handle.as_ref() {
+                    menu_handle.refresh_if_visible();
+                }
             })
         };
 

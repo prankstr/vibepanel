@@ -57,6 +57,7 @@ pub mod quick_settings;
 pub use base::BaseWidget;
 pub(crate) use base::{MenuHandle, RippleHandle, trigger_ripple_from_gesture};
 pub use battery::{BatteryConfig, BatteryWidget};
+pub(crate) use clock::CalendarWeatherPopoverBinding;
 pub use clock::{ClockConfig, ClockWidget};
 pub use media::{MediaConfig, MediaWidget};
 pub use notifications::{NotificationsConfig, NotificationsWidget};
@@ -104,6 +105,7 @@ pub(crate) struct EdgeInteraction {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PopoverKind {
     System,
+    CalendarWeather,
     /// Widget has no popover or its popover is not mergeable.
     Unmergeable,
 }
@@ -112,6 +114,7 @@ pub(crate) enum PopoverKind {
 pub(crate) fn popover_kind_for(widget_name: &str) -> PopoverKind {
     match widget_name {
         "cpu" | "memory" | "gpu" | "network_speed" => PopoverKind::System,
+        "clock" | "weather" => PopoverKind::CalendarWeather,
         _ => PopoverKind::Unmergeable,
     }
 }
@@ -416,17 +419,7 @@ impl WidgetFactory {
                 let root = network.widget().clone().upcast::<Widget>();
                 Some(BuiltWidget::new(root, network))
             }
-            "spacer" => {
-                let cfg = SpacerConfig::from_entry(entry);
-                let spacer = SpacerWidget::new(cfg);
-                let widget = spacer.widget().clone();
-                // Passive spacers inside merge groups need the same structural
-                // classes as other passive widgets so margin / hover rules apply.
-                widget.add_css_class(class::WIDGET_ITEM);
-                widget.add_css_class(class::PASSIVE);
-                let root = widget.upcast::<Widget>();
-                Some(BuiltWidget::new(root, spacer))
-            }
+            "spacer" => Self::build_passive_spacer(entry),
             name => {
                 warn!(
                     "build_passive called for unsupported widget type: '{}'",
@@ -435,6 +428,44 @@ impl WidgetFactory {
                 None
             }
         }
+    }
+
+    /// Build a clock/weather widget in passive mode for a calendar/weather merge group.
+    pub(crate) fn build_calendar_weather_passive(entry: &WidgetEntry) -> Option<BuiltWidget> {
+        match entry.name.as_str() {
+            "clock" => {
+                let cfg = ClockConfig::from_entry(entry);
+                let clock = ClockWidget::new_passive(cfg);
+                let root = clock.widget().clone().upcast::<Widget>();
+                Some(BuiltWidget::new(root, clock))
+            }
+            "weather" => {
+                let cfg = WeatherConfig::from_entry(entry);
+                let weather = WeatherWidget::new_passive(cfg);
+                let root = weather.widget().clone().upcast::<Widget>();
+                Some(BuiltWidget::new(root, weather))
+            }
+            "spacer" => Self::build_passive_spacer(entry),
+            name => {
+                warn!(
+                    "build_calendar_weather_passive called for unsupported widget type: '{}'",
+                    name
+                );
+                None
+            }
+        }
+    }
+
+    fn build_passive_spacer(entry: &WidgetEntry) -> Option<BuiltWidget> {
+        let cfg = SpacerConfig::from_entry(entry);
+        let spacer = SpacerWidget::new(cfg);
+        let widget = spacer.widget().clone();
+        // Passive spacers inside merge groups need the same structural classes
+        // as other passive widgets so margin / hover rules apply.
+        widget.add_css_class(class::WIDGET_ITEM);
+        widget.add_css_class(class::PASSIVE);
+        let root = widget.upcast::<Widget>();
+        Some(BuiltWidget::new(root, spacer))
     }
 }
 
@@ -486,7 +517,8 @@ mod tests {
 
     #[test]
     fn popover_kind_non_system_widgets() {
-        assert_eq!(popover_kind_for("clock"), PopoverKind::Unmergeable);
+        assert_eq!(popover_kind_for("clock"), PopoverKind::CalendarWeather);
+        assert_eq!(popover_kind_for("weather"), PopoverKind::CalendarWeather);
         assert_eq!(popover_kind_for("battery"), PopoverKind::Unmergeable);
         assert_eq!(popover_kind_for("media"), PopoverKind::Unmergeable);
         assert_eq!(popover_kind_for("unknown"), PopoverKind::Unmergeable);

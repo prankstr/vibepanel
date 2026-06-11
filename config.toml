@@ -40,6 +40,8 @@ background_opacity = 1.0
 #   [widgets.clock]
 #   format = "%H:%M"
 #   show_weather = true # Embed weather content in the clock/calendar popover
+#   # When "clock" and "weather" are in the same explicit group, they merge
+#   # into one calendar/weather button unless show_weather = false is set.
 #   outline_color = "accent"  # Per-widget outline color: "subtle" | "accent" | "foreground" | "#rrggbb"
 #
 #   [widgets.battery]
