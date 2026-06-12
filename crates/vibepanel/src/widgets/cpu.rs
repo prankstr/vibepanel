@@ -26,6 +26,7 @@ use crate::widgets::{WidgetConfig, warn_unknown_options};
 /// Default configuration values
 const DEFAULT_SHOW_ICON: bool = true;
 const DEFAULT_SHOW_PERCENTAGE: bool = true;
+const DEFAULT_RESERVE_WIDTH: bool = true;
 
 /// CPU display format options.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -62,11 +63,17 @@ pub struct CpuConfig {
     pub show_percentage: bool,
     /// Display format for CPU metrics.
     pub format: CpuFormat,
+    /// Reserve label width for common metric values to reduce layout jitter.
+    pub reserve_width: bool,
 }
 
 impl WidgetConfig for CpuConfig {
     fn from_entry(entry: &WidgetEntry) -> Self {
-        warn_unknown_options("cpu", entry, &["show_icon", "show_percentage", "format"]);
+        warn_unknown_options(
+            "cpu",
+            entry,
+            &["show_icon", "show_percentage", "format", "reserve_width"],
+        );
 
         let show_icon = entry
             .options
@@ -87,10 +94,17 @@ impl WidgetConfig for CpuConfig {
             .map(CpuFormat::from_str)
             .unwrap_or_default();
 
+        let reserve_width = entry
+            .options
+            .get("reserve_width")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(DEFAULT_RESERVE_WIDTH);
+
         Self {
             show_icon,
             show_percentage,
             format,
+            reserve_width,
         }
     }
 }
@@ -101,6 +115,7 @@ impl Default for CpuConfig {
             show_icon: DEFAULT_SHOW_ICON,
             show_percentage: DEFAULT_SHOW_PERCENTAGE,
             format: CpuFormat::default(),
+            reserve_width: DEFAULT_RESERVE_WIDTH,
         }
     }
 }
@@ -134,7 +149,13 @@ impl CpuWidget {
 
         let icon_handle = base.add_icon("cpu-symbolic", &[widget::CPU_ICON]);
 
+        let is_vertical = ConfigManager::global().bar_position().is_vertical();
         let percentage_label = base.add_label(None, &[widget::CPU_LABEL, class::VCENTER_CAPS]);
+        if let Some(width_chars) =
+            cpu_label_width(&config.format, config.reserve_width, is_vertical)
+        {
+            percentage_label.set_width_chars(width_chars);
+        }
 
         icon_handle.widget().set_visible(config.show_icon);
         percentage_label.set_visible(config.show_percentage);
@@ -147,7 +168,6 @@ impl CpuWidget {
             let show_icon = config.show_icon;
             let show_percentage = config.show_percentage;
             let format = config.format.clone();
-            let is_vertical = ConfigManager::global().bar_position().is_vertical();
             let popover_binding = popover_binding.clone();
 
             system_service.connect(move |snapshot: &SystemSnapshot| {
@@ -179,6 +199,21 @@ impl CpuWidget {
     pub(crate) fn edge_interaction(&self) -> Option<crate::widgets::EdgeInteraction> {
         self.base.edge_interaction()
     }
+}
+
+fn cpu_label_width(format: &CpuFormat, reserve_width: bool, is_vertical: bool) -> Option<i32> {
+    if !reserve_width {
+        return None;
+    }
+
+    Some(match (format, is_vertical) {
+        (CpuFormat::Usage, false) => 3,       // 99%
+        (CpuFormat::Usage, true) => 2,        // 99
+        (CpuFormat::Temperature, false) => 4, // 99°C
+        (CpuFormat::Temperature, true) => 3,  // 99°
+        (CpuFormat::Both, false) => 8,        // 99% 99°C
+        (CpuFormat::Both, true) => 3,         // widest line: 99°
+    })
 }
 
 impl Drop for CpuWidget {
@@ -288,6 +323,7 @@ mod tests {
         assert!(config.show_icon);
         assert!(config.show_percentage);
         assert_eq!(config.format, CpuFormat::Usage);
+        assert!(config.reserve_width);
     }
 
     #[test]
@@ -295,6 +331,7 @@ mod tests {
         let mut options = std::collections::HashMap::new();
         options.insert("show_icon".to_string(), toml::Value::Boolean(false));
         options.insert("show_percentage".to_string(), toml::Value::Boolean(true));
+        options.insert("reserve_width".to_string(), toml::Value::Boolean(false));
         options.insert(
             "format".to_string(),
             toml::Value::String("both".to_string()),
@@ -308,6 +345,7 @@ mod tests {
         assert!(!config.show_icon);
         assert!(config.show_percentage);
         assert_eq!(config.format, CpuFormat::Both);
+        assert!(!config.reserve_width);
     }
 
     #[test]

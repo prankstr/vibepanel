@@ -25,6 +25,7 @@ use crate::widgets::{WidgetConfig, warn_unknown_options};
 
 /// Default configuration values
 const DEFAULT_SHOW_ICON: bool = true;
+const DEFAULT_RESERVE_WIDTH: bool = true;
 
 /// Memory display format options.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -56,11 +57,13 @@ pub struct MemoryConfig {
     pub show_icon: bool,
     /// Display format for memory usage.
     pub format: MemoryFormat,
+    /// Reserve label width for common metric values to reduce layout jitter.
+    pub reserve_width: bool,
 }
 
 impl WidgetConfig for MemoryConfig {
     fn from_entry(entry: &WidgetEntry) -> Self {
-        warn_unknown_options("memory", entry, &["show_icon", "format"]);
+        warn_unknown_options("memory", entry, &["show_icon", "format", "reserve_width"]);
 
         let show_icon = entry
             .options
@@ -75,7 +78,17 @@ impl WidgetConfig for MemoryConfig {
             .map(MemoryFormat::from_str)
             .unwrap_or_default();
 
-        Self { show_icon, format }
+        let reserve_width = entry
+            .options
+            .get("reserve_width")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(DEFAULT_RESERVE_WIDTH);
+
+        Self {
+            show_icon,
+            format,
+            reserve_width,
+        }
     }
 }
 
@@ -84,6 +97,7 @@ impl Default for MemoryConfig {
         Self {
             show_icon: DEFAULT_SHOW_ICON,
             format: MemoryFormat::default(),
+            reserve_width: DEFAULT_RESERVE_WIDTH,
         }
     }
 }
@@ -121,7 +135,13 @@ impl MemoryWidget {
 
         let icon_handle = base.add_icon("ram-symbolic", &[widget::MEMORY_ICON]);
 
+        let is_vertical = ConfigManager::global().bar_position().is_vertical();
         let memory_label = base.add_label(None, &[widget::MEMORY_LABEL, class::VCENTER_CAPS]);
+        if let Some(width_chars) =
+            memory_label_width(&config.format, config.reserve_width, is_vertical)
+        {
+            memory_label.set_width_chars(width_chars);
+        }
 
         icon_handle.widget().set_visible(config.show_icon);
 
@@ -132,7 +152,6 @@ impl MemoryWidget {
             let memory_label = memory_label.clone();
             let show_icon = config.show_icon;
             let format = config.format.clone();
-            let is_vertical = ConfigManager::global().bar_position().is_vertical();
             let popover_binding = popover_binding.clone();
 
             system_service.connect(move |snapshot: &SystemSnapshot| {
@@ -164,6 +183,23 @@ impl MemoryWidget {
     pub(crate) fn edge_interaction(&self) -> Option<crate::widgets::EdgeInteraction> {
         self.base.edge_interaction()
     }
+}
+
+fn memory_label_width(
+    format: &MemoryFormat,
+    reserve_width: bool,
+    is_vertical: bool,
+) -> Option<i32> {
+    if !reserve_width {
+        return None;
+    }
+
+    Some(match (format, is_vertical) {
+        (_, true) => 2, // vertical mode always renders percentage without %
+        (MemoryFormat::Percentage, _) => 3, // 99%
+        (MemoryFormat::Absolute, _) => 4, // 8.2G / 999M
+        (MemoryFormat::Both, _) => 9, // 8.2/16.0G
+    })
 }
 
 impl Drop for MemoryWidget {
@@ -252,12 +288,14 @@ mod tests {
         let config = MemoryConfig::from_entry(&entry);
         assert!(config.show_icon);
         assert_eq!(config.format, MemoryFormat::Percentage);
+        assert!(config.reserve_width);
     }
 
     #[test]
     fn test_memory_config_custom() {
         let mut options = std::collections::HashMap::new();
         options.insert("show_icon".to_string(), toml::Value::Boolean(false));
+        options.insert("reserve_width".to_string(), toml::Value::Boolean(false));
         options.insert(
             "format".to_string(),
             toml::Value::String("absolute".to_string()),
@@ -270,6 +308,7 @@ mod tests {
         let config = MemoryConfig::from_entry(&entry);
         assert!(!config.show_icon);
         assert_eq!(config.format, MemoryFormat::Absolute);
+        assert!(!config.reserve_width);
     }
 
     #[test]
