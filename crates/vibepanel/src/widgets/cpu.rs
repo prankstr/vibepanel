@@ -26,7 +26,7 @@ use crate::widgets::{WidgetConfig, warn_unknown_options};
 /// Default configuration values
 const DEFAULT_SHOW_ICON: bool = true;
 const DEFAULT_SHOW_PERCENTAGE: bool = true;
-const DEFAULT_RESERVE_WIDTH: bool = true;
+const DEFAULT_STABLE_WIDTH: bool = true;
 
 /// CPU display format options.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -63,8 +63,8 @@ pub struct CpuConfig {
     pub show_percentage: bool,
     /// Display format for CPU metrics.
     pub format: CpuFormat,
-    /// Reserve label width for common metric values to reduce layout jitter.
-    pub reserve_width: bool,
+    /// Stabilize label width for common metric values to reduce layout jitter.
+    pub stable_width: bool,
 }
 
 impl WidgetConfig for CpuConfig {
@@ -72,7 +72,7 @@ impl WidgetConfig for CpuConfig {
         warn_unknown_options(
             "cpu",
             entry,
-            &["show_icon", "show_percentage", "format", "reserve_width"],
+            &["show_icon", "show_percentage", "format", "stable_width"],
         );
 
         let show_icon = entry
@@ -94,17 +94,17 @@ impl WidgetConfig for CpuConfig {
             .map(CpuFormat::from_str)
             .unwrap_or_default();
 
-        let reserve_width = entry
+        let stable_width = entry
             .options
-            .get("reserve_width")
+            .get("stable_width")
             .and_then(|v| v.as_bool())
-            .unwrap_or(DEFAULT_RESERVE_WIDTH);
+            .unwrap_or(DEFAULT_STABLE_WIDTH);
 
         Self {
             show_icon,
             show_percentage,
             format,
-            reserve_width,
+            stable_width,
         }
     }
 }
@@ -115,7 +115,7 @@ impl Default for CpuConfig {
             show_icon: DEFAULT_SHOW_ICON,
             show_percentage: DEFAULT_SHOW_PERCENTAGE,
             format: CpuFormat::default(),
-            reserve_width: DEFAULT_RESERVE_WIDTH,
+            stable_width: DEFAULT_STABLE_WIDTH,
         }
     }
 }
@@ -151,8 +151,7 @@ impl CpuWidget {
 
         let is_vertical = ConfigManager::global().bar_position().is_vertical();
         let percentage_label = base.add_label(None, &[widget::CPU_LABEL, class::VCENTER_CAPS]);
-        if let Some(width_chars) =
-            cpu_label_width(&config.format, config.reserve_width, is_vertical)
+        if let Some(width_chars) = cpu_label_width(&config.format, config.stable_width, is_vertical)
         {
             percentage_label.set_width_chars(width_chars);
         }
@@ -201,8 +200,8 @@ impl CpuWidget {
     }
 }
 
-fn cpu_label_width(format: &CpuFormat, reserve_width: bool, is_vertical: bool) -> Option<i32> {
-    if !reserve_width {
+fn cpu_label_width(format: &CpuFormat, stable_width: bool, is_vertical: bool) -> Option<i32> {
+    if !stable_width {
         return None;
     }
 
@@ -323,7 +322,7 @@ mod tests {
         assert!(config.show_icon);
         assert!(config.show_percentage);
         assert_eq!(config.format, CpuFormat::Usage);
-        assert!(config.reserve_width);
+        assert!(config.stable_width);
     }
 
     #[test]
@@ -331,7 +330,7 @@ mod tests {
         let mut options = std::collections::HashMap::new();
         options.insert("show_icon".to_string(), toml::Value::Boolean(false));
         options.insert("show_percentage".to_string(), toml::Value::Boolean(true));
-        options.insert("reserve_width".to_string(), toml::Value::Boolean(false));
+        options.insert("stable_width".to_string(), toml::Value::Boolean(false));
         options.insert(
             "format".to_string(),
             toml::Value::String("both".to_string()),
@@ -345,7 +344,7 @@ mod tests {
         assert!(!config.show_icon);
         assert!(config.show_percentage);
         assert_eq!(config.format, CpuFormat::Both);
-        assert!(!config.reserve_width);
+        assert!(!config.stable_width);
     }
 
     #[test]

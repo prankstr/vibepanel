@@ -58,7 +58,7 @@ background_opacity = 1.0
 #   visualizer = true  # Enable/disable cava audio visualizer (default: true)
 #
 #   [widgets.cpu]
-#   reserve_width = false # Disable reserved width for changing metric labels
+#   stable_width = false # Disable width stabilization; default stabilizes common 2-digit metric values
 #   # Also supported by [widgets.memory] and [widgets.gpu]
 #
 #   [widgets.notifications]
