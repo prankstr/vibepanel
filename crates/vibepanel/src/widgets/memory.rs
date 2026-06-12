@@ -193,8 +193,8 @@ fn memory_label_width(format: &MemoryFormat, stable_width: bool, is_vertical: bo
     Some(match (format, is_vertical) {
         (_, true) => 2, // vertical mode always renders percentage without %
         (MemoryFormat::Percentage, _) => 3, // 99%
-        (MemoryFormat::Absolute, _) => 4, // 8.2G / 999M
-        (MemoryFormat::Both, _) => 9, // 8.2/16.0G
+        (MemoryFormat::Absolute, _) => 5, // 10.0G / 999M
+        (MemoryFormat::Both, _) => 10, // 10.0/16.0G
     })
 }
 
@@ -213,11 +213,12 @@ fn format_memory(snapshot: &SystemSnapshot, format: &MemoryFormat, is_vertical: 
     match format {
         MemoryFormat::Percentage => format!("{:.0}%", snapshot.memory_percent),
         MemoryFormat::Absolute => format_bytes(snapshot.memory_used),
-        MemoryFormat::Both => format!(
-            "{}/{}",
-            format_bytes(snapshot.memory_used),
-            format_bytes(snapshot.memory_total)
-        ),
+        MemoryFormat::Both => {
+            let used = format_bytes(snapshot.memory_used);
+            let total = format_bytes(snapshot.memory_total);
+            let used_without_unit = used.trim_end_matches(|c: char| c.is_ascii_alphabetic());
+            format!("{used_without_unit}/{total}")
+        }
     }
 }
 
@@ -347,5 +348,44 @@ mod tests {
             "76"
         );
         assert_eq!(format_memory(&snapshot, &MemoryFormat::Both, true), "76");
+    }
+
+    #[test]
+    fn test_format_memory_both_shows_unit_once() {
+        let snapshot = SystemSnapshot {
+            available: true,
+            memory_percent: 62.5,
+            memory_used: 10 * 1024 * 1024 * 1024,
+            memory_total: 16 * 1024 * 1024 * 1024,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            format_memory(&snapshot, &MemoryFormat::Both, false),
+            "10.0/16.0G"
+        );
+    }
+
+    #[test]
+    fn test_memory_label_width_covers_two_digit_gib() {
+        let snapshot = SystemSnapshot {
+            available: true,
+            memory_percent: 62.5,
+            memory_used: 10 * 1024 * 1024 * 1024,
+            memory_total: 16 * 1024 * 1024 * 1024,
+            ..Default::default()
+        };
+
+        let absolute = format_memory(&snapshot, &MemoryFormat::Absolute, false);
+        let both = format_memory(&snapshot, &MemoryFormat::Both, false);
+
+        assert!(
+            absolute.chars().count()
+                <= memory_label_width(&MemoryFormat::Absolute, true, false).unwrap() as usize
+        );
+        assert!(
+            both.chars().count()
+                <= memory_label_width(&MemoryFormat::Both, true, false).unwrap() as usize
+        );
     }
 }
