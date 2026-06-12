@@ -152,19 +152,28 @@ pub struct LinearAllocation {
 /// * `interior` - Total usable width (after edge margins)
 /// * `spacing` - Gap between left and right sections
 /// * `left` - Size requirements for left section (None if not present)
+/// * `left_expand` - Whether left section should expand to fill available space
 /// * `right` - Size requirements for right section (None if not present)
+/// * `right_expand` - Whether right section should expand to fill available space
 pub fn compute_linear_allocation(
     interior: i32,
     spacing: i32,
     left: Option<SectionSizes>,
+    left_expand: bool,
     right: Option<SectionSizes>,
+    right_expand: bool,
 ) -> LinearAllocation {
     let (left_min, left_nat) = left.map_or((0, 0), |s| (s.min, s.natural));
     let (right_min, right_nat) = right.map_or((0, 0), |s| (s.min, s.natural));
 
-    let (left_width, right_width) = match (left.is_some(), right.is_some()) {
+    let available = match (left.is_some(), right.is_some()) {
+        (true, true) => (interior - spacing).max(0),
+        (true, false) | (false, true) => interior.max(0),
+        (false, false) => 0,
+    };
+
+    let (mut left_width, mut right_width) = match (left.is_some(), right.is_some()) {
         (true, true) => {
-            let available = (interior - spacing).max(0);
             let total_natural = left_nat + right_nat;
             if total_natural <= available {
                 (left_nat, right_nat)
@@ -175,15 +184,30 @@ pub fn compute_linear_allocation(
             }
         }
         (true, false) => {
-            let lw = clamp_width(interior, left_min, left_nat);
+            let lw = clamp_width(available, left_min, left_nat);
             (lw, 0)
         }
         (false, true) => {
-            let rw = clamp_width(interior, right_min, right_nat);
+            let rw = clamp_width(available, right_min, right_nat);
             (0, rw)
         }
         (false, false) => (0, 0),
     };
+
+    let extra = (available - left_width - right_width).max(0);
+    match (
+        left.is_some() && left_expand,
+        right.is_some() && right_expand,
+    ) {
+        (true, true) => {
+            let left_extra = extra / 2;
+            left_width += left_extra;
+            right_width += extra - left_extra;
+        }
+        (true, false) => left_width += extra,
+        (false, true) => right_width += extra,
+        (false, false) => {}
+    }
 
     LinearAllocation {
         left_x: 0,
@@ -409,10 +433,12 @@ mod tests {
                 min: 50,
                 natural: 100,
             }),
+            false,
             Some(SectionSizes {
                 min: 50,
                 natural: 100,
             }),
+            false,
         );
 
         assert_eq!(alloc.right_width, 100);
@@ -430,10 +456,12 @@ mod tests {
                 min: 50,
                 natural: 300,
             }),
+            false,
             Some(SectionSizes {
                 min: 50,
                 natural: 100,
             }),
+            false,
         );
 
         assert_eq!(alloc.right_width, 100);
@@ -451,7 +479,9 @@ mod tests {
                 min: 50,
                 natural: 100,
             }),
+            false,
             None,
+            false,
         );
 
         assert_eq!(alloc.left_width, 100);
@@ -465,10 +495,12 @@ mod tests {
             400,
             8,
             None,
+            false,
             Some(SectionSizes {
                 min: 50,
                 natural: 100,
             }),
+            false,
         );
 
         assert_eq!(alloc.left_width, 0);
@@ -485,10 +517,12 @@ mod tests {
                 min: 50,
                 natural: 100,
             }),
+            false,
             Some(SectionSizes {
                 min: 50,
                 natural: 100,
             }),
+            false,
         );
 
         assert_eq!(alloc.right_width, 100);
@@ -497,9 +531,85 @@ mod tests {
 
     #[test]
     fn test_linear_empty() {
-        let alloc = compute_linear_allocation(400, 8, None, None);
+        let alloc = compute_linear_allocation(400, 8, None, false, None, false);
 
         assert_eq!(alloc.left_width, 0);
         assert_eq!(alloc.right_width, 0);
+    }
+
+    #[test]
+    fn test_linear_right_expand_fills_remaining_space() {
+        let alloc = compute_linear_allocation(
+            400,
+            8,
+            Some(SectionSizes {
+                min: 50,
+                natural: 100,
+            }),
+            false,
+            Some(SectionSizes { min: 0, natural: 0 }),
+            true,
+        );
+
+        assert_eq!(alloc.left_width, 100);
+        assert_eq!(alloc.right_width, 292);
+        assert_eq!(alloc.right_x, 108);
+    }
+
+    #[test]
+    fn test_linear_left_expand_fills_remaining_space() {
+        let alloc = compute_linear_allocation(
+            400,
+            8,
+            Some(SectionSizes { min: 0, natural: 0 }),
+            true,
+            Some(SectionSizes {
+                min: 50,
+                natural: 100,
+            }),
+            false,
+        );
+
+        assert_eq!(alloc.left_width, 292);
+        assert_eq!(alloc.right_width, 100);
+        assert_eq!(alloc.right_x, 300);
+    }
+
+    #[test]
+    fn test_linear_both_expand_share_remaining_space() {
+        let alloc = compute_linear_allocation(
+            400,
+            8,
+            Some(SectionSizes {
+                min: 50,
+                natural: 100,
+            }),
+            true,
+            Some(SectionSizes {
+                min: 50,
+                natural: 100,
+            }),
+            true,
+        );
+
+        assert_eq!(alloc.left_width, 196);
+        assert_eq!(alloc.right_width, 196);
+        assert_eq!(alloc.right_x, 204);
+    }
+
+    #[test]
+    fn test_linear_single_expander_fills_section() {
+        let alloc = compute_linear_allocation(
+            400,
+            8,
+            None,
+            false,
+            Some(SectionSizes { min: 0, natural: 0 }),
+            true,
+        );
+
+        assert_eq!(alloc.left_width, 0);
+        assert_eq!(alloc.right_width, 400);
+        assert_eq!(alloc.right_x, 0);
     }
 }

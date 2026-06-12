@@ -179,7 +179,9 @@ mod imp {
                     interior,
                     spacing,
                     measure_section(left.as_ref(), orientation),
+                    self.left_expand.get(),
                     measure_section(right.as_ref(), orientation),
+                    self.right_expand.get(),
                 );
 
                 // Record last allocation for snapshot/clipping

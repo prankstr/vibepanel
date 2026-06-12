@@ -1436,6 +1436,23 @@ fn run_test_widgets_grouping_spacer_does_not_expand_sibling_group() {
     );
 }
 
+fn run_test_widgets_empty_center_spacer_expands_side_section() {
+    let mut config = config_with_quick_settings_group();
+    config.widgets.right.insert(
+        0,
+        vibepanel_core::config::WidgetPlacement::Group {
+            group: vec!["clock".to_string(), "spacer".to_string()],
+        },
+    );
+
+    let widths = right_section_child_widths(&config);
+    assert_eq!(widths.len(), 2);
+    assert!(
+        widths.iter().sum::<i32>() > 300,
+        "with no center section, a bare spacer should still expand the side section"
+    );
+}
+
 fn run_test_widgets_grouping_spacing_contract() {
     let mut config = test_config();
     config.bar.spacing = 18;
@@ -2457,6 +2474,11 @@ ui_regression_config_tests!(
         test_ui_regression_widgets_grouping_spacer_does_not_expand_sibling_group,
         "widgets.grouping.spacer-does-not-expand-sibling-group",
         run_test_widgets_grouping_spacer_does_not_expand_sibling_group
+    ),
+    (
+        test_ui_regression_widgets_empty_center_spacer_expands_side_section,
+        "widgets.empty-center-spacer-expands-side-section",
+        run_test_widgets_empty_center_spacer_expands_side_section
     ),
     (
         test_ui_regression_widgets_grouping_spacing,
