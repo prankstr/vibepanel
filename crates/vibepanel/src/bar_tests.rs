@@ -872,3 +872,38 @@ fn find_user_css_finds_existing_file() {
 
     assert_eq!(found, Some(style_path));
 }
+
+fn entry_with_width(name: &str, width: Option<toml::Value>) -> WidgetEntry {
+    let mut entry = WidgetEntry::new(name);
+    if let Some(value) = width {
+        entry.options.insert("width".to_string(), value);
+    }
+    entry
+}
+
+#[test]
+fn entry_has_fixed_width_option_matches_spacer_config_parsing() {
+    let positive = entry_with_width("spacer", Some(toml::Value::Integer(50)));
+    assert!(
+        entry_has_fixed_width_option(&positive),
+        "positive integer width must count as fixed"
+    );
+
+    let flexible = entry_with_width("spacer", None);
+    assert!(
+        !entry_has_fixed_width_option(&flexible),
+        "missing width must count as flexible"
+    );
+
+    let invalid_string = entry_with_width("spacer", Some(toml::Value::String("oops".to_string())));
+    assert!(
+        !entry_has_fixed_width_option(&invalid_string),
+        "non-integer width must count as flexible, matching SpacerConfig::from_entry"
+    );
+
+    let negative = entry_with_width("spacer", Some(toml::Value::Integer(-5)));
+    assert!(
+        !entry_has_fixed_width_option(&negative),
+        "negative width must count as flexible, matching SpacerConfig::from_entry"
+    );
+}

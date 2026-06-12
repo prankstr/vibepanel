@@ -769,6 +769,21 @@ fn collect_island_bounds(
     result
 }
 
+/// Return true when a resolved entry's `width` option is a positive
+/// integer, mirroring `SpacerConfig::from_entry`.
+///
+/// Invalid or non-integer `width` values fall through to the flexible
+/// branch, keeping group expansion policy in sync with what the spacer
+/// widget itself does at build time.
+fn entry_has_fixed_width_option(entry: &WidgetEntry) -> bool {
+    entry
+        .options
+        .get("width")
+        .and_then(|v| v.as_integer())
+        .and_then(|n| u32::try_from(n).ok())
+        .is_some()
+}
+
 /// Build a single widget or a group of widgets sharing one island.
 ///
 /// Returns the number of widgets built (for counting purposes).
@@ -798,9 +813,18 @@ fn build_widget_or_group(
                 return 0;
             }
 
+            let group_has_flexible_spacer = group
+                .iter()
+                .any(|entry| entry.name == "spacer" && !entry_has_fixed_width_option(entry));
+
             // Create a shared island container for the group
             let island = gtk4::Box::new(orientation, 0);
             island.add_css_class(class::WIDGET_WRAPPER);
+            if orientation == gtk4::Orientation::Vertical {
+                island.set_vexpand(group_has_flexible_spacer);
+            } else {
+                island.set_hexpand(group_has_flexible_spacer);
+            }
 
             // Create inner content box (matching BaseWidget structure)
             let content = gtk4::Box::new(orientation, 0);
