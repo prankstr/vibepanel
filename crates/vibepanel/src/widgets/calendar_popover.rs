@@ -300,10 +300,11 @@ pub fn build_clock_calendar_popover(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::styles::weather_popover as wp;
     use crate::ui_regression_test_support::{find_descendant_with_class, init_gtk_or_skip};
 
     #[test]
-    fn clock_calendar_week_number_header_tracks_config() {
+    fn clock_calendar_popover_tracks_config() {
         if !init_gtk_or_skip("clock calendar popover test", None) {
             return;
         }
@@ -321,5 +322,14 @@ mod tests {
             find_descendant_with_class(&without_week_numbers, "week-number-header").is_none(),
             "calendar popover should omit the week-number header when week numbers are disabled"
         );
+
+        let (without_weather, _refresh, weather_refresh) =
+            build_clock_calendar_popover(false, false);
+        assert!(weather_refresh.is_none());
+        assert!(find_descendant_with_class(&without_weather, wp::EMPTY).is_none());
+
+        let (with_weather, _refresh, weather_refresh) = build_clock_calendar_popover(false, true);
+        assert!(weather_refresh.is_some());
+        assert!(find_descendant_with_class(&with_weather, wp::EMPTY).is_some());
     }
 }

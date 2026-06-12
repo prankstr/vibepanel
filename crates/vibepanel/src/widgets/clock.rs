@@ -117,8 +117,12 @@ pub(crate) struct CalendarWeatherPopoverBinding {
 }
 
 impl CalendarWeatherPopoverBinding {
-    pub(crate) fn new_for_menu(menu_handle: &Rc<MenuHandle>, show_week_numbers: bool) -> Self {
-        let weather_callback_id = wire_clock_popover(menu_handle, show_week_numbers, true);
+    pub(crate) fn new_for_menu(
+        menu_handle: &Rc<MenuHandle>,
+        show_week_numbers: bool,
+        show_weather: bool,
+    ) -> Self {
+        let weather_callback_id = wire_clock_popover(menu_handle, show_week_numbers, show_weather);
         Self {
             weather_callback_id,
         }

@@ -840,6 +840,7 @@ fn build_widget_or_group(
             // on_click_right / on_click_middle commands aren't silently lost.
             // Spacers are tracked as MergeKind::Spacer so they can be absorbed
             // into adjacent runs rather than breaking merges.
+            let group_has_weather = group.iter().any(|e| e.name == "weather");
             let kinds: Vec<MergeKind> = group
                 .iter()
                 .map(|e| {
@@ -848,7 +849,8 @@ fn build_widget_or_group(
                     } else {
                         let (right, middle) = ConfigManager::global().get_click_handlers(&e.name);
                         let has_custom_click = right.is_some() || middle.is_some();
-                        let clock_weather_opt_out = e.name == "clock"
+                        let clock_weather_opt_out = group_has_weather
+                            && e.name == "clock"
                             && e.options.get("show_weather").and_then(|v| v.as_bool())
                                 == Some(false);
                         if has_custom_click || clock_weather_opt_out {
@@ -909,11 +911,11 @@ fn build_widget_or_group(
                 let run_entries = &group[*start..*end];
                 let run_len = end - start;
                 let real_in_run = run_entries.iter().filter(|e| e.name != "spacer").count();
+                let run_has_clock = run_entries.iter().any(|e| e.name == "clock");
+                let supports_merge = *kind != PopoverKind::Unmergeable
+                    && (*kind != PopoverKind::CalendarWeather || run_has_clock);
 
-                if run_len >= 2
-                    && *kind != PopoverKind::Unmergeable
-                    && (real_in_run >= 2 || total_real == 1)
-                {
+                if run_len >= 2 && supports_merge && (real_in_run >= 2 || total_real == 1) {
                     let merged = build_merge_group(
                         run_entries,
                         *kind,
@@ -1095,7 +1097,10 @@ fn build_merge_group(
     wrapper.add_overlay(&ripple_clip);
     wrapper.set_measure_overlay(&ripple_clip, true);
 
-    let widget_name = representative.name.clone();
+    let widget_name = match kind {
+        PopoverKind::CalendarWeather => "clock".to_string(),
+        _ => representative.name.clone(),
+    };
     let menu_handle = MenuHandle::new_placeholder(widget_name, wrapper.clone());
 
     // Primary click toggles the shared popover. Right/middle-click handlers
@@ -1142,9 +1147,12 @@ fn build_merge_group(
                     return 0;
                 };
                 let clock_config = ClockConfig::from_entry(clock_entry);
+                let has_weather_widget = entries.iter().any(|entry| entry.name == "weather");
+                let show_weather = has_weather_widget || clock_config.show_weather;
                 let binding = CalendarWeatherPopoverBinding::new_for_menu(
                     &menu_handle,
                     clock_config.show_week_numbers,
+                    show_weather,
                 );
                 let built_widgets = entries
                     .iter()
