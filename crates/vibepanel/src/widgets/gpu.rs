@@ -205,7 +205,7 @@ fn gpu_label_width(format: &GpuFormat, stable_width: bool, is_vertical: bool) ->
     }
 
     Some(match (format, is_vertical) {
-        (GpuFormat::Usage, false) => 4,       // 99% / Idle
+        (GpuFormat::Usage, false) => 3,       // 99%
         (GpuFormat::Usage, true) => 2,        // 99
         (GpuFormat::Temperature, false) => 4, // 99°C
         (GpuFormat::Temperature, true) => 3,  // 99°
@@ -383,6 +383,12 @@ mod tests {
         assert!(!config.show_icon);
         assert_eq!(config.format, GpuFormat::Temperature);
         assert!(!config.stable_width);
+    }
+
+    #[test]
+    fn test_gpu_label_width_usage_matches_percentage_width() {
+        assert_eq!(gpu_label_width(&GpuFormat::Usage, true, false), Some(3));
+        assert_eq!(gpu_label_width(&GpuFormat::Usage, false, false), None);
     }
 
     #[test]
