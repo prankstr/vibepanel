@@ -418,6 +418,7 @@ struct WidgetUpdateContext<'a> {
     status_icon: &'a Option<IconHandle>,
     player_icon: &'a Option<Image>,
     art_picture: &'a Option<RoundedPicture>,
+    art_fallback_icon: &'a Option<Image>,
     text_labels: &'a Vec<Rc<MarqueeLabel>>,
     controls: &'a Option<ControlsHandle>,
     template_elements: &'a [TemplateElement],
@@ -434,6 +435,7 @@ struct CallbackWidgetRefs {
     status_icon: Option<IconHandle>,
     player_icon: Option<Image>,
     art_picture: Option<RoundedPicture>,
+    art_fallback_icon: Option<Image>,
     text_labels: Vec<Rc<MarqueeLabel>>,
     controls: Option<ControlsHandle>,
     template_elements: Vec<TemplateElement>,
@@ -450,6 +452,7 @@ impl CallbackWidgetRefs {
             status_icon: &self.status_icon,
             player_icon: &self.player_icon,
             art_picture: &self.art_picture,
+            art_fallback_icon: &self.art_fallback_icon,
             text_labels: &self.text_labels,
             controls: &self.controls,
             template_elements: &self.template_elements,
@@ -550,6 +553,8 @@ impl MediaWidget {
         let template_elements = template_elements_for_orientation(&config.template, is_vertical);
 
         let mut art_picture: Option<RoundedPicture> = None;
+        let mut art_fallback_icon: Option<Image> = None;
+        let mut art_overlay: Option<Overlay> = None;
         let mut player_icon: Option<Image> = None;
         let mut status_icon: Option<IconHandle> = None;
         let mut controls: Option<ControlsHandle> = None;
@@ -566,9 +571,27 @@ impl MediaWidget {
             let picture = RoundedPicture::new();
             picture.set_pixel_size(art_size);
             picture.set_corner_radius(corner_radius);
-            picture.add_css_class(media::ART_SMALL);
             picture.set_visible(false);
+
+            // Fallback app icon (shown when no art): a live icon-theme `Image`
+            // resolves crisply at the bar's pixel size/scale, unlike a baked
+            // paintable upscaled inside RoundedPicture. See show_player_icon_in_art.
+            let fallback_icon = Image::new();
+            fallback_icon.set_pixel_size(art_size);
+            fallback_icon.set_visible(false);
+
+            // Overlay both in one slot, toggling visibility. The size-request
+            // stops the slot collapsing when only the overlay child is shown.
+            let overlay = Overlay::new();
+            overlay.add_css_class(media::ART_SMALL);
+            overlay.set_size_request(art_size, art_size);
+            overlay.set_child(Some(&picture));
+            overlay.add_overlay(&fallback_icon);
+            overlay.set_measure_overlay(&fallback_icon, true);
+
             art_picture = Some(picture);
+            art_fallback_icon = Some(fallback_icon);
+            art_overlay = Some(overlay);
         }
 
         if template_elements
@@ -637,8 +660,8 @@ impl MediaWidget {
                             }
                         }
                         WidgetToken::Art => {
-                            if let Some(picture) = &art_picture {
-                                base.content().append(picture);
+                            if let Some(overlay) = &art_overlay {
+                                base.content().append(overlay);
                             }
                         }
                         WidgetToken::PlayerIcon => {
@@ -867,6 +890,7 @@ impl MediaWidget {
             status_icon: status_icon.clone(),
             player_icon: player_icon.clone(),
             art_picture: art_picture.clone(),
+            art_fallback_icon: art_fallback_icon.clone(),
             text_labels,
             controls: controls.clone(),
             template_elements,
@@ -886,6 +910,7 @@ impl MediaWidget {
             widget_refs.status_icon.as_ref(),
             widget_refs.player_icon.as_ref(),
             widget_refs.art_picture.as_ref(),
+            widget_refs.art_fallback_icon.as_ref(),
             widget_refs.controls.as_ref(),
         );
 
@@ -947,6 +972,7 @@ impl Drop for MediaWidget {
 }
 
 /// Actually hide the media bar widget (called from timeout or startup).
+#[allow(clippy::too_many_arguments)]
 fn perform_hide(
     container: &gtk4::Box,
     text_labels: &[Rc<MarqueeLabel>],
@@ -954,6 +980,7 @@ fn perform_hide(
     status_icon: Option<&IconHandle>,
     player_icon: Option<&Image>,
     art_picture: Option<&RoundedPicture>,
+    art_fallback_icon: Option<&Image>,
     controls: Option<&ControlsHandle>,
 ) {
     if empty_text.is_empty() {
@@ -976,6 +1003,9 @@ fn perform_hide(
         }
         if let Some(image) = art_picture {
             image.set_visible(false);
+        }
+        if let Some(icon) = art_fallback_icon {
+            icon.set_visible(false);
         }
         if let Some(ctrl) = controls {
             ctrl.container.set_visible(false);
@@ -1024,6 +1054,7 @@ fn update_widgets_from_snapshot_impl(ctx: &WidgetUpdateContext<'_>, snapshot: &M
         let status_icon = ctx.status_icon.clone();
         let player_icon = ctx.player_icon.clone();
         let art_picture = ctx.art_picture.clone();
+        let art_fallback_icon = ctx.art_fallback_icon.clone();
         let controls = ctx.controls.clone();
         let bar_viz = ctx.bar_visualizer.clone();
 
@@ -1047,6 +1078,7 @@ fn update_widgets_from_snapshot_impl(ctx: &WidgetUpdateContext<'_>, snapshot: &M
                     status_icon.as_ref(),
                     player_icon.as_ref(),
                     art_picture.as_ref(),
+                    art_fallback_icon.as_ref(),
                     controls.as_ref(),
                 );
             });
@@ -1133,9 +1165,8 @@ fn update_widgets_from_snapshot_impl(ctx: &WidgetUpdateContext<'_>, snapshot: &M
     // updates below — stale-but-recent track info is preferable to blank content
     // during the brief transition window.
     //
-    // Note: this also prevents art_url=None from reaching `prepare_art_load`,
-    // which has its own None-refusal logic as a second layer of defense against
-    // flashing fallback art during track switches.
+    // Album art has its own debounce, so genuine no-art tracks can still clear
+    // stale art to the fallback without flashing during brief track switches.
     if !has_metadata {
         return;
     }
@@ -1153,9 +1184,16 @@ fn update_widgets_from_snapshot_impl(ctx: &WidgetUpdateContext<'_>, snapshot: &M
     if let Some(picture) = ctx.art_picture {
         let art_url = snapshot.metadata.art_url.as_deref();
 
-        let on_success = || {};
+        // Hide the fallback icon on success so it doesn't overlay the art.
+        let fallback_for_success = ctx.art_fallback_icon.clone();
+        let on_success = move || {
+            if let Some(icon) = &fallback_for_success {
+                icon.set_visible(false);
+            }
+        };
 
         let picture_for_failure = picture.clone();
+        let fallback_for_failure = ctx.art_fallback_icon.clone();
         let player_id = snapshot.player_id.clone();
         let art_state_for_failure = ctx.art_state.clone();
         let on_failure = move || {
@@ -1164,6 +1202,7 @@ fn update_widgets_from_snapshot_impl(ctx: &WidgetUpdateContext<'_>, snapshot: &M
             let generation = art_state_for_failure.borrow().generation;
             show_player_icon_in_art(
                 &picture_for_failure,
+                fallback_for_failure.as_ref(),
                 player_id.as_deref(),
                 &art_state_for_failure,
                 generation,
@@ -1210,8 +1249,14 @@ fn update_widgets_from_snapshot_impl(ctx: &WidgetUpdateContext<'_>, snapshot: &M
 }
 
 /// Show the player's app icon as fallback for album art.
+///
+/// Renders into a live icon-theme [`Image`] (mirroring the window_title widget)
+/// rather than baking a fixed-size paintable into the [`RoundedPicture`]. GTK
+/// re-resolves the icon at the widget's actual pixel size and scale factor, so
+/// the result stays crisp on HiDPI instead of being upscaled (issue #172).
 fn show_player_icon_in_art(
     art_picture: &RoundedPicture,
+    fallback_icon: Option<&Image>,
     player_id: Option<&str>,
     art_state: &Rc<RefCell<ArtState>>,
     generation: u64,
@@ -1224,27 +1269,18 @@ fn show_player_icon_in_art(
         .map(|id| resolve_app_icon_name(id, media::ICON_AUDIO_GENERIC))
         .unwrap_or_else(|| media::ICON_AUDIO_GENERIC.to_string());
 
-    let Some(display) = gtk4::gdk::Display::default() else {
-        warn!("No display available for icon lookup");
-        art_picture.set_visible(false);
+    art_picture.set_visible(false);
+
+    let Some(icon) = fallback_icon else {
         return;
     };
-    let icon_theme = gtk4::IconTheme::for_display(&display);
 
     let config = ConfigManager::global();
     let art_size = (config.bar_size() as f64 * ART_DISPLAY_SCALE) as i32;
 
-    let paintable = icon_theme.lookup_icon(
-        &icon_name,
-        &[],
-        art_size,
-        1,
-        gtk4::TextDirection::None,
-        gtk4::IconLookupFlags::empty(),
-    );
-
-    art_picture.set_paintable(Some(&paintable));
-    art_picture.set_visible(true);
+    icon.set_pixel_size(art_size);
+    icon.set_icon_name(Some(&icon_name));
+    icon.set_visible(true);
 }
 
 fn build_tooltip(snapshot: &MediaSnapshot) -> String {

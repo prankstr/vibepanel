@@ -104,7 +104,8 @@ pub struct MediaMetadata {
     pub artist: Option<String>,
     /// Album name (xesam:album).
     pub album: Option<String>,
-    /// Album art URL (mpris:artUrl) - can be file:// or http(s)://.
+    /// Album art URL (mpris:artUrl) - can be file://, http(s)://, or a
+    /// data: URI (e.g. base64-encoded embedded cover art from mpv-mpris).
     pub art_url: Option<String>,
     /// Track URL (xesam:url) - useful for identifying web players.
     pub url: Option<String>,

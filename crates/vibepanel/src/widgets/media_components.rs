@@ -175,9 +175,9 @@ impl ArtState {
     /// any cached URL is invalidated so that a `None` art URL correctly clears
     /// stale art from the previous player.
     ///
-    /// Within the same player, returns `false` when the URL is unchanged or when
-    /// it momentarily became `None` (e.g. during a track switch) — in that case
-    /// we keep showing the previous album art to avoid flashing a placeholder.
+    /// Within the same player, returns `false` when the URL is unchanged. A
+    /// `Some -> None` transition is still scheduled through the debounce timer
+    /// so tracks that genuinely lack album art clear stale art to the fallback.
     pub fn prepare_art_load(&mut self, new_url: Option<&str>, player_id: Option<&str>) -> bool {
         let player_changed = self.current_player_id.as_deref() != player_id;
         if player_changed {
@@ -191,9 +191,6 @@ impl ArtState {
         }
 
         if self.current_url.as_deref() == new_url {
-            return false;
-        }
-        if new_url.is_none() && self.current_url.is_some() {
             return false;
         }
         self.cancellable.cancel();
@@ -799,9 +796,69 @@ pub fn load_art_from_url<S, F>(
                 }
             }
         });
+    } else if url.starts_with("data:") {
+        // mpv-mpris emits embedded cover art as a base64 data URI. Decoded
+        // synchronously — cover art is small enough not to stall the main loop.
+        // load_texture_from_bytes has no generation guard, so check here.
+        if art_state.borrow().generation != generation {
+            return;
+        }
+
+        match decode_data_uri(url) {
+            Some(bytes) => {
+                load_texture_from_bytes(
+                    &bytes,
+                    &picture,
+                    &truncate_uri(url),
+                    &on_success,
+                    &on_failure,
+                );
+            }
+            None => {
+                debug!("Unsupported or malformed data URI: {}", truncate_uri(url));
+                on_failure();
+            }
+        }
     } else {
         warn!("Unknown album art URL scheme: {}", url);
         on_failure();
+    }
+}
+
+/// Decode a base64 `data:` URI into raw bytes, or `None` if it isn't a usable
+/// base64 data URI. Image-format validity is left to the decoder downstream.
+fn decode_data_uri(url: &str) -> Option<Vec<u8>> {
+    let rest = url.strip_prefix("data:")?;
+    let comma_idx = rest.find(',')?;
+    let (header, payload_with_comma) = rest.split_at(comma_idx);
+    let payload = &payload_with_comma[1..]; // skip the comma
+
+    // The mediatype may carry params (e.g. `image/jpeg;charset=utf-8;base64`),
+    // so look for a `base64` token among the `;`-separated segments.
+    let is_base64 = header
+        .split(';')
+        .any(|tok| tok.eq_ignore_ascii_case("base64"));
+    if !is_base64 || payload.is_empty() {
+        return None;
+    }
+
+    // glib::base64_decode returns Vec<u8> with no error channel; empty == fail.
+    let bytes = glib::base64_decode(payload);
+    if bytes.is_empty() { None } else { Some(bytes) }
+}
+
+/// Truncate a (potentially huge) URI for safe logging — data URIs can be
+/// megabytes of base64.
+fn truncate_uri(url: &str) -> String {
+    const MAX: usize = 64;
+    if url.len() <= MAX {
+        url.to_string()
+    } else {
+        let mut end = MAX;
+        while !url.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}…({} bytes)", &url[..end], url.len())
     }
 }
 
@@ -891,15 +948,11 @@ mod tests {
     }
 
     #[test]
-    fn test_prepare_art_load_ignores_none_transition() {
+    fn test_prepare_art_load_some_to_none_clears_art() {
         let mut state = ArtState::new();
         state.current_url = Some("http://example.com/art.jpg".into());
-        assert!(!state.prepare_art_load(None, None));
-        assert_eq!(
-            state.current_url.as_deref(),
-            Some("http://example.com/art.jpg"),
-            "stale art URL should be preserved"
-        );
+        assert!(state.prepare_art_load(None, None));
+        assert_eq!(state.current_url, None);
     }
 
     #[test]
@@ -948,16 +1001,49 @@ mod tests {
     }
 
     #[test]
-    fn test_prepare_art_load_same_player_ignores_none() {
+    fn test_prepare_art_load_same_player_clears_none() {
         let mut state = ArtState::new();
         state.current_url = Some("http://example.com/art.jpg".into());
         state.current_player_id = Some("spotify".into());
 
-        // Same player, art momentarily None — should keep stale art.
-        assert!(!state.prepare_art_load(None, Some("spotify")));
+        // Same player, genuine no-art track should clear stale art after debounce.
+        assert!(state.prepare_art_load(None, Some("spotify")));
+        assert_eq!(state.current_url, None);
+    }
+
+    #[test]
+    fn test_decode_data_uri_basic_base64() {
+        // base64("hello") = "aGVsbG8="
         assert_eq!(
-            state.current_url.as_deref(),
-            Some("http://example.com/art.jpg"),
+            decode_data_uri("data:image/jpeg;base64,aGVsbG8=").unwrap(),
+            b"hello"
         );
+    }
+
+    #[test]
+    fn test_decode_data_uri_base64_token_not_last_and_mixed_case() {
+        // Guards the `;`-split scan: `base64` is neither the final token nor
+        // lowercase, so a naive `ends_with("base64")` would wrongly reject it.
+        assert_eq!(
+            decode_data_uri("data:image/jpeg;charset=utf-8;BASE64,aGVsbG8=").unwrap(),
+            b"hello"
+        );
+    }
+
+    #[test]
+    fn test_decode_data_uri_rejects_non_base64() {
+        // Percent-encoded (non-base64) data URIs are unsupported.
+        assert!(decode_data_uri("data:image/jpeg,hello").is_none());
+    }
+
+    #[test]
+    fn test_decode_data_uri_rejects_no_comma() {
+        // Guards the `find(',')?` — without it, `[1..]` would panic.
+        assert!(decode_data_uri("data:image/jpeg;base64").is_none());
+    }
+
+    #[test]
+    fn test_decode_data_uri_rejects_empty_payload() {
+        assert!(decode_data_uri("data:image/jpeg;base64,").is_none());
     }
 }
