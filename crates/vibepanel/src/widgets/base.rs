@@ -255,18 +255,18 @@ impl MenuHandle {
 
     /// Get the anchor position for the popover.
     ///
-    /// Returns the widget's center X coordinate (in monitor-local coordinates)
+    /// Returns the widget's center X coordinate (in surface-relative coordinates)
     /// and the monitor it's on.
     ///
     /// # Coordinate Space
     ///
-    /// The returned `anchor_x` is relative to the monitor's origin (0,0 at top-left
-    /// of the monitor), NOT global screen coordinates. This is correct because:
+    /// The returned anchor is relative to the bar's layer-shell surface, NOT
+    /// global screen coordinates. This is correct because:
     ///
     /// 1. Layer-shell surfaces are per-monitor - the bar is anchored to a specific
     ///    monitor and its native surface coordinates are relative to that monitor.
     /// 2. `compute_bounds(&native)` returns coordinates relative to the native
-    ///    surface, which for layer-shell is the monitor-local coordinate space.
+    ///    surface, which for the bar is the bar surface coordinate space.
     /// 3. The popover is also a layer-shell surface on the same monitor, so it
     ///    uses the same coordinate space for its margin calculations.
     fn get_anchor_info(&self) -> (PopoverAnchor, Option<gtk4::gdk::Monitor>) {
@@ -282,7 +282,7 @@ impl MenuHandle {
         let widget_y = bounds.y() as i32;
         let widget_width = bounds.width() as i32;
         let widget_height = bounds.height() as i32;
-        // anchor_x is monitor-relative: the center X of the widget on its monitor
+        // Anchor is surface-relative: the center of the widget in the bar surface.
         let anchor = PopoverAnchor {
             x: widget_x + widget_width / 2,
             y: widget_y + widget_height / 2,
@@ -711,6 +711,7 @@ impl BaseWidget {
                         } else {
                             debug!("Closed own menu from BaseWidget press");
                         }
+                        gesture.set_state(gtk4::EventSequenceState::Claimed);
                     } else {
                         debug!("BaseWidget press: no menu registered");
                     }

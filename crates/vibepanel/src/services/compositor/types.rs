@@ -260,6 +260,15 @@ pub trait CompositorBackend: Send + Sync {
         // Default no-op
     }
 
+    /// Ask the compositor to refresh pointer focus without changing UI state.
+    ///
+    /// Some compositors do not immediately re-hit-test the pointer when layer
+    /// surfaces map under a stationary cursor. Backends can use a compositor-
+    /// native no-op cursor move or similar mechanism when available.
+    fn refresh_pointer_focus(&self) {
+        // Default no-op
+    }
+
     /// Get the list of all windows.
     ///
     /// Returns a snapshot of all windows currently open across all workspaces.

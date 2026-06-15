@@ -22,6 +22,7 @@ use crate::services::audio::AudioService;
 use crate::services::bluetooth::BluetoothService;
 use crate::services::brightness::BrightnessService;
 use crate::services::callbacks::CallbackId;
+use crate::services::compositor::CompositorManager;
 use crate::services::config_manager::ConfigManager;
 use crate::services::idle_inhibitor::IdleInhibitorService;
 use crate::services::network::NetworkService;
@@ -1471,6 +1472,7 @@ impl QuickSettingsWindow {
             self.update_position();
             self.window.set_visible(true);
             self.window.present();
+            CompositorManager::global().refresh_pointer_focus();
 
             // Install deferred Tab controller for keyboard nav on first Tab.
             self.prepare_keyboard_nav();
@@ -1516,6 +1518,7 @@ impl QuickSettingsWindow {
                 {
                     qs.update_position();
                     qs.window.set_opacity(1.0);
+                    CompositorManager::global().refresh_pointer_focus();
 
                     if ConfigManager::global().animations_enabled() {
                         qs.start_animation(AnimDirection::Opening, generation);

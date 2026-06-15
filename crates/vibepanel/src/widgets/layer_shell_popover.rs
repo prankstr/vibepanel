@@ -295,7 +295,8 @@ pub fn reset_popover_margins(window: &ApplicationWindow) {
 /// All parameters use **monitor-local coordinates** (0,0 at the monitor's top-left).
 /// This is correct because:
 /// - Layer-shell surfaces are anchored to specific monitors
-/// - `anchor_x` comes from `compute_bounds()` which returns monitor-relative coords
+/// - horizontal bar surfaces span the monitor width, so surface-local X matches
+///   monitor-local X along the placement axis
 /// - `monitor_width` is from `monitor.geometry().width()` (the monitor's own width)
 /// - The resulting margin is applied to a layer-shell surface on the same monitor
 ///
@@ -406,8 +407,7 @@ where
     catcher.add_css_class(surface::LAYER_SHELL_CLICK_CATCHER);
     catcher.add_css_class(class::CLICK_CATCHER);
 
-    // Layer shell configuration - fullscreen surface behind the popover.
-    // Use Top layer (not Overlay) to avoid appearing on top of fullscreen apps.
+    // Layer shell configuration - fullscreen transparent surface around popovers.
     catcher.init_layer_shell();
     catcher.set_namespace(Some("vibepanel-click-catcher"));
     catcher.set_layer(Layer::Top);
@@ -416,14 +416,9 @@ where
     catcher.set_anchor(Edge::Bottom, true);
     catcher.set_anchor(Edge::Left, true);
     catcher.set_anchor(Edge::Right, true);
-    // Click-catcher should never take keyboard focus - its only purpose is
-    // catching clicks outside the popover. Keyboard focus belongs to the actual
-    // popover window which is shown after this.
     catcher.set_keyboard_mode(KeyboardMode::None);
 
-    // Leave the bar area uncovered so clicks/hovers pass through to bar widgets.
-    let bar_edge = popover_bar_edge();
-    catcher.set_margin(bar_edge, bar_zone);
+    catcher.set_margin(popover_bar_edge(), bar_zone);
 
     // Content - add CSS class to the child widget for background styling
     let overlay = GtkBox::new(Orientation::Vertical, 0);
@@ -435,13 +430,9 @@ where
     // Click handler
     let gesture = GestureClick::new();
     gesture.set_button(0); // All buttons
-    {
-        // Use connect_released to allow GTK to complete the gesture lifecycle
-        // before hiding windows. This avoids "Broken accounting of active state" warnings.
-        gesture.connect_released(move |_gesture, _, _x, _y| {
-            on_dismiss();
-        });
-    }
+    // Use connect_released to allow GTK to complete the gesture lifecycle
+    // before hiding windows. This avoids "Broken accounting of active state" warnings.
+    gesture.connect_released(move |_, _, _, _| on_dismiss());
     catcher.add_controller(gesture);
 
     // Note: No ESC handler on click-catcher. ESC handling is done by the actual
@@ -1021,6 +1012,7 @@ impl LayerShellPopover {
                     popover.update_position();
                     if let Some(ref window) = *popover.window.borrow() {
                         window.set_opacity(1.0);
+                        CompositorManager::global().refresh_pointer_focus();
                     }
                     popover.start_animation(AnimDirection::Opening, generation);
                 }
@@ -1042,6 +1034,7 @@ impl LayerShellPopover {
             );
             window.set_visible(true);
             window.present();
+            CompositorManager::global().refresh_pointer_focus();
 
             // present() may assign auto-focus, so install after mapping to clear
             // it and keep focus rings hidden until the first keynav press.
@@ -1082,7 +1075,6 @@ impl LayerShellPopover {
         window.add_css_class(surface::LAYER_SHELL_POPOVER);
 
         // Layer shell configuration.
-        // Use Top layer (not Overlay) to avoid appearing on top of fullscreen apps.
         window.init_layer_shell();
         window.set_namespace(Some(&format!("vibepanel-{}-popover", self.widget_name)));
         window.set_layer(Layer::Top);

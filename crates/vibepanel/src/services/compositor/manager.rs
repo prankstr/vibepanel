@@ -261,6 +261,13 @@ impl CompositorManager {
         }
     }
 
+    /// Ask the active compositor to refresh pointer focus, if supported.
+    pub fn refresh_pointer_focus(&self) {
+        if let Some(ref backend) = *self.backend.borrow() {
+            backend.refresh_pointer_focus();
+        }
+    }
+
     /// Get the list of all windows.
     pub fn list_windows(&self) -> Vec<super::Window> {
         if let Some(ref backend) = *self.backend.borrow() {

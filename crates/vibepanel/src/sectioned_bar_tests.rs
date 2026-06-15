@@ -71,6 +71,25 @@ fn collect_descendants_with_class(root: &gtk4::Widget, class_name: &str) -> Vec<
     matches
 }
 
+fn has_bar_background_click_guard_ancestor(widget: &gtk4::Widget, stop_at: &gtk4::Widget) -> bool {
+    let mut current = Some(widget.clone());
+    while let Some(widget) = current {
+        if widget.has_css_class(crate::styles::class::WIDGET_WRAPPER)
+            || widget.has_css_class(crate::styles::class::WIDGET_ITEM)
+            || widget.has_css_class(crate::styles::class::WIDGET)
+            || widget.has_css_class(crate::styles::class::WIDGET_MERGE_GROUP)
+        {
+            return true;
+        }
+        if widget == *stop_at {
+            break;
+        }
+        current = widget.parent();
+    }
+
+    false
+}
+
 fn section_widget_class_names(
     bar: &SectionedBar,
     section_name: &str,
@@ -1519,6 +1538,46 @@ fn run_test_widgets_grouping_spacing_contract() {
     flush_gtk();
 }
 
+fn run_test_bar_background_click_guard_classes() {
+    let mut config = test_config();
+    config.widgets.left = vec![
+        vibepanel_core::config::WidgetPlacement::Single("custom-a".to_string()),
+        vibepanel_core::config::WidgetPlacement::Group {
+            group: vec!["custom-b".to_string(), "custom-c".to_string()],
+        },
+        vibepanel_core::config::WidgetPlacement::Group {
+            group: vec!["cpu".to_string(), "memory".to_string()],
+        },
+    ];
+    config
+        .widgets
+        .widget_configs
+        .entry("custom-c".to_string())
+        .or_default()
+        .options
+        .insert("label".to_string(), toml::Value::String("C".to_string()));
+
+    let (window, bar, _state, _popover_registry_guard, _css_provider) = built_bar_fixture(&config);
+    let left_section = bar
+        .section("left")
+        .expect("bar should build a left section");
+    let contents = collect_descendants_with_class(&left_section, crate::styles::class::CONTENT);
+    assert!(
+        contents.len() >= 5,
+        "test config should render single, explicit-group, and merge-group content"
+    );
+
+    for content in contents {
+        assert!(
+            has_bar_background_click_guard_ancestor(&content, &left_section),
+            "bar widget content should have a guard class ancestor for background clicks"
+        );
+    }
+
+    window.close();
+    flush_gtk();
+}
+
 fn merge_group_child_label_gap(override_css: Option<&str>) -> i32 {
     let mut config = test_config();
     config.widgets.left = vec![
@@ -2484,6 +2543,11 @@ ui_regression_config_tests!(
         test_ui_regression_widgets_grouping_spacing,
         "widgets.grouping.spacing",
         run_test_widgets_grouping_spacing_contract
+    ),
+    (
+        test_ui_regression_bar_background_click_guard_classes,
+        "bar.background_click_guard_classes",
+        run_test_bar_background_click_guard_classes
     ),
     (
         test_ui_regression_widgets_grouping_merge_spacing,

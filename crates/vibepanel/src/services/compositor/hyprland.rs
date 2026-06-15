@@ -30,6 +30,7 @@ const DEFAULT_WORKSPACE_COUNT: i32 = 10;
 const RECONNECT_INITIAL_MS: u64 = 1000;
 const RECONNECT_MAX_MS: u64 = 30000;
 const RECONNECT_MULTIPLIER: f64 = 1.5;
+const POINTER_FOCUS_REFRESH_DELAY: Duration = Duration::from_millis(50);
 
 pub struct HyprlandBackend {
     allowed_outputs: RwLock<Vec<String>>,
@@ -145,6 +146,10 @@ impl HyprlandBackend {
         let socket_path = self.socket_path.read();
         let socket_path = socket_path.as_ref()?;
 
+        Self::send_command_to_socket(socket_path, command)
+    }
+
+    fn send_command_to_socket(socket_path: &str, command: &str) -> Option<String> {
         let mut stream = match UnixStream::connect(socket_path) {
             Ok(s) => s,
             Err(e) => {
@@ -343,6 +348,11 @@ impl HyprlandBackend {
         response.trim().eq_ignore_ascii_case("ok")
     }
 
+    fn parse_cursorpos(response: &str) -> Option<(i32, i32)> {
+        let (x, y) = response.trim().split_once(',')?;
+        Some((x.trim().parse().ok()?, y.trim().parse().ok()?))
+    }
+
     fn send_dispatch(&self, context: &str, lua: &str, legacy: &str) {
         // TODO: Remove the legacy hyprlang dispatch path once Hyprland drops hyprlang support.
         let command = if self.supports_lua_dispatch.load(Ordering::Relaxed) {
@@ -370,6 +380,60 @@ impl HyprlandBackend {
                 );
             }
         }
+    }
+
+    fn refresh_pointer_focus_impl(&self) {
+        // Workaround for Hyprland: after layer-shell popovers map, Hyprland
+        // does not recalculate pointer hover/focus until it processes cursor
+        // activity. Delay the no-op move until the newly mapped surface has
+        // been committed. A user cursor move inside this short window can be
+        // pulled back to the sampled position; avoiding that race would add IPC
+        // complexity for a very small, transient case.
+        let socket_path = self.socket_path.read().clone();
+        let use_lua = self.supports_lua_dispatch.load(Ordering::Relaxed);
+        thread::spawn(move || {
+            thread::sleep(POINTER_FOCUS_REFRESH_DELAY);
+            let Some(socket_path) = socket_path else {
+                return;
+            };
+
+            let Some(cursorpos) = Self::send_command_to_socket(&socket_path, "cursorpos") else {
+                debug!("Hyprland cursor position unavailable for pointer focus refresh");
+                return;
+            };
+            let Some((x, y)) = Self::parse_cursorpos(&cursorpos) else {
+                debug!(
+                    response = %cursorpos.trim(),
+                    "Hyprland cursor position parse failed for pointer focus refresh"
+                );
+                return;
+            };
+
+            let command = if use_lua {
+                format!("dispatch hl.dsp.cursor.move({{ x = {x}, y = {y} }})")
+            } else {
+                format!("dispatch movecursor {x} {y}")
+            };
+
+            match Self::send_command_to_socket(&socket_path, &command) {
+                Some(response) if Self::response_is_ok(&response) => {
+                    debug!(command, "Hyprland deferred pointer focus refresh succeeded");
+                }
+                Some(response) => {
+                    warn!(
+                        command,
+                        response = %response.trim(),
+                        "Hyprland deferred pointer focus refresh failed"
+                    );
+                }
+                None => {
+                    warn!(
+                        command,
+                        "Hyprland deferred pointer focus refresh failed without a response"
+                    );
+                }
+            }
+        });
     }
 
     /// Fetch monitor information from Hyprland.
@@ -1201,6 +1265,10 @@ impl CompositorBackend for HyprlandBackend {
             let _ = self.send_command("switchxkblayout all next");
         }
     }
+
+    fn refresh_pointer_focus(&self) {
+        self.refresh_pointer_focus_impl();
+    }
 }
 
 impl Drop for HyprlandBackend {
@@ -1384,6 +1452,20 @@ mod tests {
         assert!(!HyprlandBackend::response_is_ok("unknown dispatcher"));
         assert!(!HyprlandBackend::response_is_ok("workspace 1"));
         assert!(!HyprlandBackend::response_is_ok(""));
+    }
+
+    #[test]
+    fn parse_cursorpos_accepts_trimmed_coordinates() {
+        assert_eq!(
+            HyprlandBackend::parse_cursorpos("123,456"),
+            Some((123, 456))
+        );
+        assert_eq!(
+            HyprlandBackend::parse_cursorpos("  -12, 34\n"),
+            Some((-12, 34))
+        );
+        assert_eq!(HyprlandBackend::parse_cursorpos("123"), None);
+        assert_eq!(HyprlandBackend::parse_cursorpos("x,456"), None);
     }
 
     #[test]

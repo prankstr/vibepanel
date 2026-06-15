@@ -279,6 +279,47 @@ fn install_edge_click_handler(
     outer_box.add_controller(motion);
 }
 
+fn install_bar_background_click_handler(outer_box: &gtk4::Box) {
+    let gesture = GestureClick::new();
+    gesture.set_button(0);
+    gesture.set_propagation_phase(gtk4::PropagationPhase::Bubble);
+    gesture.connect_pressed(move |gesture, _n_press, x, y| {
+        if click_inside_bar_widget(gesture, x, y) {
+            return;
+        }
+
+        TooltipManager::global().cancel_and_hide();
+        PopoverTracker::global().dismiss_active();
+        gesture.set_state(gtk4::EventSequenceState::Claimed);
+    });
+    outer_box.add_controller(gesture);
+}
+
+fn click_inside_bar_widget(gesture: &GestureClick, x: f64, y: f64) -> bool {
+    // Bar widget containers must keep one of these classes so background clicks
+    // don't dismiss popovers before widget handlers run.
+    let Some(root) = gesture.widget() else {
+        return false;
+    };
+    let Some(target) = root.pick(x, y, gtk4::PickFlags::DEFAULT) else {
+        return false;
+    };
+
+    let mut current = Some(target);
+    while let Some(widget) = current {
+        if widget.has_css_class(class::WIDGET_WRAPPER)
+            || widget.has_css_class(class::WIDGET_ITEM)
+            || widget.has_css_class(class::WIDGET)
+            || widget.has_css_class(class::WIDGET_MERGE_GROUP)
+        {
+            return true;
+        }
+        current = widget.parent();
+    }
+
+    false
+}
+
 /// Production-built bar content shared by the layer-shell window path and
 /// runtime UI regression tests.
 pub(crate) struct BuiltBarContent {
@@ -438,6 +479,7 @@ pub(crate) fn build_bar_content(
     );
     bar_box.set_end_widget(Some(&right_section));
 
+    install_bar_background_click_handler(&outer_box);
     install_edge_click_handler(&outer_box, position, &edge_targets);
 
     BuiltBarContent {
@@ -1149,6 +1191,7 @@ fn build_merge_group(
                 }
 
                 trigger_ripple_from_gesture(gesture, x, y, &ripple_for_press);
+                gesture.set_state(gtk4::EventSequenceState::Claimed);
             }
         });
     }
