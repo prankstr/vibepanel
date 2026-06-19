@@ -35,6 +35,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag_name || github.ref_name }}
 
       - name: Install dependencies (native)
         if: ${{ !matrix.cross }}
@@ -111,6 +113,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag_name || github.ref_name }}
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -161,19 +165,21 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   publish-aur:
-    name: Publish to AUR
+    name: Publish binary package to AUR
     needs: release
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag_name || github.ref_name }}
 
       - name: Generate PKGBUILD
         run: |
           TAG="${{ inputs.tag_name || github.ref_name }}"
           VERSION="${TAG#v}"
           
-          curl -sL "https://github.com/prankstr/vibepanel/releases/download/${TAG}/vibepanel-x86_64-unknown-linux-gnu" -o vibepanel
-          curl -sL "https://raw.githubusercontent.com/prankstr/vibepanel/${TAG}/LICENSE" -o LICENSE
+          curl -fsSL "https://github.com/prankstr/vibepanel/releases/download/${TAG}/vibepanel-x86_64-unknown-linux-gnu" -o vibepanel
+          curl -fsSL "https://raw.githubusercontent.com/prankstr/vibepanel/${TAG}/LICENSE" -o LICENSE
           
           SHA256_BIN=$(sha256sum vibepanel | cut -d' ' -f1)
           SHA256_LICENSE=$(sha256sum LICENSE | cut -d' ' -f1)
@@ -182,6 +188,15 @@ jobs:
               -e "s/\${SHA256_BIN}/${SHA256_BIN}/g" \
               -e "s/\${SHA256_LICENSE}/${SHA256_LICENSE}/g" \
               .github/aur/vibepanel-bin/PKGBUILD.template > PKGBUILD
+
+      - name: Validate PKGBUILD
+        run: |
+          docker run --rm \
+            --platform linux/amd64 \
+            -v "$PWD:/workspace" \
+            -w /workspace \
+            archlinux:base-devel \
+            bash -lc 'useradd -m builder && su builder -c "makepkg --printsrcinfo -p PKGBUILD >/dev/null"'
 
       - name: Publish to AUR
         uses: KSXGitHub/github-actions-deploy-aur@v4.1.3
@@ -192,6 +207,89 @@ jobs:
           commit_email: ${{ secrets.AUR_EMAIL }}
           ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
           commit_message: "Update to ${{ inputs.tag_name || github.ref_name }}"
+          ssh_keyscan_types: rsa,ecdsa,ed25519
+          allow_empty_commits: false
+
+  publish-aur-source:
+    name: Publish source package to AUR
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag_name || github.ref_name }}
+
+      - name: Generate PKGBUILD
+        run: |
+          TAG="${{ inputs.tag_name || github.ref_name }}"
+          VERSION="${TAG#v}"
+
+          curl -fsSL "https://github.com/prankstr/vibepanel/archive/refs/tags/${TAG}.tar.gz" -o "vibepanel-${VERSION}.tar.gz"
+          SHA256_SOURCE=$(sha256sum "vibepanel-${VERSION}.tar.gz" | cut -d' ' -f1)
+
+          mkdir -p generated/aur/vibepanel
+          sed -e "s/\${VERSION}/${VERSION}/g" \
+              -e "s/\${SHA256_SOURCE}/${SHA256_SOURCE}/g" \
+              .github/aur/vibepanel/PKGBUILD.template > generated/aur/vibepanel/PKGBUILD
+
+      - name: Validate PKGBUILD
+        run: |
+          docker run --rm \
+            --platform linux/amd64 \
+            -v "$PWD:/workspace" \
+            -w /workspace \
+            archlinux:base-devel \
+            bash -lc 'useradd -m builder && su builder -c "makepkg --printsrcinfo -p generated/aur/vibepanel/PKGBUILD >/dev/null"'
+
+      - name: Publish to AUR
+        uses: KSXGitHub/github-actions-deploy-aur@v4.1.3
+        with:
+          pkgname: vibepanel
+          pkgbuild: ./generated/aur/vibepanel/PKGBUILD
+          commit_username: ${{ secrets.AUR_USERNAME }}
+          commit_email: ${{ secrets.AUR_EMAIL }}
+          ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          commit_message: "Update to ${{ inputs.tag_name || github.ref_name }}"
+          ssh_keyscan_types: rsa,ecdsa,ed25519
+          allow_empty_commits: false
+
+  publish-aur-git:
+    name: Publish git package to AUR
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag_name || github.ref_name }}
+          fetch-depth: 0
+
+      - name: Generate PKGBUILD
+        run: |
+          pkgver="$(git describe --long --tags --abbrev=7 | sed 's/\([^-]*-g\)/r\1/;s/-/./g' | sed 's/^v//')"
+          mkdir -p generated/aur/vibepanel-git
+          cp .github/aur/vibepanel-git/PKGBUILD generated/aur/vibepanel-git/PKGBUILD
+          sed -i "s/^pkgver=.*/pkgver=${pkgver}/" generated/aur/vibepanel-git/PKGBUILD
+
+      - name: Validate PKGBUILD
+        run: |
+          docker run --rm \
+            --platform linux/amd64 \
+            -v "$PWD:/workspace" \
+            -w /workspace \
+            archlinux:base-devel \
+            bash -lc 'useradd -m builder && su builder -c "makepkg --printsrcinfo -p generated/aur/vibepanel-git/PKGBUILD >/dev/null"'
+
+      - name: Publish to AUR
+        uses: KSXGitHub/github-actions-deploy-aur@v4.1.3
+        with:
+          pkgname: vibepanel-git
+          pkgbuild: ./generated/aur/vibepanel-git/PKGBUILD
+          commit_username: ${{ secrets.AUR_USERNAME }}
+          commit_email: ${{ secrets.AUR_EMAIL }}
+          ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          commit_message: "Update vibepanel-git package"
+          ssh_keyscan_types: rsa,ecdsa,ed25519
+          allow_empty_commits: false
 
   publish-copr:
     name: Publish to Copr
@@ -201,6 +299,8 @@ jobs:
       image: fedora:latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag_name || github.ref_name }}
 
       - name: Install copr-cli
         run: dnf install -y copr-cli
