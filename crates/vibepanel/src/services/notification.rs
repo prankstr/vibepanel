@@ -98,6 +98,8 @@ pub struct Notification {
     /// Whether the notification is transient: skip popover history and persistence,
     /// only fire the toast.
     pub transient: bool,
+    /// Whether a service-side close should also close any visible toast.
+    pub close_toast_on_close: bool,
 }
 
 /// Raw image data for a notification, parsed from the
@@ -147,6 +149,7 @@ impl From<PersistedNotification> for Notification {
             image_path: p.image_path,
             image_data: None, // Binary data is not persisted
             transient: false, // Transient notifications are never persisted
+            close_toast_on_close: false,
         }
     }
 }
@@ -532,6 +535,7 @@ impl NotificationService {
         let mut image_path: Option<String> = None;
         let mut image_data: Option<NotificationImage> = None;
         let mut transient = false;
+        let mut close_toast_on_close = false;
         for j in 0..hints_variant.n_children() {
             let entry = hints_variant.child_value(j);
             if entry.n_children() >= 2
@@ -598,6 +602,17 @@ impl NotificationService {
                             transient = v != 0;
                         }
                     }
+                    "x-vibepanel-close-toast-on-close" => {
+                        if let Some(v) = actual_value.get::<bool>() {
+                            close_toast_on_close = v;
+                        } else if let Some(v) = actual_value.get::<u8>() {
+                            close_toast_on_close = v != 0;
+                        } else if let Some(v) = actual_value.get::<i32>() {
+                            close_toast_on_close = v != 0;
+                        } else if let Some(v) = actual_value.get::<u32>() {
+                            close_toast_on_close = v != 0;
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -640,6 +655,7 @@ impl NotificationService {
             image_path,
             image_data,
             transient,
+            close_toast_on_close,
         };
 
         debug!(
@@ -661,7 +677,6 @@ impl NotificationService {
 
         // Persist state to disk
         self.save_state();
-
         self.notify_listeners();
 
         // Return the notification ID
@@ -876,6 +891,7 @@ mod tests {
             image_path: None,
             image_data: None,
             transient,
+            close_toast_on_close: false,
         }
     }
 

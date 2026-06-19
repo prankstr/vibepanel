@@ -862,6 +862,9 @@ pub mod notification {
     /// Row icon (`.notification-row-icon`).
     pub const ROW_ICON: &str = "notification-row-icon";
 
+    /// Battery notification icon (`.notification-battery-icon`).
+    pub const BATTERY_ICON: &str = "notification-battery-icon";
+
     /// Row content (`.notification-row-content`).
     pub const ROW_CONTENT: &str = "notification-row-content";
 

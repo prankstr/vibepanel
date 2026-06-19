@@ -991,6 +991,11 @@ impl ConfigManager {
         // so widgets see the new values when notified
         *self.config.borrow_mut() = new_config.clone();
 
+        if old_config.battery_alert_config() != new_config.battery_alert_config() {
+            crate::services::battery_alert::BatteryAlertController::global()
+                .configure(new_config.battery_alert_config());
+        }
+
         // Restart or stop wallpaper polling if auto mode or wallpaper config changed
         if old_config.theme.mode != new_config.theme.mode
             || old_config.theme.wallpaper != new_config.theme.wallpaper
@@ -1323,17 +1328,39 @@ fn widget_names(config: &Config) -> Vec<String> {
     let mut widget_configs: Vec<_> = config.widgets.widget_configs.iter().collect();
     widget_configs.sort_by_key(|(name, _)| *name);
     for (name, opts) in widget_configs {
-        names.push(widget_config_fingerprint(name, opts));
+        if let Some(fingerprint) = widget_config_fingerprint(name, opts) {
+            names.push(fingerprint);
+        }
     }
 
     names
 }
 
-fn widget_config_fingerprint(name: &str, opts: &vibepanel_core::config::WidgetOptions) -> String {
-    let mut option_items: Vec<_> = opts.options.iter().collect();
+fn widget_config_fingerprint(
+    name: &str,
+    opts: &vibepanel_core::config::WidgetOptions,
+) -> Option<String> {
+    let mut options = opts.options.clone();
+    if name == "battery" {
+        options.remove("alerts");
+        options.remove("low_threshold");
+        options.remove("critical_threshold");
+
+        if !opts.disabled
+            && opts.on_click_right.is_none()
+            && opts.on_click_middle.is_none()
+            && opts.show_if.is_none()
+            && opts.show_if_interval.is_none()
+            && options.is_empty()
+        {
+            return None;
+        }
+    }
+
+    let mut option_items: Vec<_> = options.iter().collect();
     option_items.sort_by_key(|(name, _)| *name);
 
-    format!(
+    Some(format!(
         "config:{}:disabled={},click_r={:?},click_m={:?},show_if={:?},show_if_interval={:?},{:?}",
         name,
         opts.disabled,
@@ -1342,7 +1369,7 @@ fn widget_config_fingerprint(name: &str, opts: &vibepanel_core::config::WidgetOp
         opts.show_if,
         opts.show_if_interval,
         option_items
-    )
+    ))
 }
 
 #[cfg(test)]
@@ -1737,12 +1764,9 @@ mod tests {
         first.widgets.widget_configs.insert(
             "battery".to_string(),
             WidgetOptions {
-                options: [
-                    ("show_icon".to_string(), toml::Value::Boolean(true)),
-                    ("low_threshold".to_string(), toml::Value::Integer(20)),
-                ]
-                .into_iter()
-                .collect(),
+                options: [("show_icon".to_string(), toml::Value::Boolean(true))]
+                    .into_iter()
+                    .collect(),
                 ..Default::default()
             },
         );
@@ -1751,12 +1775,9 @@ mod tests {
         second.widgets.widget_configs.insert(
             "battery".to_string(),
             WidgetOptions {
-                options: [
-                    ("low_threshold".to_string(), toml::Value::Integer(20)),
-                    ("show_icon".to_string(), toml::Value::Boolean(true)),
-                ]
-                .into_iter()
-                .collect(),
+                options: [("show_icon".to_string(), toml::Value::Boolean(true))]
+                    .into_iter()
+                    .collect(),
                 ..Default::default()
             },
         );
@@ -1779,5 +1800,87 @@ mod tests {
 
         assert_eq!(widget_names(&first), widget_names(&second));
         assert!(!config_structure_changed(&first, &second));
+    }
+
+    #[test]
+    fn test_battery_alert_options_do_not_trigger_structural_change() {
+        use vibepanel_core::config::WidgetPlacement;
+
+        let mut old = Config::default();
+        old.widgets
+            .right
+            .push(WidgetPlacement::Single("battery".to_string()));
+
+        let mut new = old.clone();
+        new.widgets.widget_configs.insert(
+            "battery".to_string(),
+            WidgetOptions {
+                options: [
+                    ("alerts".to_string(), toml::Value::Boolean(false)),
+                    ("low_threshold".to_string(), toml::Value::Integer(30)),
+                    ("critical_threshold".to_string(), toml::Value::Integer(10)),
+                ]
+                .into_iter()
+                .collect(),
+                ..Default::default()
+            },
+        );
+
+        assert!(!config_structure_changed(&old, &new));
+    }
+
+    #[test]
+    fn test_battery_alert_options_do_not_trigger_structural_change_with_other_options() {
+        use vibepanel_core::config::WidgetPlacement;
+
+        let mut old = Config::default();
+        old.widgets
+            .right
+            .push(WidgetPlacement::Single("battery".to_string()));
+        old.widgets.widget_configs.insert(
+            "battery".to_string(),
+            WidgetOptions {
+                options: [
+                    ("show_icon".to_string(), toml::Value::Boolean(true)),
+                    ("low_threshold".to_string(), toml::Value::Integer(20)),
+                ]
+                .into_iter()
+                .collect(),
+                ..Default::default()
+            },
+        );
+
+        let mut new = old.clone();
+        new.widgets
+            .widget_configs
+            .get_mut("battery")
+            .unwrap()
+            .options
+            .insert("low_threshold".to_string(), toml::Value::Integer(30));
+
+        assert!(!config_structure_changed(&old, &new));
+    }
+
+    #[test]
+    fn test_battery_non_alert_options_still_trigger_structural_change() {
+        use vibepanel_core::config::WidgetPlacement;
+
+        let mut old = Config::default();
+        old.widgets
+            .right
+            .push(WidgetPlacement::Single("battery".to_string()));
+
+        let mut new = old.clone();
+        new.widgets.widget_configs.insert(
+            "battery".to_string(),
+            WidgetOptions {
+                options: [("show_icon".to_string(), toml::Value::Boolean(false))]
+                    .into_iter()
+                    .collect(),
+                ..Default::default()
+            },
+        );
+
+        assert!(config_structure_changed(&old, &new));
     }
 }

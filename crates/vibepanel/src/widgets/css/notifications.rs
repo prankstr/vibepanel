@@ -47,7 +47,20 @@ pub fn css(animations: bool) -> String {
     margin-top: 2px;
     min-width: 48px;
     min-height: 48px;
+    -gtk-icon-size: 48px;
+    font-size: 48px;
     border-radius: var(--radius-round);
+}}
+
+.notification-row-icon .material-symbol,
+.notification-toast-icon .material-symbol {{
+    margin-top: -4px;
+    margin-bottom: -4px;
+}}
+
+.notification-row.notification-critical .notification-battery-icon,
+.notification-toast.notification-toast-critical .notification-battery-icon {{
+    color: var(--color-state-urgent);
 }}
 
 /* Shared typography (row + toast) */

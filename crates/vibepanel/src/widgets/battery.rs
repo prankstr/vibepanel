@@ -14,7 +14,8 @@ use gtk4::prelude::*;
 use vibepanel_core::config::WidgetEntry;
 
 use crate::services::battery::{
-    BatteryService, BatterySnapshot, STATE_CHARGING, STATE_FULLY_CHARGED,
+    BatteryService, BatterySnapshot, STATE_CHARGING, STATE_FULLY_CHARGED, battery_icon_name,
+    rounded_pct_value,
 };
 use crate::services::callbacks::CallbackId;
 use crate::services::icons::IconHandle;
@@ -46,7 +47,17 @@ pub struct BatteryConfig {
 
 impl WidgetConfig for BatteryConfig {
     fn from_entry(entry: &WidgetEntry) -> Self {
-        warn_unknown_options("battery", entry, &["show_percentage", "show_icon"]);
+        warn_unknown_options(
+            "battery",
+            entry,
+            &[
+                "show_percentage",
+                "show_icon",
+                "alerts",
+                "low_threshold",
+                "critical_threshold",
+            ],
+        );
 
         let show_percentage = entry
             .options
@@ -316,17 +327,6 @@ fn update_widgets_from_state_impl(
     tooltip_manager.set_styled_tooltip(container, &tooltip);
 }
 
-/// Round a floating-point percentage (0.0 - 100.0) to a u8, clamped.
-///
-/// NaN is treated as 0; infinities are clamped to the 0-100 range.
-pub fn rounded_pct_value(percent: f64) -> u8 {
-    if percent.is_nan() {
-        return 0;
-    }
-    let clamped = percent.clamp(0.0, 100.0);
-    clamped.round() as u8
-}
-
 /// Format a rounded percentage value as readable text, e.g. "57%".
 pub fn readable_pct(percent: u8) -> String {
     format!("{}%", percent)
@@ -338,38 +338,6 @@ pub fn bar_pct_label(percent: u8, is_vertical: bool) -> String {
         percent.to_string()
     } else {
         readable_pct(percent)
-    }
-}
-
-/// Return a symbolic icon name for the given battery level.
-///
-/// Returns names like "battery-full", "battery-high-charging", etc.
-/// These are then mapped to Material Symbols glyphs by `IconsService`.
-///
-/// Thresholds (8 levels to match Material icon granularity):
-/// - full (>=95%), high (>=80%), medium-high (>=60%), medium (>=40%)
-/// - medium-low (>=25%), low (>=10%), critical (<10%)
-pub fn battery_icon_name(percent: u8, charging: bool) -> String {
-    let level = if percent >= 95 {
-        "full"
-    } else if percent >= 80 {
-        "high"
-    } else if percent >= 60 {
-        "medium-high"
-    } else if percent >= 40 {
-        "medium"
-    } else if percent >= 25 {
-        "medium-low"
-    } else if percent >= 10 {
-        "low"
-    } else {
-        "critical"
-    };
-
-    if charging {
-        format!("battery-{}-charging", level)
-    } else {
-        format!("battery-{}", level)
     }
 }
 
@@ -416,7 +384,7 @@ mod tests {
         assert_eq!(battery_icon_name(50, false), "battery-medium");
         assert_eq!(battery_icon_name(30, false), "battery-medium-low");
         assert_eq!(battery_icon_name(15, false), "battery-low");
-        assert_eq!(battery_icon_name(5, false), "battery-critical");
+        assert_eq!(battery_icon_name(5, false), "battery-very-low");
     }
 
     #[test]
@@ -425,7 +393,7 @@ mod tests {
         assert_eq!(battery_icon_name(65, true), "battery-medium-high-charging");
         assert_eq!(battery_icon_name(50, true), "battery-medium-charging");
         assert_eq!(battery_icon_name(30, true), "battery-medium-low-charging");
-        assert_eq!(battery_icon_name(5, true), "battery-critical-charging");
+        assert_eq!(battery_icon_name(5, true), "battery-very-low-charging");
     }
 
     #[test]

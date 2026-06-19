@@ -3,12 +3,15 @@
 //! This module contains constants and helper functions used by both
 //! notifications_toast.rs and notifications_popover.rs.
 
-use gtk4::Image;
 use gtk4::gdk;
 use gtk4::gdk_pixbuf::Pixbuf;
+use gtk4::prelude::*;
+use gtk4::{Image, Widget};
 
-use crate::services::icons::get_app_icon_name;
+use crate::services::battery::normalize_battery_icon_name;
+use crate::services::icons::{IconsService, get_app_icon_name};
 use crate::services::notification::{Notification, NotificationImage};
+use crate::styles::notification as notif;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Toast display duration in ms
@@ -264,7 +267,7 @@ fn load_scaled_image_from_path(path: &str, size: i32) -> Image {
 
 /// Create an Image widget for a notification, preferring avatar data
 /// from image-data/image-path hints when available.
-pub fn create_notification_image_widget(notification: &Notification) -> Image {
+pub fn create_notification_image_widget(notification: &Notification) -> Widget {
     // Fixed size for notification avatars/icons (larger than theme default)
     const NOTIFICATION_ICON_SIZE: i32 = 48;
 
@@ -274,22 +277,22 @@ pub fn create_notification_image_widget(notification: &Notification) -> Image {
     {
         let image = Image::from_paintable(Some(&texture));
         image.set_pixel_size(NOTIFICATION_ICON_SIZE);
-        return image;
+        return image.upcast();
     }
 
     // Note: image-path can be either an actual file path OR an icon theme name
     if let Some(ref path) = notification.image_path {
         if let Some(file_path) = path.strip_prefix("file://") {
             // file:// URI - load from filesystem
-            return load_scaled_image_from_path(file_path, NOTIFICATION_ICON_SIZE);
+            return load_scaled_image_from_path(file_path, NOTIFICATION_ICON_SIZE).upcast();
         } else if path.starts_with('/') {
             // Absolute path - load from filesystem
-            return load_scaled_image_from_path(path, NOTIFICATION_ICON_SIZE);
+            return load_scaled_image_from_path(path, NOTIFICATION_ICON_SIZE).upcast();
         } else {
             // Icon theme name - use icon theme lookup
             let image = Image::from_icon_name(path);
             image.set_pixel_size(NOTIFICATION_ICON_SIZE);
-            return image;
+            return image.upcast();
         }
     }
 
@@ -340,7 +343,7 @@ fn notification_image_to_texture(img: &NotificationImage) -> Option<gtk4::gdk::T
 ///   2. desktop_entry hint (e.g. "org.telegram.desktop")
 ///   3. app_name via desktop entry lookup
 ///   4. generic fallback icon
-fn create_notification_icon(app_icon: &str, app_name: &str, desktop_entry: Option<&str>) -> Image {
+fn create_notification_icon(app_icon: &str, app_name: &str, desktop_entry: Option<&str>) -> Widget {
     // Fixed size for notification icons (larger than theme default)
     const NOTIFICATION_ICON_SIZE: i32 = 48;
 
@@ -373,18 +376,35 @@ fn create_notification_icon(app_icon: &str, app_name: &str, desktop_entry: Optio
 
     // Handle file:// URIs
     if let Some(file_path) = icon_name.strip_prefix("file://") {
-        return load_scaled_image_from_path(file_path, NOTIFICATION_ICON_SIZE);
+        return load_scaled_image_from_path(file_path, NOTIFICATION_ICON_SIZE).upcast();
     }
 
     // Handle absolute file paths
     if icon_name.starts_with('/') {
-        return load_scaled_image_from_path(&icon_name, NOTIFICATION_ICON_SIZE);
+        return load_scaled_image_from_path(&icon_name, NOTIFICATION_ICON_SIZE).upcast();
+    }
+
+    if let Some(logical_icon) = notification_logical_icon_name(&icon_name) {
+        let handle = IconsService::global().create_icon(logical_icon, &[]);
+        let widget = handle.widget();
+        widget.set_size_request(NOTIFICATION_ICON_SIZE, NOTIFICATION_ICON_SIZE);
+        widget.add_css_class(notif::BATTERY_ICON);
+        // Keep the handle alive so the icon can survive theme backend rebuilds
+        // while the notification row/toast is still visible.
+        unsafe {
+            widget.set_data("vibepanel-notification-icon-handle", handle);
+        }
+        return widget;
     }
 
     // It's an icon theme name
     let icon = Image::from_icon_name(&icon_name);
     icon.set_pixel_size(NOTIFICATION_ICON_SIZE);
-    icon
+    icon.upcast()
+}
+
+fn notification_logical_icon_name(icon_name: &str) -> Option<&'static str> {
+    normalize_battery_icon_name(icon_name)
 }
 
 #[cfg(test)]
@@ -394,6 +414,30 @@ mod tests {
     #[test]
     fn test_sanitize_plain_text() {
         assert_eq!(sanitize_body_markup("Hello World"), "Hello World");
+    }
+
+    #[test]
+    fn test_notification_battery_icon_normalization() {
+        assert_eq!(
+            notification_logical_icon_name("battery-low-symbolic"),
+            Some("battery-low")
+        );
+        assert_eq!(
+            notification_logical_icon_name("battery-very-low"),
+            Some("battery-very-low")
+        );
+        assert_eq!(
+            notification_logical_icon_name("battery-caution-symbolic"),
+            Some("battery-critical-alert")
+        );
+        assert_eq!(
+            notification_logical_icon_name("battery-empty-symbolic"),
+            Some("battery-very-low")
+        );
+        assert_eq!(
+            notification_logical_icon_name("dialog-information-symbolic"),
+            None
+        );
     }
 
     #[test]

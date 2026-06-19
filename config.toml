@@ -46,6 +46,9 @@ background_opacity = 1.0
 #
 #   [widgets.battery]
 #   disabled = true
+#   alerts = true
+#   low_threshold = 20
+#   critical_threshold = 5
 #
 #   [widgets.quick_settings]
 #   # shutdown_command = "loginctl poweroff"

@@ -332,6 +332,143 @@ fn test_validation_collects_multiple_errors() {
 }
 
 #[test]
+fn test_battery_alert_config_parses() {
+    let toml = r#"
+        [widgets]
+        right = ["battery"]
+
+        [widgets.battery]
+        alerts = true
+        low_threshold = 15
+        critical_threshold = 5
+    "#;
+
+    let config: Config = toml::from_str(toml).unwrap();
+    let alert = config.battery_alert_config();
+    assert!(alert.enabled);
+    assert_eq!(alert.low_threshold, 15);
+    assert_eq!(alert.critical_threshold, 5);
+    config
+        .validate()
+        .expect("Valid battery alert config should pass validation");
+}
+
+#[test]
+fn test_battery_alerts_default_to_active_widget() {
+    let toml = r#"
+        [widgets]
+        right = ["battery"]
+    "#;
+
+    let config: Config = toml::from_str(toml).unwrap();
+    let alert = config.battery_alert_config();
+    assert!(alert.enabled);
+    assert_eq!(alert.low_threshold, 20);
+    assert_eq!(alert.critical_threshold, 5);
+}
+
+#[test]
+fn test_battery_alerts_disabled_without_active_widget() {
+    let toml = r#"
+        [widgets]
+        right = ["clock"]
+
+        [widgets.battery]
+        alerts = true
+    "#;
+
+    let config: Config = toml::from_str(toml).unwrap();
+    assert!(!config.battery_alert_config().enabled);
+}
+
+#[test]
+fn test_battery_alerts_disabled_when_widget_disabled() {
+    let toml = r#"
+        [widgets]
+        right = ["battery"]
+
+        [widgets.battery]
+        disabled = true
+    "#;
+
+    let config: Config = toml::from_str(toml).unwrap();
+    assert!(!config.battery_alert_config().enabled);
+}
+
+#[test]
+fn test_battery_alert_threshold_validation() {
+    let toml = r#"
+        [widgets]
+        right = ["battery"]
+
+        [widgets.battery]
+        low_threshold = 0
+    "#;
+
+    let config: Config = toml::from_str(toml).unwrap();
+    let err = config.validate().unwrap_err().to_string();
+    assert!(
+        err.contains("widgets.battery.low_threshold"),
+        "Should report battery alert threshold error"
+    );
+}
+
+#[test]
+fn test_battery_alert_threshold_rejects_u32_overflow() {
+    let toml = r#"
+        [widgets]
+        right = ["battery"]
+
+        [widgets.battery]
+        low_threshold = 4294967396
+    "#;
+
+    let config: Config = toml::from_str(toml).unwrap();
+    let err = config.validate().unwrap_err().to_string();
+    assert!(
+        err.contains("widgets.battery.low_threshold"),
+        "Should report battery alert threshold overflow"
+    );
+}
+
+#[test]
+fn test_battery_alert_enabled_validation() {
+    let toml = r#"
+        [widgets]
+        right = ["battery"]
+
+        [widgets.battery]
+        alerts = "yes"
+    "#;
+
+    let config: Config = toml::from_str(toml).unwrap();
+    let err = config.validate().unwrap_err().to_string();
+    assert!(
+        err.contains("widgets.battery.alerts"),
+        "Should report battery alert enabled error"
+    );
+}
+
+#[test]
+fn test_battery_alert_critical_threshold_validation() {
+    let toml = r#"
+        [widgets]
+        right = ["battery"]
+
+        [widgets.battery]
+        low_threshold = 10
+        critical_threshold = 15
+    "#;
+
+    let config: Config = toml::from_str(toml).unwrap();
+    let err = config.validate().unwrap_err().to_string();
+    assert!(
+        err.contains("widgets.battery.critical_threshold"),
+        "Should report battery alert critical threshold error"
+    );
+}
+
+#[test]
 fn test_audio_overdrive_policy_explicit_true() {
     let temp_dir = std::env::temp_dir().join("vibepanel_test_audio_policy_true");
     let _ = std::fs::remove_dir_all(&temp_dir);

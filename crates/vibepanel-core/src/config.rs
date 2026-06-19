@@ -396,6 +396,48 @@ impl Config {
             errors.push("osd.timeout_ms: must be greater than 0".to_string());
         }
 
+        if let Some(battery) = self.widgets.get_options("battery") {
+            if let Some(value) = battery.options.get("alerts")
+                && let Err(msg) = widget_option_bool(value)
+            {
+                errors.push(format!("widgets.battery.alerts: {msg}"));
+            }
+
+            let low_threshold = battery.options.get("low_threshold").and_then(|value| {
+                match widget_option_u32(value) {
+                    Ok(value) => Some(value),
+                    Err(msg) => {
+                        errors.push(format!("widgets.battery.low_threshold: {msg}"));
+                        None
+                    }
+                }
+            });
+            let critical_threshold =
+                battery.options.get("critical_threshold").and_then(
+                    |value| match widget_option_u32(value) {
+                        Ok(value) => Some(value),
+                        Err(msg) => {
+                            errors.push(format!("widgets.battery.critical_threshold: {msg}"));
+                            None
+                        }
+                    },
+                );
+
+            let low_threshold = low_threshold.unwrap_or(DEFAULT_BATTERY_LOW_THRESHOLD);
+            let critical_threshold =
+                critical_threshold.unwrap_or(DEFAULT_BATTERY_CRITICAL_THRESHOLD);
+
+            if low_threshold == 0 || low_threshold > 100 {
+                errors.push("widgets.battery.low_threshold: must be between 1 and 100".to_string());
+            }
+            if critical_threshold == 0 || critical_threshold > low_threshold {
+                errors.push(
+                    "widgets.battery.critical_threshold: must be between 1 and widgets.battery.low_threshold"
+                        .to_string(),
+                );
+            }
+        }
+
         if self.weather.refresh_interval < MIN_WEATHER_REFRESH_INTERVAL {
             errors.push(format!(
                 "weather.refresh_interval: must be at least {} seconds",
@@ -921,6 +963,11 @@ impl WidgetsConfig {
             .unwrap_or(false)
     }
 
+    /// Check if a widget is referenced by any section and not disabled.
+    pub fn is_active(&self, name: &str) -> bool {
+        self.all_referenced_widgets().contains(name) && !self.is_disabled(name)
+    }
+
     /// Get widget options for a given widget name.
     /// Returns None if no `[widgets.<name>]` section exists.
     ///
@@ -1120,6 +1167,84 @@ impl WidgetsConfig {
             .filter(|name| !referenced.contains(*name))
             .cloned()
             .collect()
+    }
+}
+
+fn widget_option_u32(value: &toml::Value) -> std::result::Result<u32, &'static str> {
+    match value {
+        toml::Value::Integer(value) if *value >= 0 => {
+            u32::try_from(*value).map_err(|_| "must be at most 4294967295")
+        }
+        toml::Value::Integer(_) => Err("must be a non-negative integer"),
+        _ => Err("must be an integer"),
+    }
+}
+
+fn widget_option_bool(value: &toml::Value) -> std::result::Result<bool, &'static str> {
+    match value {
+        toml::Value::Boolean(value) => Ok(*value),
+        _ => Err("must be a boolean"),
+    }
+}
+
+pub const DEFAULT_BATTERY_ALERTS: bool = true;
+pub const DEFAULT_BATTERY_LOW_THRESHOLD: u32 = 20;
+pub const DEFAULT_BATTERY_CRITICAL_THRESHOLD: u32 = 5;
+
+/// Effective low-battery heads-up configuration derived from `[widgets.battery]`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BatteryAlertConfig {
+    /// Whether low-battery heads-up is enabled.
+    pub enabled: bool,
+
+    /// Battery percentage threshold that triggers the low heads-up.
+    pub low_threshold: u32,
+
+    /// Battery percentage threshold that triggers the critical heads-up.
+    pub critical_threshold: u32,
+}
+
+impl Default for BatteryAlertConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            low_threshold: DEFAULT_BATTERY_LOW_THRESHOLD,
+            critical_threshold: DEFAULT_BATTERY_CRITICAL_THRESHOLD,
+        }
+    }
+}
+
+impl Config {
+    /// Derive battery alert behavior from battery widget placement/options.
+    pub fn battery_alert_config(&self) -> BatteryAlertConfig {
+        let Some(battery) = self.widgets.get_options("battery") else {
+            return BatteryAlertConfig {
+                enabled: self.widgets.is_active("battery") && DEFAULT_BATTERY_ALERTS,
+                ..BatteryAlertConfig::default()
+            };
+        };
+
+        let alerts = battery
+            .options
+            .get("alerts")
+            .and_then(|value| widget_option_bool(value).ok())
+            .unwrap_or(DEFAULT_BATTERY_ALERTS);
+        let low_threshold = battery
+            .options
+            .get("low_threshold")
+            .and_then(|value| widget_option_u32(value).ok())
+            .unwrap_or(DEFAULT_BATTERY_LOW_THRESHOLD);
+        let critical_threshold = battery
+            .options
+            .get("critical_threshold")
+            .and_then(|value| widget_option_u32(value).ok())
+            .unwrap_or(DEFAULT_BATTERY_CRITICAL_THRESHOLD);
+
+        BatteryAlertConfig {
+            enabled: self.widgets.is_active("battery") && alerts,
+            low_threshold,
+            critical_threshold,
+        }
     }
 }
 

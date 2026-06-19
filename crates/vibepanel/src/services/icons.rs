@@ -111,7 +111,7 @@ fn register_font_with_pango(font_path: &std::path::Path) -> bool {
 ///
 /// Battery icons (8 levels for granular display):
 ///   - battery-full, battery-high, battery-medium-high, battery-medium
-///   - battery-medium-low, battery-low, battery-critical
+///   - battery-medium-low, battery-low, battery-very-low
 ///   - Plus "-charging" variants for each level
 ///   - battery-missing for unknown state
 pub fn material_symbol_name(icon_name: &str) -> &str {
@@ -140,7 +140,7 @@ fn material_symbol_lookup(icon_name: &str) -> Option<&'static str> {
         "battery-medium" => "battery_4_bar",
         "battery-medium-low" => "battery_3_bar",
         "battery-low" => "battery_2_bar",
-        "battery-critical" => "battery_1_bar",
+        "battery-very-low" => "battery_1_bar",
         "battery-missing" => "battery_unknown",
 
         // Battery (charging) - matching 8 levels
@@ -150,7 +150,10 @@ fn material_symbol_lookup(icon_name: &str) -> Option<&'static str> {
         "battery-medium-charging" => "battery_charging_60",
         "battery-medium-low-charging" => "battery_charging_50",
         "battery-low-charging" => "battery_charging_30",
-        "battery-critical-charging" => "battery_charging_20",
+        "battery-very-low-charging" => "battery_charging_20",
+
+        // Battery alert notifications
+        "battery-critical-alert" => "battery_alert",
 
         // Notifications
         "notifications" => "notifications",
@@ -396,10 +399,10 @@ pub fn gtk_icon_candidates(logical: &str) -> &'static [&'static str] {
             "battery-caution-symbolic",
             "battery-symbolic",
         ],
-        "battery-critical" => &[
+        "battery-very-low" => &[
             "battery-level-10-symbolic",
-            "battery-caution-symbolic",
             "battery-empty-symbolic",
+            "battery-caution-symbolic",
             "battery-low-symbolic",
             "battery-symbolic",
         ],
@@ -450,11 +453,20 @@ pub fn gtk_icon_candidates(logical: &str) -> &'static [&'static str] {
             "battery-low-symbolic",
             "battery-symbolic",
         ],
-        "battery-critical-charging" => &[
+        "battery-very-low-charging" => &[
             "battery-level-10-charging-symbolic",
             "battery-caution-charging-symbolic",
             "battery-empty-charging-symbolic",
             "battery-caution-symbolic",
+            "battery-symbolic",
+        ],
+
+        // Battery alert notifications - warning intent, not a level bucket.
+        "battery-critical-alert" => &[
+            "battery-caution-symbolic",
+            "battery-empty-symbolic",
+            "dialog-warning-symbolic",
+            "battery-low-symbolic",
             "battery-symbolic",
         ],
 
@@ -2403,7 +2415,11 @@ mod tests {
         assert_eq!(material_symbol_name("battery-medium"), "battery_4_bar");
         assert_eq!(material_symbol_name("battery-medium-low"), "battery_3_bar");
         assert_eq!(material_symbol_name("battery-low"), "battery_2_bar");
-        assert_eq!(material_symbol_name("battery-critical"), "battery_1_bar");
+        assert_eq!(material_symbol_name("battery-very-low"), "battery_1_bar");
+        assert_eq!(
+            material_symbol_name("battery-critical-alert"),
+            "battery_alert"
+        );
         assert_eq!(material_symbol_name("battery-missing"), "battery_unknown");
     }
 
@@ -2456,7 +2472,7 @@ mod tests {
             "battery_charging_30"
         );
         assert_eq!(
-            material_symbol_name("battery-critical-charging"),
+            material_symbol_name("battery-very-low-charging"),
             "battery_charging_20"
         );
     }
@@ -2503,10 +2519,15 @@ mod tests {
         assert_eq!(candidates[0], "battery-level-20-symbolic");
         assert!(candidates.contains(&"battery-low-symbolic"));
 
-        let candidates = gtk_icon_candidates("battery-critical");
+        let candidates = gtk_icon_candidates("battery-very-low");
         assert!(!candidates.is_empty());
         assert_eq!(candidates[0], "battery-level-10-symbolic");
-        assert!(candidates.contains(&"battery-caution-symbolic"));
+        assert!(candidates.contains(&"battery-empty-symbolic"));
+
+        let candidates = gtk_icon_candidates("battery-critical-alert");
+        assert!(!candidates.is_empty());
+        assert_eq!(candidates[0], "battery-caution-symbolic");
+        assert!(candidates.contains(&"dialog-warning-symbolic"));
 
         let candidates = gtk_icon_candidates("battery-missing");
         assert!(!candidates.is_empty());
@@ -2541,7 +2562,7 @@ mod tests {
         assert_eq!(candidates[0], "battery-level-20-charging-symbolic");
         assert!(candidates.contains(&"battery-low-charging-symbolic"));
 
-        let candidates = gtk_icon_candidates("battery-critical-charging");
+        let candidates = gtk_icon_candidates("battery-very-low-charging");
         assert!(!candidates.is_empty());
         assert_eq!(candidates[0], "battery-level-10-charging-symbolic");
         assert!(candidates.contains(&"battery-caution-charging-symbolic"));

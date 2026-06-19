@@ -29,7 +29,10 @@ const DEVICE_IFACE: &str = "org.freedesktop.UPower.Device";
 /// See: https://upower.freedesktop.org/docs/Device.html#Device:state
 /// Note: UPower returns State as u32, TimeToEmpty/TimeToFull as i64.
 pub const STATE_CHARGING: u32 = 1;
+pub const STATE_DISCHARGING: u32 = 2;
+pub const STATE_EMPTY: u32 = 3;
 pub const STATE_FULLY_CHARGED: u32 = 4;
+pub const STATE_PENDING_DISCHARGE: u32 = 6;
 
 /// Canonical snapshot of battery state.
 #[derive(Debug, Clone)]
@@ -58,6 +61,78 @@ impl BatterySnapshot {
             time_to_empty: None,
             time_to_full: None,
         }
+    }
+
+    pub fn is_discharging(&self) -> bool {
+        matches!(
+            self.state,
+            Some(STATE_DISCHARGING | STATE_EMPTY | STATE_PENDING_DISCHARGE)
+        )
+    }
+}
+
+/// Round a floating-point percentage (0.0 - 100.0) to a u8, clamped.
+///
+/// NaN is treated as 0; infinities are clamped to the 0-100 range.
+pub fn rounded_pct_value(percent: f64) -> u8 {
+    if percent.is_nan() {
+        return 0;
+    }
+    percent.clamp(0.0, 100.0).round() as u8
+}
+
+/// Return a logical icon name for the given battery level.
+///
+/// Returns names like "battery-full", "battery-high-charging", etc.
+/// These are mapped to Material Symbols glyphs by `IconsService`.
+///
+/// Thresholds (8 levels to match Material icon granularity):
+/// - full (>=95%), high (>=80%), medium-high (>=60%), medium (>=40%)
+/// - medium-low (>=25%), low (>=10%), very-low (<10%)
+pub fn battery_icon_name(percent: u8, charging: bool) -> String {
+    let level = if percent >= 95 {
+        "full"
+    } else if percent >= 80 {
+        "high"
+    } else if percent >= 60 {
+        "medium-high"
+    } else if percent >= 40 {
+        "medium"
+    } else if percent >= 25 {
+        "medium-low"
+    } else if percent >= 10 {
+        "low"
+    } else {
+        "very-low"
+    };
+
+    if charging {
+        format!("battery-{level}-charging")
+    } else {
+        format!("battery-{level}")
+    }
+}
+
+/// Normalize battery icon aliases from external notification themes to the
+/// logical names used by `IconsService` and battery widgets.
+pub fn normalize_battery_icon_name(icon_name: &str) -> Option<&'static str> {
+    match icon_name {
+        "battery-full" | "battery-level-100-symbolic" | "battery-full-symbolic" => {
+            Some("battery-full")
+        }
+        "battery-high" | "battery-level-80-symbolic" | "battery-good-symbolic" => {
+            Some("battery-high")
+        }
+        "battery-medium-high" | "battery-level-60-symbolic" => Some("battery-medium-high"),
+        "battery-medium" | "battery-level-50-symbolic" => Some("battery-medium"),
+        "battery-medium-low" | "battery-level-30-symbolic" => Some("battery-medium-low"),
+        "battery-low" | "battery-level-20-symbolic" | "battery-low-symbolic" => Some("battery-low"),
+        "battery-very-low" | "battery-level-10-symbolic" | "battery-empty-symbolic" => {
+            Some("battery-very-low")
+        }
+        "battery-critical-alert" | "battery-caution-symbolic" => Some("battery-critical-alert"),
+        "battery-symbolic" => Some("battery-medium"),
+        _ => None,
     }
 }
 

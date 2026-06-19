@@ -809,6 +809,10 @@ fn run_gtk_app(config: Config, config_source: Option<PathBuf>) -> ExitCode {
                 debug!("IPC listener initialized and attached to application");
             }
 
+            crate::services::battery_alert::BatteryAlertController::global()
+                .configure(config_for_activate.battery_alert_config());
+            debug!("Battery alert controller initialized");
+
             // Attach OSD overlay to the application so the Rc stays alive.
             if let Some(overlay) = osd_overlay {
                 // SAFETY: Key is unique to vibepanel; stored type matches what

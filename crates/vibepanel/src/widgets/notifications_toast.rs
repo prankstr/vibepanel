@@ -710,6 +710,18 @@ impl NotificationToastManager {
         (self.on_toast_removed)();
     }
 
+    pub fn close_toast(&self, notification_id: u32) {
+        if let Some(toast) = self.toasts.borrow_mut().remove(&notification_id) {
+            toast.window.close();
+        }
+
+        self.toast_order
+            .borrow_mut()
+            .retain(|&id| id != notification_id);
+        self.reposition_toasts();
+        (self.on_toast_removed)();
+    }
+
     fn reposition_toasts(&self) {
         let order = self.toast_order.borrow();
         let toasts = self.toasts.borrow();

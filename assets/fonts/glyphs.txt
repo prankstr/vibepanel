@@ -8,6 +8,7 @@ battery_3_bar
 battery_4_bar
 battery_5_bar
 battery_6_bar
+battery_alert
 battery_charging_20
 battery_charging_30
 battery_charging_50

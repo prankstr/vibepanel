@@ -27,6 +27,7 @@ fn test_notification(urgency: u8) -> Notification {
         image_path: None,
         image_data: None,
         transient: true,
+        close_toast_on_close: false,
     }
 }
 
