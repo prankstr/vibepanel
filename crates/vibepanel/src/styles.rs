@@ -401,6 +401,36 @@ pub mod qs {
     /// Audio details container (`.qs-audio-details`).
     pub const AUDIO_DETAILS: &str = "qs-audio-details";
 
+    /// Application volume list container (`.qs-app-volume-list`).
+    pub const APP_VOLUME_LIST: &str = "qs-app-volume-list";
+
+    /// Application volume row (`.qs-app-volume-row`).
+    pub const APP_VOLUME_ROW: &str = "qs-app-volume-row";
+
+    /// Application volume icon slot (`.qs-app-volume-icon-slot`).
+    pub const APP_VOLUME_ICON_SLOT: &str = "qs-app-volume-icon-slot";
+
+    /// Application volume icon (`.qs-app-volume-icon`).
+    pub const APP_VOLUME_ICON: &str = "qs-app-volume-icon";
+
+    /// Application volume fallback icon (`.qs-app-volume-icon-fallback`).
+    pub const APP_VOLUME_ICON_FALLBACK: &str = "qs-app-volume-icon-fallback";
+
+    /// Application volume title (`.qs-app-volume-title`).
+    pub const APP_VOLUME_TITLE: &str = "qs-app-volume-title";
+
+    /// Application volume description (`.qs-app-volume-description`).
+    pub const APP_VOLUME_DESCRIPTION: &str = "qs-app-volume-description";
+
+    /// Application volume value (`.qs-app-volume-value`).
+    pub const APP_VOLUME_VALUE: &str = "qs-app-volume-value";
+
+    /// Application volume slider (`.qs-app-volume-slider`).
+    pub const APP_VOLUME_SLIDER: &str = "qs-app-volume-slider";
+
+    /// Application volume mute button (`.qs-app-volume-mute`).
+    pub const APP_VOLUME_MUTE: &str = "qs-app-volume-mute";
+
     /// Section header (`.qs-section-header`).
     pub const SECTION_HEADER: &str = "qs-section-header";
 

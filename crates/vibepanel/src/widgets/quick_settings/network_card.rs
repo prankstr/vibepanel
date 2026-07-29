@@ -21,8 +21,9 @@ use tracing::debug;
 use super::components::ListRow;
 use super::ui_helpers::{
     ExpandableCard, ExpandableCardBase, ScanButton, add_disabled_placeholder, add_placeholder_row,
-    build_accent_subtitle, build_error_subtitle, clear_list_box, create_qs_list_box,
-    create_row_action_label, create_row_menu_action, create_row_menu_button, set_icon_active,
+    build_accent_subtitle, build_error_subtitle, clear_list_box, close_row_menu_popover,
+    create_qs_list_box, create_row_action_label, create_row_menu_action, create_row_menu_button,
+    present_row_menu_popover, set_icon_active,
 };
 use super::window::current_quick_settings_window;
 use crate::services::icons::{IconHandle, IconsService};
@@ -1313,7 +1314,7 @@ fn create_network_action_widget(net: &WifiNetwork) -> gtk4::Widget {
             let action = create_row_menu_action("Disconnect", move || {
                 // Close popover first to avoid "still has children" warning
                 if let Some(p) = popover_weak.upgrade() {
-                    p.popdown();
+                    close_row_menu_popover(&p);
                 }
                 let network = NetworkService::global();
                 debug!("wifi_disconnect_from_menu ssid={}", ssid_clone);
@@ -1327,7 +1328,7 @@ fn create_network_action_widget(net: &WifiNetwork) -> gtk4::Widget {
             let action = create_row_menu_action("Connect", move || {
                 // Close popover first to avoid "still has children" warning
                 if let Some(p) = popover_weak.upgrade() {
-                    p.popdown();
+                    close_row_menu_popover(&p);
                 }
                 let network = NetworkService::global();
                 debug!("wifi_connect_from_menu ssid={}", ssid_clone);
@@ -1345,7 +1346,7 @@ fn create_network_action_widget(net: &WifiNetwork) -> gtk4::Widget {
             let action = create_row_menu_action("Forget", move || {
                 // Close popover first to avoid "still has children" warning
                 if let Some(p) = popover_weak.upgrade() {
-                    p.popdown();
+                    close_row_menu_popover(&p);
                 }
                 let network = NetworkService::global();
                 debug!("wifi_forget_from_menu ssid={}", ssid_clone);
@@ -1358,16 +1359,7 @@ fn create_network_action_widget(net: &WifiNetwork) -> gtk4::Widget {
         SurfaceStyleManager::global().apply_pango_attrs_all(&content_box);
 
         popover.set_child(Some(&panel));
-        popover.set_parent(btn);
-
-        menu_icon_widget.add_css_class(state::EXPANDED);
-        let icon_for_close = menu_icon_widget.clone();
-        popover.connect_closed(move |p| {
-            icon_for_close.remove_css_class(state::EXPANDED);
-            p.unparent();
-        });
-
-        popover.popup();
+        present_row_menu_popover(&popover, btn, &menu_icon_widget);
     });
 
     menu_btn.upcast()

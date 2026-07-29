@@ -12,18 +12,21 @@ use std::rc::Rc;
 use gtk4::pango::EllipsizeMode;
 use gtk4::prelude::*;
 use gtk4::{
-    Align, Box as GtkBox, Button, EventControllerScroll, EventControllerScrollFlags, Label,
-    ListBox, ListBoxRow, Orientation, Overlay, Revealer, RevealerTransitionType, Scale,
+    Align, Box as GtkBox, Button, CenterBox, EventControllerScroll, EventControllerScrollFlags,
+    Image, Label, ListBox, ListBoxRow, Orientation, Revealer, RevealerTransitionType, Scale,
 };
 
 use super::components::SliderRow;
-use super::ui_helpers::{add_placeholder_row, clear_list_box, create_qs_list_box};
-use crate::services::audio::{AudioService, AudioSnapshot};
+use super::ui_helpers::{
+    add_placeholder_row, audio_output_icon_name, clear_list_box, create_device_row,
+    create_qs_list_box, device_subtitle,
+};
+use crate::services::audio::{AppVolumeSnapshot, AudioService, AudioSnapshot, SinkInfoSnapshot};
 use crate::services::config_manager::ConfigManager;
-use crate::services::icons::{IconHandle, IconsService};
+use crate::services::icons::{IconHandle, IconsService, resolve_app_icon_name};
 use crate::services::surfaces::SurfaceStyleManager;
 use crate::styles::{color, qs, row, state};
-use crate::widgets::base::add_ripple_to_row;
+use crate::widgets::base::vp_button;
 
 /// Get the appropriate volume icon name based on volume level and mute state.
 ///
@@ -58,12 +61,22 @@ pub struct AudioCardState {
     pub revealer: RefCell<Option<Revealer>>,
     /// Audio sink list box.
     pub list_box: RefCell<Option<ListBox>>,
+    /// Last sink-list inputs rendered into `list_box`.
+    sink_list_snapshot: RefCell<Option<(bool, Vec<SinkInfoSnapshot>)>>,
+    /// Application volume list box.
+    pub app_list_box: RefCell<Option<ListBox>>,
+    /// Last application-list inputs rendered; `None` means the list has not rendered yet.
+    app_volume_list_key: RefCell<Option<AppVolumeListKey>>,
+    /// Current application volume row widgets, aligned with the rendered stream keys.
+    app_volume_rows: RefCell<Vec<AppVolumeRowState>>,
     /// Flag to prevent slider feedback loop.
     pub updating: Cell<bool>,
     /// Audio row container (for CSS class toggling).
     pub row: RefCell<Option<GtkBox>>,
     /// Hint label shown when audio control is unavailable.
     pub hint_label: RefCell<Option<Label>>,
+    /// Volume delta used for application slider scroll.
+    pub app_scroll_step: Cell<i32>,
 }
 
 impl AudioCardState {
@@ -75,11 +88,57 @@ impl AudioCardState {
             arrow: RefCell::new(None),
             revealer: RefCell::new(None),
             list_box: RefCell::new(None),
+            sink_list_snapshot: RefCell::new(None),
+            app_list_box: RefCell::new(None),
+            app_volume_list_key: RefCell::new(None),
+            app_volume_rows: RefCell::new(Vec::new()),
             updating: Cell::new(false),
             row: RefCell::new(None),
             hint_label: RefCell::new(None),
+            app_scroll_step: Cell::new(5),
         }
     }
+
+    pub fn invalidate_list_caches(&self) {
+        *self.sink_list_snapshot.borrow_mut() = None;
+        *self.app_volume_list_key.borrow_mut() = None;
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AppVolumeKey {
+    index: u32,
+    app_name: String,
+    app_id: String,
+    app_icon_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AppVolumeListKey {
+    available: bool,
+    streams: Vec<AppVolumeKey>,
+}
+
+impl From<&AppVolumeSnapshot> for AppVolumeKey {
+    fn from(stream: &AppVolumeSnapshot) -> Self {
+        Self {
+            index: stream.index,
+            app_name: stream.app_name.clone(),
+            app_id: stream.app_id.clone(),
+            app_icon_name: stream.app_icon_name.clone(),
+        }
+    }
+}
+
+struct AppVolumeRowState {
+    row: ListBoxRow,
+    index: u32,
+    description_label: Label,
+    value_label: Label,
+    slider: Scale,
+    mute_button: Button,
+    mute_icon: IconHandle,
+    updating: Rc<Cell<bool>>,
 }
 
 impl Default for AudioCardState {
@@ -148,6 +207,8 @@ pub struct AudioDetailsWidgets {
     pub revealer: Revealer,
     /// The list box for sinks.
     pub list_box: ListBox,
+    /// The list box for application streams.
+    pub app_list_box: ListBox,
 }
 
 /// Build the audio details section with sink list.
@@ -162,7 +223,7 @@ pub fn build_audio_details() -> AudioDetailsWidgets {
     container.add_css_class(qs::AUDIO_DETAILS);
 
     // Section header
-    let header = Label::new(Some("Sound"));
+    let header = Label::new(Some("Output Devices"));
     header.set_xalign(0.0);
     header.add_css_class(qs::SECTION_HEADER);
     container.append(&header);
@@ -171,6 +232,15 @@ pub fn build_audio_details() -> AudioDetailsWidgets {
     let list_box = create_qs_list_box();
     container.append(&list_box);
 
+    let app_header = Label::new(Some("Applications"));
+    app_header.set_xalign(0.0);
+    app_header.add_css_class(qs::SECTION_HEADER);
+    container.append(&app_header);
+
+    let app_list_box = create_qs_list_box();
+    app_list_box.add_css_class(qs::APP_VOLUME_LIST);
+    container.append(&app_list_box);
+
     // Wrap in revealer
     let revealer = Revealer::new();
     revealer.set_transition_type(RevealerTransitionType::SlideDown);
@@ -178,7 +248,11 @@ pub fn build_audio_details() -> AudioDetailsWidgets {
     revealer.set_reveal_child(false);
     revealer.set_child(Some(&container));
 
-    AudioDetailsWidgets { revealer, list_box }
+    AudioDetailsWidgets {
+        revealer,
+        list_box,
+        app_list_box,
+    }
 }
 
 /// Create a hint label for when audio control is unavailable.
@@ -195,101 +269,10 @@ pub fn build_audio_hint_label() -> Label {
     label
 }
 
-/// Create a sink row for the audio sink list.
-///
-/// # Arguments
-///
-/// - `description`: The human-readable sink description.
-/// - `is_default`: Whether this sink is the current default.
-/// - `port_available`: Whether the sink's port is available (e.g., headphones plugged in).
-///   `None` means no jack detection, `Some(false)` means unavailable.
-pub fn create_sink_row(
-    description: &str,
-    is_default: bool,
-    port_available: Option<bool>,
-) -> ListBoxRow {
-    let list_row = ListBoxRow::new();
-    list_row.add_css_class(row::QS);
-    list_row.add_css_class(row::BASE);
-
-    // Check if port is unavailable (explicitly false, not unknown/None)
-    let is_unavailable = port_available == Some(false);
-
-    let hbox = GtkBox::new(Orientation::Horizontal, 6);
-    hbox.add_css_class(row::QS_CONTENT);
-
-    // Description label
-    let label = Label::new(Some(description));
-    label.set_xalign(0.0);
-    label.set_hexpand(true);
-    label.set_ellipsize(EllipsizeMode::End);
-    label.set_single_line_mode(true);
-    label.set_width_chars(22);
-    label.set_max_width_chars(22);
-    label.add_css_class(row::QS_TITLE);
-    label.add_css_class(color::PRIMARY);
-    hbox.append(&label);
-
-    // Selection indicator
-    if is_default {
-        // Overlay: background box + checkmark icon floating on top
-        let overlay = Overlay::new();
-        overlay.set_valign(Align::Center);
-
-        // Background box (same size as unselected indicator)
-        let bg = GtkBox::new(Orientation::Horizontal, 0);
-        bg.add_css_class(row::QS_INDICATOR_BG);
-        overlay.set_child(Some(&bg));
-
-        // Checkmark icon (larger, overflows the background)
-        let icons = IconsService::global();
-        let indicator = icons.create_icon("object-select-symbolic", &[row::QS_INDICATOR]);
-        indicator.widget().set_halign(Align::Center);
-        indicator.widget().set_valign(Align::Center);
-        overlay.add_overlay(&indicator.widget());
-
-        hbox.append(&overlay);
-    } else {
-        // CSS-styled box for unselected (respects --radius-pill)
-        let indicator = GtkBox::new(Orientation::Horizontal, 0);
-        indicator.add_css_class(row::QS_RADIO_INDICATOR);
-        hbox.append(&indicator);
-    }
-
-    // Add ripple overlay for press feedback on activatable rows.
-    // Move padding from the row CSS to content margins so the ripple
-    // DrawingArea fills the full row background.
-    if is_unavailable {
-        list_row.set_child(Some(&hbox));
-    } else {
-        // Transfer .qs-row padding to content margins; the CSS rule
-        // `.qs-row.vp-has-ripple { padding: 0 }` zeros the row padding.
-        hbox.set_margin_top(6);
-        hbox.set_margin_bottom(6);
-        hbox.set_margin_start(10);
-        hbox.set_margin_end(10);
-
-        add_ripple_to_row(&list_row, &hbox);
-    }
-
-    // If port is unavailable, gray out the row and make it non-activatable
-    if is_unavailable {
-        list_row.set_activatable(false);
-        list_row.set_focusable(false);
-        list_row.set_sensitive(false);
-    } else {
-        list_row.set_activatable(true);
-        list_row.set_focusable(true);
-    }
-
-    list_row
-}
-
 /// Populate the audio sink list with available sinks.
 ///
-/// Sinks with unavailable ports (e.g., headphones not plugged in) are shown
-/// but grayed out and non-selectable.
-pub fn populate_audio_sink_list(list_box: &ListBox, snapshot: &AudioSnapshot) {
+/// Sinks with unavailable ports (e.g., headphones not plugged in) are omitted.
+fn populate_audio_sink_list(list_box: &ListBox, snapshot: &AudioSnapshot) {
     clear_list_box(list_box);
 
     if !snapshot.available {
@@ -322,9 +305,296 @@ pub fn populate_audio_sink_list(list_box: &ListBox, snapshot: &AudioSnapshot) {
             continue;
         }
 
-        let row = create_sink_row(&sink.description, sink.is_default, sink.port_available);
+        let subtitle = device_subtitle(
+            &sink.description,
+            sink.port_description.as_deref(),
+            sink.form_factor.as_deref(),
+        );
+        let icon_name = audio_output_icon_name(
+            sink.device_icon_name.as_deref(),
+            sink.form_factor.as_deref(),
+        );
+        let row = create_device_row(
+            &sink.description,
+            subtitle.as_deref(),
+            Some(icon_name),
+            sink.is_default,
+        );
         list_box.append(&row);
     }
+}
+
+pub fn sync_audio_sink_list(
+    state: &AudioCardState,
+    list_box: &ListBox,
+    snapshot: &AudioSnapshot,
+) -> bool {
+    let unchanged = state
+        .sink_list_snapshot
+        .borrow()
+        .as_ref()
+        .is_some_and(|(available, sinks)| {
+            *available == snapshot.available && sinks == &snapshot.sinks
+        });
+    if unchanged {
+        return false;
+    }
+
+    populate_audio_sink_list(list_box, snapshot);
+    *state.sink_list_snapshot.borrow_mut() = Some((snapshot.available, snapshot.sinks.clone()));
+    true
+}
+
+/// Populate application stream volume controls.
+fn populate_app_volume_list(state: &AudioCardState, list_box: &ListBox, snapshot: &AudioSnapshot) {
+    clear_list_box(list_box);
+    state.app_volume_rows.borrow_mut().clear();
+    *state.app_volume_list_key.borrow_mut() = Some(app_volume_list_key(snapshot));
+
+    if !snapshot.available {
+        add_placeholder_row(list_box, "Audio unavailable");
+        return;
+    }
+
+    if snapshot.app_volumes.is_empty() {
+        add_placeholder_row(list_box, "No application audio");
+        return;
+    }
+
+    let mut rows = Vec::with_capacity(snapshot.app_volumes.len());
+    for stream in &snapshot.app_volumes {
+        let row = create_app_volume_row(stream, state.app_scroll_step.get());
+        list_box.append(&row.row);
+        rows.push(row);
+    }
+    *state.app_volume_rows.borrow_mut() = rows;
+}
+
+pub fn sync_app_volume_list(
+    state: &AudioCardState,
+    list_box: &ListBox,
+    snapshot: &AudioSnapshot,
+) -> bool {
+    let key = app_volume_list_key(snapshot);
+    if state.app_volume_list_key.borrow().as_ref() != Some(&key) {
+        populate_app_volume_list(state, list_box, snapshot);
+        return true;
+    }
+
+    let rows = state.app_volume_rows.borrow();
+    for (row, stream) in rows.iter().zip(&snapshot.app_volumes) {
+        row.update(stream);
+    }
+    false
+}
+
+fn app_volume_list_key(snapshot: &AudioSnapshot) -> AppVolumeListKey {
+    AppVolumeListKey {
+        available: snapshot.available,
+        streams: if snapshot.available {
+            snapshot
+                .app_volumes
+                .iter()
+                .map(AppVolumeKey::from)
+                .collect()
+        } else {
+            Vec::new()
+        },
+    }
+}
+
+fn create_app_volume_row(stream: &AppVolumeSnapshot, scroll_step: i32) -> AppVolumeRowState {
+    let list_row = ListBoxRow::new();
+    list_row.add_css_class(row::QS);
+    list_row.add_css_class(row::BASE);
+    list_row.add_css_class(qs::APP_VOLUME_ROW);
+    list_row.set_activatable(false);
+    list_row.set_focusable(false);
+
+    let outer = GtkBox::new(Orientation::Horizontal, 0);
+    outer.add_css_class(row::QS_CONTENT);
+    outer.set_margin_top(6);
+    outer.set_margin_bottom(6);
+    outer.set_margin_start(10);
+    outer.set_margin_end(10);
+
+    append_app_volume_icon(&outer, stream);
+
+    let content = GtkBox::new(Orientation::Vertical, 2);
+    content.set_hexpand(true);
+
+    let top_row = GtkBox::new(Orientation::Horizontal, 6);
+
+    let title_label = Label::new(Some(&stream.app_name));
+    title_label.add_css_class(qs::APP_VOLUME_TITLE);
+    title_label.add_css_class(color::PRIMARY);
+    title_label.set_xalign(0.0);
+    title_label.set_ellipsize(EllipsizeMode::End);
+    title_label.set_single_line_mode(true);
+    title_label.set_tooltip_text(Some(&stream.app_name));
+    top_row.append(&title_label);
+
+    let description_label = Label::new(None);
+    description_label.add_css_class(qs::APP_VOLUME_DESCRIPTION);
+    description_label.add_css_class(color::MUTED);
+    description_label.set_xalign(0.0);
+    description_label.set_hexpand(true);
+    description_label.set_ellipsize(EllipsizeMode::End);
+    description_label.set_single_line_mode(true);
+    top_row.append(&description_label);
+
+    let value_label = Label::new(None);
+    value_label.add_css_class(qs::APP_VOLUME_VALUE);
+    value_label.set_halign(Align::End);
+    value_label.add_css_class(color::PRIMARY);
+    top_row.append(&value_label);
+
+    content.append(&top_row);
+
+    let slider = Scale::with_range(
+        Orientation::Horizontal,
+        0.0,
+        AudioService::global().user_max_percent() as f64,
+        1.0,
+    );
+    slider.add_css_class(qs::APP_VOLUME_SLIDER);
+    slider.set_draw_value(false);
+    slider.set_hexpand(true);
+    slider.set_round_digits(0);
+    attach_app_volume_scroll_controller(&slider, scroll_step);
+
+    let index = stream.index;
+    let updating = Rc::new(Cell::new(false));
+    let updating_for_slider = Rc::clone(&updating);
+    slider.connect_value_changed(move |slider| {
+        if updating_for_slider.get() {
+            return;
+        }
+        AudioService::global().set_app_volume(index, slider.value().round() as u32);
+    });
+
+    content.append(&slider);
+    outer.append(&content);
+    let (mute_button, mute_icon) = build_app_volume_mute_button(stream.index);
+    outer.append(&mute_button);
+    list_row.set_child(Some(&outer));
+
+    let row = AppVolumeRowState {
+        row: list_row,
+        index: stream.index,
+        description_label,
+        value_label,
+        slider,
+        mute_button,
+        mute_icon,
+        updating,
+    };
+    row.update(stream);
+    row
+}
+
+impl AppVolumeRowState {
+    fn update(&self, stream: &AppVolumeSnapshot) {
+        debug_assert_eq!(self.index, stream.index);
+        let description = format!("- {}", stream.media_description);
+        if self.description_label.text() != description {
+            self.description_label.set_text(&description);
+            self.description_label
+                .set_tooltip_text(Some(&stream.media_description));
+        }
+        let tooltip = format!("{}%", stream.volume);
+        self.value_label.set_text(&tooltip);
+        self.value_label.set_tooltip_text(Some(&tooltip));
+        self.updating.set(true);
+        self.slider
+            .set_range(0.0, AudioService::global().user_max_percent().max(1) as f64);
+        self.slider.set_value(stream.volume as f64);
+        self.slider.set_tooltip_text(Some(&tooltip));
+        self.updating.set(false);
+
+        let icon_name = volume_icon_name(stream.volume, stream.muted);
+        self.mute_icon.set_icon(icon_name);
+        let icon = self.mute_icon.widget();
+        if stream.muted {
+            icon.add_css_class(state::MUTED);
+        } else {
+            icon.remove_css_class(state::MUTED);
+        }
+        let mute_tooltip = if stream.muted { "Unmute" } else { "Mute" };
+        if self.mute_button.tooltip_text().as_deref() != Some(mute_tooltip) {
+            self.mute_button.set_tooltip_text(Some(mute_tooltip));
+        }
+    }
+}
+
+fn build_app_volume_mute_button(index: u32) -> (Button, IconHandle) {
+    let button = vp_button();
+    button.set_has_frame(false);
+    button.add_css_class(qs::APP_VOLUME_MUTE);
+    button.set_valign(Align::Center);
+
+    let icon_handle =
+        IconsService::global().create_icon("audio-volume-muted-symbolic", &[color::PRIMARY]);
+    icon_handle.widget().set_halign(Align::Center);
+    icon_handle.widget().set_valign(Align::Center);
+    button.set_child(Some(&icon_handle.widget()));
+
+    button.connect_clicked(move |_| {
+        AudioService::global().toggle_app_mute(index);
+    });
+
+    (button, icon_handle)
+}
+
+fn append_app_volume_icon(container: &GtkBox, stream: &AppVolumeSnapshot) {
+    let icon_slot = CenterBox::new();
+    icon_slot.add_css_class(qs::APP_VOLUME_ICON_SLOT);
+    icon_slot.set_halign(Align::Start);
+    icon_slot.set_valign(Align::Center);
+    icon_slot.set_hexpand(false);
+
+    if let Some(icon_name) = resolve_stream_icon_name(stream) {
+        let app_icon = Image::from_icon_name(&icon_name);
+        app_icon.add_css_class(qs::APP_VOLUME_ICON);
+        let icon_size = ConfigManager::global().theme_sizes().pixmap_icon_size as i32;
+        app_icon.set_pixel_size((icon_size as f32 * 1.25).round() as i32);
+        app_icon.set_halign(Align::Center);
+        app_icon.set_valign(Align::Center);
+        icon_slot.set_center_widget(Some(&app_icon));
+        container.append(&icon_slot);
+        return;
+    }
+
+    let fallback = IconsService::global().create_icon(
+        "audio-speakers-symbolic",
+        &[qs::APP_VOLUME_ICON, color::PRIMARY],
+    );
+    fallback.add_css_class(qs::APP_VOLUME_ICON_FALLBACK);
+    fallback.widget().set_valign(Align::Center);
+    fallback.widget().set_halign(Align::Center);
+    fallback.widget().set_hexpand(false);
+    icon_slot.set_center_widget(Some(&fallback.widget()));
+    container.append(&icon_slot);
+}
+
+fn resolve_stream_icon_name(stream: &AppVolumeSnapshot) -> Option<String> {
+    for candidate in [
+        stream.app_icon_name.as_str(),
+        stream.app_id.as_str(),
+        stream.app_name.as_str(),
+    ] {
+        let candidate = candidate.trim();
+        if candidate.is_empty() || candidate.eq_ignore_ascii_case("application") {
+            continue;
+        }
+
+        let icon_name = resolve_app_icon_name(candidate, "");
+        if !icon_name.is_empty() {
+            return Some(icon_name);
+        }
+    }
+
+    None
 }
 
 /// Handle Audio state changes from AudioService.
@@ -373,11 +643,17 @@ pub fn on_audio_changed(state: &AudioCardState, snapshot: &AudioSnapshot) {
         }
     }
 
-    // Update sink list
-    if let Some(list_box) = state.list_box.borrow().as_ref() {
-        populate_audio_sink_list(list_box, snapshot);
-        // Apply Pango font attrs to dynamically created list rows
+    // Update sink list only when device inputs change.
+    if let Some(list_box) = state.list_box.borrow().as_ref()
+        && sync_audio_sink_list(state, list_box, snapshot)
+    {
         SurfaceStyleManager::global().apply_pango_attrs_all(list_box);
+    }
+
+    if let Some(app_list_box) = state.app_list_box.borrow().as_ref()
+        && sync_app_volume_list(state, app_list_box, snapshot)
+    {
+        SurfaceStyleManager::global().apply_pango_attrs_all(app_list_box);
     }
 }
 
@@ -412,14 +688,55 @@ pub fn on_audio_sink_row_activated(row: &ListBoxRow) {
 /// volume only changes once a full tick is reached. The accumulator resets
 /// on direction change so that reversing scroll direction feels responsive.
 pub fn attach_volume_scroll_controller(widget: &impl IsA<gtk4::Widget>, step: i32) {
+    attach_volume_scroll_controller_inner(
+        widget,
+        step,
+        move || {
+            let snapshot = AudioService::global().current();
+            if !snapshot.available || !snapshot.control_available {
+                return false;
+            }
+
+            true
+        },
+        |direction, step| {
+            AudioService::global().set_volume_relative(direction * step);
+        },
+    );
+}
+
+fn attach_app_volume_scroll_controller(slider: &Scale, step: i32) {
+    let slider_for_apply = slider.downgrade();
+
+    attach_volume_scroll_controller_inner(
+        slider,
+        step,
+        || true,
+        move |direction, step| {
+            let Some(slider) = slider_for_apply.upgrade() else {
+                return;
+            };
+            let adjustment = slider.adjustment();
+            let value = (slider.value() + f64::from(direction * step))
+                .clamp(adjustment.lower(), adjustment.upper());
+            slider.set_value(value);
+        },
+    );
+}
+
+fn attach_volume_scroll_controller_inner(
+    widget: &impl IsA<gtk4::Widget>,
+    step: i32,
+    can_scroll: impl Fn() -> bool + 'static,
+    apply_step: impl Fn(i32, i32) + 'static,
+) {
     let scroll = EventControllerScroll::new(EventControllerScrollFlags::VERTICAL);
     scroll.set_propagation_phase(gtk4::PropagationPhase::Capture);
 
     let accumulated = Rc::new(Cell::new(0.0f64));
 
     scroll.connect_scroll(move |_controller, _dx, dy| {
-        let snapshot = AudioService::global().current();
-        if !snapshot.available || !snapshot.control_available {
+        if !can_scroll() {
             accumulated.set(0.0);
             return gtk4::glib::Propagation::Proceed;
         }
@@ -433,13 +750,11 @@ pub fn attach_volume_scroll_controller(widget: &impl IsA<gtk4::Widget>, step: i3
         }
 
         acc += dy;
-
-        let audio = AudioService::global();
         let step = step.abs();
 
         while acc.abs() >= 1.0 {
             let direction = if acc < 0.0 { 1 } else { -1 };
-            audio.set_volume_relative(direction * step);
+            apply_step(direction, step);
             acc -= acc.signum();
         }
 
@@ -448,4 +763,94 @@ pub fn attach_volume_scroll_controller(widget: &impl IsA<gtk4::Widget>, step: i3
     });
 
     widget.add_controller(scroll);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stream(
+        volume: u32,
+        muted: bool,
+        media_description: &str,
+        channel_count: u8,
+    ) -> AppVolumeSnapshot {
+        AppVolumeSnapshot {
+            index: 7,
+            app_name: "App".to_string(),
+            app_id: "app".to_string(),
+            app_icon_name: "app-icon".to_string(),
+            media_description: media_description.to_string(),
+            volume,
+            muted,
+            channel_count,
+        }
+    }
+
+    fn snapshot(app_volumes: Vec<AppVolumeSnapshot>) -> AudioSnapshot {
+        AudioSnapshot {
+            available: true,
+            app_volumes,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn app_volume_list_key_ignores_dynamic_stream_fields() {
+        let first = snapshot(vec![stream(25, false, "Playback", 2)]);
+        let second = snapshot(vec![stream(80, true, "Next track", 6)]);
+
+        assert_eq!(app_volume_list_key(&first), app_volume_list_key(&second));
+    }
+
+    #[test]
+    fn app_volume_list_key_distinguishes_unavailable_from_available_empty() {
+        let unavailable = AudioSnapshot::default();
+        let available = snapshot(Vec::new());
+
+        assert_ne!(
+            app_volume_list_key(&unavailable),
+            app_volume_list_key(&available)
+        );
+    }
+
+    #[test]
+    fn app_volume_list_key_changes_when_streams_appear() {
+        let empty = snapshot(Vec::new());
+        let populated = snapshot(vec![stream(25, false, "Playback", 2)]);
+
+        assert_ne!(app_volume_list_key(&empty), app_volume_list_key(&populated));
+    }
+
+    #[test]
+    fn uninitialized_app_volume_list_differs_from_rendered_unavailable() {
+        let state = AudioCardState::new();
+        let unavailable_key = app_volume_list_key(&AudioSnapshot::default());
+
+        assert_ne!(
+            state.app_volume_list_key.borrow().as_ref(),
+            Some(&unavailable_key)
+        );
+
+        *state.app_volume_list_key.borrow_mut() = Some(unavailable_key.clone());
+        assert_eq!(
+            state.app_volume_list_key.borrow().as_ref(),
+            Some(&unavailable_key)
+        );
+    }
+
+    #[test]
+    fn invalidating_audio_list_caches_clears_rendered_inputs() {
+        let state = AudioCardState::new();
+        *state.sink_list_snapshot.borrow_mut() = Some((true, Vec::new()));
+        *state.app_volume_list_key.borrow_mut() = Some(AppVolumeListKey {
+            available: true,
+            streams: Vec::new(),
+        });
+
+        state.invalidate_list_caches();
+
+        assert!(state.sink_list_snapshot.borrow().is_none());
+        assert!(state.app_volume_list_key.borrow().is_none());
+    }
 }

@@ -9,7 +9,7 @@ if command -v xvfb-run >/dev/null 2>&1; then
 else
     printf '%s\n' 'skipping scripts/run-ui-regression-tests.sh: xvfb-run is not installed'
 fi
-echo '+cargo clippy --all -- -D warnings'
-cargo clippy --all -- -D warnings
+echo '+cargo clippy --all-targets -- -D warnings'
+cargo clippy --all-targets -- -D warnings
 echo '+cargo fmt --all -- --check'
 cargo fmt --all -- --check

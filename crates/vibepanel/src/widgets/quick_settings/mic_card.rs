@@ -8,21 +8,21 @@
 
 use std::cell::{Cell, RefCell};
 
-use gtk4::pango::EllipsizeMode;
 use gtk4::prelude::*;
 use gtk4::{
-    Align, Box as GtkBox, Button, Label, ListBox, ListBoxRow, Orientation, Overlay, Revealer,
+    Box as GtkBox, Button, Label, ListBox, ListBoxRow, Orientation, Revealer,
     RevealerTransitionType, Scale,
 };
 
 use super::components::SliderRow;
-use super::ui_helpers::{add_placeholder_row, clear_list_box, create_qs_list_box};
+use super::ui_helpers::{
+    add_placeholder_row, clear_list_box, create_device_row, create_qs_list_box, device_subtitle,
+};
 use crate::services::audio::{AudioService, AudioSnapshot, SourceInfoSnapshot};
 use crate::services::config_manager::ConfigManager;
-use crate::services::icons::{IconHandle, IconsService};
+use crate::services::icons::IconHandle;
 use crate::services::surfaces::SurfaceStyleManager;
-use crate::styles::{color, qs, row, state};
-use crate::widgets::base::add_ripple_to_row;
+use crate::styles::{color, qs, state};
 
 /// Get the appropriate mic icon name based on volume level and mute state.
 pub fn mic_icon_name(volume: u32, muted: bool) -> &'static str {
@@ -55,6 +55,8 @@ pub struct MicCardState {
     pub revealer: RefCell<Option<Revealer>>,
     /// Mic source list box.
     pub list_box: RefCell<Option<ListBox>>,
+    /// Last source list rendered into `list_box`.
+    source_list_snapshot: RefCell<Option<Vec<SourceInfoSnapshot>>>,
     /// Flag to prevent slider feedback loop.
     pub updating: Cell<bool>,
     /// Mic row container (for CSS class toggling).
@@ -72,10 +74,15 @@ impl MicCardState {
             arrow: RefCell::new(None),
             revealer: RefCell::new(None),
             list_box: RefCell::new(None),
+            source_list_snapshot: RefCell::new(None),
             updating: Cell::new(false),
             row: RefCell::new(None),
             hint_label: RefCell::new(None),
         }
+    }
+
+    pub fn invalidate_list_cache(&self) {
+        *self.source_list_snapshot.borrow_mut() = None;
     }
 }
 
@@ -159,7 +166,7 @@ pub fn build_mic_details() -> MicDetailsWidgets {
     container.add_css_class(qs::AUDIO_DETAILS);
 
     // Section header
-    let header = Label::new(Some("Input"));
+    let header = Label::new(Some("Input Devices"));
     header.set_xalign(0.0);
     header.add_css_class(qs::SECTION_HEADER);
     container.append(&header);
@@ -190,100 +197,10 @@ pub fn build_mic_hint_label() -> Label {
     label
 }
 
-/// Create a source row for the mic source list.
-///
-/// # Arguments
-///
-/// - `description`: The human-readable source description.
-/// - `is_default`: Whether this source is the current default.
-/// - `port_available`: Whether the source's port is available.
-///   `None` means no jack detection, `Some(false)` means unavailable.
-pub fn create_source_row(
-    description: &str,
-    is_default: bool,
-    port_available: Option<bool>,
-) -> ListBoxRow {
-    let list_row = ListBoxRow::new();
-    list_row.add_css_class(row::QS);
-    list_row.add_css_class(row::BASE);
-
-    // Check if port is unavailable (explicitly false, not unknown/None)
-    let is_unavailable = port_available == Some(false);
-
-    let hbox = GtkBox::new(Orientation::Horizontal, 6);
-    hbox.add_css_class(row::QS_CONTENT);
-
-    // Description label
-    let label = Label::new(Some(description));
-    label.set_xalign(0.0);
-    label.set_hexpand(true);
-    label.set_ellipsize(EllipsizeMode::End);
-    label.set_single_line_mode(true);
-    label.set_width_chars(22);
-    label.set_max_width_chars(22);
-    label.add_css_class(row::QS_TITLE);
-    label.add_css_class(color::PRIMARY);
-    hbox.append(&label);
-
-    // Selection indicator
-    if is_default {
-        // Overlay: background box + checkmark icon floating on top
-        let overlay = Overlay::new();
-        overlay.set_valign(Align::Center);
-
-        // Background box (same size as unselected indicator)
-        let bg = GtkBox::new(Orientation::Horizontal, 0);
-        bg.add_css_class(row::QS_INDICATOR_BG);
-        overlay.set_child(Some(&bg));
-
-        // Checkmark icon (larger, overflows the background)
-        let icons = IconsService::global();
-        let indicator = icons.create_icon("object-select-symbolic", &[row::QS_INDICATOR]);
-        indicator.widget().set_halign(Align::Center);
-        indicator.widget().set_valign(Align::Center);
-        overlay.add_overlay(&indicator.widget());
-
-        hbox.append(&overlay);
-    } else {
-        // CSS-styled box for unselected (respects --radius-pill)
-        let indicator = GtkBox::new(Orientation::Horizontal, 0);
-        indicator.add_css_class(row::QS_RADIO_INDICATOR);
-        hbox.append(&indicator);
-    }
-
-    // Add ripple overlay for press feedback on activatable rows.
-    // Move padding from the row CSS to content margins so the ripple
-    // DrawingArea fills the full row background.
-    if is_unavailable {
-        list_row.set_child(Some(&hbox));
-    } else {
-        // Transfer .qs-row padding to content margins; the CSS rule
-        // `.qs-row.vp-has-ripple { padding: 0 }` zeros the row padding.
-        hbox.set_margin_top(6);
-        hbox.set_margin_bottom(6);
-        hbox.set_margin_start(10);
-        hbox.set_margin_end(10);
-
-        add_ripple_to_row(&list_row, &hbox);
-    }
-
-    // If port is unavailable, gray out the row and make it non-activatable
-    if is_unavailable {
-        list_row.set_activatable(false);
-        list_row.set_focusable(false);
-        list_row.set_sensitive(false);
-    } else {
-        list_row.set_activatable(true);
-        list_row.set_focusable(true);
-    }
-
-    list_row
-}
-
 /// Populate the mic source list with available sources.
 ///
-/// Sources with unavailable ports are shown but grayed out and non-selectable.
-pub fn populate_mic_source_list(list_box: &ListBox, sources: &[SourceInfoSnapshot]) {
+/// Sources with unavailable ports are omitted.
+fn populate_mic_source_list(list_box: &ListBox, sources: &[SourceInfoSnapshot]) {
     clear_list_box(list_box);
 
     if sources.is_empty() {
@@ -309,13 +226,33 @@ pub fn populate_mic_source_list(list_box: &ListBox, sources: &[SourceInfoSnapsho
             continue;
         }
 
-        let row = create_source_row(
+        let subtitle = device_subtitle(
             &source.description,
+            source.port_description.as_deref(),
+            source.form_factor.as_deref(),
+        );
+        let row = create_device_row(
+            &source.description,
+            subtitle.as_deref(),
+            None,
             source.is_default,
-            source.port_available,
         );
         list_box.append(&row);
     }
+}
+
+pub fn sync_mic_source_list(
+    state: &MicCardState,
+    list_box: &ListBox,
+    sources: &[SourceInfoSnapshot],
+) -> bool {
+    if state.source_list_snapshot.borrow().as_deref() == Some(sources) {
+        return false;
+    }
+
+    populate_mic_source_list(list_box, sources);
+    *state.source_list_snapshot.borrow_mut() = Some(sources.to_vec());
+    true
 }
 
 /// Handle Audio state changes from AudioService (mic-related fields).
@@ -366,10 +303,10 @@ pub fn on_mic_changed(state: &MicCardState, snapshot: &AudioSnapshot) {
         }
     }
 
-    // Update source list
-    if let Some(list_box) = state.list_box.borrow().as_ref() {
-        populate_mic_source_list(list_box, &snapshot.sources);
-        // Apply Pango font attrs to dynamically created list rows
+    // Update source list only when device inputs change.
+    if let Some(list_box) = state.list_box.borrow().as_ref()
+        && sync_mic_source_list(state, list_box, &snapshot.sources)
+    {
         SurfaceStyleManager::global().apply_pango_attrs_all(list_box);
     }
 }
@@ -391,5 +328,20 @@ pub fn on_mic_source_row_activated(row: &ListBoxRow, sources: &[SourceInfoSnapsh
 
     if let Some(source) = available_sources.get(index as usize) {
         AudioService::global().set_default_source(&source.name);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invalidating_mic_list_cache_clears_rendered_inputs() {
+        let state = MicCardState::new();
+        *state.source_list_snapshot.borrow_mut() = Some(Vec::new());
+
+        state.invalidate_list_cache();
+
+        assert!(state.source_list_snapshot.borrow().is_none());
     }
 }

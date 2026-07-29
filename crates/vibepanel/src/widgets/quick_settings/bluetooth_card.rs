@@ -19,15 +19,16 @@ use tracing::debug;
 use super::components::ListRow;
 use super::ui_helpers::{
     ExpandableCard, ExpandableCardBase, ScanButton, add_disabled_placeholder, add_placeholder_row,
-    build_accent_subtitle, clear_list_box, create_qs_list_box, create_row_action_label,
-    create_row_menu_action, create_row_menu_button, set_icon_active, set_subtitle_active,
+    build_accent_subtitle, clear_list_box, close_row_menu_popover, create_qs_list_box,
+    create_row_action_label, create_row_menu_action, create_row_menu_button,
+    present_row_menu_popover, set_icon_active, set_subtitle_active,
 };
 use crate::services::bluetooth::{
     BluetoothAuthRequest, BluetoothDevice, BluetoothService, BluetoothSnapshot,
 };
 use crate::services::icons::IconsService;
 use crate::services::surfaces::SurfaceStyleManager;
-use crate::styles::{button, color, icon, qs, row, state, surface};
+use crate::styles::{button, color, icon, qs, row, surface};
 use crate::widgets::base::configure_popover;
 
 /// Identity of an auth request for cache invalidation.
@@ -364,7 +365,11 @@ fn create_bluetooth_action_widget(dev: &BluetoothDevice, is_pairing: bool) -> gt
 
         if connected {
             let path = path_for_menu.clone();
+            let popover_weak = popover.downgrade();
             let action = create_row_menu_action("Disconnect", move || {
+                if let Some(popover) = popover_weak.upgrade() {
+                    close_row_menu_popover(&popover);
+                }
                 let bt = BluetoothService::global();
                 debug!("bt_disconnect_from_menu path={}", path);
                 bt.disconnect_device(&path);
@@ -372,7 +377,11 @@ fn create_bluetooth_action_widget(dev: &BluetoothDevice, is_pairing: bool) -> gt
             content_box.append(&action);
         } else {
             let path = path_for_menu.clone();
+            let popover_weak = popover.downgrade();
             let action = create_row_menu_action("Connect", move || {
+                if let Some(popover) = popover_weak.upgrade() {
+                    close_row_menu_popover(&popover);
+                }
                 let bt = BluetoothService::global();
                 debug!("bt_connect_from_menu path={}", path);
                 bt.connect_device(&path);
@@ -381,7 +390,11 @@ fn create_bluetooth_action_widget(dev: &BluetoothDevice, is_pairing: bool) -> gt
         }
 
         let path = path_for_menu.clone();
+        let popover_weak = popover.downgrade();
         let action = create_row_menu_action("Forget", move || {
+            if let Some(popover) = popover_weak.upgrade() {
+                close_row_menu_popover(&popover);
+            }
             let bt = BluetoothService::global();
             debug!("bt_forget_from_menu path={}", path);
             bt.forget_device(&path);
@@ -390,16 +403,7 @@ fn create_bluetooth_action_widget(dev: &BluetoothDevice, is_pairing: bool) -> gt
 
         panel.append(&content_box);
         popover.set_child(Some(&panel));
-        popover.set_parent(btn);
-
-        menu_icon_widget.add_css_class(state::EXPANDED);
-        let icon_for_close = menu_icon_widget.clone();
-        popover.connect_closed(move |p| {
-            icon_for_close.remove_css_class(state::EXPANDED);
-            p.unparent();
-        });
-
-        popover.popup();
+        present_row_menu_popover(&popover, btn, &menu_icon_widget);
     });
 
     menu_btn.upcast()

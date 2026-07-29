@@ -343,12 +343,23 @@ impl QuickSettingsWindow {
         // Subscribe to services
         Self::subscribe_to_services(&qs);
 
-        // Update revealer durations when animations config is toggled at runtime.
+        // Refresh theme-dependent widgets and animation durations at runtime.
         {
             let qs_weak = Rc::downgrade(&qs);
             let id = ConfigManager::global().on_theme_change(move || {
                 if let Some(qs) = qs_weak.upgrade() {
                     Self::update_revealer_durations(&qs);
+                    if qs.cards_config.audio || qs.cards_config.mic {
+                        let audio_snapshot = AudioService::global().current();
+                        if qs.cards_config.audio {
+                            qs.audio.invalidate_list_caches();
+                            audio_card::on_audio_changed(&qs.audio, &audio_snapshot);
+                        }
+                        if qs.cards_config.mic {
+                            qs.mic.invalidate_list_cache();
+                            mic_card::on_mic_changed(&qs.mic, &audio_snapshot);
+                        }
+                    }
                 }
             });
             qs.theme_callback_id.set(Some(id));
@@ -984,6 +995,7 @@ impl QuickSettingsWindow {
         let audio_widgets = build_audio_row();
         let audio_details = build_audio_details();
         let audio_hint_label = build_audio_hint_label();
+        qs.audio.app_scroll_step.set(qs.audio_scroll_percentage);
 
         // Add row identifier for CSS targeting
         audio_widgets.row.add_css_class(qs::AUDIO_OUTPUT);
@@ -1037,7 +1049,8 @@ impl QuickSettingsWindow {
         }
 
         // Populate initial sink list
-        audio_card::populate_audio_sink_list(&audio_details.list_box, &audio_snapshot);
+        audio_card::sync_audio_sink_list(&qs.audio, &audio_details.list_box, &audio_snapshot);
+        audio_card::sync_app_volume_list(&qs.audio, &audio_details.app_list_box, &audio_snapshot);
 
         // Check initial control availability
         let control_ok = audio_snapshot.available && audio_snapshot.control_available;
@@ -1054,6 +1067,7 @@ impl QuickSettingsWindow {
         *qs.audio.arrow.borrow_mut() = Some(audio_widgets.arrow_handle.clone());
         *qs.audio.revealer.borrow_mut() = Some(audio_details.revealer.clone());
         *qs.audio.list_box.borrow_mut() = Some(audio_details.list_box.clone());
+        *qs.audio.app_list_box.borrow_mut() = Some(audio_details.app_list_box.clone());
         *qs.audio.row.borrow_mut() = Some(audio_widgets.row.clone());
         *qs.audio.hint_label.borrow_mut() = Some(audio_hint_label.clone());
 
@@ -1132,7 +1146,7 @@ impl QuickSettingsWindow {
         }
 
         // Populate initial source list
-        mic_card::populate_mic_source_list(&mic_details.list_box, &audio_snapshot.sources);
+        mic_card::sync_mic_source_list(&qs.mic, &mic_details.list_box, &audio_snapshot.sources);
 
         // Check initial control availability
         let control_ok = audio_snapshot.available && audio_snapshot.mic_control_available;

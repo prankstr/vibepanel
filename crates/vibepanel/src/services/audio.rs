@@ -17,6 +17,7 @@
 //! - Volume/mute commands are sent to the background thread via `std::sync::mpsc`
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -37,7 +38,7 @@ use super::callbacks::{CallbackId, Callbacks};
 /// devices are discovered and defaults are resolved.
 const INITIAL_SETTLE_MS: u64 = 200;
 use pulse::callbacks::ListResult;
-use pulse::context::introspect::SinkInfo;
+use pulse::context::introspect::{SinkInfo, SinkInputInfo};
 use pulse::context::subscribe::{Facility, InterestMaskSet, Operation as SubscribeOp};
 use pulse::context::{Context, FlagSet as ContextFlagSet, State as ContextState};
 use pulse::def::PortAvailable;
@@ -52,6 +53,12 @@ pub struct SinkInfoSnapshot {
     pub name: String,
     /// Human-readable description.
     pub description: String,
+    /// Human-readable active port description, useful as UI subtitle.
+    pub port_description: Option<String>,
+    /// PulseAudio device form factor hint (e.g. speaker, headphone, headset).
+    pub form_factor: Option<String>,
+    /// PulseAudio/PipeWire icon hint (e.g. audio-speakers, audio-headphones).
+    pub device_icon_name: Option<String>,
     /// Whether this is the current default sink.
     pub is_default: bool,
     /// Whether the sink's active port is available (e.g., headphones plugged in).
@@ -68,6 +75,10 @@ pub struct SourceInfoSnapshot {
     pub name: String,
     /// Human-readable description.
     pub description: String,
+    /// Human-readable active port description, useful as UI subtitle.
+    pub port_description: Option<String>,
+    /// PulseAudio device form factor hint (e.g. microphone, headset, webcam).
+    pub form_factor: Option<String>,
     /// Whether this is the current default source.
     pub is_default: bool,
     /// Whether the source's active port is available (e.g., mic plugged in).
@@ -75,6 +86,27 @@ pub struct SourceInfoSnapshot {
     /// `Some(false)` means the port is not available.
     /// `Some(true)` means the port is available.
     pub port_available: Option<bool>,
+}
+
+/// Information about an application playback stream.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppVolumeSnapshot {
+    /// PulseAudio sink-input index used for per-stream volume changes.
+    pub index: u32,
+    /// Human-readable application name.
+    pub app_name: String,
+    /// Application identifier used for desktop-entry icon resolution.
+    pub app_id: String,
+    /// Optional icon name advertised by the application stream.
+    pub app_icon_name: String,
+    /// Human-readable stream/media description.
+    pub media_description: String,
+    /// Current stream volume as a percentage.
+    pub volume: u32,
+    /// Whether the stream is muted.
+    pub muted: bool,
+    /// Number of channels in the stream volume structure.
+    pub channel_count: u8,
 }
 
 /// Snapshot of audio service state for callbacks.
@@ -104,6 +136,8 @@ pub struct AudioSnapshot {
     pub control_available: bool,
     /// Whether mic volume/mute controls are currently functional.
     pub mic_control_available: bool,
+    /// Application playback streams with per-stream volume controls.
+    pub app_volumes: Vec<AppVolumeSnapshot>,
 }
 
 impl Default for AudioSnapshot {
@@ -120,6 +154,7 @@ impl Default for AudioSnapshot {
             available: false,
             control_available: true, // Optimistic default; updated when sink info arrives
             mic_control_available: true,
+            app_volumes: Vec::new(),
         }
     }
 }
@@ -181,6 +216,12 @@ enum AudioCommand {
     /// Values are clamped to the configured user-facing range before sending. Silently ignored if
     /// no default source is available or if mic control is unavailable.
     SetMicVolume(u32),
+
+    /// Set an application playback stream volume to an absolute percentage.
+    SetAppVolume { index: u32, percent: u32 },
+
+    /// Toggle the mute state for an application playback stream.
+    ToggleAppMute { index: u32 },
 
     /// Set the mute state for the default audio input source (microphone).
     ///
@@ -297,6 +338,7 @@ struct AudioStateUpdate {
     available: bool,
     control_available: bool,
     mic_control_available: bool,
+    app_volumes: Vec<AppVolumeSnapshot>,
 }
 
 /// Shared, process-wide audio service.
@@ -477,6 +519,19 @@ impl AudioService {
         let _ = self.command_tx.send(AudioCommand::SetMicVolume(percent));
     }
 
+    /// Set an application playback stream volume as a percentage.
+    pub fn set_app_volume(&self, index: u32, percent: u32) {
+        let percent = user_volume_percent(percent, self.user_max_percent());
+        let _ = self
+            .command_tx
+            .send(AudioCommand::SetAppVolume { index, percent });
+    }
+
+    /// Toggle an application playback stream mute state.
+    pub fn toggle_app_mute(&self, index: u32) {
+        let _ = self.command_tx.send(AudioCommand::ToggleAppMute { index });
+    }
+
     /// Set the default source (microphone) by name.
     pub fn set_default_source(&self, name: &str) {
         let _ = self
@@ -524,6 +579,7 @@ impl AudioService {
             available: update.available,
             control_available: update.control_available,
             mic_control_available: update.mic_control_available,
+            app_volumes: update.app_volumes,
         };
 
         if *self.current.borrow() == new_snapshot {
@@ -657,6 +713,18 @@ struct PulseWorkerState {
     /// Similar to `control_available` but for the default source.
     mic_control_available: bool,
 
+    /// Application playback streams eligible for per-app volume controls.
+    app_volumes: Vec<AppVolumeSnapshot>,
+
+    /// Monotonic revision assigned to optimistic application volume and mute changes.
+    app_change_revision: u64,
+
+    /// Desired mute states awaiting confirmation from a fresh enumeration.
+    pending_app_mutes: HashMap<u32, PendingAppMute>,
+
+    /// Desired volume states awaiting confirmation from a fresh enumeration.
+    pending_app_volumes: HashMap<u32, PendingAppVolume>,
+
     // ===== Connection State =====
     /// Whether we have an active connection to the PulseAudio server.
     ///
@@ -682,6 +750,18 @@ struct PulseWorkerState {
     /// externally). When this reaches 2, `control_available` is set to `false`
     /// indicating the backend is unresponsive to volume commands.
     stuck_attempts: u8,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PendingAppMute {
+    muted: bool,
+    revision: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PendingAppVolume {
+    volume: u32,
+    revision: u64,
 }
 
 /// Main function for the PulseAudio worker thread.
@@ -836,11 +916,11 @@ fn setup_subscriptions(
     let state_for_cb = Arc::clone(&state);
     let context_for_cb = Arc::clone(&context);
 
-    ctx.set_subscribe_callback(Some(Box::new(move |facility, op, index| {
+    ctx.set_subscribe_callback(Some(Box::new(move |facility, op, _index| {
         let Some(facility) = facility else { return };
         let Some(op) = op else { return };
 
-        // We care about sink, source, and server changes.
+        // We care about sink, source, sink-input, and server changes.
         // Note: We're inside a callback, so the mainloop is already locked.
         // We must NOT call mainloop.lock() or ml.lock() here.
         match facility {
@@ -849,12 +929,7 @@ fn setup_subscriptions(
                     op,
                     SubscribeOp::Changed | SubscribeOp::New | SubscribeOp::Removed
                 ) {
-                    // Fetch updated sink info.
-                    fetch_sink_by_index_from_callback(
-                        Arc::clone(&context_for_cb),
-                        Arc::clone(&state_for_cb),
-                        index,
-                    );
+                    fetch_sinks_inner(Arc::clone(&context_for_cb), Arc::clone(&state_for_cb));
                 }
             }
             Facility::Source => {
@@ -862,27 +937,30 @@ fn setup_subscriptions(
                     op,
                     SubscribeOp::Changed | SubscribeOp::New | SubscribeOp::Removed
                 ) {
-                    // Fetch updated source info for mic volume/mute.
-                    fetch_source_by_index_from_callback(
-                        Arc::clone(&context_for_cb),
-                        Arc::clone(&state_for_cb),
-                        index,
-                    );
+                    fetch_sources_inner(Arc::clone(&context_for_cb), Arc::clone(&state_for_cb));
+                }
+            }
+            Facility::SinkInput => {
+                if matches!(
+                    op,
+                    SubscribeOp::Changed | SubscribeOp::New | SubscribeOp::Removed
+                ) {
+                    fetch_sink_inputs_inner(Arc::clone(&context_for_cb), Arc::clone(&state_for_cb));
                 }
             }
             Facility::Server => {
                 // Server info changed (e.g., default sink changed).
-                fetch_full_state_from_callback(
-                    Arc::clone(&context_for_cb),
-                    Arc::clone(&state_for_cb),
-                );
+                fetch_full_state_inner(Arc::clone(&context_for_cb), Arc::clone(&state_for_cb));
             }
             _ => {}
         }
     })));
 
-    // Subscribe to sink, source, and server events.
-    let mask = InterestMaskSet::SINK | InterestMaskSet::SOURCE | InterestMaskSet::SERVER;
+    // Subscribe to sink, source, sink-input, and server events.
+    let mask = InterestMaskSet::SINK
+        | InterestMaskSet::SOURCE
+        | InterestMaskSet::SINK_INPUT
+        | InterestMaskSet::SERVER;
     ctx.subscribe(mask, |_success| {});
 
     ml.unlock();
@@ -956,6 +1034,12 @@ fn handle_command(
                 percent,
             );
         }
+        AudioCommand::SetAppVolume { index, percent } => {
+            set_sink_input_volume(mainloop, context, state, index, percent);
+        }
+        AudioCommand::ToggleAppMute { index } => {
+            toggle_sink_input_mute(mainloop, context, state, index);
+        }
         AudioCommand::SetDefaultSink(name) => {
             set_default_sink(Arc::clone(&mainloop), Arc::clone(&context), &name);
             // The server event will trigger a full state refresh.
@@ -997,10 +1081,16 @@ fn fetch_full_state(
     context: Arc<Mutex<Context>>,
     state: Arc<Mutex<PulseWorkerState>>,
 ) {
-    // First, get server info to find the default sink/source names.
     let mut ml = mainloop.lock();
     ml.lock();
 
+    fetch_full_state_inner(context, state);
+
+    ml.unlock();
+}
+
+/// Fetch all audio state while the PulseAudio mainloop is already locked.
+fn fetch_full_state_inner(context: Arc<Mutex<Context>>, state: Arc<Mutex<PulseWorkerState>>) {
     let ctx = context.lock();
     let introspect = ctx.introspect();
 
@@ -1026,67 +1116,18 @@ fn fetch_full_state(
 
         {
             let mut st = state_for_cb.lock();
-            st.default_sink_name = default_sink_name.clone();
-            st.available = true;
-        }
-
-        // We're inside a callback, so the mainloop is already locked.
-        // Use the context directly without locking the mainloop.
-
-        // Fetch sinks
-        fetch_sinks_inner(Arc::clone(&context_for_cb), Arc::clone(&state_for_cb));
-
-        // Fetch default sink details
-        if let Some(sink_name) = default_sink_name {
-            fetch_sink_by_name_inner(
-                Arc::clone(&context_for_cb),
-                Arc::clone(&state_for_cb),
-                &sink_name,
-            );
-        }
-
-        // Fetch default source for mic mute status
-        if default_source_name.is_some() {
-            fetch_default_source_from_callback(
-                Arc::clone(&context_for_cb),
-                Arc::clone(&state_for_cb),
-            );
-        }
-    });
-
-    ml.unlock();
-}
-
-/// Version called from within a callback (mainloop already locked).
-fn fetch_full_state_from_callback(
-    context: Arc<Mutex<Context>>,
-    state: Arc<Mutex<PulseWorkerState>>,
-) {
-    let ctx = context.lock();
-    let introspect = ctx.introspect();
-
-    let state_for_cb = Arc::clone(&state);
-    let context_for_cb = Arc::clone(&context);
-
-    // Use a Mutex to track whether we've already processed the callback.
-    let called = Arc::new(Mutex::new(false));
-
-    introspect.get_server_info(move |info| {
-        // Ensure we only process once.
-        {
-            let mut c = called.lock();
-            if *c {
-                return;
+            if st.default_sink_name.as_deref() != default_sink_name.as_deref()
+                || default_sink_name.is_none()
+            {
+                clear_default_sink_state(&mut st);
             }
-            *c = true;
-        }
-
-        let default_sink_name = info.default_sink_name.as_ref().map(|s| s.to_string());
-        let default_source_name = info.default_source_name.as_ref().map(|s| s.to_string());
-
-        {
-            let mut st = state_for_cb.lock();
             st.default_sink_name = default_sink_name.clone();
+            if st.default_source_name.as_deref() != default_source_name.as_deref()
+                || default_source_name.is_none()
+            {
+                clear_default_source_state(&mut st);
+            }
+            st.default_source_name = default_source_name.clone();
             st.available = true;
         }
 
@@ -1096,22 +1137,11 @@ fn fetch_full_state_from_callback(
         // Fetch sinks
         fetch_sinks_inner(Arc::clone(&context_for_cb), Arc::clone(&state_for_cb));
 
-        // Fetch default sink details
-        if let Some(sink_name) = default_sink_name {
-            fetch_sink_by_name_inner(
-                Arc::clone(&context_for_cb),
-                Arc::clone(&state_for_cb),
-                &sink_name,
-            );
-        }
+        // Fetch sources
+        fetch_sources_inner(Arc::clone(&context_for_cb), Arc::clone(&state_for_cb));
 
-        // Fetch default source for mic mute status
-        if default_source_name.is_some() {
-            fetch_default_source_from_callback(
-                Arc::clone(&context_for_cb),
-                Arc::clone(&state_for_cb),
-            );
-        }
+        // Fetch application playback streams
+        fetch_sink_inputs_inner(Arc::clone(&context_for_cb), Arc::clone(&state_for_cb));
     });
 }
 
@@ -1141,6 +1171,15 @@ fn fetch_sinks_inner(context: Arc<Mutex<Context>>, state: Arc<Mutex<PulseWorkerS
 
                 let default_name = state_for_cb.lock().default_sink_name.clone();
                 let is_default = default_name.as_ref().map(|n| n == &name).unwrap_or(false);
+                if is_default {
+                    update_sink_state(&state_for_cb, info);
+                }
+                let port_description = info
+                    .active_port
+                    .as_ref()
+                    .and_then(|port| port.description.as_ref().map(|value| value.to_string()));
+                let form_factor = audio_prop(&info.proplist, "device.form_factor");
+                let device_icon_name = audio_prop(&info.proplist, "device.icon_name");
 
                 // Check active port availability (for jack detection, e.g., headphones)
                 // PortAvailable::Unknown means no jack detection support - treat as available
@@ -1154,6 +1193,9 @@ fn fetch_sinks_inner(context: Arc<Mutex<Context>>, state: Arc<Mutex<PulseWorkerS
                 collected_for_cb.lock().push(SinkInfoSnapshot {
                     name,
                     description,
+                    port_description,
+                    form_factor,
+                    device_icon_name,
                     is_default,
                     port_available,
                 });
@@ -1163,6 +1205,7 @@ fn fetch_sinks_inner(context: Arc<Mutex<Context>>, state: Arc<Mutex<PulseWorkerS
                 let sinks = std::mem::take(&mut *collected_for_cb.lock());
                 {
                     let mut st = state_for_cb.lock();
+                    clear_missing_default_sink_state(&mut st, &sinks);
                     st.sinks = sinks;
                 }
                 send_state_update(&state_for_cb.lock());
@@ -1175,22 +1218,154 @@ fn fetch_sinks_inner(context: Arc<Mutex<Context>>, state: Arc<Mutex<PulseWorkerS
 }
 
 /// Inner version called from within a callback (mainloop already locked).
-fn fetch_sink_by_name_inner(
-    context: Arc<Mutex<Context>>,
-    state: Arc<Mutex<PulseWorkerState>>,
-    name: &str,
-) {
+fn fetch_sink_inputs_inner(context: Arc<Mutex<Context>>, state: Arc<Mutex<PulseWorkerState>>) {
     let ctx = context.lock();
     let introspect = ctx.introspect();
 
+    let collected = Arc::new(Mutex::new(Vec::new()));
+    let collected_for_cb = Arc::clone(&collected);
     let state_for_cb = Arc::clone(&state);
+    // Mainloop serialization dispatches this request after all app operations
+    // through this revision.
+    let enumeration_revision = state.lock().app_change_revision;
 
-    introspect.get_sink_info_by_name(name, move |result| {
-        if let ListResult::Item(info) = result {
-            update_sink_state(&state_for_cb, info);
+    introspect.get_sink_input_info_list(move |result| match result {
+        ListResult::Item(info) => {
+            if let Some(snapshot) = app_volume_from_sink_input(info) {
+                collected_for_cb.lock().push(snapshot);
+            }
+        }
+        ListResult::End => {
+            let mut app_volumes = std::mem::take(&mut *collected_for_cb.lock());
+            app_volumes.sort_by(|a, b| a.app_name.cmp(&b.app_name).then(a.index.cmp(&b.index)));
+            {
+                let mut st = state_for_cb.lock();
+                reconcile_pending_app_mutes(
+                    &mut app_volumes,
+                    &mut st.pending_app_mutes,
+                    enumeration_revision,
+                );
+                reconcile_pending_app_volumes(
+                    &mut app_volumes,
+                    &mut st.pending_app_volumes,
+                    enumeration_revision,
+                );
+                st.app_volumes = app_volumes;
+            }
             send_state_update(&state_for_cb.lock());
         }
+        ListResult::Error => {
+            warn!("AudioService: error fetching sink input list");
+        }
     });
+}
+
+fn app_volume_from_sink_input(info: &SinkInputInfo<'_>) -> Option<AppVolumeSnapshot> {
+    if !info.has_volume
+        || !info.volume.is_valid()
+        || info.volume.len() == 0
+        || !is_application_sink_input(info)
+    {
+        return None;
+    }
+
+    let app_name = sink_input_prop(info, "application.name")
+        .or_else(|| sink_input_prop(info, "application.process.binary"))
+        .unwrap_or_else(|| "Application".to_string());
+    let app_id = sink_input_prop(info, "application.id")
+        .or_else(|| sink_input_prop(info, "application.process.binary"))
+        .unwrap_or_else(|| app_name.clone());
+    let app_icon_name = sink_input_prop(info, "application.icon_name").unwrap_or_default();
+    let media_description = sink_input_prop(info, "media.name")
+        .or_else(|| info.name.as_ref().map(|name| name.to_string()))
+        .unwrap_or_else(|| "Audio stream".to_string());
+    let volume = volume_to_percent(info.volume.avg());
+
+    Some(AppVolumeSnapshot {
+        index: info.index,
+        app_name,
+        app_id,
+        app_icon_name,
+        media_description,
+        volume,
+        muted: info.mute,
+        channel_count: info.volume.len(),
+    })
+}
+
+fn sink_input_prop(info: &SinkInputInfo<'_>, key: &str) -> Option<String> {
+    info.proplist
+        .get_str(key)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn audio_prop(proplist: &Proplist, key: &str) -> Option<String> {
+    proplist
+        .get_str(key)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn clear_default_sink_state(st: &mut PulseWorkerState) {
+    st.default_sink_name = None;
+    st.default_sink_index = None;
+    st.channel_count = 0;
+    st.control_available = false;
+    st.last_volume_request = None;
+    st.stuck_attempts = 0;
+}
+
+fn clear_default_source_state(st: &mut PulseWorkerState) {
+    st.default_source_name = None;
+    st.default_source_index = None;
+    st.mic_muted = None;
+    st.mic_volume = None;
+    st.mic_channel_count = 0;
+    st.mic_control_available = false;
+}
+
+fn clear_missing_default_sink_state(st: &mut PulseWorkerState, sinks: &[SinkInfoSnapshot]) {
+    if st
+        .default_sink_name
+        .as_ref()
+        .is_some_and(|default| !sinks.iter().any(|sink| &sink.name == default))
+    {
+        clear_default_sink_state(st);
+    }
+}
+
+fn clear_missing_default_source_state(st: &mut PulseWorkerState, source_names: &[String]) {
+    if st
+        .default_source_name
+        .as_ref()
+        .is_some_and(|default| !source_names.iter().any(|name| name == default))
+    {
+        clear_default_source_state(st);
+    }
+}
+
+fn is_application_sink_input(info: &SinkInputInfo<'_>) -> bool {
+    let app_name = sink_input_prop(info, "application.name");
+    let process_binary = sink_input_prop(info, "application.process.binary");
+
+    if app_name.is_none() && process_binary.is_none() {
+        return false;
+    }
+
+    if info.client.is_none() || !info.volume_writable {
+        return false;
+    }
+
+    let media_role = sink_input_prop(info, "media.role").unwrap_or_default();
+    if matches!(
+        media_role.as_str(),
+        "filter" | "abstract" | "test" | "event"
+    ) {
+        return false;
+    }
+
+    true
 }
 
 /// Fetch the default sink state (called from command handler, locks mainloop).
@@ -1225,87 +1400,6 @@ fn fetch_default_sink(
 }
 
 /// Inner version called from within a callback (mainloop already locked).
-fn fetch_sink_by_index_from_callback(
-    context: Arc<Mutex<Context>>,
-    state: Arc<Mutex<PulseWorkerState>>,
-    index: u32,
-) {
-    let ctx = context.lock();
-    let introspect = ctx.introspect();
-
-    let state_for_cb = Arc::clone(&state);
-
-    introspect.get_sink_info_by_index(index, move |result| {
-        if let ListResult::Item(info) = result {
-            // Only update if this is the default sink.
-            let is_default = {
-                let st = state_for_cb.lock();
-                st.default_sink_index == Some(info.index)
-                    || st.default_sink_name.as_deref() == info.name.as_ref().map(|s| s.as_ref())
-            };
-
-            if is_default {
-                update_sink_state(&state_for_cb, info);
-                send_state_update(&state_for_cb.lock());
-            }
-        }
-    });
-}
-
-/// Version called from within a callback (mainloop already locked, no need for lock/unlock).
-fn fetch_default_source_from_callback(
-    context: Arc<Mutex<Context>>,
-    state: Arc<Mutex<PulseWorkerState>>,
-) {
-    let ctx = context.lock();
-    let introspect = ctx.introspect();
-
-    // First get server info to find the default source name.
-    let state_for_cb = Arc::clone(&state);
-    let context_for_source = Arc::clone(&context);
-
-    // Use a Mutex to track whether we've already processed the callback.
-    let called = Arc::new(Mutex::new(false));
-
-    introspect.get_server_info(move |info| {
-        // Ensure we only process once.
-        {
-            let mut c = called.lock();
-            if *c {
-                return;
-            }
-            *c = true;
-        }
-
-        let default_source_name = info.default_source_name.as_ref().map(|s| s.to_string());
-
-        {
-            let mut st = state_for_cb.lock();
-            st.default_source_name = default_source_name.clone();
-        }
-
-        if let Some(source_name) = default_source_name {
-            // We're inside a callback, so the mainloop is already locked.
-            // Just get the context and call introspect directly.
-            let ctx2 = context_for_source.lock();
-            let introspect2 = ctx2.introspect();
-
-            let state_for_source = Arc::clone(&state_for_cb);
-
-            introspect2.get_source_info_by_name(&source_name, move |result| {
-                if let ListResult::Item(info) = result {
-                    update_source_state(&state_for_source, info);
-                    send_state_update(&state_for_source.lock());
-                }
-            });
-        }
-
-        // Fetch all sources for the source list
-        fetch_sources_inner(Arc::clone(&context_for_source), Arc::clone(&state_for_cb));
-    });
-}
-
-/// Inner version called from within a callback (mainloop already locked).
 fn fetch_sources_inner(context: Arc<Mutex<Context>>, state: Arc<Mutex<PulseWorkerState>>) {
     let ctx = context.lock();
     let introspect = ctx.introspect();
@@ -1313,16 +1407,13 @@ fn fetch_sources_inner(context: Arc<Mutex<Context>>, state: Arc<Mutex<PulseWorke
     // Collect sources in a temporary Vec.
     let collected_sources = Arc::new(Mutex::new(Vec::new()));
     let collected_for_cb = Arc::clone(&collected_sources);
+    let collected_source_names = Arc::new(Mutex::new(Vec::new()));
+    let names_for_cb = Arc::clone(&collected_source_names);
     let state_for_cb = Arc::clone(&state);
 
     introspect.get_source_info_list(move |result| {
         match result {
             ListResult::Item(info) => {
-                // Skip monitor sources (they mirror sinks, not useful as mic inputs)
-                if info.monitor_of_sink.is_some() {
-                    return;
-                }
-
                 let name = info
                     .name
                     .as_ref()
@@ -1334,8 +1425,25 @@ fn fetch_sources_inner(context: Arc<Mutex<Context>>, state: Arc<Mutex<PulseWorke
                     .map(|s| s.to_string())
                     .unwrap_or_else(|| name.clone());
 
+                names_for_cb.lock().push(name.clone());
+
                 let default_name = state_for_cb.lock().default_source_name.clone();
                 let is_default = default_name.as_ref().map(|n| n == &name).unwrap_or(false);
+                // Update controls before filtering: a monitor can be the configured default source.
+                if is_default {
+                    update_source_state(&state_for_cb, info);
+                }
+
+                // Skip monitor sources (they mirror sinks, not useful as mic inputs)
+                if info.monitor_of_sink.is_some() {
+                    return;
+                }
+
+                let port_description = info
+                    .active_port
+                    .as_ref()
+                    .and_then(|port| port.description.as_ref().map(|value| value.to_string()));
+                let form_factor = audio_prop(&info.proplist, "device.form_factor");
 
                 // Check active port availability (for jack detection)
                 let port_available = info.active_port.as_ref().map(|port| match port.available {
@@ -1346,6 +1454,8 @@ fn fetch_sources_inner(context: Arc<Mutex<Context>>, state: Arc<Mutex<PulseWorke
                 collected_for_cb.lock().push(SourceInfoSnapshot {
                     name,
                     description,
+                    port_description,
+                    form_factor,
                     is_default,
                     port_available,
                 });
@@ -1353,8 +1463,10 @@ fn fetch_sources_inner(context: Arc<Mutex<Context>>, state: Arc<Mutex<PulseWorke
             ListResult::End => {
                 // All sources collected; update state.
                 let sources = std::mem::take(&mut *collected_for_cb.lock());
+                let source_names = std::mem::take(&mut *names_for_cb.lock());
                 {
                     let mut st = state_for_cb.lock();
+                    clear_missing_default_source_state(&mut st, &source_names);
                     st.sources = sources;
                 }
                 send_state_update(&state_for_cb.lock());
@@ -1402,34 +1514,6 @@ fn update_source_state(
     }
 }
 
-/// Inner version called from within a callback (mainloop already locked).
-fn fetch_source_by_index_from_callback(
-    context: Arc<Mutex<Context>>,
-    state: Arc<Mutex<PulseWorkerState>>,
-    index: u32,
-) {
-    let ctx = context.lock();
-    let introspect = ctx.introspect();
-
-    let state_for_cb = Arc::clone(&state);
-
-    introspect.get_source_info_by_index(index, move |result| {
-        if let ListResult::Item(info) = result {
-            // Only update if this is the default source.
-            let is_default = {
-                let st = state_for_cb.lock();
-                st.default_source_index == Some(info.index)
-                    || st.default_source_name.as_deref() == info.name.as_ref().map(|s| s.as_ref())
-            };
-
-            if is_default {
-                update_source_state(&state_for_cb, info);
-                send_state_update(&state_for_cb.lock());
-            }
-        }
-    });
-}
-
 fn update_sink_state(state: &Arc<Mutex<PulseWorkerState>>, info: &SinkInfo) {
     let mut st = state.lock();
 
@@ -1457,13 +1541,6 @@ fn update_sink_state(state: &Arc<Mutex<PulseWorkerState>>, info: &SinkInfo) {
         sink_state,
         info.flags
     );
-
-    // Reset behavioral detection state if sink changed
-    let sink_changed = st.default_sink_name.as_deref() != info.name.as_ref().map(|s| s.as_ref());
-    if sink_changed {
-        st.last_volume_request = None;
-        st.stuck_attempts = 0;
-    }
 
     // Calculate volume as percentage (only if volume structure is valid)
     let volume_percent = if volume_valid && channel_count > 0 {
@@ -1739,6 +1816,205 @@ fn set_source_volume(
     ml.unlock();
 }
 
+fn set_cached_app_volume(
+    state: &mut PulseWorkerState,
+    index: u32,
+    volume: u32,
+) -> Option<(u8, PendingAppVolume)> {
+    let position = state
+        .app_volumes
+        .iter()
+        .position(|stream| stream.index == index)?;
+    let channel_count = state.app_volumes[position].channel_count;
+    if channel_count == 0 {
+        return None;
+    }
+
+    state.app_change_revision = state.app_change_revision.saturating_add(1);
+    let pending = PendingAppVolume {
+        volume,
+        revision: state.app_change_revision,
+    };
+    state.pending_app_volumes.insert(index, pending);
+    state.app_volumes[position].volume = volume;
+    Some((channel_count, pending))
+}
+
+fn remove_matching_pending_app_volume(
+    pending_volumes: &mut HashMap<u32, PendingAppVolume>,
+    index: u32,
+    pending: PendingAppVolume,
+) -> bool {
+    if pending_volumes.get(&index) != Some(&pending) {
+        return false;
+    }
+    pending_volumes.remove(&index);
+    true
+}
+
+fn set_sink_input_volume(
+    mainloop: Arc<Mutex<Mainloop>>,
+    context: Arc<Mutex<Context>>,
+    state: Arc<Mutex<PulseWorkerState>>,
+    index: u32,
+    percent: u32,
+) {
+    let mut ml = mainloop.lock();
+    ml.lock();
+
+    let volume_value = percent_to_valid_volume(percent);
+    let percent = volume_to_percent(volume_value);
+    let (channel_count, pending) = {
+        let mut st = state.lock();
+        let Some(change) = set_cached_app_volume(&mut st, index, percent) else {
+            debug!(
+                index,
+                "AudioService: skipping app volume change - stream unavailable"
+            );
+            ml.unlock();
+            return;
+        };
+        send_state_update(&st);
+        change
+    };
+
+    let mut cv = pulse::volume::ChannelVolumes::default();
+    cv.set(channel_count, volume_value);
+
+    let ctx = context.lock();
+    let mut introspect = ctx.introspect();
+    let context_for_cb = Arc::clone(&context);
+    let state_for_cb = Arc::clone(&state);
+    introspect.set_sink_input_volume(
+        index,
+        &cv,
+        Some(Box::new(move |success| {
+            if !success {
+                warn!(index, percent, "AudioService: failed to set app volume");
+                let mut st = state_for_cb.lock();
+                remove_matching_pending_app_volume(&mut st.pending_app_volumes, index, pending);
+                // Refresh re-locks state; parking_lot::Mutex is not reentrant.
+                drop(st);
+                fetch_sink_inputs_inner(Arc::clone(&context_for_cb), Arc::clone(&state_for_cb));
+            }
+        })),
+    );
+
+    ml.unlock();
+}
+
+fn toggle_cached_app_mute(state: &mut PulseWorkerState, index: u32) -> Option<PendingAppMute> {
+    let cached_muted = state
+        .app_volumes
+        .iter()
+        .find(|stream| stream.index == index)?
+        .muted;
+    let muted = !state
+        .pending_app_mutes
+        .get(&index)
+        .map(|pending| pending.muted)
+        .unwrap_or(cached_muted);
+    state.app_change_revision = state.app_change_revision.saturating_add(1);
+    let pending = PendingAppMute {
+        muted,
+        revision: state.app_change_revision,
+    };
+    state.pending_app_mutes.insert(index, pending);
+    if let Some(stream) = state
+        .app_volumes
+        .iter_mut()
+        .find(|stream| stream.index == index)
+    {
+        stream.muted = muted;
+    }
+    Some(pending)
+}
+
+fn reconcile_pending_app_mutes(
+    streams: &mut [AppVolumeSnapshot],
+    pending_mutes: &mut HashMap<u32, PendingAppMute>,
+    enumeration_revision: u64,
+) {
+    pending_mutes.retain(|index, pending| {
+        if enumeration_revision >= pending.revision {
+            return false;
+        }
+
+        if let Some(stream) = streams.iter_mut().find(|stream| stream.index == *index) {
+            stream.muted = pending.muted;
+        }
+        true
+    });
+}
+
+fn reconcile_pending_app_volumes(
+    streams: &mut [AppVolumeSnapshot],
+    pending_volumes: &mut HashMap<u32, PendingAppVolume>,
+    enumeration_revision: u64,
+) {
+    pending_volumes.retain(|index, pending| {
+        if enumeration_revision >= pending.revision {
+            return false;
+        }
+
+        if let Some(stream) = streams.iter_mut().find(|stream| stream.index == *index) {
+            stream.volume = pending.volume;
+        }
+        true
+    });
+}
+
+fn toggle_sink_input_mute(
+    mainloop: Arc<Mutex<Mainloop>>,
+    context: Arc<Mutex<Context>>,
+    state: Arc<Mutex<PulseWorkerState>>,
+    index: u32,
+) {
+    let mut ml = mainloop.lock();
+    ml.lock();
+
+    let pending = {
+        let mut st = state.lock();
+        let Some(pending) = toggle_cached_app_mute(&mut st, index) else {
+            debug!(
+                index,
+                "AudioService: skipping app mute change - stream unavailable"
+            );
+            ml.unlock();
+            return;
+        };
+        send_state_update(&st);
+        pending
+    };
+
+    let ctx = context.lock();
+    let mut introspect = ctx.introspect();
+    let context_for_cb = Arc::clone(&context);
+    let state_for_cb = Arc::clone(&state);
+    introspect.set_sink_input_mute(
+        index,
+        pending.muted,
+        Some(Box::new(move |success| {
+            if !success {
+                warn!(
+                    index,
+                    muted = pending.muted,
+                    "AudioService: failed to set app mute"
+                );
+                let mut st = state_for_cb.lock();
+                if st.pending_app_mutes.get(&index) == Some(&pending) {
+                    st.pending_app_mutes.remove(&index);
+                }
+                // Refresh re-locks state; parking_lot::Mutex is not reentrant.
+                drop(st);
+                fetch_sink_inputs_inner(Arc::clone(&context_for_cb), Arc::clone(&state_for_cb));
+            }
+        })),
+    );
+
+    ml.unlock();
+}
+
 fn set_default_sink(mainloop: Arc<Mutex<Mainloop>>, context: Arc<Mutex<Context>>, name: &str) {
     let mut ml = mainloop.lock();
     ml.lock();
@@ -1772,6 +2048,7 @@ fn build_state_update(state: &PulseWorkerState) -> AudioStateUpdate {
         available: state.available,
         control_available: state.control_available,
         mic_control_available: state.mic_control_available,
+        app_volumes: state.app_volumes.clone(),
     }
 }
 
@@ -2159,5 +2436,267 @@ mod tests {
         assert_eq!(bounded_relative_volume_target(200, -5, 153), Some(153));
         assert_eq!(bounded_relative_volume_target(50, -5, 153), Some(45));
         assert_eq!(bounded_relative_volume_target(50, 0, 153), None);
+    }
+
+    #[test]
+    fn cached_app_mute_toggles_compose_across_stale_enumeration() {
+        let stream = AppVolumeSnapshot {
+            index: 7,
+            app_name: "App".to_string(),
+            app_id: "app".to_string(),
+            app_icon_name: String::new(),
+            media_description: "Playback".to_string(),
+            volume: 50,
+            muted: false,
+            channel_count: 2,
+        };
+        let mut state = PulseWorkerState {
+            app_volumes: vec![stream.clone()],
+            ..Default::default()
+        };
+
+        assert!(toggle_cached_app_mute(&mut state, 7).unwrap().muted);
+
+        let mut stale_enumeration = vec![stream];
+        reconcile_pending_app_mutes(&mut stale_enumeration, &mut state.pending_app_mutes, 0);
+        state.app_volumes = stale_enumeration;
+
+        assert!(!toggle_cached_app_mute(&mut state, 7).unwrap().muted);
+        assert!(!state.app_volumes[0].muted);
+        assert_eq!(state.pending_app_mutes.len(), 1);
+
+        let revision = state.app_change_revision;
+        let mut confirmed_enumeration = state.app_volumes.clone();
+        reconcile_pending_app_mutes(
+            &mut confirmed_enumeration,
+            &mut state.pending_app_mutes,
+            revision,
+        );
+        assert!(state.pending_app_mutes.is_empty());
+        assert_eq!(toggle_cached_app_mute(&mut state, 99), None);
+    }
+
+    #[test]
+    fn post_revision_mute_disagreement_preserves_backend_state() {
+        let mut streams = vec![AppVolumeSnapshot {
+            index: 7,
+            app_name: "App".to_string(),
+            app_id: "app".to_string(),
+            app_icon_name: String::new(),
+            media_description: "Playback".to_string(),
+            volume: 50,
+            muted: false,
+            channel_count: 2,
+        }];
+        let mut pending_mutes = HashMap::from([(
+            7,
+            PendingAppMute {
+                muted: true,
+                revision: 1,
+            },
+        )]);
+
+        reconcile_pending_app_mutes(&mut streams, &mut pending_mutes, 1);
+
+        assert!(pending_mutes.is_empty());
+        assert!(!streams[0].muted);
+    }
+
+    #[test]
+    fn stale_enumeration_preserves_pending_app_volume() {
+        let stream = AppVolumeSnapshot {
+            index: 7,
+            app_name: "App".to_string(),
+            app_id: "app".to_string(),
+            app_icon_name: String::new(),
+            media_description: "Playback".to_string(),
+            volume: 50,
+            muted: false,
+            channel_count: 2,
+        };
+        let mut state = PulseWorkerState {
+            app_volumes: vec![stream.clone()],
+            ..Default::default()
+        };
+
+        let (_, pending) = set_cached_app_volume(&mut state, 7, 75).unwrap();
+        let mut stale_enumeration = vec![stream];
+        reconcile_pending_app_volumes(&mut stale_enumeration, &mut state.pending_app_volumes, 0);
+
+        assert_eq!(pending.revision, 1);
+        assert_eq!(stale_enumeration[0].volume, 75);
+        assert_eq!(state.pending_app_volumes.get(&7), Some(&pending));
+    }
+
+    #[test]
+    fn post_revision_volume_disagreement_preserves_backend_state() {
+        let mut streams = vec![AppVolumeSnapshot {
+            index: 7,
+            app_name: "App".to_string(),
+            app_id: "app".to_string(),
+            app_icon_name: String::new(),
+            media_description: "Playback".to_string(),
+            volume: 60,
+            muted: false,
+            channel_count: 2,
+        }];
+        let mut pending_volumes = HashMap::from([(
+            7,
+            PendingAppVolume {
+                volume: 75,
+                revision: 1,
+            },
+        )]);
+
+        reconcile_pending_app_volumes(&mut streams, &mut pending_volumes, 1);
+
+        assert!(pending_volumes.is_empty());
+        assert_eq!(streams[0].volume, 60);
+    }
+
+    #[test]
+    fn older_volume_failure_preserves_newer_pending_change() {
+        let mut state = PulseWorkerState {
+            app_volumes: vec![AppVolumeSnapshot {
+                index: 7,
+                app_name: "App".to_string(),
+                app_id: "app".to_string(),
+                app_icon_name: String::new(),
+                media_description: "Playback".to_string(),
+                volume: 50,
+                muted: false,
+                channel_count: 2,
+            }],
+            ..Default::default()
+        };
+
+        let mute = toggle_cached_app_mute(&mut state, 7).unwrap();
+        let (_, older) = set_cached_app_volume(&mut state, 7, 60).unwrap();
+        let (_, newer) = set_cached_app_volume(&mut state, 7, 70).unwrap();
+
+        assert_eq!(mute.revision, 1);
+        assert_eq!(older.revision, 2);
+        assert_eq!(newer.revision, 3);
+        assert!(!remove_matching_pending_app_volume(
+            &mut state.pending_app_volumes,
+            7,
+            older,
+        ));
+        assert_eq!(state.pending_app_volumes.get(&7), Some(&newer));
+        assert_eq!(state.app_volumes[0].volume, 70);
+    }
+
+    #[test]
+    fn missing_default_sink_clears_control_state() {
+        let mut state = PulseWorkerState {
+            default_sink_name: Some("removed".to_string()),
+            default_sink_index: Some(7),
+            control_available: true,
+            ..Default::default()
+        };
+        let sinks = vec![SinkInfoSnapshot {
+            name: "remaining".to_string(),
+            description: "Remaining".to_string(),
+            port_description: None,
+            form_factor: None,
+            device_icon_name: None,
+            is_default: false,
+            port_available: None,
+        }];
+
+        clear_missing_default_sink_state(&mut state, &sinks);
+
+        assert_eq!(state.default_sink_name, None);
+        assert_eq!(state.default_sink_index, None);
+        assert!(!state.control_available);
+    }
+
+    #[test]
+    fn present_default_sink_preserves_control_state() {
+        let mut state = PulseWorkerState {
+            default_sink_name: Some("remaining".to_string()),
+            default_sink_index: Some(7),
+            control_available: true,
+            ..Default::default()
+        };
+        let sinks = vec![SinkInfoSnapshot {
+            name: "remaining".to_string(),
+            description: "Remaining".to_string(),
+            port_description: None,
+            form_factor: None,
+            device_icon_name: None,
+            is_default: true,
+            port_available: None,
+        }];
+
+        clear_missing_default_sink_state(&mut state, &sinks);
+
+        assert_eq!(state.default_sink_name.as_deref(), Some("remaining"));
+        assert_eq!(state.default_sink_index, Some(7));
+        assert!(state.control_available);
+    }
+
+    #[test]
+    fn source_presence_includes_filtered_monitors() {
+        let mut state = PulseWorkerState {
+            default_source_name: Some("sink.monitor".to_string()),
+            default_source_index: Some(9),
+            mic_control_available: true,
+            ..Default::default()
+        };
+
+        clear_missing_default_source_state(&mut state, &["sink.monitor".to_string()]);
+        assert_eq!(state.default_source_name.as_deref(), Some("sink.monitor"));
+
+        clear_missing_default_source_state(&mut state, &[]);
+        assert_eq!(state.default_source_name, None);
+        assert_eq!(state.default_source_index, None);
+        assert!(!state.mic_control_available);
+    }
+
+    #[test]
+    fn clear_default_sink_state_disables_stale_controls() {
+        let mut state = PulseWorkerState {
+            volume: 42,
+            muted: true,
+            default_sink_name: Some("sink".to_string()),
+            default_sink_index: Some(7),
+            channel_count: 2,
+            control_available: true,
+            last_volume_request: Some(50),
+            stuck_attempts: 1,
+            ..Default::default()
+        };
+
+        clear_default_sink_state(&mut state);
+
+        assert_eq!(state.default_sink_name, None);
+        assert_eq!(state.default_sink_index, None);
+        assert_eq!(state.channel_count, 0);
+        assert!(!state.control_available);
+        assert_eq!(state.last_volume_request, None);
+        assert_eq!(state.stuck_attempts, 0);
+    }
+
+    #[test]
+    fn clear_default_source_state_disables_stale_controls() {
+        let mut state = PulseWorkerState {
+            mic_muted: Some(true),
+            mic_volume: Some(42),
+            default_source_name: Some("source".to_string()),
+            default_source_index: Some(9),
+            mic_channel_count: 1,
+            mic_control_available: true,
+            ..Default::default()
+        };
+
+        clear_default_source_state(&mut state);
+
+        assert_eq!(state.default_source_name, None);
+        assert_eq!(state.default_source_index, None);
+        assert_eq!(state.mic_muted, None);
+        assert_eq!(state.mic_volume, None);
+        assert_eq!(state.mic_channel_count, 0);
+        assert!(!state.mic_control_available);
     }
 }

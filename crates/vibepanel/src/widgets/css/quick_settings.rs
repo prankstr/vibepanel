@@ -176,6 +176,10 @@ window.quick-settings-window {{
     background: transparent;
 }}
 
+.qs-section-header {{
+    font-size: var(--font-size-md);
+}}
+
 .qs-row {{
     background: var(--color-card-overlay);
     border-radius: var(--radius-widget);
@@ -440,6 +444,93 @@ window.quick-settings-window {{
     font-size: var(--font-size-xs);
     font-style: italic;
     padding: 4px 0;
+}}
+
+/* Application volume cards inside expanded audio details */
+.qs-app-volume-list .qs-row {{
+    padding: 0;
+}}
+
+.qs-app-volume-row {{
+    margin: 3px 0;
+}}
+
+.qs-app-volume-icon-slot {{
+    min-width: calc(var(--icon-size) * 1.5);
+    margin-right: 10px;
+}}
+
+.qs-app-volume-icon-fallback {{
+    font-size: calc(var(--icon-size) * 1.0);
+}}
+
+.qs-app-volume-title {{
+    font-size: var(--font-size-sm);
+    font-weight: bold;
+}}
+
+.qs-app-volume-description {{
+    font-size: var(--font-size-sm);
+    font-weight: normal;
+}}
+
+.qs-app-volume-value {{
+    font-size: var(--font-size-sm);
+    font-weight: bold;
+    min-width: 34px;
+}}
+
+.qs-app-volume-mute {{
+    background: transparent;
+    border: none;
+    box-shadow: none;
+    min-width: 28px;
+    min-height: 28px;
+    margin-left: 8px;
+    margin-right: 0;
+    padding: 2px;
+    border-radius: var(--radius-widget);
+    font-size: calc(var(--icon-size) * 0.95);
+}}
+
+.qs-app-volume-mute:hover {{
+    background: var(--color-card-overlay-hover);
+}}
+
+.qs-app-volume-slider {{
+    min-height: 14px;
+    margin: 0 0 0 0;
+    padding: 0;
+}}
+
+.qs-app-volume-slider > trough {{
+    min-height: 3px;
+    border-radius: calc(var(--slider-radius) * 0.75);
+    background-color: var(--color-slider-track);
+    margin: 0;
+}}
+
+.qs-app-volume-slider > trough > highlight {{
+    background-image: image(var(--color-accent-slider, var(--color-accent-primary)));
+    background-color: var(--color-accent-slider, var(--color-accent-primary));
+    border: none;
+    min-height: 3px;
+    border-radius: calc(var(--slider-radius) * 0.75);
+}}
+
+.qs-app-volume-slider > trough > slider {{
+    min-width: 12px;
+    min-height: 12px;
+    margin: -4px;
+    padding: 0;
+    background-color: var(--color-accent-primary);
+    border-radius: calc(var(--slider-knob-radius) * 0.75);
+    border: none;
+    box-shadow: none;
+}}
+
+.qs-app-volume-slider > trough > slider:active {{
+    transform: scale(1.15);
 }}
 
 /* ===== MARQUEE LABEL ===== */

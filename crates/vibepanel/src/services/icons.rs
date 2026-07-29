@@ -1268,10 +1268,11 @@ pub fn resolve_app_icon_name(app_id: &str, fallback: &str) -> String {
         return icon_name;
     }
     // Try the app_id directly as an icon name (some apps use their name)
-    let display = gtk4::gdk::Display::default().expect("No display");
-    let icon_theme = IconTheme::for_display(&display);
-    if icon_theme.has_icon(app_id) {
-        return app_id.to_string();
+    if let Some(display) = gtk4::gdk::Display::default() {
+        let icon_theme = IconTheme::for_display(&display);
+        if icon_theme.has_icon(app_id) {
+            return app_id.to_string();
+        }
     }
     fallback.to_string()
 }
@@ -2482,6 +2483,17 @@ mod tests {
         // Unknown names pass through unchanged
         assert_eq!(material_symbol_name("unknown-icon"), "unknown-icon");
         assert_eq!(material_symbol_name("wifi"), "wifi");
+    }
+
+    #[test]
+    fn resolve_app_icon_name_falls_back_without_matching_icon() {
+        assert_eq!(
+            resolve_app_icon_name(
+                "vibepanel-test-definitely-missing-application",
+                "audio-x-generic"
+            ),
+            "audio-x-generic"
+        );
     }
 
     // GTK Icon Mapping Tests

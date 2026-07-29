@@ -6,11 +6,13 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use crate::services::icons::{CairoSpinner, IconHandle, IconsService};
-use crate::styles::{button, color, qs, row, state};
+use crate::styles::{button, color, icon, qs, row, state};
+use crate::widgets::base::add_ripple_to_row;
+use gtk4::pango::EllipsizeMode;
 use gtk4::prelude::*;
 use gtk4::{
-    Align, Box as GtkBox, Button, Label, ListBox, ListBoxRow, Orientation, Revealer, SelectionMode,
-    ToggleButton,
+    Align, Box as GtkBox, Button, Label, ListBox, ListBoxRow, Orientation, Overlay, Popover,
+    Revealer, SelectionMode, ToggleButton,
 };
 
 /// Base state for expandable cards (Wi-Fi, Bluetooth, VPN).
@@ -76,6 +78,161 @@ pub fn set_subtitle_active(label: &Label, active: bool) {
     } else {
         label.remove_css_class(state::SUBTITLE_ACTIVE);
     }
+}
+
+pub fn device_subtitle(
+    description: &str,
+    port_description: Option<&str>,
+    form_factor: Option<&str>,
+) -> Option<String> {
+    port_description
+        .and_then(|subtitle| meaningful_device_subtitle(description, subtitle))
+        .map(str::to_owned)
+        .or_else(|| {
+            form_factor
+                .and_then(|factor| meaningful_device_subtitle(description, factor))
+                .map(title_case_device_hint)
+        })
+}
+
+pub fn audio_output_icon_name(
+    device_icon_name: Option<&str>,
+    form_factor: Option<&str>,
+) -> &'static str {
+    form_factor
+        .and_then(audio_form_factor_icon)
+        .or_else(|| device_icon_name.and_then(audio_icon_family))
+        .unwrap_or("audio-card-symbolic")
+}
+
+fn audio_icon_family(icon_name: &str) -> Option<&'static str> {
+    let icon_name = icon_name.trim();
+
+    [
+        ("audio-headphones", "audio-headphones"),
+        ("audio-headset", "audio-headset"),
+        ("audio-speakers", "audio-speakers"),
+        ("audio-card", "audio-card-symbolic"),
+    ]
+    .into_iter()
+    .find_map(|(family, canonical)| {
+        icon_name
+            .strip_prefix(family)
+            .is_some_and(|suffix| suffix.is_empty() || suffix.starts_with('-'))
+            .then_some(canonical)
+    })
+}
+
+fn audio_form_factor_icon(form_factor: &str) -> Option<&'static str> {
+    match form_factor.trim().to_ascii_lowercase().as_str() {
+        "headphone" | "headphones" => Some("audio-headphones"),
+        "headset" | "hands-free" | "handsfree" => Some("audio-headset"),
+        "speaker" | "speakers" => Some("audio-speakers"),
+        _ => None,
+    }
+}
+
+pub(super) fn create_device_row(
+    description: &str,
+    subtitle: Option<&str>,
+    icon_name: Option<&str>,
+    is_default: bool,
+) -> ListBoxRow {
+    let list_row = ListBoxRow::new();
+    list_row.add_css_class(row::QS);
+    list_row.add_css_class(row::BASE);
+
+    let content = GtkBox::new(Orientation::Horizontal, 6);
+    content.add_css_class(row::QS_CONTENT);
+
+    if let Some(icon_name) = icon_name {
+        let icon_handle = IconsService::global()
+            .create_icon(icon_name, &[icon::TEXT, row::QS_ICON, color::PRIMARY]);
+        icon_handle.widget().set_valign(Align::Center);
+        content.append(&icon_handle.widget());
+    }
+
+    let labels = GtkBox::new(Orientation::Vertical, 2);
+    labels.set_hexpand(true);
+
+    let title = Label::new(Some(description));
+    title.set_xalign(0.0);
+    title.set_ellipsize(EllipsizeMode::End);
+    title.set_single_line_mode(true);
+    title.set_width_chars(22);
+    title.set_max_width_chars(22);
+    title.add_css_class(row::QS_TITLE);
+    title.add_css_class(color::PRIMARY);
+    labels.append(&title);
+
+    if let Some(subtitle) = subtitle {
+        let label = Label::new(Some(subtitle));
+        label.set_xalign(0.0);
+        label.set_ellipsize(EllipsizeMode::End);
+        label.set_single_line_mode(true);
+        label.add_css_class(row::QS_SUBTITLE);
+        label.add_css_class(color::MUTED);
+        labels.append(&label);
+    }
+
+    content.append(&labels);
+
+    if is_default {
+        let overlay = Overlay::new();
+        overlay.set_valign(Align::Center);
+        overlay.set_margin_end(8);
+
+        let background = GtkBox::new(Orientation::Horizontal, 0);
+        background.add_css_class(row::QS_INDICATOR_BG);
+        overlay.set_child(Some(&background));
+
+        let indicator =
+            IconsService::global().create_icon("object-select-symbolic", &[row::QS_INDICATOR]);
+        indicator.widget().set_halign(Align::Center);
+        indicator.widget().set_valign(Align::Center);
+        overlay.add_overlay(&indicator.widget());
+        content.append(&overlay);
+    } else {
+        let indicator = GtkBox::new(Orientation::Horizontal, 0);
+        indicator.set_valign(Align::Center);
+        indicator.set_margin_end(8);
+        indicator.add_css_class(row::QS_RADIO_INDICATOR);
+        content.append(&indicator);
+    }
+
+    content.set_margin_top(6);
+    content.set_margin_bottom(6);
+    content.set_margin_start(10);
+    content.set_margin_end(10);
+    add_ripple_to_row(&list_row, &content);
+    list_row.set_activatable(true);
+    list_row.set_focusable(true);
+
+    list_row
+}
+
+fn meaningful_device_subtitle<'a>(description: &str, subtitle: &'a str) -> Option<&'a str> {
+    let subtitle = subtitle.trim();
+    if subtitle.is_empty() || subtitle.eq_ignore_ascii_case(description.trim()) {
+        return None;
+    }
+
+    Some(subtitle)
+}
+
+fn title_case_device_hint(value: &str) -> String {
+    value
+        .split(['-', '_', ' '])
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Build a subtitle with an error-colored primary word followed by muted dot-separated parts.
@@ -297,6 +454,55 @@ pub fn create_row_menu_button() -> (Button, IconHandle) {
     menu_btn.set_child(Some(&icon_widget));
 
     (menu_btn, icon_handle)
+}
+
+/// Close and detach a row menu before its parent button can be removed.
+pub fn close_row_menu_popover(popover: &Popover) {
+    if popover.parent().is_none() {
+        return;
+    }
+
+    popover.popdown();
+    if popover.parent().is_some() {
+        popover.unparent();
+    }
+}
+
+/// Attach and present a row menu with cleanup for dynamic list rebuilds.
+pub fn present_row_menu_popover(
+    popover: &Popover,
+    button: &Button,
+    menu_icon: &impl IsA<gtk4::Widget>,
+) {
+    popover.set_parent(button);
+
+    let menu_icon = menu_icon.as_ref();
+    menu_icon.add_css_class(state::EXPANDED);
+    let unmap_handler = Rc::new(RefCell::new(None));
+    let popover_weak = popover.downgrade();
+    let id = button.connect_unmap(move |_| {
+        if let Some(popover) = popover_weak.upgrade() {
+            close_row_menu_popover(&popover);
+        }
+    });
+    *unmap_handler.borrow_mut() = Some(id);
+
+    let icon_for_close = menu_icon.clone();
+    let button_weak = button.downgrade();
+    let unmap_handler_for_close = Rc::clone(&unmap_handler);
+    popover.connect_closed(move |popover| {
+        if let Some(button) = button_weak.upgrade()
+            && let Some(id) = unmap_handler_for_close.borrow_mut().take()
+        {
+            button.disconnect(id);
+        }
+        icon_for_close.remove_css_class(state::EXPANDED);
+        if popover.parent().is_some() {
+            popover.unparent();
+        }
+    });
+
+    popover.popup();
 }
 
 /// Create a single inline action as accent-colored text (no background).
@@ -555,5 +761,58 @@ impl ScanButton {
                 self.button.grab_focus();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{audio_output_icon_name, device_subtitle};
+
+    #[test]
+    fn device_subtitle_preserves_port_description_casing() {
+        assert_eq!(
+            device_subtitle("USB Audio", Some("HDMI / DisplayPort 2"), Some("speaker")),
+            Some("HDMI / DisplayPort 2".to_string())
+        );
+    }
+
+    #[test]
+    fn device_subtitle_title_cases_form_factor_fallback() {
+        assert_eq!(
+            device_subtitle("USB Audio", None, Some("headset-microphone")),
+            Some("Headset Microphone".to_string())
+        );
+    }
+
+    #[test]
+    fn audio_output_icon_normalizes_supported_device_hints() {
+        assert_eq!(
+            audio_output_icon_name(Some("audio-speakers-bluetooth"), None),
+            "audio-speakers"
+        );
+        assert_eq!(
+            audio_output_icon_name(Some("audio-card-analog-usb"), None),
+            "audio-card-symbolic"
+        );
+        assert_eq!(
+            audio_output_icon_name(Some("audio-headphones-symbolic"), None),
+            "audio-headphones"
+        );
+    }
+
+    #[test]
+    fn audio_output_icon_uses_safe_fallbacks() {
+        assert_eq!(
+            audio_output_icon_name(Some("vendor-specific-device"), Some("headset")),
+            "audio-headset"
+        );
+        assert_eq!(
+            audio_output_icon_name(Some("audio-card-analog"), Some("headset")),
+            "audio-headset"
+        );
+        assert_eq!(
+            audio_output_icon_name(Some("vendor-specific-device"), Some("internal")),
+            "audio-card-symbolic"
+        );
     }
 }
