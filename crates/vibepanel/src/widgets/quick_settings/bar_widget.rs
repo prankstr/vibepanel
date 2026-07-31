@@ -103,6 +103,7 @@ impl Default for QuickSettingsCardsConfig {
 /// vpn = false                          # hide the VPN card
 /// idle_inhibitor = false               # hide the idle inhibitor card
 /// vpn_close_on_connect = true          # close panel when VPN connects successfully
+/// remember_expanded_state = false      # keep cards expanded across close/open
 /// audio_scroll_percentage = 5          # volume change per scroll tick (% points, 1..=25)
 /// ```
 #[derive(Debug, Clone)]
@@ -111,6 +112,8 @@ pub struct QuickSettingsConfig {
     pub cards: QuickSettingsCardsConfig,
     /// Volume delta (percentage points) for scroll on QS widget/window.
     pub audio_scroll_percentage: i32,
+    /// Whether expanded card state is preserved when the panel closes.
+    pub remember_expanded_state: bool,
     /// Shell commands used by the power card.
     pub power_commands: PowerCommandsConfig,
 }
@@ -128,6 +131,7 @@ impl WidgetConfig for QuickSettingsConfig {
             "brightness",
             "power",
             "vpn_close_on_connect",
+            "remember_expanded_state",
             "audio_scroll_percentage",
             "shutdown_command",
             "reboot_command",
@@ -187,6 +191,11 @@ impl WidgetConfig for QuickSettingsConfig {
                 vpn_close_on_connect: get_bool("vpn_close_on_connect"),
             },
             audio_scroll_percentage,
+            remember_expanded_state: entry
+                .options
+                .get("remember_expanded_state")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
             power_commands: PowerCommandsConfig {
                 shutdown: get_command("shutdown_command", &default_commands.shutdown),
                 reboot: get_command("reboot_command", &default_commands.reboot),
@@ -203,6 +212,7 @@ impl Default for QuickSettingsConfig {
         Self {
             cards: QuickSettingsCardsConfig::default(),
             audio_scroll_percentage: Self::DEFAULT_AUDIO_SCROLL_PERCENTAGE,
+            remember_expanded_state: false,
             power_commands: PowerCommandsConfig::default(),
         }
     }
@@ -734,5 +744,21 @@ mod tests {
         assert_eq!(config.power_commands.suspend, "loginctl suspend");
         assert_eq!(config.power_commands.lock, "swaylock");
         assert_eq!(config.power_commands.logout, "niri msg action quit");
+    }
+
+    #[test]
+    fn quick_settings_remember_expanded_state_is_opt_in() {
+        let default_config = QuickSettingsConfig::from_entry(&WidgetEntry::new("quick_settings"));
+        assert!(!default_config.remember_expanded_state);
+
+        let mut options = HashMap::new();
+        options.insert("remember_expanded_state".to_string(), Value::Boolean(true));
+        let entry = WidgetEntry {
+            name: "quick_settings".to_string(),
+            options,
+        };
+
+        let config = QuickSettingsConfig::from_entry(&entry);
+        assert!(config.remember_expanded_state);
     }
 }

@@ -4,7 +4,7 @@
 //! QuickSettingsWindowHandle. The window is lazily created on first open
 //! and kept alive across close/re-open cycles using `set_visible(false)`
 //! / `set_visible(true)` toggling. Service subscriptions stay alive
-//! while hidden. UI state is reset on close so it opens fresh.
+//! while hidden. Expanded card state can optionally be preserved across closes.
 
 use gtk4::gdk::{self, Monitor};
 use gtk4::glib::{self, ControlFlow};
@@ -165,6 +165,7 @@ pub struct QuickSettingsWindow {
     cards_config: QuickSettingsCardsConfig,
     power_commands: PowerCommandsConfig,
     audio_scroll_percentage: i32,
+    remember_expanded_state: bool,
     scroll_container: ScrolledWindow,
     /// Service callback IDs, used to disconnect/unsubscribe on close.
     network_callback_id: Cell<Option<CallbackId>>,
@@ -259,6 +260,7 @@ impl QuickSettingsWindow {
             cards_config: config.cards,
             power_commands: config.power_commands,
             audio_scroll_percentage: config.audio_scroll_percentage,
+            remember_expanded_state: config.remember_expanded_state,
             scroll_container,
             network_callback_id: Cell::new(None),
             bluetooth_callback_id: Cell::new(None),
@@ -1264,15 +1266,31 @@ impl QuickSettingsWindow {
         }
     }
 
-    /// Reset all UI state to its initial (collapsed) appearance.
+    /// Reset transient UI state when the panel closes.
     ///
-    /// Called when hiding the panel so it opens fresh next time. This
-    /// collapses all revealers, removes expanded arrow indicators, hides
-    /// auth dialogs, and scrolls back to the top.
+    /// Unless configured otherwise, expanded cards are collapsed. Auth dialog
+    /// state, scrolling, and focus are always reset because they should not
+    /// survive a close/open cycle.
     fn reset_ui_state(&self) {
-        // --- Collapse all toggle card revealers (network, bluetooth, vpn, updates, power) ---
+        if !self.remember_expanded_state {
+            self.collapse_all_cards();
+        }
 
-        // Helper: collapse a revealer and remove the EXPANDED class from its arrow
+        // --- Hide auth dialogs ---
+        network_card::hide_password_dialog(&self.network);
+        vpn_card::hide_vpn_auth_dialog(&self.vpn);
+        self.bluetooth.clear_auth_input();
+
+        // --- Scroll to top ---
+        self.scroll_container.vadjustment().set_value(0.0);
+
+        // --- Clear focus from any focused widget ---
+        gtk4::prelude::RootExt::set_focus(&self.window, None::<&gtk4::Widget>);
+    }
+
+    /// Collapse every expandable card and reset its expanded indicators.
+    fn collapse_all_cards(&self) {
+        // Helper: collapse a revealer and remove the EXPANDED class from its arrow.
         let collapse = |base: &super::ui_helpers::ExpandableCardBase| {
             if let Some(revealer) = base.revealer.borrow().as_ref() {
                 collapse_revealer_instant(revealer);
@@ -1287,16 +1305,13 @@ impl QuickSettingsWindow {
         collapse(&self.vpn.base);
         collapse(&self.updates.base);
 
-        // Power card (expander variant)
         if let Some(ref power_state) = *self.power.borrow() {
             collapse(&power_state.base);
-            // Reset subtitle back to default
             if let Some(ref subtitle) = *power_state.base.subtitle.borrow() {
                 subtitle.set_label("Hold to shut down");
             }
         }
 
-        // --- Collapse audio and mic revealers ---
         if let Some(revealer) = self.audio.revealer.borrow().as_ref() {
             collapse_revealer_instant(revealer);
         }
@@ -1310,17 +1325,6 @@ impl QuickSettingsWindow {
         if let Some(arrow) = self.mic.arrow.borrow().as_ref() {
             arrow.widget().remove_css_class(state::EXPANDED);
         }
-
-        // --- Hide auth dialogs ---
-        network_card::hide_password_dialog(&self.network);
-        vpn_card::hide_vpn_auth_dialog(&self.vpn);
-        self.bluetooth.clear_auth_input();
-
-        // --- Scroll to top ---
-        self.scroll_container.vadjustment().set_value(0.0);
-
-        // --- Clear focus from any focused widget ---
-        gtk4::prelude::RootExt::set_focus(&self.window, None::<&gtk4::Widget>);
     }
 
     // Position and visibility management
