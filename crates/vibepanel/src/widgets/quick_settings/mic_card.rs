@@ -16,7 +16,8 @@ use gtk4::{
 
 use super::components::SliderRow;
 use super::ui_helpers::{
-    add_placeholder_row, clear_list_box, create_device_row, create_qs_list_box, device_subtitle,
+    add_placeholder_row, audio_input_icon_name, clear_list_box, create_device_row,
+    create_qs_list_box, device_subtitle,
 };
 use crate::services::audio::{AudioService, AudioSnapshot, SourceInfoSnapshot};
 use crate::services::config_manager::ConfigManager;
@@ -231,10 +232,11 @@ fn populate_mic_source_list(list_box: &ListBox, sources: &[SourceInfoSnapshot]) 
             source.port_description.as_deref(),
             source.form_factor.as_deref(),
         );
+        let icon_name = audio_input_icon_name(source.form_factor.as_deref());
         let row = create_device_row(
             &source.description,
             subtitle.as_deref(),
-            None,
+            Some(icon_name),
             source.is_default,
         );
         list_box.append(&row);

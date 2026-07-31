@@ -105,6 +105,17 @@ pub fn audio_output_icon_name(
         .unwrap_or("audio-card-symbolic")
 }
 
+pub fn audio_input_icon_name(form_factor: Option<&str>) -> &'static str {
+    match form_factor.map(str::trim).map(str::to_ascii_lowercase) {
+        Some(form_factor)
+            if matches!(form_factor.as_str(), "headset" | "hands-free" | "handsfree") =>
+        {
+            "audio-headset"
+        }
+        _ => "audio-input-microphone-symbolic",
+    }
+}
+
 fn audio_icon_family(icon_name: &str) -> Option<&'static str> {
     let icon_name = icon_name.trim();
 
@@ -766,7 +777,7 @@ impl ScanButton {
 
 #[cfg(test)]
 mod tests {
-    use super::{audio_output_icon_name, device_subtitle};
+    use super::{audio_input_icon_name, audio_output_icon_name, device_subtitle};
 
     #[test]
     fn device_subtitle_preserves_port_description_casing() {
@@ -813,6 +824,19 @@ mod tests {
         assert_eq!(
             audio_output_icon_name(Some("vendor-specific-device"), Some("internal")),
             "audio-card-symbolic"
+        );
+    }
+
+    #[test]
+    fn audio_input_icon_distinguishes_headsets() {
+        assert_eq!(audio_input_icon_name(Some("headset")), "audio-headset");
+        assert_eq!(
+            audio_input_icon_name(Some("microphone")),
+            "audio-input-microphone-symbolic"
+        );
+        assert_eq!(
+            audio_input_icon_name(None),
+            "audio-input-microphone-symbolic"
         );
     }
 }
