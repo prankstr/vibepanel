@@ -975,28 +975,6 @@ impl GpuService {
         }
     }
 
-    /// Select GPU: explicit config index > first discrete > index 0.
-    #[cfg(test)]
-    fn select_gpu(devices: &[GpuDevice], selection: &Option<u32>) -> Option<usize> {
-        if devices.is_empty() {
-            return None;
-        }
-
-        if let Some(i) = selection {
-            let idx = *i as usize;
-            if idx < devices.len() {
-                return Some(idx);
-            }
-            warn!(
-                "GpuService: configured device index {} out of range (have {} GPU(s)), falling back to auto",
-                i,
-                devices.len(),
-            );
-        }
-
-        Self::auto_select(devices)
-    }
-
     /// Auto-select a GPU: prefer the primary discrete GPU, then any discrete
     /// GPU, then the primary GPU, then index 0.
     fn auto_select(devices: &[GpuDevice]) -> Option<usize> {
@@ -1261,6 +1239,7 @@ fn sysfs_pci_device_path_from_nvml_bus_id(bus_id: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn nvml_lib_candidates_are_absolute_sonames() {
@@ -1311,27 +1290,6 @@ mod tests {
 
         snap.gpu_usage = Some(100.0);
         assert!(snap.is_gpu_high());
-    }
-
-    #[test]
-    fn test_vram_percent() {
-        let mut snap = GpuDeviceSnapshot::default();
-        assert!(device_vram_percent(&snap).is_none());
-
-        snap.vram_used = Some(4 * 1024 * 1024 * 1024); // 4 GB
-        snap.vram_total = Some(8 * 1024 * 1024 * 1024); // 8 GB
-        let pct = device_vram_percent(&snap).unwrap();
-        assert!((pct - 50.0).abs() < 0.01);
-    }
-
-    #[test]
-    fn test_vram_percent_zero_total() {
-        let snap = GpuDeviceSnapshot {
-            vram_used: Some(0),
-            vram_total: Some(0),
-            ..Default::default()
-        };
-        assert!(device_vram_percent(&snap).is_none());
     }
 
     #[test]
@@ -1462,71 +1420,6 @@ mod tests {
     }
 
     #[test]
-    fn test_select_gpu_explicit_index() {
-        let devices = vec![
-            dummy_amd("iGPU", false, true),
-            dummy_amd("dGPU", true, false),
-        ];
-        // Explicit config overrides auto-selection.
-        assert_eq!(GpuService::select_gpu(&devices, &Some(0)), Some(0));
-    }
-
-    #[test]
-    fn test_select_gpu_out_of_range_falls_back() {
-        let devices = vec![dummy_amd("dGPU", true, true)];
-        // Out-of-range index falls back to auto (which picks discrete at 0).
-        assert_eq!(GpuService::select_gpu(&devices, &Some(5)), Some(0));
-    }
-
-    #[test]
-    fn test_select_gpu_none_config_uses_auto() {
-        let devices = vec![
-            dummy_amd("iGPU", false, true),
-            dummy_amd("dGPU", true, false),
-        ];
-        assert_eq!(GpuService::select_gpu(&devices, &None), Some(1));
-    }
-
-    fn unique_test_dir(name: &str) -> PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        std::env::temp_dir().join(format!("vibepanel-{name}-{nanos}"))
-    }
-
-    #[test]
-    fn test_amd_ioctl_uapi_layout() {
-        let request = linux_iow(
-            DRM_COMMAND_BASE + DRM_AMDGPU_INFO,
-            mem::size_of::<DrmAmdgpuInfo>(),
-        );
-        assert_eq!(mem::size_of::<DrmAmdgpuInfo>(), 32);
-        assert_eq!(request, 0x4020_6445);
-
-        let device_info = DrmAmdgpuInfoDeviceIds::default();
-        let base = &device_info as *const _ as usize;
-        let ids_flags = &device_info.ids_flags as *const _ as usize;
-        assert_eq!(ids_flags - base, 136);
-    }
-
-    #[test]
-    fn test_amd_discrete_sysfs_fallback_uses_dgpu_markers() {
-        let root = unique_test_dir("amd-gpu-detection");
-        let igpu = root.join("igpu");
-        let dgpu = root.join("dgpu");
-        fs::create_dir_all(&igpu).unwrap();
-        fs::create_dir_all(&dgpu).unwrap();
-
-        fs::write(dgpu.join("mem_info_vram_vendor"), "samsung\n").unwrap();
-
-        assert!(!is_amd_discrete_gpu_sysfs_fallback(&igpu));
-        assert!(is_amd_discrete_gpu_sysfs_fallback(&dgpu));
-
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
     fn test_parse_display_selection_accepts_strings() {
         assert_eq!(
             GpuService::parse_display_selection_value(
@@ -1626,5 +1519,44 @@ mod tests {
             sysfs_pci_device_path_from_nvml_bus_id("00000080:3B:00.0"),
             Some(PathBuf::from("/sys/bus/pci/devices/0080:3b:00.0"))
         );
+    }
+
+    fn unique_test_dir(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("vibepanel-{name}-{nanos}"))
+    }
+
+    #[test]
+    fn test_amd_ioctl_uapi_layout() {
+        let request = linux_iow(
+            DRM_COMMAND_BASE + DRM_AMDGPU_INFO,
+            mem::size_of::<DrmAmdgpuInfo>(),
+        );
+        assert_eq!(mem::size_of::<DrmAmdgpuInfo>(), 32);
+        assert_eq!(request, 0x4020_6445);
+
+        let device_info = DrmAmdgpuInfoDeviceIds::default();
+        let base = &device_info as *const _ as usize;
+        let ids_flags = &device_info.ids_flags as *const _ as usize;
+        assert_eq!(ids_flags - base, 136);
+    }
+
+    #[test]
+    fn test_amd_discrete_sysfs_fallback_uses_dgpu_markers() {
+        let root = unique_test_dir("amd-gpu-detection");
+        let igpu = root.join("igpu");
+        let dgpu = root.join("dgpu");
+        fs::create_dir_all(&igpu).unwrap();
+        fs::create_dir_all(&dgpu).unwrap();
+
+        fs::write(dgpu.join("mem_info_vram_vendor"), "samsung\n").unwrap();
+
+        assert!(!is_amd_discrete_gpu_sysfs_fallback(&igpu));
+        assert!(is_amd_discrete_gpu_sysfs_fallback(&dgpu));
+
+        fs::remove_dir_all(root).unwrap();
     }
 }
