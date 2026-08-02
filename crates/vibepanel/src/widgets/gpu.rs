@@ -9,8 +9,11 @@
 //! - `TooltipManager` for styled tooltips
 //! - Shared popover with CPU/Memory widgets for detailed system info
 
-use gtk4::Label;
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use gtk4::prelude::*;
+use gtk4::{Align, Box as GtkBox, Label, Orientation};
 use vibepanel_core::config::WidgetEntry;
 
 use crate::services::callbacks::CallbackId;
@@ -22,7 +25,7 @@ use crate::services::tooltip::TooltipManager;
 use crate::styles::{class, widget};
 use crate::widgets::base::BaseWidget;
 use crate::widgets::system_popover::SystemPopoverBinding;
-use crate::widgets::{WidgetConfig, warn_unknown_options};
+use crate::widgets::{WidgetConfig, format_vertical_metric, warn_unknown_options};
 
 const DEFAULT_SHOW_ICON: bool = true;
 const DEFAULT_STABLE_WIDTH: bool = true;
@@ -115,6 +118,97 @@ pub struct GpuWidget {
     system_callback_id: CallbackId,
 }
 
+#[derive(Clone)]
+enum GpuBarDisplay {
+    Horizontal(Label),
+    Vertical {
+        container: GtkBox,
+        labels: Rc<RefCell<Vec<Label>>>,
+        width_chars: Option<i32>,
+    },
+}
+
+impl GpuBarDisplay {
+    fn new(base: &BaseWidget, config: &GpuConfig, is_vertical: bool) -> Self {
+        let width_chars = gpu_label_width(&config.format, config.stable_width, is_vertical);
+
+        if !is_vertical {
+            let label = base.add_label(None, &[widget::GPU_LABEL, class::VCENTER_CAPS]);
+            if let Some(width_chars) = width_chars {
+                label.set_width_chars(width_chars);
+            }
+            return Self::Horizontal(label);
+        }
+
+        let container = GtkBox::new(Orientation::Vertical, 4);
+        container.set_halign(Align::Fill);
+        container.set_hexpand(true);
+        container.set_valign(Align::Center);
+        base.content().append(&container);
+
+        Self::Vertical {
+            container,
+            labels: Rc::new(RefCell::new(Vec::new())),
+            width_chars,
+        }
+    }
+
+    fn update(&self, snapshot: &GpuSnapshot, format: &GpuFormat) {
+        match self {
+            Self::Horizontal(label) => {
+                label.set_label(&format_gpu_label(snapshot, format, false));
+                label.set_visible(true);
+            }
+            Self::Vertical {
+                container,
+                labels,
+                width_chars,
+            } => {
+                let devices = snapshot.devices_for_display();
+                let texts = if devices.is_empty() {
+                    vec!["—".to_string()]
+                } else {
+                    devices
+                        .iter()
+                        .map(|device| format_gpu_device_label(device, format, true))
+                        .collect()
+                };
+
+                let mut labels = labels.borrow_mut();
+                if labels.len() != texts.len() {
+                    while let Some(child) = container.first_child() {
+                        container.remove(&child);
+                    }
+                    labels.clear();
+
+                    for _ in 0..texts.len() {
+                        let label = Label::new(None);
+                        label.add_css_class(widget::GPU_LABEL);
+                        label.add_css_class(class::VCENTER_CAPS);
+                        label.set_halign(Align::Fill);
+                        label.set_hexpand(true);
+                        label.set_xalign(0.5);
+                        label.set_wrap(true);
+                        label.set_single_line_mode(false);
+                        label.set_justify(gtk4::Justification::Center);
+                        label.set_yalign(0.5);
+                        if let Some(width_chars) = width_chars {
+                            label.set_width_chars(*width_chars);
+                        }
+                        container.append(&label);
+                        labels.push(label);
+                    }
+                }
+
+                for (label, text) in labels.iter().zip(texts) {
+                    label.set_label(&text);
+                    label.set_visible(true);
+                }
+            }
+        }
+    }
+}
+
 impl GpuWidget {
     /// Create a new GPU widget with the given configuration.
     pub fn new(config: GpuConfig) -> Self {
@@ -136,11 +230,7 @@ impl GpuWidget {
         let icon_handle = base.add_icon("video-display-symbolic", &[widget::GPU_ICON]);
 
         let is_vertical = ConfigManager::global().bar_position().is_vertical();
-        let gpu_label = base.add_label(None, &[widget::GPU_LABEL, class::VCENTER_CAPS]);
-        if let Some(width_chars) = gpu_label_width(&config.format, config.stable_width, is_vertical)
-        {
-            gpu_label.set_width_chars(width_chars);
-        }
+        let gpu_display = GpuBarDisplay::new(&base, &config, is_vertical);
 
         icon_handle.widget().set_visible(config.show_icon);
 
@@ -152,7 +242,7 @@ impl GpuWidget {
         let gpu_callback_id = {
             let container = base.widget().clone();
             let icon_handle = icon_handle.clone();
-            let gpu_label = gpu_label.clone();
+            let gpu_display = gpu_display.clone();
             let show_icon = config.show_icon;
             let format = config.format.clone();
             let popover_binding = popover_binding.clone();
@@ -161,10 +251,9 @@ impl GpuWidget {
                 update_gpu_widget(
                     &container,
                     &icon_handle,
-                    &gpu_label,
+                    &gpu_display,
                     show_icon,
                     &format,
-                    is_vertical,
                     snapshot,
                 );
 
@@ -206,11 +295,11 @@ fn gpu_label_width(format: &GpuFormat, stable_width: bool, is_vertical: bool) ->
 
     Some(match (format, is_vertical) {
         (GpuFormat::Usage, false) => 3,       // 99%
-        (GpuFormat::Usage, true) => 2,        // 99
+        (GpuFormat::Usage, true) => 3,        // 99%
         (GpuFormat::Temperature, false) => 4, // 99°C
         (GpuFormat::Temperature, true) => 3,  // 99°
         (GpuFormat::Both, false) => 8,        // 99% 99°C
-        (GpuFormat::Both, true) => 3,         // widest line: 99°
+        (GpuFormat::Both, true) => 3,         // 99% / 99°
     })
 }
 
@@ -230,12 +319,12 @@ fn format_gpu_label(snapshot: &GpuSnapshot, format: &GpuFormat, is_vertical: boo
         return "—".to_string();
     }
 
-    let separator = if is_vertical { "\n" } else { " | " };
-    devices
+    let labels = devices
         .iter()
         .map(|device| format_gpu_device_label(device, format, is_vertical))
-        .collect::<Vec<_>>()
-        .join(separator)
+        .collect::<Vec<_>>();
+
+    labels.join(if is_vertical { "\n" } else { " | " })
 }
 
 fn format_gpu_device_label(
@@ -244,7 +333,7 @@ fn format_gpu_device_label(
     is_vertical: bool,
 ) -> String {
     if snapshot.power_state == GpuPowerState::Suspended {
-        return "Idle".to_string();
+        return if is_vertical { "—" } else { "Idle" }.to_string();
     }
 
     match format {
@@ -253,7 +342,7 @@ fn format_gpu_device_label(
             None => "—".to_string(),
         },
         GpuFormat::Temperature => match snapshot.temperature {
-            Some(temp) if is_vertical => format!("{:.0}°", temp),
+            Some(temp) if is_vertical => format_vertical_metric(temp as f64, '°'),
             Some(temp) => format!("{:.0}°C", temp),
             None => "—".to_string(),
         },
@@ -263,7 +352,7 @@ fn format_gpu_device_label(
                 None => "—".to_string(),
             };
             let temp_part = match snapshot.temperature {
-                Some(temp) if is_vertical => format!("{:.0}°", temp),
+                Some(temp) if is_vertical => format_vertical_metric(temp as f64, '°'),
                 Some(temp) => format!("{:.0}°C", temp),
                 None => "—".to_string(),
             };
@@ -278,7 +367,7 @@ fn format_gpu_device_label(
 
 fn format_gpu_usage(usage: f32, is_vertical: bool) -> String {
     if is_vertical {
-        format!("{usage:.0}")
+        format_vertical_metric(usage as f64, '%')
     } else {
         format!("{usage:.0}%")
     }
@@ -343,10 +432,9 @@ fn format_gpu_tooltip_block(index: usize, snapshot: &GpuDeviceSnapshot) -> Strin
 fn update_gpu_widget(
     container: &gtk4::Box,
     icon_handle: &IconHandle,
-    gpu_label: &Label,
+    gpu_display: &GpuBarDisplay,
     show_icon: bool,
     format: &GpuFormat,
-    is_vertical: bool,
     snapshot: &GpuSnapshot,
 ) {
     if !snapshot.available {
@@ -356,8 +444,7 @@ fn update_gpu_widget(
         if show_icon {
             icon_handle.widget().set_visible(true);
         }
-        gpu_label.set_label("—");
-        gpu_label.set_visible(true);
+        gpu_display.update(snapshot, format);
 
         let tooltip_manager = TooltipManager::global();
         tooltip_manager.set_styled_tooltip(container, "GPU: No supported GPU detected");
@@ -380,9 +467,7 @@ fn update_gpu_widget(
 
     icon_handle.widget().set_visible(show_icon);
 
-    let text = format_gpu_label(snapshot, format, is_vertical);
-    gpu_label.set_label(&text);
-    gpu_label.set_visible(true);
+    gpu_display.update(snapshot, format);
 
     let tooltip = format_gpu_tooltip(snapshot);
     let tooltip_manager = TooltipManager::global();
@@ -475,7 +560,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(format_gpu_label(&snapshot, &GpuFormat::Usage, false), "76%");
-        assert_eq!(format_gpu_label(&snapshot, &GpuFormat::Usage, true), "76");
+        assert_eq!(format_gpu_label(&snapshot, &GpuFormat::Usage, true), "76%");
     }
 
     #[test]
@@ -525,7 +610,22 @@ mod tests {
         );
         assert_eq!(
             format_gpu_label(&snapshot, &GpuFormat::Both, true),
-            "76\n72°"
+            "76%\n72°"
+        );
+
+        let boundary = GpuSnapshot {
+            gpu_usage: Some(100.0),
+            temperature: Some(100.0),
+            ..snapshot
+        };
+        assert_eq!(format_gpu_label(&boundary, &GpuFormat::Usage, true), "100");
+        assert_eq!(
+            format_gpu_label(&boundary, &GpuFormat::Temperature, true),
+            "100"
+        );
+        assert_eq!(
+            format_gpu_label(&boundary, &GpuFormat::Both, true),
+            "100\n100"
         );
     }
 
@@ -541,7 +641,10 @@ mod tests {
             format_gpu_label(&snapshot, &GpuFormat::Both, false),
             "76% —"
         );
-        assert_eq!(format_gpu_label(&snapshot, &GpuFormat::Both, true), "76\n—");
+        assert_eq!(
+            format_gpu_label(&snapshot, &GpuFormat::Both, true),
+            "76%\n—"
+        );
     }
 
     #[test]
@@ -569,8 +672,30 @@ mod tests {
         );
         assert_eq!(
             format_gpu_label(&snapshot, &GpuFormat::Usage, true),
-            "76\n41"
+            "76%\n41%"
         );
+        assert_eq!(
+            format_gpu_label(&snapshot, &GpuFormat::Both, true),
+            "76%\n72°\n41%\n61°"
+        );
+    }
+
+    #[test]
+    fn test_format_gpu_label_compacts_suspended_device_vertically() {
+        let snapshot = GpuSnapshot {
+            available: true,
+            devices: vec![GpuDeviceSnapshot {
+                power_state: GpuPowerState::Suspended,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            format_gpu_label(&snapshot, &GpuFormat::Usage, false),
+            "Idle"
+        );
+        assert_eq!(format_gpu_label(&snapshot, &GpuFormat::Usage, true), "—");
     }
 
     #[test]

@@ -10,11 +10,10 @@
 //! │ │  CPU      │ │  Memory   │ │
 //! │ └───────────┘ └───────────┘ │
 //! ├─────────────────────────────┤
-//! │ ┌───────────┐ ┌───────────┐ │  (conditional: GPU cards, max 2 per row)
-//! │ │  GPU 1    │ │  GPU 2    │ │
-//! │ └───────────┘ └───────────┘ │
-//! │ ┌───────────────────────────┤  (odd last GPU spans full width)
-//! │ │  GPU 3                    │
+//! │ ┌───────────────────────────┤  (conditional: all GPUs in one card)
+//! │ │  GPU                      │
+//! │ │  GPU 1              76%  │
+//! │ │  GPU 2              41%  │
 //! │ └───────────────────────────┤
 //! ├─────────────────────────────┤
 //! │ ┌───────────┐ ┌───────────┐ │
@@ -44,8 +43,9 @@ use crate::services::system::{
 use crate::styles::{button, card, color, icon, surface, system_popover as sp};
 use crate::widgets::layer_shell_popover::animate_reveal;
 
-const GPU_TITLE_MAX_CHARS: i32 = 12;
-const GPU_DETAIL_MAX_CHARS: i32 = 22;
+const GPU_TITLE_MAX_CHARS: i32 = 34;
+const GPU_VRAM_MAX_CHARS: i32 = 18;
+const GPU_METRICS_MAX_CHARS: i32 = 24;
 
 /// A single pre-allocated per-core row with its updatable widgets.
 #[derive(Clone)]
@@ -55,12 +55,13 @@ struct CoreRow {
 }
 
 #[derive(Clone)]
-struct GpuCardRow {
-    card: GtkBox,
+struct GpuDeviceRow {
+    container: GtkBox,
     title_label: Label,
     usage_label: Label,
     usage_progress: ProgressBar,
-    detail_label: Label,
+    vram_detail_label: Label,
+    metrics_label: Label,
 }
 
 /// Controller owning the system popover UI elements and update logic.
@@ -92,8 +93,9 @@ pub struct SystemPopoverController {
     load_15_label: Label,
 
     // GPU section (conditional: only present when GPUs are detected)
-    gpu_cards_box: GtkBox,
-    gpu_card_rows: Rc<RefCell<Vec<GpuCardRow>>>,
+    gpu_card: GtkBox,
+    gpu_devices_box: GtkBox,
+    gpu_device_rows: Rc<RefCell<Vec<GpuDeviceRow>>>,
 }
 
 impl SystemPopoverController {
@@ -145,48 +147,33 @@ impl SystemPopoverController {
     pub fn update_from_gpu_snapshot(&self, snapshot: &GpuSnapshot) {
         let devices = snapshot.devices_for_display();
         if devices.is_empty() {
-            self.gpu_cards_box.set_visible(false);
+            self.gpu_card.set_visible(false);
             return;
         }
-        self.gpu_cards_box.set_visible(true);
-        self.sync_gpu_card_rows(devices.len());
+        self.gpu_card.set_visible(true);
+        self.sync_gpu_device_rows(devices.len());
 
-        let rows = self.gpu_card_rows.borrow();
+        let rows = self.gpu_device_rows.borrow();
         for (index, (row, device)) in rows.iter().zip(devices.iter()).enumerate() {
-            update_gpu_card_row(row, index, device);
+            update_gpu_device_row(row, index, device);
         }
     }
 
-    fn sync_gpu_card_rows(&self, count: usize) {
-        let mut rows = self.gpu_card_rows.borrow_mut();
+    fn sync_gpu_device_rows(&self, count: usize) {
+        let mut rows = self.gpu_device_rows.borrow_mut();
         if rows.len() == count {
             return;
         }
 
-        while let Some(child) = self.gpu_cards_box.first_child() {
-            self.gpu_cards_box.remove(&child);
+        while let Some(child) = self.gpu_devices_box.first_child() {
+            self.gpu_devices_box.remove(&child);
         }
         rows.clear();
 
         for _ in 0..count {
-            let row = build_gpu_card_row();
+            let row = build_gpu_device_row();
+            self.gpu_devices_box.append(&row.container);
             rows.push(row);
-        }
-
-        let mut next_card = 0;
-        for cards_in_row in gpu_cards_per_row(count) {
-            let row_container = GtkBox::new(Orientation::Horizontal, 8);
-            row_container.set_homogeneous(cards_in_row == 2);
-            row_container.set_hexpand(true);
-
-            for _ in 0..cards_in_row {
-                let card = &rows[next_card].card;
-                card.set_hexpand(true);
-                row_container.append(card);
-                next_card += 1;
-            }
-
-            self.gpu_cards_box.append(&row_container);
         }
     }
 
@@ -309,65 +296,66 @@ fn stat_row(label_text: &str, value_width_chars: i32) -> (GtkBox, Label) {
     (row, value)
 }
 
-fn build_gpu_card_row() -> GpuCardRow {
-    let icons = IconsService::global();
-
-    let card = GtkBox::new(Orientation::Vertical, 0);
-    card.add_css_class(card::BASE);
-    card.add_css_class(sp::SECTION_CARD);
-    card.add_css_class(sp::GPU_CARD);
-    card.set_hexpand(true);
-
-    let gpu_section = GtkBox::new(Orientation::Vertical, 8);
-
-    let gpu_title_row = GtkBox::new(Orientation::Horizontal, 6);
-    gpu_title_row.add_css_class(sp::SECTION_TITLE);
-    gpu_title_row.add_css_class(sp::GPU_TITLE);
-
-    let gpu_icon = icons.create_icon("video-display-symbolic", &[icon::TEXT, sp::SECTION_ICON]);
-    gpu_title_row.append(&gpu_icon.widget());
+fn build_gpu_device_row() -> GpuDeviceRow {
+    let container = GtkBox::new(Orientation::Vertical, 6);
+    let summary_row = GtkBox::new(Orientation::Horizontal, 8);
 
     let title_label = Label::new(Some("GPU"));
-    title_label.add_css_class(surface::POPOVER_TITLE);
+    title_label.set_halign(Align::Start);
     title_label.set_xalign(0.0);
     title_label.set_hexpand(true);
     title_label.set_ellipsize(EllipsizeMode::End);
     title_label.set_single_line_mode(true);
     title_label.set_max_width_chars(GPU_TITLE_MAX_CHARS);
-    gpu_title_row.append(&title_label);
+    summary_row.append(&title_label);
 
-    gpu_section.append(&gpu_title_row);
-
-    let (gpu_usage_row, usage_label) = stat_row("Usage", 6);
-    gpu_section.append(&gpu_usage_row);
+    let usage_label = Label::new(Some("--"));
+    usage_label.set_halign(Align::End);
+    usage_label.set_width_chars(6);
+    usage_label.set_xalign(1.0);
+    summary_row.append(&usage_label);
+    container.append(&summary_row);
 
     let usage_progress = ProgressBar::new();
     usage_progress.add_css_class(sp::PROGRESS_BAR);
-    gpu_section.append(&usage_progress);
+    container.append(&usage_progress);
 
-    let detail_label = Label::new(Some("--"));
-    detail_label.add_css_class(color::MUTED);
-    detail_label.set_halign(Align::Start);
-    detail_label.set_xalign(0.0);
-    detail_label.set_ellipsize(EllipsizeMode::End);
-    detail_label.set_single_line_mode(true);
-    detail_label.set_max_width_chars(GPU_DETAIL_MAX_CHARS);
-    gpu_section.append(&detail_label);
+    let detail_row = GtkBox::new(Orientation::Horizontal, 8);
 
-    card.append(&gpu_section);
+    let vram_detail_label = Label::new(Some("--"));
+    vram_detail_label.add_css_class(color::MUTED);
+    vram_detail_label.set_halign(Align::Start);
+    vram_detail_label.set_xalign(0.0);
+    vram_detail_label.set_ellipsize(EllipsizeMode::End);
+    vram_detail_label.set_single_line_mode(true);
+    vram_detail_label.set_hexpand(true);
+    vram_detail_label.set_max_width_chars(GPU_VRAM_MAX_CHARS);
+    detail_row.append(&vram_detail_label);
 
-    GpuCardRow {
-        card,
+    let metrics_label = Label::new(None);
+    metrics_label.add_css_class(color::MUTED);
+    metrics_label.set_halign(Align::End);
+    metrics_label.set_xalign(1.0);
+    metrics_label.set_ellipsize(EllipsizeMode::End);
+    metrics_label.set_single_line_mode(true);
+    metrics_label.set_max_width_chars(GPU_METRICS_MAX_CHARS);
+    detail_row.append(&metrics_label);
+
+    container.append(&detail_row);
+
+    GpuDeviceRow {
+        container,
         title_label,
         usage_label,
         usage_progress,
-        detail_label,
+        vram_detail_label,
+        metrics_label,
     }
 }
 
-fn update_gpu_card_row(row: &GpuCardRow, index: usize, snapshot: &GpuDeviceSnapshot) {
+fn update_gpu_device_row(row: &GpuDeviceRow, index: usize, snapshot: &GpuDeviceSnapshot) {
     row.title_label
-        .set_label(&format_gpu_card_title(index, snapshot));
+        .set_label(&format_gpu_device_title(index, snapshot));
 
     if snapshot.power_state == GpuPowerState::Suspended {
         row.usage_label.set_label("Idle");
@@ -380,11 +368,14 @@ fn update_gpu_card_row(row: &GpuCardRow, index: usize, snapshot: &GpuDeviceSnaps
         row.usage_progress.set_fraction(0.0);
     }
 
-    row.detail_label
-        .set_label(&format_gpu_card_detail(snapshot));
+    row.vram_detail_label
+        .set_label(&format_gpu_device_vram(snapshot));
+    let metrics = format_gpu_device_metrics(snapshot);
+    row.metrics_label.set_label(&metrics);
+    row.metrics_label.set_visible(!metrics.is_empty());
 }
 
-fn format_gpu_card_title(index: usize, snapshot: &GpuDeviceSnapshot) -> String {
+fn format_gpu_device_title(index: usize, snapshot: &GpuDeviceSnapshot) -> String {
     snapshot
         .device_name
         .as_ref()
@@ -393,16 +384,19 @@ fn format_gpu_card_title(index: usize, snapshot: &GpuDeviceSnapshot) -> String {
         .unwrap_or_else(|| format!("GPU {}", index + 1))
 }
 
-fn format_gpu_card_detail(snapshot: &GpuDeviceSnapshot) -> String {
-    let mut parts = Vec::new();
-
+fn format_gpu_device_vram(snapshot: &GpuDeviceSnapshot) -> String {
     match (snapshot.vram_used, snapshot.vram_total) {
         (Some(used), Some(total)) => {
-            parts.push(format!("{} / {}", format_bytes(used), format_bytes(total)))
+            format!("{} / {}", format_bytes(used), format_bytes(total))
         }
-        (Some(used), None) => parts.push(format!("{} used", format_bytes(used))),
-        _ => {}
+        (Some(used), None) => format!("{} used", format_bytes(used)),
+        _ if snapshot.power_state == GpuPowerState::Suspended => "Suspended".to_string(),
+        _ => "--".to_string(),
     }
+}
+
+fn format_gpu_device_metrics(snapshot: &GpuDeviceSnapshot) -> String {
+    let mut parts = Vec::new();
 
     if let Some(temp) = snapshot.temperature {
         parts.push(format!("{:.0}°C", temp));
@@ -412,32 +406,11 @@ fn format_gpu_card_detail(snapshot: &GpuDeviceSnapshot) -> String {
         parts.push(format!("{:.0}W", watts));
     }
 
-    if parts.is_empty() {
-        if let Some(mhz) = snapshot.clock_mhz {
-            parts.push(format!("{}MHz", mhz));
-        } else if let Some(name) = snapshot.device_name.as_ref() {
-            parts.push(name.clone());
-        } else if snapshot.power_state == GpuPowerState::Suspended {
-            parts.push("Suspended".to_string());
-        } else {
-            parts.push("--".to_string());
-        }
+    if let Some(mhz) = snapshot.clock_mhz {
+        parts.push(format!("{}MHz", mhz));
     }
 
     parts.join(" · ")
-}
-
-fn gpu_cards_per_row(count: usize) -> Vec<usize> {
-    let mut rows = Vec::new();
-    let mut remaining = count;
-
-    while remaining > 0 {
-        let cards_in_row = if remaining == 1 { 1 } else { 2 };
-        rows.push(cards_in_row);
-        remaining = remaining.saturating_sub(cards_in_row);
-    }
-
-    rows
 }
 
 /// Build a system resource popover content widget.
@@ -525,13 +498,26 @@ pub fn build_system_popover_with_controller() -> (Widget, SystemPopoverControlle
     cores_revealer.set_child(Some(&cpu_cores_box));
     container.append(&cores_revealer);
 
-    // GPU section (one full-width card per detected GPU)
+    // GPU section (all detected GPUs in one full-width card)
     let gpu_service = GpuService::global();
     let gpu_snapshot = gpu_service.snapshot();
-    let gpu_cards_box = GtkBox::new(Orientation::Vertical, 8);
-    gpu_cards_box.set_margin_top(8);
-    gpu_cards_box.set_visible(!gpu_snapshot.devices_for_display().is_empty());
-    container.append(&gpu_cards_box);
+
+    let gpu_card = GtkBox::new(Orientation::Vertical, 0);
+    gpu_card.add_css_class(card::BASE);
+    gpu_card.add_css_class(sp::SECTION_CARD);
+    gpu_card.add_css_class(sp::GPU_CARD);
+    gpu_card.set_margin_top(8);
+    gpu_card.set_visible(!gpu_snapshot.devices_for_display().is_empty());
+
+    let gpu_section = GtkBox::new(Orientation::Vertical, 8);
+    let gpu_title = section_title("video-display-symbolic", "GPU", &icons);
+    gpu_title.add_css_class(sp::GPU_TITLE);
+    gpu_section.append(&gpu_title);
+
+    let gpu_devices_box = GtkBox::new(Orientation::Vertical, 14);
+    gpu_section.append(&gpu_devices_box);
+    gpu_card.append(&gpu_section);
+    container.append(&gpu_card);
 
     let bottom_row = GtkBox::new(Orientation::Horizontal, 8);
     bottom_row.set_homogeneous(true);
@@ -665,8 +651,9 @@ pub fn build_system_popover_with_controller() -> (Widget, SystemPopoverControlle
         load_1_label,
         load_5_label,
         load_15_label,
-        gpu_cards_box,
-        gpu_card_rows: Rc::new(RefCell::new(Vec::new())),
+        gpu_card,
+        gpu_devices_box,
+        gpu_device_rows: Rc::new(RefCell::new(Vec::new())),
     };
 
     let controller_clone = controller.clone();
@@ -683,68 +670,58 @@ pub fn build_system_popover_with_controller() -> (Widget, SystemPopoverControlle
 
 #[cfg(test)]
 mod tests {
-    use super::{format_gpu_card_detail, format_gpu_card_title, gpu_cards_per_row};
+    use super::{format_gpu_device_metrics, format_gpu_device_title, format_gpu_device_vram};
     use crate::services::gpu::{GpuDeviceSnapshot, GpuPowerState};
 
     #[test]
-    fn test_gpu_cards_per_row_even() {
-        assert_eq!(gpu_cards_per_row(0), Vec::<usize>::new());
-        assert_eq!(gpu_cards_per_row(2), vec![2]);
-        assert_eq!(gpu_cards_per_row(4), vec![2, 2]);
-    }
-
-    #[test]
-    fn test_gpu_cards_per_row_odd() {
-        assert_eq!(gpu_cards_per_row(1), vec![1]);
-        assert_eq!(gpu_cards_per_row(3), vec![2, 1]);
-        assert_eq!(gpu_cards_per_row(5), vec![2, 2, 1]);
-    }
-
-    #[test]
-    fn test_format_gpu_card_detail_prefers_compact_stats() {
+    fn test_format_gpu_device_details_group_vram_and_metrics() {
         let snapshot = GpuDeviceSnapshot {
             vram_used: Some(4 * 1024 * 1024 * 1024),
             vram_total: Some(8 * 1024 * 1024 * 1024),
             temperature: Some(62.0),
             power_watts: Some(118.6),
+            clock_mhz: Some(2430),
             device_name: Some("Very Long GPU Name".to_string()),
             ..Default::default()
         };
 
+        assert_eq!(format_gpu_device_vram(&snapshot), "4.0G / 8.0G");
         assert_eq!(
-            format_gpu_card_detail(&snapshot),
-            "4.0G / 8.0G · 62°C · 119W"
+            format_gpu_device_metrics(&snapshot),
+            "62°C · 119W · 2430MHz"
         );
     }
 
     #[test]
-    fn test_format_gpu_card_detail_falls_back_when_stats_missing() {
+    fn test_format_gpu_device_vram_shows_suspended_state_when_missing() {
         let snapshot = GpuDeviceSnapshot {
             power_state: GpuPowerState::Suspended,
+            device_name: Some("Intel Integrated Graphics".to_string()),
             ..Default::default()
         };
 
-        assert_eq!(format_gpu_card_detail(&snapshot), "Suspended");
+        assert_eq!(format_gpu_device_vram(&snapshot), "Suspended");
+        assert_eq!(format_gpu_device_metrics(&snapshot), "");
     }
 
     #[test]
-    fn test_format_gpu_card_title_prefers_device_name() {
+    fn test_format_gpu_device_title_prefers_device_name() {
         let snapshot = GpuDeviceSnapshot {
             device_name: Some("NVIDIA GeForce RTX 4090".to_string()),
             ..Default::default()
         };
 
         assert_eq!(
-            format_gpu_card_title(0, &snapshot),
+            format_gpu_device_title(0, &snapshot),
             "NVIDIA GeForce RTX 4090"
         );
     }
 
     #[test]
-    fn test_format_gpu_card_title_falls_back_to_index() {
+    fn test_format_gpu_device_title_falls_back_to_index() {
         let snapshot = GpuDeviceSnapshot::default();
 
-        assert_eq!(format_gpu_card_title(1, &snapshot), "GPU 2");
+        assert_eq!(format_gpu_device_title(1, &snapshot), "GPU 2");
     }
 }
 

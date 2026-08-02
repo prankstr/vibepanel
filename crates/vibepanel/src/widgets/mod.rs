@@ -121,6 +121,17 @@ pub(crate) fn popover_kind_for(widget_name: &str) -> PopoverKind {
     }
 }
 
+/// Format a rounded vertical metric without exceeding the three-character
+/// width budget solely to show its unit.
+pub(crate) fn format_vertical_metric(value: f64, unit: char) -> String {
+    let value = format!("{value:.0}");
+    if value.chars().count() < 3 {
+        format!("{value}{unit}")
+    } else {
+        value
+    }
+}
+
 use crate::services::battery::BatteryService;
 use crate::services::gpu::GpuService;
 
@@ -537,5 +548,14 @@ mod tests {
         assert_eq!(popover_kind_for("battery"), PopoverKind::Unmergeable);
         assert_eq!(popover_kind_for("media"), PopoverKind::Unmergeable);
         assert_eq!(popover_kind_for("unknown"), PopoverKind::Unmergeable);
+    }
+
+    #[test]
+    fn vertical_metric_drops_unit_when_it_would_exceed_three_chars() {
+        assert_eq!(format_vertical_metric(4.0, '%'), "4%");
+        assert_eq!(format_vertical_metric(76.0, '%'), "76%");
+        assert_eq!(format_vertical_metric(100.0, '%'), "100");
+        assert_eq!(format_vertical_metric(41.0, '°'), "41°");
+        assert_eq!(format_vertical_metric(100.0, '°'), "100");
     }
 }
