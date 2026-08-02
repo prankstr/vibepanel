@@ -82,10 +82,6 @@ button.system-expander-header > overlay > box {
 .system-gpu-title {
     margin-bottom: 4px;
 }
-
-/* GPU metrics in title row (clock · power · temp) */
-.system-gpu-metrics {
-}
 "#
 }
 

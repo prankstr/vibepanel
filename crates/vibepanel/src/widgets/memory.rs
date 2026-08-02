@@ -207,7 +207,7 @@ impl Drop for MemoryWidget {
 /// Format memory usage according to the selected format.
 fn format_memory(snapshot: &SystemSnapshot, format: &MemoryFormat, is_vertical: bool) -> String {
     if is_vertical {
-        return format_vertical_metric(snapshot.memory_percent as f64, '%');
+        return format_vertical_metric(snapshot.memory_percent, '%');
     }
 
     match format {

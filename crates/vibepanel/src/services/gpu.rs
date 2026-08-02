@@ -12,7 +12,9 @@
 //!
 //! 1. **`devices = "auto"`** (default): shows only the preferred GPU.
 //! 2. **`devices = "all"`**: shows all detected GPUs, ordered with the
-//!    preferred GPU first.
+//!    preferred GPU first. While GPU monitoring is active, every selected GPU
+//!    is checked; runtime-suspended GPUs skip vendor polling, but active
+//!    secondary GPUs are still queried and may consume more power than `auto`.
 //! 3. **`devices = [N, M]`** or **`devices = N`**: shows explicit GPU indices
 //!    in the configured order.
 //! 4. **Legacy compatibility**: `device = N` remains accepted as an alias for a
@@ -30,7 +32,7 @@
 //! ```rust,ignore
 //! let service = GpuService::global();
 //! service.connect(|snapshot| {
-//!     if let Some(usage) = snapshot.gpu_usage {
+//!     if let Some(usage) = snapshot.devices.first().and_then(|gpu| gpu.gpu_usage) {
 //!         println!("GPU: {:.0}%", usage);
 //!     }
 //! });
@@ -149,6 +151,8 @@ pub enum GpuPowerState {
 
 #[derive(Debug, Clone, Default)]
 pub struct GpuDeviceSnapshot {
+    /// Zero-based index used by the `devices` configuration option.
+    pub device_index: usize,
     /// Hardware power state (active, suspended, or unknown).
     pub power_state: GpuPowerState,
     /// GPU utilization percentage (0.0 - 100.0).
@@ -177,92 +181,31 @@ impl GpuDeviceSnapshot {
 
 #[derive(Debug, Clone, Default)]
 pub struct GpuSnapshot {
-    pub available: bool,
-    /// Hardware power state (active, suspended, or unknown).
-    pub power_state: GpuPowerState,
-    /// GPU utilization percentage (0.0 - 100.0).
-    pub gpu_usage: Option<f32>,
-    /// Used VRAM in bytes.
-    pub vram_used: Option<u64>,
-    /// Total VRAM in bytes.
-    pub vram_total: Option<u64>,
-    /// GPU temperature in degrees Celsius.
-    pub temperature: Option<f32>,
-    /// GPU clock speed in MHz.
-    pub clock_mhz: Option<u64>,
-    /// GPU power draw in watts.
-    pub power_watts: Option<f32>,
-    /// Device name (product name, or `vendor:device` PCI ID fallback).
-    pub device_name: Option<String>,
     /// Per-device snapshots in display order (preferred GPU first).
     pub devices: Vec<GpuDeviceSnapshot>,
 }
 
 impl GpuSnapshot {
-    /// Returns a snapshot representing an unknown/unavailable GPU.
-    pub fn unknown() -> Self {
-        Self::default()
+    /// Returns whether at least one GPU is available.
+    pub fn available(&self) -> bool {
+        !self.devices.is_empty()
     }
 
     /// Returns true if GPU usage is above the high threshold.
     pub fn is_gpu_high(&self) -> bool {
-        if self.devices.is_empty() {
-            self.gpu_usage
-                .map(|u| u >= GPU_HIGH_USAGE_THRESHOLD)
-                .unwrap_or(false)
-        } else {
-            self.devices.iter().any(GpuDeviceSnapshot::is_gpu_high)
-        }
-    }
-
-    /// Returns the per-device GPU snapshots, falling back to the summary fields
-    /// for older callers when the service has not yet populated the device list.
-    pub fn devices_for_display(&self) -> Vec<GpuDeviceSnapshot> {
-        if !self.devices.is_empty() {
-            return self.devices.clone();
-        }
-
-        if !self.available {
-            return Vec::new();
-        }
-
-        vec![GpuDeviceSnapshot {
-            power_state: self.power_state,
-            gpu_usage: self.gpu_usage,
-            vram_used: self.vram_used,
-            vram_total: self.vram_total,
-            temperature: self.temperature,
-            clock_mhz: self.clock_mhz,
-            power_watts: self.power_watts,
-            device_name: self.device_name.clone(),
-        }]
+        self.devices.iter().any(GpuDeviceSnapshot::is_gpu_high)
     }
 
     pub fn all_devices_suspended(&self) -> bool {
-        let devices = self.devices_for_display();
-        !devices.is_empty()
-            && devices
+        !self.devices.is_empty()
+            && self
+                .devices
                 .iter()
                 .all(|device| device.power_state == GpuPowerState::Suspended)
     }
 
     fn from_devices(devices: Vec<GpuDeviceSnapshot>) -> Self {
-        let Some(summary) = devices.first().cloned() else {
-            return Self::unknown();
-        };
-
-        Self {
-            available: true,
-            power_state: summary.power_state,
-            gpu_usage: summary.gpu_usage,
-            vram_used: summary.vram_used,
-            vram_total: summary.vram_total,
-            temperature: summary.temperature,
-            clock_mhz: summary.clock_mhz,
-            power_watts: summary.power_watts,
-            device_name: summary.device_name.clone(),
-            devices,
-        }
+        Self { devices }
     }
 }
 
@@ -378,14 +321,7 @@ impl GpuService {
 
         Self::log_display_selection(&devices, &display_selection, &display_indices);
 
-        let initial_snapshot = if !display_indices.is_empty() {
-            GpuSnapshot {
-                available: true,
-                ..Default::default()
-            }
-        } else {
-            GpuSnapshot::unknown()
-        };
+        let initial_snapshot = Self::placeholder_snapshot(&devices, &display_indices);
 
         Rc::new(Self {
             snapshot: RefCell::new(initial_snapshot),
@@ -436,14 +372,7 @@ impl GpuService {
             return;
         }
 
-        let snapshot = if self.display_indices.borrow().is_empty() {
-            GpuSnapshot::unknown()
-        } else {
-            GpuSnapshot {
-                available: true,
-                ..Default::default()
-            }
-        };
+        let snapshot = Self::placeholder_snapshot(&self.devices, &self.display_indices.borrow());
 
         *self.snapshot.borrow_mut() = snapshot;
         self.callbacks.notify(&self.snapshot.borrow());
@@ -509,22 +438,17 @@ impl GpuService {
     }
 
     fn poll(&self) {
-        let snapshot = {
-            let display_indices = self.display_indices.borrow();
-            if display_indices.is_empty() {
-                GpuSnapshot::unknown()
-            } else {
-                let mut snapshots = Vec::with_capacity(display_indices.len());
-
-                for &idx in display_indices.iter() {
-                    if let Some(device) = self.devices.get(idx) {
-                        snapshots.push(Self::poll_device(idx, device));
-                    }
-                }
-
-                GpuSnapshot::from_devices(snapshots)
-            }
-        };
+        let snapshot = GpuSnapshot::from_devices(
+            self.display_indices
+                .borrow()
+                .iter()
+                .filter_map(|&idx| {
+                    self.devices
+                        .get(idx)
+                        .map(|device| Self::poll_device(idx, device))
+                })
+                .collect(),
+        );
 
         *self.snapshot.borrow_mut() = snapshot;
         self.callbacks.notify(&self.snapshot.borrow());
@@ -544,6 +468,7 @@ impl GpuService {
         if power_state == GpuPowerState::Suspended {
             trace!("GpuService: GPU {} is suspended, skipping vendor poll", idx);
             return GpuDeviceSnapshot {
+                device_index: idx,
                 power_state: GpuPowerState::Suspended,
                 device_name: device.name().map(str::to_string),
                 ..Default::default()
@@ -554,8 +479,24 @@ impl GpuService {
             GpuDevice::Amd(amd) => Self::poll_amd(amd),
             GpuDevice::Nvidia(nvidia) => Self::poll_nvidia(nvidia),
         };
+        snapshot.device_index = idx;
         snapshot.power_state = power_state;
         snapshot
+    }
+
+    fn placeholder_snapshot(devices: &[GpuDevice], display_indices: &[usize]) -> GpuSnapshot {
+        GpuSnapshot::from_devices(
+            display_indices
+                .iter()
+                .filter_map(|&device_index| {
+                    devices.get(device_index).map(|device| GpuDeviceSnapshot {
+                        device_index,
+                        device_name: device.name().map(str::to_string),
+                        ..Default::default()
+                    })
+                })
+                .collect(),
+        )
     }
 
     fn poll_amd(device: &AmdGpuDevice) -> GpuDeviceSnapshot {
@@ -678,8 +619,8 @@ impl GpuService {
             }
         }
 
-        // Sort by card number for deterministic ordering
-        cards.sort();
+        // Sort numerically so card10 follows card9 rather than card1.
+        cards.sort_by_key(|path| drm_card_index(path).unwrap_or(u32::MAX));
 
         let mut devices = Vec::new();
 
@@ -1221,6 +1162,14 @@ fn read_runtime_status(path: &Path) -> GpuPowerState {
     }
 }
 
+fn drm_card_index(path: &Path) -> Option<u32> {
+    path.file_name()?
+        .to_str()?
+        .strip_prefix("card")?
+        .parse()
+        .ok()
+}
+
 fn sysfs_pci_device_path_from_nvml_bus_id(bus_id: &str) -> Option<PathBuf> {
     let trimmed = bus_id.trim().trim_end_matches('\0');
     let (domain_hex, bus_slot) = trimmed.split_once(':')?;
@@ -1266,30 +1215,19 @@ mod tests {
     #[test]
     fn test_gpu_snapshot_defaults() {
         let snap = GpuSnapshot::default();
-        assert!(!snap.available);
+        assert!(!snap.available());
         assert!(snap.devices.is_empty());
-        assert!(snap.gpu_usage.is_none());
-        assert!(snap.vram_used.is_none());
-        assert!(snap.vram_total.is_none());
-        assert!(snap.temperature.is_none());
-        assert!(snap.clock_mhz.is_none());
-        assert!(snap.power_watts.is_none());
-        assert!(snap.device_name.is_none());
     }
 
     #[test]
     fn test_is_gpu_high() {
-        let mut snap = GpuSnapshot::default();
-        assert!(!snap.is_gpu_high());
-
-        snap.gpu_usage = Some(89.0);
-        assert!(!snap.is_gpu_high());
-
-        snap.gpu_usage = Some(90.0);
-        assert!(snap.is_gpu_high());
-
-        snap.gpu_usage = Some(100.0);
-        assert!(snap.is_gpu_high());
+        for (usage, expected) in [(89.0, false), (90.0, true), (100.0, true)] {
+            let snap = GpuSnapshot::from_devices(vec![GpuDeviceSnapshot {
+                gpu_usage: Some(usage),
+                ..Default::default()
+            }]);
+            assert_eq!(snap.is_gpu_high(), expected);
+        }
     }
 
     #[test]
@@ -1326,7 +1264,7 @@ mod tests {
     }
 
     #[test]
-    fn test_snapshot_from_devices_uses_first_device_as_summary() {
+    fn test_snapshot_from_devices_preserves_devices() {
         let snap = GpuSnapshot::from_devices(vec![
             GpuDeviceSnapshot {
                 gpu_usage: Some(75.0),
@@ -1340,10 +1278,10 @@ mod tests {
             },
         ]);
 
-        assert!(snap.available);
-        assert_eq!(snap.gpu_usage, Some(75.0));
-        assert_eq!(snap.device_name.as_deref(), Some("Primary GPU"));
+        assert!(snap.available());
         assert_eq!(snap.devices.len(), 2);
+        assert_eq!(snap.devices[0].gpu_usage, Some(75.0));
+        assert_eq!(snap.devices[0].device_name.as_deref(), Some("Primary GPU"));
     }
 
     #[test]
@@ -1363,19 +1301,10 @@ mod tests {
     }
 
     #[test]
-    fn test_devices_for_display_falls_back_to_summary_fields() {
-        let snap = GpuSnapshot {
-            available: true,
-            power_state: GpuPowerState::Active,
-            gpu_usage: Some(64.0),
-            device_name: Some("Fallback GPU".to_string()),
-            ..Default::default()
-        };
-
-        let devices = snap.devices_for_display();
-        assert_eq!(devices.len(), 1);
-        assert_eq!(devices[0].gpu_usage, Some(64.0));
-        assert_eq!(devices[0].device_name.as_deref(), Some("Fallback GPU"));
+    fn test_drm_card_index_parses_numeric_suffix() {
+        assert_eq!(drm_card_index(Path::new("/sys/class/drm/card2")), Some(2));
+        assert_eq!(drm_card_index(Path::new("/sys/class/drm/card10")), Some(10));
+        assert_eq!(drm_card_index(Path::new("/sys/class/drm/renderD128")), None);
     }
 
     /// Helper to create a dummy AMD GPU device for selection tests.

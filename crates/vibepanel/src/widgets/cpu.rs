@@ -152,10 +152,7 @@ impl CpuWidget {
         let is_vertical = ConfigManager::global().bar_position().is_vertical();
         let percentage_label = base.add_label(None, &[widget::CPU_LABEL, class::VCENTER_CAPS]);
         if is_vertical {
-            percentage_label.set_wrap(true);
-            percentage_label.set_single_line_mode(false);
             percentage_label.set_justify(gtk4::Justification::Center);
-            percentage_label.set_yalign(0.5);
         }
         if let Some(width_chars) = cpu_label_width(&config.format, config.stable_width, is_vertical)
         {
@@ -283,7 +280,7 @@ fn update_cpu_widget(
 
 fn format_cpu_usage(cpu_usage: f32, is_vertical: bool) -> String {
     if is_vertical {
-        format_vertical_metric(cpu_usage as f64, '%')
+        format_vertical_metric(cpu_usage, '%')
     } else {
         format!("{cpu_usage:.0}%")
     }
@@ -294,14 +291,14 @@ fn format_cpu_label(snapshot: &SystemSnapshot, format: &CpuFormat, is_vertical: 
     match format {
         CpuFormat::Usage => format_cpu_usage(snapshot.cpu_usage, is_vertical),
         CpuFormat::Temperature => match snapshot.cpu_temp {
-            Some(temp) if is_vertical => format_vertical_metric(temp as f64, '°'),
+            Some(temp) if is_vertical => format_vertical_metric(temp, '°'),
             Some(temp) => format!("{temp:.0}°C"),
             None => "—".to_string(),
         },
         CpuFormat::Both => {
             let usage_part = format_cpu_usage(snapshot.cpu_usage, is_vertical);
             let temp_part = match snapshot.cpu_temp {
-                Some(temp) if is_vertical => format_vertical_metric(temp as f64, '°'),
+                Some(temp) if is_vertical => format_vertical_metric(temp, '°'),
                 Some(temp) => format!("{temp:.0}°C"),
                 None => "—".to_string(),
             };

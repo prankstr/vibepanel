@@ -12,8 +12,8 @@
 //! ├─────────────────────────────┤
 //! │ ┌───────────────────────────┤  (conditional: all GPUs in one card)
 //! │ │  GPU                      │
-//! │ │  GPU 1              76%  │
-//! │ │  GPU 2              41%  │
+//! │ │  AMD Radeon          76%  │
+//! │ │  NVIDIA RTX          41%  │
 //! │ └───────────────────────────┤
 //! ├─────────────────────────────┤
 //! │ ┌───────────┐ ┌───────────┐ │
@@ -37,9 +37,7 @@ use crate::services::callbacks::CallbackId;
 use crate::services::config_manager::ConfigManager;
 use crate::services::gpu::{GpuDeviceSnapshot, GpuPowerState, GpuService, GpuSnapshot};
 use crate::services::icons::{IconHandle, IconsService};
-use crate::services::system::{
-    SystemService, SystemSnapshot, format_bytes, format_bytes_long, format_speed,
-};
+use crate::services::system::{SystemService, SystemSnapshot, format_bytes_long, format_speed};
 use crate::styles::{button, card, color, icon, surface, system_popover as sp};
 use crate::widgets::layer_shell_popover::animate_reveal;
 
@@ -145,7 +143,7 @@ impl SystemPopoverController {
 
     /// Update the GPU card from the latest GPU snapshot.
     pub fn update_from_gpu_snapshot(&self, snapshot: &GpuSnapshot) {
-        let devices = snapshot.devices_for_display();
+        let devices = &snapshot.devices;
         if devices.is_empty() {
             self.gpu_card.set_visible(false);
             return;
@@ -154,8 +152,8 @@ impl SystemPopoverController {
         self.sync_gpu_device_rows(devices.len());
 
         let rows = self.gpu_device_rows.borrow();
-        for (index, (row, device)) in rows.iter().zip(devices.iter()).enumerate() {
-            update_gpu_device_row(row, index, device);
+        for (row, device) in rows.iter().zip(devices.iter()) {
+            update_gpu_device_row(row, device, devices.len() > 1);
         }
     }
 
@@ -353,9 +351,9 @@ fn build_gpu_device_row() -> GpuDeviceRow {
     }
 }
 
-fn update_gpu_device_row(row: &GpuDeviceRow, index: usize, snapshot: &GpuDeviceSnapshot) {
+fn update_gpu_device_row(row: &GpuDeviceRow, snapshot: &GpuDeviceSnapshot, show_index: bool) {
     row.title_label
-        .set_label(&format_gpu_device_title(index, snapshot));
+        .set_label(&format_gpu_device_title(snapshot, show_index));
 
     if snapshot.power_state == GpuPowerState::Suspended {
         row.usage_label.set_label("Idle");
@@ -375,21 +373,27 @@ fn update_gpu_device_row(row: &GpuDeviceRow, index: usize, snapshot: &GpuDeviceS
     row.metrics_label.set_visible(!metrics.is_empty());
 }
 
-fn format_gpu_device_title(index: usize, snapshot: &GpuDeviceSnapshot) -> String {
-    snapshot
+fn format_gpu_device_title(snapshot: &GpuDeviceSnapshot, show_index: bool) -> String {
+    let name = snapshot
         .device_name
         .as_ref()
         .filter(|name| !name.trim().is_empty())
-        .cloned()
-        .unwrap_or_else(|| format!("GPU {}", index + 1))
+        .map(String::as_str);
+
+    match (show_index, name) {
+        (true, Some(name)) => format!("GPU {}: {name}", snapshot.device_index),
+        (true, None) => format!("GPU {}", snapshot.device_index),
+        (false, Some(name)) => name.to_string(),
+        (false, None) => "GPU".to_string(),
+    }
 }
 
 fn format_gpu_device_vram(snapshot: &GpuDeviceSnapshot) -> String {
     match (snapshot.vram_used, snapshot.vram_total) {
         (Some(used), Some(total)) => {
-            format!("{} / {}", format_bytes(used), format_bytes(total))
+            format!("{} / {}", format_bytes_long(used), format_bytes_long(total))
         }
-        (Some(used), None) => format!("{} used", format_bytes(used)),
+        (Some(used), None) => format!("{} used", format_bytes_long(used)),
         _ if snapshot.power_state == GpuPowerState::Suspended => "Suspended".to_string(),
         _ => "--".to_string(),
     }
@@ -507,7 +511,7 @@ pub fn build_system_popover_with_controller() -> (Widget, SystemPopoverControlle
     gpu_card.add_css_class(sp::SECTION_CARD);
     gpu_card.add_css_class(sp::GPU_CARD);
     gpu_card.set_margin_top(8);
-    gpu_card.set_visible(!gpu_snapshot.devices_for_display().is_empty());
+    gpu_card.set_visible(gpu_snapshot.available());
 
     let gpu_section = GtkBox::new(Orientation::Vertical, 8);
     let gpu_title = section_title("video-display-symbolic", "GPU", &icons);
@@ -685,7 +689,7 @@ mod tests {
             ..Default::default()
         };
 
-        assert_eq!(format_gpu_device_vram(&snapshot), "4.0G / 8.0G");
+        assert_eq!(format_gpu_device_vram(&snapshot), "4.0 GB / 8.0 GB");
         assert_eq!(
             format_gpu_device_metrics(&snapshot),
             "62°C · 119W · 2430MHz"
@@ -712,16 +716,23 @@ mod tests {
         };
 
         assert_eq!(
-            format_gpu_device_title(0, &snapshot),
+            format_gpu_device_title(&snapshot, false),
             "NVIDIA GeForce RTX 4090"
         );
     }
 
     #[test]
-    fn test_format_gpu_device_title_falls_back_to_index() {
-        let snapshot = GpuDeviceSnapshot::default();
+    fn test_format_gpu_device_title_uses_config_index_for_multiple_devices() {
+        let snapshot = GpuDeviceSnapshot {
+            device_index: 3,
+            device_name: Some("NVIDIA GeForce RTX 4090".to_string()),
+            ..Default::default()
+        };
 
-        assert_eq!(format_gpu_device_title(1, &snapshot), "GPU 2");
+        assert_eq!(
+            format_gpu_device_title(&snapshot, true),
+            "GPU 3: NVIDIA GeForce RTX 4090"
+        );
     }
 }
 

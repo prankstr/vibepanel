@@ -123,7 +123,7 @@ pub(crate) fn popover_kind_for(widget_name: &str) -> PopoverKind {
 
 /// Format a rounded vertical metric without exceeding the three-character
 /// width budget solely to show its unit.
-pub(crate) fn format_vertical_metric(value: f64, unit: char) -> String {
+pub(crate) fn format_vertical_metric(value: f32, unit: char) -> String {
     let value = format!("{value:.0}");
     if value.chars().count() < 3 {
         format!("{value}{unit}")
@@ -339,7 +339,7 @@ impl WidgetFactory {
                 Some(BuiltWidget::new(root, memory).with_edge_interaction(edge_interaction))
             }
             "gpu" => {
-                if !GpuService::global().snapshot().available {
+                if !GpuService::global().snapshot().available() {
                     debug!("Skipping gpu widget: no supported GPU detected");
                     return None;
                 }
@@ -430,7 +430,7 @@ impl WidgetFactory {
                 Some(BuiltWidget::new(root, memory))
             }
             "gpu" => {
-                if !GpuService::global().snapshot().available {
+                if !GpuService::global().snapshot().available() {
                     debug!("Skipping gpu widget: no supported GPU detected");
                     return None;
                 }

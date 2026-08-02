@@ -67,7 +67,9 @@ background_opacity = 1.0
 #   # Also supported by [widgets.memory] and [widgets.gpu]
 #
 #   [widgets.gpu]
-#   devices = "auto"  # "auto" (default) shows the preferred GPU only; "all" shows every detected GPU; [1, 2] shows explicit GPU indices
+#   devices = "auto"  # "auto" (default), "all", or zero-based indices such as [0, 1]
+#   # "all" checks every GPU while the GPU widget or system popover is active. Runtime-suspended
+#   # GPUs skip vendor polling, but active secondary GPUs are queried and may use more power than "auto".
 #
 #   [widgets.notifications]
 #   toast_position = "top-right"  # "top-left", "top-center", "top-right", "bottom-left", "bottom-center", "bottom-right"
