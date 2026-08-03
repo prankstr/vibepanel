@@ -192,6 +192,15 @@ enum PopoverAction {
 }
 
 fn main() -> ExitCode {
+    // Return memory used by large, short-lived image decodes to the OS instead
+    // of keeping it for reuse. Keep glibc's matching trim setting so smaller
+    // allocations remain efficient.
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    unsafe {
+        libc::mallopt(libc::M_MMAP_THRESHOLD, 4 * 1024 * 1024);
+        libc::mallopt(libc::M_TRIM_THRESHOLD, 8 * 1024 * 1024);
+    }
+
     let mut args = Args::parse();
 
     // Initialize logging
