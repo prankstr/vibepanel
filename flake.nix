@@ -76,10 +76,10 @@
           // {
             inherit cargoArtifacts;
 
-            # Allow the Nix-wrapped binary to find the host NVIDIA driver
+            # Make runtime graphics drivers available to GTK.
             preFixup = ''
               gappsWrapperArgs+=(
-                --suffix LD_LIBRARY_PATH : "${pkgs.addDriverRunpath.driverLink}/lib:/usr/lib64:/usr/lib"
+                --suffix LD_LIBRARY_PATH : "${pkgs.addDriverRunpath.driverLink}/lib"
               )
             '';
 

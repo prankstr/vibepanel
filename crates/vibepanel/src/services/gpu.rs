@@ -4,7 +4,8 @@
 //! and power draw by reading vendor-specific interfaces:
 //!
 //! - **AMD**: sysfs files under `/sys/class/drm/cardN/device/` plus AMDGPU ioctls
-//! - **NVIDIA**: NVML via the `nvml-wrapper` crate (runtime-loaded `libnvidia-ml.so`)
+//! - **NVIDIA**: NVML via the `nvml-wrapper` crate (runtime-loaded
+//!   `libnvidia-ml.so`, see [`init_nvml`])
 //!
 //! All GPUs are discovered at startup. One is selected for active polling based on:
 //!
@@ -47,6 +48,21 @@ pub(crate) const GPU_HIGH_USAGE_THRESHOLD: f32 = 90.0;
 
 const DRM_CLASS_PATH: &str = "/sys/class/drm";
 const DRI_DEV_PATH: &str = "/dev/dri";
+
+const NVML_PATH_ENV: &str = "VIBEPANEL_NVML_PATH";
+
+/// Fallback locations used when `libnvidia-ml.so.1` is not on the loader path.
+const NVML_LIB_CANDIDATES: &[&str] = &[
+    // NixOS
+    "/run/opengl-driver/lib/libnvidia-ml.so.1",
+    // Debian/Ubuntu multiarch
+    "/usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1",
+    "/usr/lib/aarch64-linux-gnu/libnvidia-ml.so.1",
+    // Fedora/RHEL/openSUSE
+    "/usr/lib64/libnvidia-ml.so.1",
+    // Arch
+    "/usr/lib/libnvidia-ml.so.1",
+];
 
 // Linux DRM/AMDGPU UAPI constants from drm.h and amdgpu_drm.h.
 // Kept local to avoid adding a libdrm binding dependency for one query.
@@ -595,12 +611,9 @@ impl GpuService {
 
     /// Discover all NVIDIA GPUs via NVML (runtime-loads `libnvidia-ml.so`).
     fn discover_all_nvidia() -> Vec<NvidiaGpuDevice> {
-        let nvml = match Nvml::init() {
-            Ok(n) => Rc::new(n),
-            Err(e) => {
-                debug!("GpuService: NVML init failed (no NVIDIA driver?): {e}");
-                return Vec::new();
-            }
+        let nvml = match init_nvml() {
+            Some(n) => Rc::new(n),
+            None => return Vec::new(),
         };
 
         let count = match nvml.device_count() {
@@ -716,6 +729,43 @@ impl Drop for GpuService {
             source_id.remove();
         }
     }
+}
+
+/// `None` is the normal outcome on AMD/Intel-only systems, hence debug logging.
+fn init_nvml() -> Option<Nvml> {
+    if let Some(path) = std::env::var_os(NVML_PATH_ENV).filter(|p| !p.is_empty()) {
+        match Nvml::builder().lib_path(&path).init() {
+            Ok(nvml) => {
+                debug!("GpuService: NVML loaded from {NVML_PATH_ENV}={path:?}");
+                return Some(nvml);
+            }
+            Err(e) => {
+                // Explicit user intent, so warn rather than debug.
+                warn!("GpuService: NVML init from {NVML_PATH_ENV}={path:?} failed: {e}");
+            }
+        }
+    }
+
+    match Nvml::init() {
+        Ok(nvml) => return Some(nvml),
+        Err(e) => debug!("GpuService: NVML init via default search path failed: {e}"),
+    }
+
+    for candidate in NVML_LIB_CANDIDATES {
+        if !Path::new(candidate).exists() {
+            continue;
+        }
+        match Nvml::builder().lib_path(candidate.as_ref()).init() {
+            Ok(nvml) => {
+                debug!("GpuService: NVML loaded from {candidate}");
+                return Some(nvml);
+            }
+            Err(e) => debug!("GpuService: NVML init from {candidate} failed: {e}"),
+        }
+    }
+
+    debug!("GpuService: no usable NVML found (no NVIDIA driver?)");
+    None
 }
 
 /// Find the first `hwmon/hwmon*` directory under a device path.
@@ -859,6 +909,21 @@ fn read_runtime_status(path: &Path) -> GpuPowerState {
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn nvml_lib_candidates_are_absolute_sonames() {
+        assert!(!NVML_LIB_CANDIDATES.is_empty());
+        for candidate in NVML_LIB_CANDIDATES {
+            assert!(
+                Path::new(candidate).is_absolute(),
+                "{candidate} must be absolute so it bypasses the loader search path"
+            );
+            assert!(
+                candidate.ends_with("/libnvidia-ml.so.1"),
+                "{candidate} must point at the versioned NVML soname"
+            );
+        }
+    }
 
     #[test]
     fn test_gpu_snapshot_defaults() {
