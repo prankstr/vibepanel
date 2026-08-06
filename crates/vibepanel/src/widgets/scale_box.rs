@@ -23,8 +23,8 @@ use gtk4::prelude::*;
 use gtk4::subclass::prelude::*;
 use std::cell::Cell;
 
-/// Quantization denominator: scale moves in steps of 1/128.
-const QUANT_DENOM: f64 = 128.0;
+/// Quantization denominator: scale moves in steps of 1/256.
+const QUANT_DENOM: f64 = 256.0;
 
 fn quantize_scale(s: f64) -> f64 {
     (s * QUANT_DENOM).round() / QUANT_DENOM
@@ -192,15 +192,15 @@ mod tests {
 
     #[test]
     fn quantize_scale_maps_animation_endpoints() {
-        assert_eq!(quantize_scale(0.94), 120.0 / QUANT_DENOM);
+        assert_eq!(quantize_scale(0.94), 241.0 / QUANT_DENOM);
         assert_eq!(quantize_scale(1.0), 1.0);
     }
 
     #[test]
     fn quantize_scale_rounds_at_boundary() {
-        let midpoint = 120.5 / QUANT_DENOM;
-        assert_eq!(quantize_scale(midpoint - 1e-6), 120.0 / QUANT_DENOM);
-        assert_eq!(quantize_scale(midpoint), 121.0 / QUANT_DENOM);
-        assert_eq!(quantize_scale(midpoint + 1e-6), 121.0 / QUANT_DENOM);
+        let midpoint = 241.5 / QUANT_DENOM;
+        assert_eq!(quantize_scale(midpoint - 1e-6), 241.0 / QUANT_DENOM);
+        assert_eq!(quantize_scale(midpoint), 242.0 / QUANT_DENOM);
+        assert_eq!(quantize_scale(midpoint + 1e-6), 242.0 / QUANT_DENOM);
     }
 }
