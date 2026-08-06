@@ -7,7 +7,7 @@
 //! while hidden. Expanded card state can optionally be preserved across closes.
 
 use gtk4::gdk::{self, Monitor};
-use gtk4::glib::{self, ControlFlow};
+use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4::{
     Application, ApplicationWindow, Box as GtkBox, Button, EventControllerKey, Label, Orientation,
@@ -35,7 +35,7 @@ use crate::widgets::layer_shell_popover::{
     calculate_bar_exclusive_zone, calculate_popover_bar_margin, calculate_popover_bottom_margin,
     calculate_popover_right_margin, configure_popover_layer_anchors, create_click_catcher,
     is_keynav_key, popover_bar_edge, popover_keyboard_mode, reset_popover_margins,
-    setup_esc_handler, snap_anim_shell,
+    run_popover_animation, setup_esc_handler, snap_anim_shell,
 };
 use crate::widgets::scale_box::ScaleBox;
 
@@ -116,26 +116,20 @@ const QUICK_SETTINGS_DEFAULT_RIGHT_MARGIN: i32 = 8;
 const CARD_ROW_SPACING: i32 = 8;
 const CARD_ROW_GAP: i32 = 8;
 const AUDIO_SECTION_TOP_MARGIN: i32 = 12;
-/// Config key for the quick-settings widget, used for per-widget
-/// outline_color overrides in the animated outline path.
-const QUICK_SETTINGS_WIDGET: &str = "quick_settings";
 
 /// Full Quick Settings window.
 ///
 /// ## Animation architecture
 ///
-/// Open/close animations are driven by a **tick callback** on the animation
-/// shell (`ScaleBox`), not by CSS `transition:` properties. CSS `transform:
-/// scale()` transitions are observed to cause unbounded memory growth in
-/// GTK4. See `LayerShellPopover` for the same pattern.
+/// Open/close animations use [`run_popover_animation`] and a [`ScaleBox`]. See
+/// the `scale_box` module docs for why the transform is quantized.
 pub struct QuickSettingsWindow {
     window: ApplicationWindow,
     click_catcher: RefCell<Option<ApplicationWindow>>,
     /// Animation shell wrapping the outer container. Opacity and scale are
     /// animated via tick callback — no CSS transitions involved.
     anim_shell: ScaleBox,
-    /// Wrapper between window and anim_shell that provides shadow margins
-    /// so the ScaleBox grow-in clip animation is visible.
+    /// Wrapper providing transparent margins for surface shadows.
     margin_wrapper: GtkBox,
     /// Content container (surface styles, focus suppression).
     outer_container: RefCell<Option<GtkBox>>,
@@ -233,8 +227,6 @@ impl QuickSettingsWindow {
         anim_shell.set_opacity(0.0);
         anim_shell.set_scale(ANIM_SCALE_FROM);
 
-        // Margin wrapper sits between window and anim_shell, providing
-        // transparent padding so the ScaleBox clip animation is visible.
         let margin_wrapper = GtkBox::new(Orientation::Vertical, 0);
         margin_wrapper.add_css_class(surface::POPOVER_WRAPPER);
         margin_wrapper.add_css_class(surface::WIDGET_MENU_WRAPPER);
@@ -285,10 +277,6 @@ impl QuickSettingsWindow {
 
         let outer = Self::build_content(&qs);
 
-        // Hierarchy: window → margin_wrapper → anim_shell (ScaleBox) → outer
-        // The margin wrapper provides transparent padding around the ScaleBox
-        // so the rounded-clip grow animation is visible (same pattern as
-        // LayerShellPopover).
         anim_shell.set_child(&outer);
         margin_wrapper.append(&anim_shell.clone().upcast::<gtk4::Widget>());
         window.set_child(Some(&margin_wrapper));
@@ -1508,7 +1496,7 @@ impl QuickSettingsWindow {
                     if ConfigManager::global().animations_enabled() {
                         qs.start_animation(AnimDirection::Opening, generation);
                     } else {
-                        snap_anim_shell(&qs.anim_shell, QUICK_SETTINGS_WIDGET, 1.0, 1.0);
+                        snap_anim_shell(&qs.anim_shell, 1.0, 1.0);
                     }
                     let snapshot = NetworkService::global().snapshot();
                     network_card::on_network_changed(&qs.network, &snapshot, &qs.window);
@@ -1541,7 +1529,7 @@ impl QuickSettingsWindow {
                     if ConfigManager::global().animations_enabled() {
                         qs.start_animation(AnimDirection::Opening, generation);
                     } else {
-                        snap_anim_shell(&qs.anim_shell, QUICK_SETTINGS_WIDGET, 1.0, 1.0);
+                        snap_anim_shell(&qs.anim_shell, 1.0, 1.0);
                     }
 
                     let snapshot = NetworkService::global().snapshot();
@@ -1664,12 +1652,7 @@ impl QuickSettingsWindow {
 
         if !ConfigManager::global().animations_enabled() {
             // Animations disabled — snap closed immediately.
-            snap_anim_shell(
-                &self.anim_shell,
-                QUICK_SETTINGS_WIDGET,
-                0.0,
-                ANIM_SCALE_FROM,
-            );
+            snap_anim_shell(&self.anim_shell, 0.0, ANIM_SCALE_FROM);
             self.is_animating_out.set(false);
             self.reset_ui_state();
             // No explicit blur removal needed — unmapping suspends
@@ -1729,95 +1712,30 @@ impl QuickSettingsWindow {
     /// close), the current progress is captured and the animation reverses from
     /// that point with proportional timing — no snapping.
     fn start_animation(&self, direction: AnimDirection, generation: u32) {
-        let start_time_us = self
-            .anim_shell
-            .frame_clock()
-            .map(|fc| fc.frame_time())
-            .unwrap_or(0);
-
-        let need_tick = self.anim_state.borrow_mut().prepare(
-            direction,
-            generation,
-            start_time_us,
-            self.anim_shell.opacity(),
-        );
-
-        // Prepare first so reversal paths can reuse the existing tick callback;
-        // then ensure the current child has animation-outline styling even if no
-        // new callback is needed.
-        SurfaceStyleManager::global().apply_animated_surface_outline(
-            &self.anim_shell,
-            QUICK_SETTINGS_WIDGET,
-            true,
-        );
-
-        if !need_tick {
-            return;
-        }
-
-        let anim_state = Rc::clone(&self.anim_state);
-        let anim_gen = Rc::clone(&self.anim_generation);
         let window_weak = self.window.downgrade();
-        let shell_clone = self.anim_shell.clone();
 
-        self.anim_shell
-            .add_tick_callback(move |shell, frame_clock| {
-                if anim_gen.get() != generation {
-                    return ControlFlow::Break;
-                }
-
-                let now_us = frame_clock.frame_time();
-                let (progress, complete, direction) = {
-                    let state = anim_state.borrow();
-                    if !state.active {
-                        return ControlFlow::Break;
+        run_popover_animation(
+            &self.anim_shell,
+            &self.anim_state,
+            &self.anim_generation,
+            generation,
+            direction,
+            Some((self.window.downgrade(), QUICK_SETTINGS_OUTER_MARGIN)),
+            move |direction, shell| {
+                if direction == AnimDirection::Closing {
+                    snap_anim_shell(shell, 0.0, ANIM_SCALE_FROM);
+                    if let Some(window) = window_weak.upgrade()
+                        && let Some(qs) = get_qs_window_data(&window)
+                    {
+                        qs.is_animating_out.set(false);
+                        qs.reset_ui_state();
+                        qs.window.set_visible(false);
                     }
-                    (
-                        state.current_progress(now_us),
-                        state.is_complete(now_us),
-                        state.direction,
-                    )
-                };
-
-                // Apply visual state — opacity and scale, no CSS involvement.
-                shell.set_opacity(progress);
-                let scale = ANIM_SCALE_FROM + (1.0 - ANIM_SCALE_FROM) * progress;
-                shell_clone.set_scale(scale);
-
-                if direction == AnimDirection::Opening
-                    && ConfigManager::global().blur_enabled()
-                    && let Some(blur) =
-                        crate::services::background_effect::BackgroundEffectManager::global()
-                    && let Some(window) = window_weak.upgrade()
-                {
-                    blur.apply_open_animation_blur(
-                        &window,
-                        QUICK_SETTINGS_OUTER_MARGIN,
-                        scale,
-                        complete,
-                    );
+                } else {
+                    snap_anim_shell(shell, 1.0, 1.0);
                 }
-
-                if complete {
-                    anim_state.borrow_mut().active = false;
-
-                    if direction == AnimDirection::Closing {
-                        snap_anim_shell(&shell_clone, QUICK_SETTINGS_WIDGET, 0.0, ANIM_SCALE_FROM);
-                        if let Some(window) = window_weak.upgrade()
-                            && let Some(qs) = get_qs_window_data(&window)
-                        {
-                            qs.is_animating_out.set(false);
-                            qs.reset_ui_state();
-                            qs.window.set_visible(false);
-                        }
-                    } else {
-                        snap_anim_shell(&shell_clone, QUICK_SETTINGS_WIDGET, 1.0, 1.0);
-                    }
-                    return ControlFlow::Break;
-                }
-
-                ControlFlow::Continue
-            });
+            },
+        );
     }
 
     /// Temporarily release exclusive keyboard grab to allow external dialogs

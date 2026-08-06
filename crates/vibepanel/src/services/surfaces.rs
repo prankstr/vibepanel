@@ -1,7 +1,7 @@
 //! Surface styling helpers for vibepanel.
 //!
 //! This module owns runtime surface helpers that cannot live in static CSS,
-//! such as shadow margins, animated outlines, and optional Pango font styling.
+//! such as shadow margins and optional Pango font styling.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -13,9 +13,7 @@ use tracing::debug;
 use vibepanel_core::SurfaceStyles;
 use vibepanel_core::config::BarPosition;
 
-use crate::services::config_manager::ConfigManager;
-use crate::styles::{icon, surface};
-use crate::widgets::scale_box::ScaleBox;
+use crate::styles::icon;
 
 // Thread-local singleton storage for SurfaceStyleManager
 thread_local! {
@@ -36,8 +34,8 @@ fn default_surface_styles() -> SurfaceStyles {
 
 /// Process-wide surface styling manager.
 ///
-/// Provides runtime styling helpers for shadow margins, GSK outline coordination,
-/// Pango font workarounds, and tray contrast adjustments.
+/// Provides runtime styling helpers for shadow margins, Pango font workarounds,
+/// and tray contrast adjustments.
 pub struct SurfaceStyleManager {
     styles: RefCell<SurfaceStyles>,
     /// Whether to use Pango attributes for font rendering instead of CSS.
@@ -126,37 +124,6 @@ impl SurfaceStyleManager {
         } else {
             0
         }
-    }
-
-    /// Apply the temporary ScaleBox outline used while floating surfaces animate.
-    ///
-    /// The real CSS border is suppressed only when there is a GSK outline to
-    /// draw, so disabled outlines keep their normal resting CSS appearance.
-    pub fn apply_animated_surface_outline(
-        &self,
-        shell: &ScaleBox,
-        widget_name: &str,
-        active: bool,
-    ) {
-        let config = ConfigManager::global();
-        let width = config.surface_outline_width();
-        let color = if active && width > 0.0 {
-            debug_assert!(
-                shell.child_has_css_class(surface::POPOVER),
-                "animated surface outline suppression expects a popover surface child"
-            );
-            config.surface_outline_rgba_for_widget(widget_name, shell)
-        } else {
-            gtk4::gdk::RGBA::TRANSPARENT
-        };
-
-        shell.set_animated_outline(
-            active,
-            config.surface_border_radius() as f32,
-            width,
-            color,
-            surface::SUPPRESS_CSS_OUTLINE,
-        );
     }
 
     /// Apply shadow-aware margins to a popover/overlay container.

@@ -277,11 +277,6 @@ window.media-window > .media-content {{
     border-radius: var(--radius-widget-lg);
 }}
 
-/* Mirrors the generated surface rule for static popover styles. */
-.popover.vp-suppress-css-outline {{
-    border-color: transparent;
-}}
-
 popover.widget-menu,
 box.popover-wrapper,
 box.widget-menu-wrapper {{

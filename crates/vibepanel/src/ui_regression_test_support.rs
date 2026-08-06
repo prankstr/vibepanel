@@ -373,15 +373,6 @@ pub(crate) fn center_pixel_of_surface(fixture: &PaintedSurfaceFixture) -> Rgba8 
     )
 }
 
-pub(crate) fn edge_pixel_of_surface(fixture: &PaintedSurfaceFixture) -> Rgba8 {
-    sample_widget_pixel(
-        &fixture.window,
-        &fixture.surface,
-        1,
-        fixture.surface.height() / 2,
-    )
-}
-
 pub(crate) fn assert_pixel_close(observed: Rgba8, expected: Rgba8, message: &str) {
     assert!(
         observed.close_to(expected, 2),

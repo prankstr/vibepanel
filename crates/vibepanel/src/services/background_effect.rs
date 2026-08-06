@@ -1013,9 +1013,9 @@ impl BackgroundEffectManager {
 
     /// Apply a blur region that tracks the ScaleBox grow-in animation.
     ///
-    /// During the open animation the ScaleBox clips its child to a centered rect
-    /// whose size is `content_size * scale`.  This method sets the blur region to
-    /// match that clip so the compositor blur grows in sync with the visual.
+    /// During the open animation the ScaleBox scales its child around the center.
+    /// This method sets the blur region to the transformed bounds so the compositor
+    /// blur grows in sync with the visual.
     ///
     /// `scale` should be the current ScaleBox scale (ANIM_SCALE_FROM → 1.0).
     /// At `scale == 1.0` this produces the same region as `apply_blur_region`.
@@ -1047,9 +1047,10 @@ impl BackgroundEffectManager {
         let content_w = (width - margin_start - margin_end) as f64;
         let content_h = (height - margin_top - margin_bottom) as f64;
 
-        // ScaleBox clips to a centered rect of size content * scale.
+        // ScaleBox transforms to centered bounds of size content * scale.
         let scaled_w = content_w * scale;
         let scaled_h = content_h * scale;
+        let scaled_radius = (radius as f64 * scale).round() as i32;
         let dx = (content_w - scaled_w) / 2.0;
         let dy = (content_h - scaled_h) / 2.0;
 
@@ -1064,7 +1065,7 @@ impl BackgroundEffectManager {
             y.round() as i32,
             scaled_w.round() as i32,
             scaled_h.round() as i32,
-            radius,
+            scaled_radius,
             crate::services::config_manager::ConfigManager::global().surface_outline_visible(),
         );
 

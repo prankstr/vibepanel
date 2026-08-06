@@ -1,21 +1,34 @@
-//! A container that simulates scale animation via symmetric rounded clip.
+//! A container that animates a true scale transform around its center.
 //!
-//! The child is always allocated at full size — the scale effect is achieved
-//! by clipping to a centered rect in `snapshot()` that grows from smaller to
-//! full size. Combined with opacity fade this approximates `transform: scale()`
-//! without any scale transforms in the render tree (which are observed to
-//! cause unbounded memory growth in GTK4).
+//! The child is always measured and allocated at full size — `snapshot()`
+//! applies a GSK scale transform about the widget center, so text, icons,
+//! and borders genuinely scale with the popover.
 //!
-//! `ScaleBox` can also draw an optional outline on the animated clip boundary.
-//! CSS borders live on the full-size child and would otherwise be clipped away
-//! until the final frame of the grow-in animation.
+//! ## Why the scale is quantized
 //!
-//! Only calls `queue_draw()` on scale changes — no layout or CSS resolution.
+//! The scale value is quantized to multiples of `1/QUANT_DENOM` when set.
+//! Text rendered under a transform is rasterized per unique
+//! effective scale, and renderer glyph caches key their entries by that
+//! scale. A continuous per-frame scale therefore creates an endless stream
+//! of single-use cache entries: cairo caps its caches (bounded bloat), but
+//! the GPU renderers grow without bound. Quantization keeps the set of text
+//! scales small and repeating, so the caches warm up once and stay flat.
+//!
+//! CSS `transform: scale()` transitions hit the same leak but offer no
+//! quantization hook, which is why the animation is driven from a tick
+//! callback instead of CSS.
 
 use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4::subclass::prelude::*;
 use std::cell::Cell;
+
+/// Quantization denominator: scale moves in steps of 1/128.
+const QUANT_DENOM: f64 = 128.0;
+
+fn quantize_scale(s: f64) -> f64 {
+    (s * QUANT_DENOM).round() / QUANT_DENOM
+}
 
 mod imp {
     use super::*;
@@ -23,11 +36,6 @@ mod imp {
     pub struct ScaleBox {
         /// Current scale factor (1.0 = normal size).
         pub(super) scale: Cell<f64>,
-        /// Border radius for the rounded clip (pixels).
-        pub(super) radius: Cell<f32>,
-        /// Optional animated outline width (pixels). 0 disables drawing.
-        pub(super) outline_width: Cell<f32>,
-        pub(super) outline_color: Cell<gtk4::gdk::RGBA>,
         /// The single child widget.
         pub(super) child: glib::WeakRef<gtk4::Widget>,
     }
@@ -36,9 +44,6 @@ mod imp {
         fn default() -> Self {
             Self {
                 scale: Cell::default(),
-                radius: Cell::default(),
-                outline_width: Cell::default(),
-                outline_color: Cell::new(gtk4::gdk::RGBA::TRANSPARENT),
                 child: glib::WeakRef::new(),
             }
         }
@@ -86,7 +91,7 @@ mod imp {
         }
 
         fn size_allocate(&self, width: i32, height: i32, baseline: i32) {
-            // Full allocation — scale effect is purely visual via snapshot() clipping.
+            // Full allocation — the scale effect is purely visual via snapshot().
             if let Some(child) = self.child.upgrade() {
                 child.allocate(width, height, baseline, None);
             }
@@ -102,73 +107,31 @@ mod imp {
 
             if s >= 1.0 {
                 widget.snapshot_child(&child, snapshot);
-                let rect = gtk4::graphene::Rect::new(
-                    0.0,
-                    0.0,
-                    widget.width() as f32,
-                    widget.height() as f32,
-                );
-                self.snapshot_outline(snapshot, rect, self.radius.get());
                 return;
             }
             if s <= 0.0 {
                 return;
             }
 
-            // Rounded center-clip: crop edges uniformly, matching surface border radius.
-            let w = widget.width() as f32;
-            let h = widget.height() as f32;
-            let cw = w * s as f32;
-            let ch = h * s as f32;
-            let dx = (w - cw) / 2.0;
-            let dy = (h - ch) / 2.0;
-
-            let radius = self.radius.get();
-            let rect = gtk4::graphene::Rect::new(dx, dy, cw, ch);
-            let rounded = gtk4::gsk::RoundedRect::new(
-                rect,
-                gtk4::graphene::Size::new(radius, radius),
-                gtk4::graphene::Size::new(radius, radius),
-                gtk4::graphene::Size::new(radius, radius),
-                gtk4::graphene::Size::new(radius, radius),
-            );
-
-            snapshot.push_rounded_clip(&rounded);
+            let cx = widget.width() as f32 / 2.0;
+            let cy = widget.height() as f32 / 2.0;
+            snapshot.save();
+            // Scale about the widget center: translate(c*(1-s)) then scale(s).
+            snapshot.translate(&gtk4::graphene::Point::new(
+                cx * (1.0 - s as f32),
+                cy * (1.0 - s as f32),
+            ));
+            snapshot.scale(s as f32, s as f32);
             widget.snapshot_child(&child, snapshot);
-            snapshot.pop();
-
-            self.snapshot_outline(snapshot, rect, radius);
-        }
-    }
-
-    impl ScaleBox {
-        fn snapshot_outline(
-            &self,
-            snapshot: &gtk4::Snapshot,
-            rect: gtk4::graphene::Rect,
-            radius: f32,
-        ) {
-            let width = self.outline_width.get();
-            let color = self.outline_color.get();
-            if width <= 0.0 || color.alpha() <= 0.0 {
-                return;
-            }
-
-            let outline = gtk4::gsk::RoundedRect::new(
-                rect,
-                gtk4::graphene::Size::new(radius, radius),
-                gtk4::graphene::Size::new(radius, radius),
-                gtk4::graphene::Size::new(radius, radius),
-                gtk4::graphene::Size::new(radius, radius),
-            );
-            snapshot.append_border(&outline, &[width; 4], &[color; 4]);
+            snapshot.restore();
         }
     }
 }
 
 glib::wrapper! {
-    /// A container that simulates scale via symmetric center-clip in `snapshot()`.
-    /// Child always gets full allocation. No scale transforms in the render tree.
+    /// A container that renders its child through an animated center scale
+    /// transform. Child always gets full allocation; the scale is quantized
+    /// (see module docs) to keep renderer glyph caches bounded.
     pub struct ScaleBox(ObjectSubclass<imp::ScaleBox>)
         @extends gtk4::Widget,
         @implements gtk4::Accessible, gtk4::Buildable, gtk4::ConstraintTarget;
@@ -186,78 +149,16 @@ impl ScaleBox {
         glib::Object::builder().build()
     }
 
-    /// Get the current scale factor.
+    /// Get the current quantized scale factor.
     pub fn scale(&self) -> f64 {
         self.imp().scale.get()
     }
 
-    /// Set the border radius used for the rounded clip (pixels).
-    fn set_radius(&self, radius: f32) {
-        let imp = self.imp();
-        if (imp.radius.get() - radius).abs() < f32::EPSILON {
-            return;
-        }
-        imp.radius.set(radius);
-        self.queue_draw();
-    }
-
-    fn set_outline(&self, width: f32, color: gtk4::gdk::RGBA) {
-        let imp = self.imp();
-        let width = width.max(0.0);
-        let changed = (imp.outline_width.get() - width).abs() >= f32::EPSILON
-            || imp.outline_color.get() != color;
-        if !changed {
-            return;
-        }
-
-        imp.outline_width.set(width);
-        imp.outline_color.set(color);
-        self.queue_draw();
-    }
-
-    /// Toggle the outline used during scale-clip animations.
-    ///
-    /// CSS borders on the child remain at full child bounds, while this GSK
-    /// outline follows the animated clip. The child class temporarily hides
-    /// the duplicate CSS border during the handoff.
-    pub fn set_animated_outline(
-        &self,
-        active: bool,
-        radius: f32,
-        width: f32,
-        color: gtk4::gdk::RGBA,
-        suppress_child_class: &str,
-    ) {
-        let imp = self.imp();
-        self.set_radius(radius);
-
-        if !active || width <= 0.0 {
-            if let Some(child) = imp.child.upgrade() {
-                child.remove_css_class(suppress_child_class);
-            }
-            self.set_outline(0.0, gtk4::gdk::RGBA::TRANSPARENT);
-            return;
-        }
-
-        if let Some(child) = imp.child.upgrade() {
-            child.add_css_class(suppress_child_class);
-        }
-        self.set_outline(width, color);
-    }
-
-    /// Whether the managed child currently has `class`.
-    pub fn child_has_css_class(&self, class: &str) -> bool {
-        self.imp()
-            .child
-            .upgrade()
-            .is_some_and(|child| child.has_css_class(class))
-    }
-
     /// Set the scale factor and queue a repaint.
-    /// Values below 1.0 crop edges inward; only calls `queue_draw()`.
+    /// Only calls `queue_draw()` — no layout or CSS resolution.
     pub fn set_scale(&self, scale: f64) {
         let imp = self.imp();
-        let scale = scale.clamp(0.0, 1.0);
+        let scale = quantize_scale(scale.clamp(0.0, 1.0));
         if (imp.scale.get() - scale).abs() < f64::EPSILON {
             return;
         }
@@ -282,5 +183,24 @@ impl ScaleBox {
             child.unparent();
         }
         self.imp().child.set(None::<&gtk4::Widget>);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quantize_scale_maps_animation_endpoints() {
+        assert_eq!(quantize_scale(0.94), 120.0 / QUANT_DENOM);
+        assert_eq!(quantize_scale(1.0), 1.0);
+    }
+
+    #[test]
+    fn quantize_scale_rounds_at_boundary() {
+        let midpoint = 120.5 / QUANT_DENOM;
+        assert_eq!(quantize_scale(midpoint - 1e-6), 120.0 / QUANT_DENOM);
+        assert_eq!(quantize_scale(midpoint), 121.0 / QUANT_DENOM);
+        assert_eq!(quantize_scale(midpoint + 1e-6), 121.0 / QUANT_DENOM);
     }
 }

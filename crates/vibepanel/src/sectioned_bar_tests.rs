@@ -1,7 +1,7 @@
 use super::*;
 use crate::theme_vars::{THEME_VAR_EXPECTATIONS, ThemeVarRole, ThemeVarScope};
 use crate::ui_regression_test_support::{
-    CssProviderGuard, Rgba8, assert_pixel_close, center_pixel_of_surface, edge_pixel_of_surface,
+    CssProviderGuard, Rgba8, assert_pixel_close, center_pixel_of_surface,
     find_descendant_with_class, flush_gtk, init_gtk_or_skip, label_with_text,
     maybe_hold_probe_window, painted_surface_fixture_with_classes, run_ignored_contract_subprocess,
     sample_widget_pixel,
@@ -2182,34 +2182,6 @@ fn run_test_widget_outline_color_css_override_pixel() {
     flush_gtk();
 }
 
-fn run_test_surface_outline_css_gsk_parity() {
-    let mut config = test_config();
-    config.theme.outline = true;
-    config.theme.outline_width = 4;
-    config.theme.outline_color = "accent".to_string();
-    config.theme.outline_opacity = 0.8;
-    config.theme.accent = Some("#446688".to_string());
-    config.widgets.background_color = Some("#101820".to_string());
-    config.widgets.popover_background_opacity = Some(1.0);
-
-    set_ui_regression_config(&config);
-    let surface_fixture = painted_surface_fixture(&config, crate::styles::surface::POPOVER);
-    let css_edge = edge_pixel_of_surface(&surface_fixture);
-    let gsk_rgba = crate::services::config_manager::ConfigManager::global()
-        .surface_outline_rgba_for_widget("custom-a", &surface_fixture.surface);
-    let gsk_edge = Rgba8::from_gdk(gsk_rgba).premultiply_alpha();
-
-    assert_pixel_close(
-        css_edge,
-        gsk_edge,
-        "CSS-rendered surface outline and GSK animated outline resolver should agree",
-    );
-
-    maybe_hold_probe_window();
-    surface_fixture.window.close();
-    flush_gtk();
-}
-
 fn run_test_theme_mode_dark_light_pixels() {
     let mut dark = test_config();
     dark.theme.mode = "dark".to_string();
@@ -2608,11 +2580,6 @@ ui_regression_config_tests!(
         test_ui_regression_widget_outline_color_css_override_pixel,
         "widgets.outline_color_css_override_pixel",
         run_test_widget_outline_color_css_override_pixel
-    ),
-    (
-        test_ui_regression_surface_outline_css_gsk_parity,
-        "theme.surface_outline_css_gsk_parity",
-        run_test_surface_outline_css_gsk_parity
     ),
     (
         test_ui_regression_theme_mode_dark_light_pixel,

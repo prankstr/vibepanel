@@ -69,7 +69,7 @@ pub struct PopoverAnchor {
 pub(crate) const ANIM_DURATION_MS: f64 = super::css::POPOVER_ANIMATION_MS as f64;
 
 /// Starting scale for popover open/close animation.
-/// ScaleBox simulates this via symmetric center-clip (no actual scale transform).
+/// ScaleBox renders this as a true (quantized) center scale transform.
 pub(crate) const ANIM_SCALE_FROM: f64 = 0.94;
 
 /// Direction of the popover animation.
@@ -182,10 +182,80 @@ impl AnimState {
     }
 }
 
-pub(crate) fn snap_anim_shell(shell: &ScaleBox, widget_name: &str, opacity: f64, scale: f64) {
+pub(crate) fn snap_anim_shell(shell: &ScaleBox, opacity: f64, scale: f64) {
     shell.set_opacity(opacity);
     shell.set_scale(scale);
-    SurfaceStyleManager::global().apply_animated_surface_outline(shell, widget_name, false);
+}
+
+/// Drive a popover animation, preserving progress during mid-flight reversals.
+///
+/// `blur_target` pairs the target window with its shadow margin. `on_complete`
+/// runs once with the direction of the completed segment.
+pub(crate) fn run_popover_animation(
+    shell: &ScaleBox,
+    anim_state: &Rc<RefCell<AnimState>>,
+    anim_generation: &Rc<Cell<u32>>,
+    generation: u32,
+    direction: AnimDirection,
+    blur_target: Option<(glib::WeakRef<ApplicationWindow>, i32)>,
+    on_complete: impl Fn(AnimDirection, &ScaleBox) + 'static,
+) {
+    let start_time_us = shell.frame_clock().map(|fc| fc.frame_time()).unwrap_or(0);
+
+    let need_tick =
+        anim_state
+            .borrow_mut()
+            .prepare(direction, generation, start_time_us, shell.opacity());
+
+    if !need_tick {
+        return;
+    }
+
+    let anim_state = Rc::clone(anim_state);
+    let anim_gen = Rc::clone(anim_generation);
+    shell.add_tick_callback(move |shell, frame_clock| {
+        // Generation check — bail if a newer cycle started.
+        // Do NOT touch `active` — a newer tick callback owns that now.
+        if anim_gen.get() != generation {
+            return ControlFlow::Break;
+        }
+
+        let now_us = frame_clock.frame_time();
+        let (progress, complete, direction) = {
+            let state = anim_state.borrow();
+            if !state.active {
+                return ControlFlow::Break;
+            }
+            (
+                state.current_progress(now_us),
+                state.is_complete(now_us),
+                state.direction,
+            )
+        };
+
+        shell.set_opacity(progress);
+        let scale = ANIM_SCALE_FROM + (1.0 - ANIM_SCALE_FROM) * progress;
+        shell.set_scale(scale);
+
+        if direction == AnimDirection::Opening
+            && ConfigManager::global().blur_enabled()
+            && let Some(blur) =
+                crate::services::background_effect::BackgroundEffectManager::global()
+            && let Some((ref window_weak, blur_margin)) = blur_target
+            && let Some(window) = window_weak.upgrade()
+        {
+            // Match the blur to the quantized scale that ScaleBox renders.
+            blur.apply_open_animation_blur(&window, blur_margin, shell.scale(), complete);
+        }
+
+        if complete {
+            anim_state.borrow_mut().active = false;
+            on_complete(direction, shell);
+            return ControlFlow::Break;
+        }
+
+        ControlFlow::Continue
+    });
 }
 
 fn measured_popover_size(widget: &gtk4::Widget) -> Option<(i32, i32)> {
@@ -466,15 +536,17 @@ where
 ///
 /// ## Animation architecture
 ///
-/// Open/close animations (opacity fade) are driven by a **tick callback**
-/// on the persistent animation shell, not by CSS `transition:` properties.
-/// CSS `transform: scale()` transitions are observed to cause unbounded
-/// memory growth in GTK4.
+/// Open/close animations (opacity fade + scale) are driven by a **tick
+/// callback** on the persistent animation shell ([`run_popover_animation`]),
+/// not by CSS `transition:` properties. The shell is a [`ScaleBox`] that
+/// renders a true center scale transform with a *quantized* scale value —
+/// continuous per-frame scales leak renderer glyph caches (see the
+/// `scale_box` module docs), which is why CSS transitions cannot be used.
 ///
 /// The tick callback reads the frame clock each frame, computes eased progress
-/// from an `AnimState`, and applies opacity via `Widget::set_opacity()`. This gives:
+/// from an `AnimState`, and applies opacity + scale. This gives:
 ///
-/// - **No CSS transitions** (no `transition:` on any widget)
+/// - **Bounded memory** (quantized text scales reuse glyph cache entries)
 /// - **Smooth mid-flight reversal** (clicking close during open reverses from
 ///   the current position, proportional timing)
 /// - **No jank** (no snapping between states on rapid clicks)
@@ -761,7 +833,7 @@ impl LayerShellPopover {
         // If animations are disabled, snap closed immediately.
         if !ConfigManager::global().animations_enabled() {
             if let Some(ref shell) = anim_shell {
-                snap_anim_shell(shell, &self.widget_name, 0.0, ANIM_SCALE_FROM);
+                snap_anim_shell(shell, 0.0, ANIM_SCALE_FROM);
                 shell.remove_child();
             }
             // No explicit blur removal needed — unmapping suspends
@@ -821,14 +893,6 @@ impl LayerShellPopover {
         }
 
         anim_shell.set_child(&content);
-        if self.anim_state.borrow().active {
-            SurfaceStyleManager::global().apply_animated_surface_outline(
-                &anim_shell,
-                &self.widget_name,
-                true,
-            );
-        }
-
         SurfaceStyleManager::global().apply_pango_attrs_all(&anim_shell);
 
         // Reposition after content updates while visible (e.g. notifications
@@ -913,7 +977,7 @@ impl LayerShellPopover {
         {
             // Snap-close without animation to avoid recursion.
             if let Some(ref shell) = *self.anim_shell.borrow() {
-                snap_anim_shell(shell, &self.widget_name, 0.0, ANIM_SCALE_FROM);
+                snap_anim_shell(shell, 0.0, ANIM_SCALE_FROM);
                 shell.remove_child();
             }
             if let Some(ref window) = *self.window.borrow() {
@@ -1022,7 +1086,7 @@ impl LayerShellPopover {
             // Animations disabled: snap everything visible before mapping so a
             // close/open cycle cannot leave the reused layer-shell surface
             // transparent if GTK skips or delays the idle positioning pass.
-            snap_anim_shell(&anim_shell, &self.widget_name, 1.0, 1.0);
+            snap_anim_shell(&anim_shell, 1.0, 1.0);
             window.set_opacity(1.0);
 
             // Position before map using GTK's natural size so the first visible
@@ -1187,81 +1251,25 @@ impl LayerShellPopover {
             return;
         };
 
-        let start_time_us = anim_shell
-            .frame_clock()
-            .map(|fc| fc.frame_time())
-            .unwrap_or(0);
-
-        let need_tick = self.anim_state.borrow_mut().prepare(
-            direction,
-            generation,
-            start_time_us,
-            anim_shell.opacity(),
-        );
-
-        // Prepare first so reversal paths can reuse the existing tick callback;
-        // then ensure the current child has animation-outline styling even if no
-        // new callback is needed.
-        SurfaceStyleManager::global().apply_animated_surface_outline(
-            &anim_shell,
-            &self.widget_name,
-            true,
-        );
-
-        if !need_tick {
-            return;
-        }
-
-        let anim_state = Rc::clone(&self.anim_state);
-        let anim_gen = Rc::clone(&self.anim_generation);
         let window = self.window.borrow().as_ref().cloned();
-        let shell_for_scale = anim_shell.clone();
+        let window_for_complete = window.as_ref().map(|w| w.downgrade());
         let on_close = self.on_close.borrow().clone();
-        let widget_name = self.widget_name.clone();
 
-        anim_shell.add_tick_callback(move |shell, frame_clock| {
-            // Generation check — bail if a newer cycle started.
-            // Do NOT touch `active` — a newer tick callback owns that now.
-            if anim_gen.get() != generation {
-                return ControlFlow::Break;
-            }
-
-            let now_us = frame_clock.frame_time();
-            let (progress, complete, direction) = {
-                let state = anim_state.borrow();
-                if !state.active {
-                    return ControlFlow::Break;
-                }
-                (
-                    state.current_progress(now_us),
-                    state.is_complete(now_us),
-                    state.direction,
-                )
-            };
-
-            // Apply visual state — opacity and scale, no CSS involvement.
-            shell.set_opacity(progress);
-            // Interpolate scale: ANIM_SCALE_FROM at progress=0 → 1.0 at progress=1.
-            let scale = ANIM_SCALE_FROM + (1.0 - ANIM_SCALE_FROM) * progress;
-            shell_for_scale.set_scale(scale);
-
-            if direction == AnimDirection::Opening
-                && ConfigManager::global().blur_enabled()
-                && let Some(blur) =
-                    crate::services::background_effect::BackgroundEffectManager::global()
-                && let Some(ref w) = window
-            {
-                blur.apply_open_animation_blur(w, POPOVER_SHADOW_MARGIN, scale, complete);
-            }
-
-            if complete {
-                anim_state.borrow_mut().active = false;
-
+        run_popover_animation(
+            &anim_shell,
+            &self.anim_state,
+            &self.anim_generation,
+            generation,
+            direction,
+            window
+                .as_ref()
+                .map(|w| (w.downgrade(), POPOVER_SHADOW_MARGIN)),
+            move |direction, shell| {
                 if direction == AnimDirection::Closing {
                     // Close complete — remove content and hide window.
-                    snap_anim_shell(&shell_for_scale, &widget_name, 0.0, ANIM_SCALE_FROM);
-                    shell_for_scale.remove_child();
-                    if let Some(ref w) = window {
+                    snap_anim_shell(shell, 0.0, ANIM_SCALE_FROM);
+                    shell.remove_child();
+                    if let Some(w) = window_for_complete.as_ref().and_then(|w| w.upgrade()) {
                         w.set_visible(false);
                     }
                     // Fire on_close now that the popover is fully hidden.
@@ -1270,13 +1278,10 @@ impl LayerShellPopover {
                     }
                 } else {
                     // Open complete — ensure we're at exactly 1.0.
-                    snap_anim_shell(&shell_for_scale, &widget_name, 1.0, 1.0);
+                    snap_anim_shell(shell, 1.0, 1.0);
                 }
-                return ControlFlow::Break;
-            }
-
-            ControlFlow::Continue
-        });
+            },
+        );
     }
 
     fn update_position(&self) {

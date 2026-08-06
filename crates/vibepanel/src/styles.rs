@@ -783,10 +783,6 @@ pub mod surface {
     /// Kept as a user-CSS compatibility alias; scheduled for removal in a future breaking release.
     pub const SURFACE_POPOVER: &str = "vp-surface-popover";
 
-    /// Temporarily hide the CSS-painted outline while `ScaleBox` draws it on
-    /// the moving clip boundary during grow animation.
-    pub const SUPPRESS_CSS_OUTLINE: &str = "vp-suppress-css-outline";
-
     /// Deprecated: use [`POPOVER`]. Popover styling (`.widget-menu`).
     ///
     /// Still applied to native `gtk4::Popover` shells for CSS reset rules
