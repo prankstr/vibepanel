@@ -22,7 +22,7 @@ VibePanel is something between a simple status bar and a full desktop shell:
   - **Quick settings** – Native panel for Wi‑Fi, Bluetooth, audio, power profiles and more
 - **Minimal config** – Sensible defaults out of the box; customize with TOML, CSS only if needed.
 - **Modern aesthetics** – Defaults to a floating "island" design with instant hot‑reloading and features wallpaper adaptive theming that auto‑switches between light and dark.
-- **Integrated CLI** – Control volume, brightness, media playback, bar visibility, popovers and idle inhibition.
+- **Integrated CLI** – Control volume, brightness, media playback, bar visibility, popovers, idle inhibition, and more.
 
 ## Demo
 

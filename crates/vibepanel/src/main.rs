@@ -87,6 +87,11 @@ enum Command {
         #[command(subcommand)]
         action: PopoverAction,
     },
+    /// Query notification state
+    Notifications {
+        #[command(subcommand)]
+        action: NotificationsAction,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -191,6 +196,12 @@ enum PopoverAction {
     },
 }
 
+#[derive(Subcommand, Debug)]
+enum NotificationsAction {
+    /// Print the number of unread notifications (requires Vibepanel to be the active notification daemon)
+    Unread,
+}
+
 fn main() -> ExitCode {
     // Return memory used by large, short-lived image decodes to the OS instead
     // of keeping it for reuse. Keep glibc's matching trim setting so smaller
@@ -278,6 +289,7 @@ fn handle_command(command: Command, config_path: Option<&Path>) -> ExitCode {
         Command::Media { action } => handle_media_command(action),
         Command::Bar { action } => handle_bar_command(action),
         Command::Popover { action } => handle_popover_command(action),
+        Command::Notifications { action } => handle_notifications_command(action),
     }
 }
 
@@ -576,6 +588,22 @@ fn handle_popover_command(action: PopoverAction) -> ExitCode {
     }
 }
 
+/// Handle notification subcommands via the active notification daemon.
+fn handle_notifications_command(action: NotificationsAction) -> ExitCode {
+    match action {
+        NotificationsAction::Unread => match services::notification::unread_notification_count() {
+            Ok(count) => {
+                println!("{}", count);
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("Error: {}", error);
+                ExitCode::FAILURE
+            }
+        },
+    }
+}
+
 /// Initialize and run the GTK4 application.
 fn run_gtk_app(config: Config, config_source: Option<PathBuf>) -> ExitCode {
     // Log the config source for diagnostics
@@ -855,5 +883,23 @@ fn run_gtk_app(config: Config, config_source: Option<PathBuf>) -> ExitCode {
     } else {
         error!("GTK application exited with error");
         ExitCode::FAILURE
+    }
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+
+    #[test]
+    fn parses_notifications_unread_command() {
+        let args = Args::try_parse_from(["vibepanel", "notifications", "unread"])
+            .expect("command should parse");
+
+        assert!(matches!(
+            args.command,
+            Some(Command::Notifications {
+                action: NotificationsAction::Unread
+            })
+        ));
     }
 }

@@ -412,9 +412,9 @@ fn test_notification_toast_structure_contract() {
         );
 
         let notification = test_notification(URGENCY_CRITICAL);
-        let noop_dismiss: ToastCallback = Rc::new(|_| {});
+        let noop_remove: ToastCallback = Rc::new(|_| {});
+        let noop_hidden: ToastCallback = Rc::new(|_| {});
         let noop_action: ToastActionCallback = Rc::new(|_, _| {});
-        let noop_timeout: ToastCallback = Rc::new(|_| {});
         let noop_height: ToastCallback = Rc::new(|_| {});
         let toast = NotificationToast::new(
             ToastWindowContext {
@@ -426,9 +426,9 @@ fn test_notification_toast_structure_contract() {
                 },
             },
             &notification,
-            noop_dismiss,
+            noop_remove,
+            noop_hidden,
             noop_action,
-            noop_timeout,
             noop_height,
         );
         toast.present();

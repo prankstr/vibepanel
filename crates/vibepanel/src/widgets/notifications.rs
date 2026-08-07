@@ -12,13 +12,11 @@
 //! - `notifications_popover.rs`: Popover content and notification list
 //! - `notifications_common.rs`: Shared constants and helper functions
 
-use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4::{Align, Application, Box as GtkBox, Orientation, Overlay, Widget};
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
-use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{debug, warn};
 use vibepanel_core::config::WidgetEntry;
 
@@ -77,7 +75,6 @@ struct NotificationsWidgetInner {
     /// Toast IDs that should be closed when the service notification is closed.
     close_toast_on_close_ids: RefCell<HashSet<u32>>,
     toast_manager: RefCell<Option<Rc<NotificationToastManager>>>,
-    last_seen_timestamp: Cell<f64>,
     app: RefCell<Option<Application>>,
     menu_handle: RefCell<Option<Rc<MenuHandle>>>,
     /// Last known (id, timestamp) snapshot. Used to skip popover rebuilds on
@@ -102,7 +99,7 @@ impl NotificationsWidgetInner {
 
         // Update badge: unread since last popover open
         // Badge is shown as a simple dot (no text), count is only in tooltip
-        let unread = self.calculate_unread_count(service);
+        let unread = service.unread_count();
         debug!("NotificationsWidget: unread count = {}", unread);
         if unread > 0 {
             self.badge.set_visible(true);
@@ -181,58 +178,6 @@ impl NotificationsWidgetInner {
                 menu_handle.refresh_if_visible();
             }
         }
-    }
-
-    fn calculate_unread_count(&self, service: &NotificationService) -> usize {
-        if !service.backend_available() {
-            debug!("NotificationsWidget: backend not available, returning 0");
-            return 0;
-        }
-
-        let active_toast_ids = self
-            .toast_manager
-            .borrow()
-            .as_ref()
-            .map(|tm| tm.active_ids())
-            .unwrap_or_default();
-
-        let last_seen = self.last_seen_timestamp.get();
-
-        debug!(
-            "NotificationsWidget: calculate_unread_count - active_toast_ids={:?}, last_seen={}, notifications_count={}",
-            active_toast_ids,
-            last_seen,
-            service.history_count()
-        );
-
-        service
-            .history_notifications()
-            .iter()
-            .filter(|n| {
-                // Skip if currently shown as toast
-                if active_toast_ids.contains(&n.id) {
-                    debug!("NotificationsWidget: skipping {} (active toast)", n.id);
-                    return false;
-                }
-
-                // First run (never opened): count all non-toasted as unread
-                if last_seen <= 0.0 {
-                    debug!(
-                        "NotificationsWidget: counting {} (never opened popover)",
-                        n.id
-                    );
-                    return true;
-                }
-
-                // Count if delivered after last seen
-                let is_unread = n.timestamp > last_seen;
-                debug!(
-                    "NotificationsWidget: {} timestamp={} > last_seen={} = {}",
-                    n.id, n.timestamp, last_seen, is_unread
-                );
-                is_unread
-            })
-            .count()
     }
 
     fn show_new_toasts(&self, service: &NotificationService) {
@@ -347,22 +292,13 @@ impl NotificationsWidgetInner {
                     .and_then(|display| display.monitor_at_surface(&surface))
             })
     }
-
-    /// Mark notifications as seen (called when popover opens).
-    fn mark_as_seen(&self) {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs_f64())
-            .unwrap_or(0.0);
-        self.last_seen_timestamp.set(now);
-    }
 }
 
 /// Notification bell widget with popover showing notification list.
 pub struct NotificationsWidget {
     base: BaseWidget,
-    /// Kept for ownership: Weak references inside service/toast closures only
-    /// remain valid as long as this Rc is alive.
+    /// Kept for ownership: the service callback's Weak reference remains valid
+    /// as long as this Rc is alive.
     #[allow(dead_code)]
     inner: Rc<NotificationsWidgetInner>,
     /// Callback ID for NotificationService, used to disconnect on drop.
@@ -410,7 +346,6 @@ impl NotificationsWidget {
             known_ids: RefCell::new(HashMap::new()),
             close_toast_on_close_ids: RefCell::new(HashSet::new()),
             toast_manager: RefCell::new(None),
-            last_seen_timestamp: Cell::new(0.0),
             app: RefCell::new(None),
             menu_handle: RefCell::new(None),
             last_notif_ids: RefCell::new(Vec::new()),
@@ -419,11 +354,10 @@ impl NotificationsWidget {
 
         // Build menu before constructing Self so we can move base/inner cleanly.
         let suppress_rebuild = Rc::clone(&inner.suppress_rebuild);
-        let inner_for_menu = Rc::clone(&inner);
         let menu_handle = base.create_menu(|| GtkBox::new(Orientation::Vertical, 0).into());
         let handle_weak = Rc::downgrade(&menu_handle);
         menu_handle.set_builder_with_monitor(move |monitor| {
-            inner_for_menu.mark_as_seen();
+            NotificationService::global().mark_as_seen();
             let on_close: Option<ClosePopoverCallback> = handle_weak
                 .upgrade()
                 .map(|handle| Rc::new(move || handle.hide()) as ClosePopoverCallback);
@@ -440,35 +374,17 @@ impl NotificationsWidget {
             .map(|n| (n.id, n.timestamp))
             .collect();
 
-        // Initialize toast manager. Closures use Weak to avoid keeping inner
-        // alive after the widget is dropped.
         {
-            let service_for_action = NotificationService::global();
+            let service_for_action = Rc::clone(&service);
             let on_action = move |id: u32, action_id: &str| {
                 service_for_action.invoke_action(id, action_id);
             };
 
-            // When a toast is removed (dismissed or timed out), we need to recalculate
-            // the badge. However, we must NOT call on_service_update directly here
-            // because that would cause infinite recursion:
-            //   action → invoke_action → notify_listeners → on_service_update
-            //   → show_new_toasts → close toast → on_toast_removed → on_service_update → ...
-            //
-            // Instead, we use idle_add to defer the update to the next main loop iteration.
-            // This breaks the synchronous call chain and prevents stack overflow.
-            let inner_weak_for_toast = Rc::downgrade(&inner);
-            let on_toast_removed = move || {
-                let inner_weak = inner_weak_for_toast.clone();
-                glib::idle_add_local_once(move || {
-                    if let Some(inner) = inner_weak.upgrade() {
-                        let service = NotificationService::global();
-                        inner.on_service_update(&service);
-                    }
-                });
-            };
-
-            let manager =
-                NotificationToastManager::new(on_action, on_toast_removed, config.toast_position);
+            let manager = NotificationToastManager::new(
+                Rc::clone(&service),
+                on_action,
+                config.toast_position,
+            );
             *inner.toast_manager.borrow_mut() = Some(manager);
         }
 

@@ -45,6 +45,9 @@ pub struct NotificationState {
     pub muted: bool,
     /// Next notification ID to assign
     pub next_id: u32,
+    /// Notification IDs that have been seen in a popover
+    #[serde(default)]
+    pub seen_ids: Vec<u32>,
     /// Notification history (most recent first)
     pub history: Vec<PersistedNotification>,
 }
@@ -133,6 +136,17 @@ pub fn save(state: &PersistedState) {
             .history
             .truncate(MAX_PERSISTED_NOTIFICATIONS);
     }
+    // Truncating history can leave seen IDs without a persisted notification.
+    let persisted_ids: Vec<u32> = state
+        .notifications
+        .history
+        .iter()
+        .map(|notification| notification.id)
+        .collect();
+    state
+        .notifications
+        .seen_ids
+        .retain(|id| persisted_ids.contains(id));
 
     match serde_json::to_string_pretty(&state) {
         Ok(json) => {
@@ -145,5 +159,25 @@ pub fn save(state: &PersistedState) {
         Err(e) => {
             tracing::warn!("Failed to serialize state: {}", e);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_notification_seen_ids_defaults_to_empty() {
+        let json = r#"{
+            "notifications": {
+                "muted": false,
+                "next_id": 1,
+                "last_seen_timestamp": 1234.5,
+                "history": []
+            }
+        }"#;
+
+        let state: PersistedState = serde_json::from_str(json).expect("valid legacy state");
+        assert!(state.notifications.seen_ids.is_empty());
     }
 }

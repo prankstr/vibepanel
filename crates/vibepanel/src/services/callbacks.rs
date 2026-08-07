@@ -145,7 +145,6 @@ impl<T> Callbacks<T> {
     }
 
     /// Returns true if no callbacks are registered.
-    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.inner.borrow().is_empty()
     }

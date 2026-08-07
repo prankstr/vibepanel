@@ -5,11 +5,12 @@
 //! via the standard callback mechanism.
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
-use std::rc::Rc;
+use std::collections::{HashMap, HashSet};
+use std::rc::{Rc, Weak};
 
 use gtk4::gio::{self, prelude::*};
 use gtk4::glib::Variant;
+use gtk4::glib::variant::StaticVariantType;
 use tracing::{debug, error, info, warn};
 
 use super::callbacks::{CallbackId, Callbacks};
@@ -17,6 +18,9 @@ use super::state::{self, PersistedNotification};
 
 const NOTIFICATIONS_NAME: &str = "org.freedesktop.Notifications";
 const NOTIFICATIONS_PATH: &str = "/org/freedesktop/Notifications";
+const VIBEPANEL_NOTIFICATIONS_INTERFACE: &str = "io.github.vibepanel.Notifications1";
+const UNREAD_METHOD: &str = "GetUnreadCount";
+const DBUS_CALL_TIMEOUT_MS: i32 = 2_000;
 
 /// D-Bus introspection XML for org.freedesktop.Notifications
 const NOTIFICATIONS_XML: &str = r#"
@@ -53,6 +57,11 @@ const NOTIFICATIONS_XML: &str = r#"
       <arg name="id" type="u"/>
       <arg name="action_key" type="s"/>
     </signal>
+  </interface>
+  <interface name="io.github.vibepanel.Notifications1">
+    <method name="GetUnreadCount">
+      <arg direction="out" name="count" type="u"/>
+    </method>
   </interface>
 </node>
 "#;
@@ -156,10 +165,14 @@ impl From<PersistedNotification> for Notification {
 
 /// Shared, process-wide notification service implementing org.freedesktop.Notifications.
 pub struct NotificationService {
+    self_weak: Weak<NotificationService>,
+
     /// D-Bus connection
     bus: RefCell<Option<gio::DBusConnection>>,
     /// Registration ID for the exported interface
     registration_id: RefCell<Option<gio::RegistrationId>>,
+    /// Registration ID for the Vibepanel unread-query interface.
+    unread_registration_id: RefCell<Option<gio::RegistrationId>>,
 
     /// Current notifications by ID
     notifications: RefCell<HashMap<u32, Notification>>,
@@ -172,10 +185,21 @@ pub struct NotificationService {
     /// Whether notifications are muted (toasts suppressed, but notifications still stored)
     muted: Cell<bool>,
 
+    /// Exact read state by ID, independent of wall-clock ordering.
+    seen_ids: RefCell<HashSet<u32>>,
+    /// Visible toast copies by notification ID. Multiple monitors may show the same toast.
+    active_toasts: RefCell<HashMap<u32, u32>>,
+    /// Coalesces unread-state listener refreshes on the GLib main loop.
+    pending_unread_notify: Cell<bool>,
+
     /// Callbacks for state changes
     callbacks: Callbacks<NotificationService>,
     /// Whether the service is ready
     ready: Cell<bool>,
+}
+
+thread_local! {
+    static INSTANCE: Rc<NotificationService> = NotificationService::new();
 }
 
 impl NotificationService {
@@ -202,13 +226,25 @@ impl NotificationService {
             next_id
         );
 
-        let service = Rc::new(Self {
+        let seen_ids = notification_state
+            .seen_ids
+            .iter()
+            .copied()
+            .filter(|id| notifications.contains_key(id))
+            .collect();
+
+        let service = Rc::new_cyclic(|weak| Self {
+            self_weak: weak.clone(),
             bus: RefCell::new(None),
             registration_id: RefCell::new(None),
+            unread_registration_id: RefCell::new(None),
             notifications: RefCell::new(notifications),
             next_id: Cell::new(next_id),
             backend_available: Cell::new(false),
             muted: Cell::new(notification_state.muted),
+            seen_ids: RefCell::new(seen_ids),
+            active_toasts: RefCell::new(HashMap::new()),
+            pending_unread_notify: Cell::new(false),
             callbacks: Callbacks::new(),
             ready: Cell::new(false),
         });
@@ -219,10 +255,7 @@ impl NotificationService {
 
     /// Get the global NotificationService singleton.
     pub fn global() -> Rc<Self> {
-        thread_local! {
-            static INSTANCE: Rc<NotificationService> = NotificationService::new();
-        }
-        INSTANCE.with(|s| s.clone())
+        INSTANCE.with(Rc::clone)
     }
 
     /// Register a callback to be invoked when notification state changes.
@@ -297,9 +330,105 @@ impl NotificationService {
             .count()
     }
 
+    /// Count notifications not seen in a popover and no longer visible as toasts.
+    pub fn unread_count(&self) -> usize {
+        if !self.backend_available.get() {
+            return 0;
+        }
+
+        let seen_ids = self.seen_ids.borrow();
+        let active_toasts = self.active_toasts.borrow();
+        self.notifications
+            .borrow()
+            .values()
+            .filter(|notification| {
+                !notification.transient
+                    && !active_toasts.contains_key(&notification.id)
+                    && !seen_ids.contains(&notification.id)
+            })
+            .count()
+    }
+
+    /// Mark all current notifications as seen globally across monitors.
+    pub fn mark_as_seen(&self) {
+        let seen_ids = self
+            .notifications
+            .borrow()
+            .values()
+            .filter(|notification| !notification.transient)
+            .map(|notification| notification.id)
+            .collect();
+
+        if *self.seen_ids.borrow() == seen_ids {
+            return;
+        }
+
+        *self.seen_ids.borrow_mut() = seen_ids;
+        self.save_state();
+        self.schedule_unread_notify();
+    }
+
+    /// Register a visible toast copy for a notification.
+    pub fn toast_shown(&self, id: u32) {
+        // Toasts are registered before unread state is rendered in the same service
+        // update, so scheduling another listener refresh here would be redundant.
+        let mut active_toasts = self.active_toasts.borrow_mut();
+        *active_toasts.entry(id).or_insert(0) += 1;
+    }
+
+    /// Unregister a visible toast copy. Duplicate removals are ignored.
+    pub fn toast_hidden(&self, id: u32) {
+        let changed = {
+            let mut active_toasts = self.active_toasts.borrow_mut();
+            match active_toasts.get_mut(&id) {
+                Some(count) if *count > 1 => {
+                    *count -= 1;
+                    true
+                }
+                Some(_) => {
+                    active_toasts.remove(&id);
+                    true
+                }
+                None => false,
+            }
+        };
+
+        if changed {
+            self.schedule_unread_notify();
+        }
+    }
+
+    fn schedule_unread_notify(&self) {
+        // With no registered listeners, there is nobody to notify. This also avoids
+        // attaching a local source to another thread's main context in unit tests.
+        if self.callbacks.is_empty() {
+            return;
+        }
+
+        if self.pending_unread_notify.replace(true) {
+            return;
+        }
+
+        let weak = self.self_weak.clone();
+        gtk4::glib::idle_add_local_once(move || {
+            if let Some(service) = weak.upgrade() {
+                service.pending_unread_notify.set(false);
+                service.notify_listeners();
+            }
+        });
+    }
+
     /// Get a notification by ID.
     pub fn get(&self, id: u32) -> Option<Notification> {
         self.notifications.borrow().get(&id).cloned()
+    }
+
+    /// Check whether a notification is transient without cloning its payload.
+    pub fn is_transient(&self, id: u32) -> bool {
+        self.notifications
+            .borrow()
+            .get(&id)
+            .is_some_and(|notification| notification.transient)
     }
 
     /// Close a notification by ID (user dismissed).
@@ -392,8 +521,8 @@ impl NotificationService {
             }
         };
 
-        // Try to register the object - this may fail if another daemon is already
-        // exporting at the same path
+        // Object registration is connection-local; ownership of the well-known
+        // notification bus name is handled separately below.
         let registration = connection
             .register_object(NOTIFICATIONS_PATH, &interface_info)
             .method_call(
@@ -413,10 +542,49 @@ impl NotificationService {
                 );
             }
             Err(e) => {
-                // This is expected when another daemon is running - just log and continue.
-                // We'll know we don't own the name when on_name_lost is called.
+                error!("NotificationService: could not register object: {}", e);
+            }
+        }
+
+        let unread_interface_info =
+            match node_info.lookup_interface(VIBEPANEL_NOTIFICATIONS_INTERFACE) {
+                Some(i) => i,
+                None => {
+                    error!("NotificationService: unread interface not found in XML");
+                    return;
+                }
+            };
+
+        let unread_registration = connection
+            .register_object(NOTIFICATIONS_PATH, &unread_interface_info)
+            .method_call(
+                |_connection, _sender, _obj_path, _iface_name, method_name, _params, invocation| {
+                    if method_name != UNREAD_METHOD {
+                        invocation.return_error(
+                            gio::IOErrorEnum::InvalidArgument,
+                            &format!("Unknown method: {}", method_name),
+                        );
+                        return;
+                    }
+
+                    let count = NotificationService::global().unread_count();
+                    let count = u32::try_from(count).unwrap_or(u32::MAX);
+                    invocation.return_value(Some(&(count,).to_variant()));
+                },
+            )
+            .build();
+
+        match unread_registration {
+            Ok(id) => {
+                *self.unread_registration_id.borrow_mut() = Some(id);
                 debug!(
-                    "NotificationService: could not register object (likely another daemon running): {}",
+                    "NotificationService: exported {} at {}",
+                    VIBEPANEL_NOTIFICATIONS_INTERFACE, NOTIFICATIONS_PATH
+                );
+            }
+            Err(e) => {
+                error!(
+                    "NotificationService: failed to export unread interface: {}",
                     e
                 );
             }
@@ -669,15 +837,7 @@ impl NotificationService {
 
         let is_transient = notification.transient;
 
-        self.notifications.borrow_mut().insert(id, notification);
-
-        // Enforce notification limit to prevent unbounded memory growth.
-        // Remove oldest notifications (by timestamp) if we exceed the limit.
-        self.enforce_notification_limit();
-
-        // Persist state to disk
-        self.save_state();
-        self.notify_listeners();
+        self.store_notification(notification);
 
         // Return the notification ID
         invocation.return_value(Some(&(id,).to_variant()));
@@ -687,6 +847,16 @@ impl NotificationService {
         if is_transient && self.is_muted() {
             self.close_internal(id, CLOSE_REASON_DISMISSED);
         }
+    }
+
+    fn store_notification(&self, notification: Notification) {
+        self.seen_ids.borrow_mut().remove(&notification.id);
+        self.notifications
+            .borrow_mut()
+            .insert(notification.id, notification);
+        self.enforce_notification_limit();
+        self.save_state();
+        self.notify_listeners();
     }
 
     fn handle_close_notification(&self, params: &Variant, invocation: gio::DBusMethodInvocation) {
@@ -829,6 +999,12 @@ impl NotificationService {
 
         persisted.notifications.muted = self.muted.get();
         persisted.notifications.next_id = self.next_id.get();
+        let mut seen_ids = self.seen_ids.borrow_mut();
+        seen_ids.retain(|id| notifications.contains_key(id));
+        let mut persisted_seen_ids: Vec<u32> = seen_ids.iter().copied().collect();
+        persisted_seen_ids.sort_unstable();
+        drop(seen_ids);
+        persisted.notifications.seen_ids = persisted_seen_ids;
         persisted.notifications.history = history;
 
         state::save(&persisted);
@@ -838,6 +1014,43 @@ impl NotificationService {
 impl Drop for NotificationService {
     fn drop(&mut self) {
         debug!("NotificationService dropped");
+    }
+}
+
+/// Query the unread count from whichever process owns the notification D-Bus name.
+pub fn unread_notification_count() -> Result<u32, String> {
+    let connection = gio::bus_get_sync(gio::BusType::Session, None::<&gio::Cancellable>)
+        .map_err(|error| format!("could not connect to the session bus: {}", error))?;
+    let reply = connection.call_sync(
+        Some(NOTIFICATIONS_NAME),
+        NOTIFICATIONS_PATH,
+        VIBEPANEL_NOTIFICATIONS_INTERFACE,
+        UNREAD_METHOD,
+        None,
+        Some(&<(u32,)>::static_variant_type()),
+        gio::DBusCallFlags::NO_AUTO_START,
+        DBUS_CALL_TIMEOUT_MS,
+        None::<&gio::Cancellable>,
+    );
+
+    match reply {
+        Ok(reply) => reply
+            .get::<(u32,)>()
+            .map(|(count,)| count)
+            .ok_or_else(|| "notification daemon returned an invalid unread count".to_string()),
+        Err(error) => match error.kind::<gio::DBusError>() {
+            Some(gio::DBusError::ServiceUnknown | gio::DBusError::NameHasNoOwner) => {
+                Err("no notification daemon is running".to_string())
+            }
+            Some(gio::DBusError::UnknownInterface | gio::DBusError::UnknownMethod) => Err(
+                "the active notification daemon does not support Vibepanel unread queries"
+                    .to_string(),
+            ),
+            _ => Err(format!(
+                "could not query the active notification daemon: {}",
+                error
+            )),
+        },
     }
 }
 
@@ -864,13 +1077,18 @@ mod tests {
 
     fn make_service() -> Rc<NotificationService> {
         redirect_state_home();
-        Rc::new(NotificationService {
+        Rc::new_cyclic(|weak| NotificationService {
+            self_weak: weak.clone(),
             bus: RefCell::new(None),
             registration_id: RefCell::new(None),
+            unread_registration_id: RefCell::new(None),
             notifications: RefCell::new(HashMap::new()),
             next_id: Cell::new(1),
             backend_available: Cell::new(false),
             muted: Cell::new(false),
+            seen_ids: RefCell::new(HashSet::new()),
+            active_toasts: RefCell::new(HashMap::new()),
+            pending_unread_notify: Cell::new(false),
             callbacks: Callbacks::new(),
             ready: Cell::new(false),
         })
@@ -895,15 +1113,21 @@ mod tests {
         }
     }
 
+    #[test]
+    fn unread_query_wire_contract_matches_introspection() {
+        let node_info = gio::DBusNodeInfo::for_xml(NOTIFICATIONS_XML).unwrap();
+        let interface = node_info
+            .lookup_interface(VIBEPANEL_NOTIFICATIONS_INTERFACE)
+            .unwrap();
+        assert!(interface.lookup_method(UNREAD_METHOD).is_some());
+    }
+
     /// Mirror of the post-insert tail in handle_notify, which we can't call
     /// directly because it consumes D-Bus types.
     fn simulate_handle_notify(svc: &NotificationService, n: Notification) {
         let id = n.id;
         let is_transient = n.transient;
-        svc.notifications.borrow_mut().insert(id, n);
-        svc.enforce_notification_limit();
-        svc.save_state();
-        svc.notify_listeners();
+        svc.store_notification(n);
         if is_transient && svc.is_muted() {
             svc.close_internal(id, CLOSE_REASON_DISMISSED);
         }
@@ -1011,5 +1235,86 @@ mod tests {
                 1000 + i
             );
         }
+    }
+
+    #[test]
+    fn unread_count_uses_seen_ids_and_excludes_transients() {
+        let svc = make_service();
+        svc.backend_available.set(true);
+        svc.notifications
+            .borrow_mut()
+            .insert(1, make_notification(1, false, 10.0));
+        svc.notifications
+            .borrow_mut()
+            .insert(2, make_notification(2, false, 20.0));
+        svc.notifications
+            .borrow_mut()
+            .insert(3, make_notification(3, true, 30.0));
+
+        assert_eq!(svc.unread_count(), 2);
+        svc.seen_ids.borrow_mut().insert(1);
+        assert_eq!(svc.unread_count(), 1);
+        svc.seen_ids.borrow_mut().insert(2);
+        assert_eq!(svc.unread_count(), 0);
+    }
+
+    #[test]
+    fn unread_count_is_zero_without_notification_backend() {
+        let svc = make_service();
+        svc.notifications
+            .borrow_mut()
+            .insert(1, make_notification(1, false, 10.0));
+
+        assert_eq!(svc.unread_count(), 0);
+    }
+
+    #[test]
+    fn active_toasts_are_reference_counted_across_monitors() {
+        let svc = make_service();
+        svc.backend_available.set(true);
+        svc.notifications
+            .borrow_mut()
+            .insert(1, make_notification(1, false, 10.0));
+
+        svc.toast_shown(1);
+        svc.toast_shown(1);
+        assert_eq!(svc.unread_count(), 0);
+
+        svc.toast_hidden(1);
+        assert_eq!(svc.unread_count(), 0);
+
+        svc.toast_hidden(1);
+        assert_eq!(svc.unread_count(), 1);
+
+        svc.toast_hidden(1);
+        assert_eq!(svc.unread_count(), 1);
+        assert!(!svc.active_toasts.borrow().contains_key(&1));
+    }
+
+    #[test]
+    fn mark_as_seen_clears_current_unread_notifications() {
+        let svc = make_service();
+        svc.backend_available.set(true);
+        svc.notifications
+            .borrow_mut()
+            .insert(1, make_notification(1, false, 1.0));
+
+        assert_eq!(svc.unread_count(), 1);
+        svc.mark_as_seen();
+        assert_eq!(svc.unread_count(), 0);
+        assert!(svc.seen_ids.borrow().contains(&1));
+    }
+
+    #[test]
+    fn replacement_marks_notification_unread_again() {
+        let svc = make_service();
+        svc.backend_available.set(true);
+        simulate_handle_notify(&svc, make_notification(1, false, 1.0));
+        svc.mark_as_seen();
+
+        simulate_handle_notify(&svc, make_notification(1, false, 2.0));
+
+        assert_eq!(svc.unread_count(), 1);
+        assert!(!svc.seen_ids.borrow().contains(&1));
     }
 }

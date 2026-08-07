@@ -9,7 +9,7 @@ use gtk4::prelude::*;
 use gtk4::{Align, Application, Box as GtkBox, Button, Image, Label, Orientation, Window, gdk};
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::rc::Rc;
 use tracing::debug;
 
@@ -120,6 +120,8 @@ struct ToastLayout {
 pub(super) struct NotificationToast {
     window: Window,
     notification_id: u32,
+    /// Runs from `Drop` so each visible toast copy is unregistered once.
+    on_hidden: ToastCallback,
     timeout_source: RefCell<Option<SourceId>>,
     current_bar_margin: Cell<i32>,
     animation_source: RefCell<Option<SourceId>>,
@@ -137,9 +139,9 @@ impl NotificationToast {
     fn new(
         context: ToastWindowContext<'_>,
         notification: &Notification,
-        on_dismiss: ToastCallback,
+        on_remove: ToastCallback,
+        on_hidden: ToastCallback,
         on_action: ToastActionCallback,
-        on_timeout: ToastCallback,
         on_height_measured: ToastCallback,
     ) -> Rc<Self> {
         let window = Window::builder()
@@ -185,6 +187,7 @@ impl NotificationToast {
         let toast = Rc::new(Self {
             window,
             notification_id,
+            on_hidden,
             timeout_source: RefCell::new(None),
             current_bar_margin: Cell::new(layout.initial_margin),
             animation_source: RefCell::new(None),
@@ -192,9 +195,20 @@ impl NotificationToast {
             height: Cell::new(TOAST_ESTIMATED_HEIGHT),
             theme_callback_guard: RefCell::new(None),
         });
-
-        toast.build_content(notification, on_dismiss.clone(), on_action);
-        toast.schedule_timeout(notification, on_timeout);
+        toast.build_content(notification, Rc::clone(&on_remove), on_action);
+        // Route GTK close requests through normal removal. This ensures manager
+        // teardown also removes transient service entries, while external GTK
+        // closes release map-owned toasts and balance active-toast accounting.
+        // Native gtk4-layer-shell >= 1.3 does not forward compositor closure here
+        // unless respect_close is enabled, so accounting lasts until timeout or teardown.
+        // Every window.close() re-enters removal, so never hold collection borrows
+        // across a close.
+        let on_window_close = Rc::clone(&on_remove);
+        toast.window.connect_close_request(move |_| {
+            on_window_close(notification_id);
+            glib::Propagation::Proceed
+        });
+        toast.schedule_timeout(notification, on_remove);
 
         // Measure actual height after window is mapped and laid out.
         // We use idle_add to defer measurement until after GTK has completed layout.
@@ -235,9 +249,8 @@ impl NotificationToast {
     pub fn update(
         self: &Rc<Self>,
         notification: &Notification,
-        on_dismiss: ToastCallback,
+        on_remove: ToastCallback,
         on_action: ToastActionCallback,
-        on_timeout: ToastCallback,
         on_height_measured: ToastCallback,
     ) {
         // Drop the existing timeout before scheduling a fresh one - replacement
@@ -246,8 +259,8 @@ impl NotificationToast {
             source_id.remove();
         }
 
-        self.build_content(notification, on_dismiss, on_action);
-        self.schedule_timeout(notification, on_timeout);
+        self.build_content(notification, Rc::clone(&on_remove), on_action);
+        self.schedule_timeout(notification, on_remove);
 
         // The window is already mapped, so connect_map won't fire again. Defer a
         // re-measurement to the next idle so GTK has time to lay out the new
@@ -561,6 +574,7 @@ fn build_toast_content(
 
 impl Drop for NotificationToast {
     fn drop(&mut self) {
+        (self.on_hidden)(self.notification_id);
         // Cancel any pending animation to free resources promptly
         if let Some(source_id) = self.animation_source.borrow_mut().take() {
             source_id.remove();
@@ -578,22 +592,22 @@ impl Drop for NotificationToast {
 pub(super) struct NotificationToastManager {
     toasts: RefCell<HashMap<u32, Rc<NotificationToast>>>,
     toast_order: RefCell<Vec<u32>>,
+    service: Rc<NotificationService>,
     on_action: ToastActionCallback,
-    on_toast_removed: Rc<dyn Fn()>,
     position: ToastPosition,
 }
 
 impl NotificationToastManager {
     pub fn new(
+        service: Rc<NotificationService>,
         on_action: impl Fn(u32, &str) + 'static,
-        on_toast_removed: impl Fn() + 'static,
         position: ToastPosition,
     ) -> Rc<Self> {
         Rc::new(Self {
             toasts: RefCell::new(HashMap::new()),
             toast_order: RefCell::new(Vec::new()),
+            service,
             on_action: Rc::new(on_action),
-            on_toast_removed: Rc::new(on_toast_removed),
             position,
         })
     }
@@ -604,48 +618,33 @@ impl NotificationToastManager {
         monitor: Option<&gdk::Monitor>,
         notification: &Notification,
     ) {
-        // Transient notifications must be removed from the service when their toast
-        // disappears (dismiss or timeout) so they never leak into the popover
-        // history. Close the service entry *before* tearing down the toast so the
-        // synchronous on_service_update fired by `service.close` does the work;
-        // the deferred update from `remove_toast` then sees no change and no-ops.
-        let is_transient = notification.transient;
-
-        let manager = Rc::clone(self);
-        let on_dismiss: Rc<dyn Fn(u32)> = Rc::new(move |id| {
-            if is_transient {
-                NotificationService::global().close(id);
+        // Transient notifications are toast-only, so remove the service entry when the toast goes away.
+        let manager = Rc::downgrade(self);
+        let service = Rc::clone(&self.service);
+        let on_remove: Rc<dyn Fn(u32)> = Rc::new(move |id| {
+            if service.is_transient(id) {
+                service.close(id);
             }
-            manager.remove_toast(id);
+            if let Some(manager) = manager.upgrade() {
+                manager.remove_toast(id);
+            }
         });
 
-        // When toast times out, we need to remove it and notify the widget to update badge
-        let manager_for_timeout = Rc::clone(self);
-        let on_timeout: Rc<dyn Fn(u32)> = Rc::new(move |id| {
-            if is_transient {
-                NotificationService::global().close(id);
-            }
-            manager_for_timeout.remove_toast(id);
-        });
-
-        // When toast height is measured, reposition all toasts. Constructed up
-        // front because both the in-place update path and the new-toast path
-        // need it.
-        let manager_for_height = Rc::clone(self);
+        let manager_for_height = Rc::downgrade(self);
         let on_height_measured: Rc<dyn Fn(u32)> = Rc::new(move |_id| {
-            manager_for_height.reposition_toasts();
+            if let Some(manager) = manager_for_height.upgrade() {
+                manager.reposition_toasts();
+            }
         });
 
-        // If a toast for this id is already on screen, mutate it in place so a
-        // notification replaced via `replaces_id` updates the existing toast
-        // (text, actions, timer) rather than stacking a new one on top.
         let existing = self.toasts.borrow().get(&notification.id).cloned();
         if let Some(toast) = existing {
+            // A replaces_id update mutates the existing toast instead of stacking
+            // a second toast for the same notification.
             toast.update(
                 notification,
-                on_dismiss,
+                Rc::clone(&on_remove),
                 Rc::clone(&self.on_action),
-                on_timeout,
                 on_height_measured,
             );
             return;
@@ -679,9 +678,12 @@ impl NotificationToastManager {
                 },
             },
             notification,
-            on_dismiss,
+            Rc::clone(&on_remove),
+            {
+                let service = Rc::clone(&self.service);
+                Rc::new(move |id| service.toast_hidden(id))
+            },
             Rc::clone(&self.on_action),
-            on_timeout,
             on_height_measured,
         );
 
@@ -689,29 +691,24 @@ impl NotificationToastManager {
             .borrow_mut()
             .insert(notification.id, Rc::clone(&toast));
         self.toast_order.borrow_mut().push(notification.id);
+        self.service.toast_shown(notification.id);
         toast.present();
     }
 
     pub fn remove_toast(&self, notification_id: u32) {
-        let had_toast = self.toasts.borrow_mut().remove(&notification_id).is_some();
-
-        if had_toast {
-            // Note: toast.close() is not called here because the toast may have
-            // already been closed (e.g., window.close() was called directly).
-            // The timeout source is already cleared by the toast itself.
-        }
+        let removed = self.toasts.borrow_mut().remove(&notification_id);
+        // Drop the toast after releasing the map borrow.
+        drop(removed);
 
         self.toast_order
             .borrow_mut()
             .retain(|&id| id != notification_id);
         self.reposition_toasts();
-
-        // Notify widget to recalculate badge
-        (self.on_toast_removed)();
     }
 
     pub fn close_toast(&self, notification_id: u32) {
-        if let Some(toast) = self.toasts.borrow_mut().remove(&notification_id) {
+        let toast = self.toasts.borrow_mut().remove(&notification_id);
+        if let Some(toast) = toast {
             toast.window.close();
         }
 
@@ -719,7 +716,6 @@ impl NotificationToastManager {
             .borrow_mut()
             .retain(|&id| id != notification_id);
         self.reposition_toasts();
-        (self.on_toast_removed)();
     }
 
     fn reposition_toasts(&self) {
@@ -734,9 +730,19 @@ impl NotificationToastManager {
             }
         }
     }
+}
 
-    pub fn active_ids(&self) -> HashSet<u32> {
-        self.toasts.borrow().keys().cloned().collect()
+impl Drop for NotificationToastManager {
+    fn drop(&mut self) {
+        let active_toasts: Vec<Rc<NotificationToast>> =
+            std::mem::take(&mut *self.toasts.borrow_mut())
+                .into_values()
+                .collect();
+        self.toast_order.borrow_mut().clear();
+
+        for toast in &active_toasts {
+            toast.window.close();
+        }
     }
 }
 
