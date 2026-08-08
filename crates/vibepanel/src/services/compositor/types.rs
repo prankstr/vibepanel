@@ -63,6 +63,8 @@ pub struct PerOutputState {
     pub active_workspace: HashSet<i32>,
     /// Set of workspace IDs that have windows on this output.
     pub occupied_workspaces: HashSet<i32>,
+    /// Workspace IDs marked urgent on this output, when reported by the backend.
+    pub urgent_workspaces: Option<HashSet<i32>>,
     /// Number of windows per workspace on this output.
     pub window_counts: HashMap<i32, u32>,
 }
@@ -107,8 +109,6 @@ pub struct WindowInfo {
 pub struct KeyboardLayoutInfo {
     /// Full layout name (e.g., "English (US)").
     pub layout_name: String,
-    /// Short layout identifier (e.g., "us"), if available from the backend.
-    pub short_name: String,
     /// Total number of configured keyboard layouts, if known.
     pub layout_count: Option<usize>,
 }
@@ -126,7 +126,7 @@ pub type KeyboardLayoutCallback = Arc<dyn Fn(KeyboardLayoutInfo) + Send + Sync>;
 /// Information about a window in the window list.
 ///
 /// Used by the taskbar to display all windows, not just the focused one.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Window {
     /// Window ID (compositor-specific).
     pub id: u64,
@@ -394,7 +394,6 @@ mod tests {
     fn test_keyboard_layout_info_default() {
         let info = KeyboardLayoutInfo::default();
         assert!(info.layout_name.is_empty());
-        assert!(info.short_name.is_empty());
         assert_eq!(info.layout_count, None);
     }
 
@@ -402,7 +401,6 @@ mod tests {
     fn test_keyboard_layout_info_equality() {
         let info1 = KeyboardLayoutInfo {
             layout_name: "English (US)".to_string(),
-            short_name: "us".to_string(),
             layout_count: Some(2),
         };
         let info2 = info1.clone();
@@ -410,7 +408,6 @@ mod tests {
 
         let info3 = KeyboardLayoutInfo {
             layout_name: "German".to_string(),
-            short_name: "de".to_string(),
             layout_count: Some(2),
         };
         assert_ne!(info1, info3);

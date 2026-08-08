@@ -591,7 +591,6 @@ impl HyprlandBackend {
         *self.main_keyboard_name.write() = Some(kb_name);
         *self.keyboard_layout.write() = Some(KeyboardLayoutInfo {
             layout_name: active_layout,
-            short_name: String::new(), // Widget extracts short name
             layout_count,
         });
     }
@@ -962,7 +961,6 @@ impl HyprlandBackend {
                     if is_main {
                         let info = KeyboardLayoutInfo {
                             layout_name: layout_name.to_string(),
-                            short_name: String::new(), // Widget extracts short name
                             layout_count: self
                                 .keyboard_layout
                                 .read()
@@ -1583,7 +1581,6 @@ mod tests {
         *backend.main_keyboard_name.write() = Some("keyboard-a".to_string());
         *backend.keyboard_layout.write() = Some(KeyboardLayoutInfo {
             layout_name: "English (US)".to_string(),
-            short_name: String::new(),
             layout_count: Some(2),
         });
 

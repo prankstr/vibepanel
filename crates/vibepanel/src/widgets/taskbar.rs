@@ -396,6 +396,24 @@ fn taskbar_active_workspaces(
     snapshot.active_workspace.clone()
 }
 
+fn taskbar_urgent_workspaces(
+    snapshot: &WorkspaceSnapshot,
+    output_id: Option<&str>,
+    filter_by_output: bool,
+) -> HashSet<i32> {
+    if filter_by_output
+        && let Some(output_id) = output_id
+        && let Some(urgent_workspaces) = snapshot
+            .per_output
+            .get(output_id)
+            .and_then(|state| state.urgent_workspaces.as_ref())
+    {
+        return urgent_workspaces.clone();
+    }
+
+    snapshot.urgent_workspaces.clone()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn update_window_buttons(
     container: &GtkBox,
@@ -450,7 +468,8 @@ fn update_window_buttons(
         let workspace_snapshot = CompositorManager::global().get_workspace_snapshot();
         let active_workspaces =
             taskbar_active_workspaces(&workspace_snapshot, output_id, config.filter_by_output);
-        let urgent_workspaces = workspace_snapshot.urgent_workspaces;
+        let urgent_workspaces =
+            taskbar_urgent_workspaces(&workspace_snapshot, output_id, config.filter_by_output);
 
         let mut active_workspace_key: Vec<_> = active_workspaces.iter().copied().collect();
         active_workspace_key.sort_unstable();
@@ -776,6 +795,7 @@ fn update_button_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::compositor::PerOutputState;
     use std::collections::HashMap;
     use toml::Value;
 
@@ -864,6 +884,50 @@ mod tests {
         assert_eq!(
             workspace_meta_label(make_workspace_meta(42, -1, "web")),
             "web"
+        );
+    }
+
+    #[test]
+    fn taskbar_urgent_workspaces_uses_output_state_when_filtered() {
+        let mut snapshot = WorkspaceSnapshot::default();
+        snapshot.urgent_workspaces.insert(1);
+        snapshot.per_output.insert(
+            "eDP-1".to_string(),
+            PerOutputState {
+                urgent_workspaces: Some(HashSet::new()),
+                ..Default::default()
+            },
+        );
+        snapshot.per_output.insert(
+            "HDMI-A-1".to_string(),
+            PerOutputState {
+                urgent_workspaces: Some(HashSet::from([1])),
+                ..Default::default()
+            },
+        );
+
+        assert!(taskbar_urgent_workspaces(&snapshot, Some("eDP-1"), true).is_empty());
+        assert_eq!(
+            taskbar_urgent_workspaces(&snapshot, Some("HDMI-A-1"), true),
+            HashSet::from([1])
+        );
+    }
+
+    #[test]
+    fn taskbar_urgent_workspaces_falls_back_to_global_state() {
+        let mut snapshot = WorkspaceSnapshot::default();
+        snapshot.urgent_workspaces.insert(1);
+        snapshot
+            .per_output
+            .insert("eDP-1".to_string(), PerOutputState::default());
+
+        assert_eq!(
+            taskbar_urgent_workspaces(&snapshot, Some("eDP-1"), true),
+            HashSet::from([1])
+        );
+        assert_eq!(
+            taskbar_urgent_workspaces(&snapshot, Some("eDP-1"), false),
+            HashSet::from([1])
         );
     }
 }

@@ -71,16 +71,21 @@ impl Workspace {
         let per_output = snapshot.per_output.get(output);
 
         // Use per-output state if available, otherwise fall back to global
-        let (active, occupied, window_count) = if let Some(state) = per_output {
+        let (active, occupied, urgent, window_count) = if let Some(state) = per_output {
             (
                 state.active_workspace.contains(&meta.id),
                 state.occupied_workspaces.contains(&meta.id),
+                state.urgent_workspaces.as_ref().map_or_else(
+                    || snapshot.urgent_workspaces.contains(&meta.id),
+                    |urgent| urgent.contains(&meta.id),
+                ),
                 state.window_counts.get(&meta.id).copied(),
             )
         } else {
             (
                 snapshot.active_workspace.contains(&meta.id),
                 snapshot.occupied_workspaces.contains(&meta.id),
+                snapshot.urgent_workspaces.contains(&meta.id),
                 snapshot.window_counts.get(&meta.id).copied(),
             )
         };
@@ -91,7 +96,7 @@ impl Workspace {
             name: meta.name.clone(),
             active,
             occupied,
-            urgent: snapshot.urgent_workspaces.contains(&meta.id),
+            urgent,
             window_count,
             output: meta.output.clone(),
         }
@@ -459,6 +464,37 @@ mod tests {
         // Workspace 1 should not be active on eDP-1
         let ws1 = Workspace::from_meta_per_output(&make_meta(1), &snapshot, "eDP-1");
         assert!(!ws1.active);
+    }
+
+    #[test]
+    fn test_workspace_from_meta_per_output_uses_output_urgency() {
+        let mut snapshot = WorkspaceSnapshot::default();
+        snapshot.urgent_workspaces.insert(1);
+
+        let internal = PerOutputState {
+            urgent_workspaces: Some(HashSet::new()),
+            ..Default::default()
+        };
+        let external = PerOutputState {
+            urgent_workspaces: Some(HashSet::from([1])),
+            ..Default::default()
+        };
+        snapshot.per_output.insert("eDP-1".to_string(), internal);
+        snapshot.per_output.insert("HDMI-A-1".to_string(), external);
+
+        assert!(!Workspace::from_meta_per_output(&make_meta(1), &snapshot, "eDP-1").urgent);
+        assert!(Workspace::from_meta_per_output(&make_meta(1), &snapshot, "HDMI-A-1").urgent);
+    }
+
+    #[test]
+    fn test_workspace_from_meta_per_output_falls_back_to_global_urgency() {
+        let mut snapshot = WorkspaceSnapshot::default();
+        snapshot.urgent_workspaces.insert(1);
+        snapshot
+            .per_output
+            .insert("eDP-1".to_string(), PerOutputState::default());
+
+        assert!(Workspace::from_meta_per_output(&make_meta(1), &snapshot, "eDP-1").urgent);
     }
 
     #[test]

@@ -54,6 +54,14 @@ struct MangoSharedState {
     tag_count: AtomicU32,
 }
 
+#[derive(Debug, Default, PartialEq, Eq)]
+struct MonitorChanges {
+    workspace: bool,
+    focused_window: bool,
+    window_list: bool,
+    keyboard_layout: bool,
+}
+
 impl Default for MangoSharedState {
     fn default() -> Self {
         Self {
@@ -159,24 +167,26 @@ impl MangoBackend {
     ) -> JoinHandle<()> {
         thread::spawn(move || {
             watch_mango_command(socket_path, "watch all-monitors", running, move |value| {
-                if apply_workspace_from_monitors(&shared, &value) {
+                let changes = apply_monitor_update(&shared, &value);
+                if changes.workspace {
                     let snapshot = shared.snapshot.read().clone();
                     workspace_callback(snapshot);
                 }
-                if apply_focused_window_from_monitors(&shared, &value) {
+                if changes.focused_window {
                     let info = shared.focused_window.read().clone();
                     if let Some(info) = info {
                         window_callback(info);
                     }
-                    let focused_id = *shared.focused_client_id.read();
-                    if apply_window_list_focus(&shared, focused_id)
-                        && let Some(callback) = &window_list_callback
-                    {
-                        let windows = shared.windows.read().clone();
-                        callback(WindowListSnapshot { windows });
-                    }
                 }
-                if apply_keyboard_layout_from_monitors(&shared, &value) {
+                // Taskbar separator state depends on workspace metadata, matching
+                // Niri's workspace-triggered window-list refresh behavior.
+                if changes.window_list
+                    && let Some(callback) = &window_list_callback
+                {
+                    let windows = shared.windows.read().clone();
+                    callback(WindowListSnapshot { windows });
+                }
+                if changes.keyboard_layout {
                     let info = shared.keyboard_layout.read().clone();
                     if let (Some(callback), Some(info)) = (&keyboard_layout_callback, info) {
                         callback(info);
@@ -338,12 +348,7 @@ impl CompositorBackend for MangoBackend {
         *self
             .window_list_callback
             .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Some(callback.clone());
-
-        if self.running.load(Ordering::SeqCst) {
-            let windows = self.shared.windows.read().clone();
-            callback(WindowListSnapshot { windows });
-        }
+            .unwrap_or_else(|e| e.into_inner()) = Some(callback);
     }
 
     fn focus_window(&self, window_id: u64) {
@@ -454,6 +459,7 @@ fn apply_workspace_from_monitors(shared: &Arc<MangoSharedState>, value: &Value) 
             .per_output
             .entry(output_name.to_string())
             .or_default();
+        per_output.urgent_workspaces = Some(HashSet::new());
         let Some(tags) = entry.get("tags").and_then(Value::as_array) else {
             continue;
         };
@@ -501,6 +507,9 @@ fn apply_workspace_from_monitors(shared: &Arc<MangoSharedState>, value: &Value) 
             }
             if is_urgent {
                 snapshot.urgent_workspaces.insert(workspace_id);
+                if let Some(urgent_workspaces) = per_output.urgent_workspaces.as_mut() {
+                    urgent_workspaces.insert(workspace_id);
+                }
             }
         }
 
@@ -512,26 +521,50 @@ fn apply_workspace_from_monitors(shared: &Arc<MangoSharedState>, value: &Value) 
         }
     }
 
-    if max_tag > 0 {
-        shared.tag_count.store(max_tag, Ordering::Relaxed);
-    }
+    let tag_count_changed =
+        max_tag > 0 && shared.tag_count.swap(max_tag, Ordering::Relaxed) != max_tag;
     if !output_geometry.is_empty() {
         *shared.output_geometry.write() = output_geometry;
     }
-    *shared.snapshot.write() = snapshot;
-    true
+    let snapshot_changed = {
+        let mut current = shared.snapshot.write();
+        if *current == snapshot {
+            false
+        } else {
+            *current = snapshot;
+            true
+        }
+    };
+    tag_count_changed || snapshot_changed
+}
+
+fn apply_monitor_update(shared: &Arc<MangoSharedState>, value: &Value) -> MonitorChanges {
+    let workspace = apply_workspace_from_monitors(shared, value);
+    let focused_window = apply_focused_window_from_monitors(shared, value);
+    let mut window_list = workspace;
+    if focused_window {
+        let focused_id = *shared.focused_client_id.read();
+        window_list |= apply_window_list_focus(shared, focused_id);
+    }
+
+    MonitorChanges {
+        workspace,
+        focused_window,
+        window_list,
+        keyboard_layout: apply_keyboard_layout_from_monitors(shared, value),
+    }
+}
+
+fn active_monitor(value: &Value) -> Option<&Value> {
+    value
+        .get("monitors")?
+        .as_array()?
+        .iter()
+        .find(|monitor| monitor.get("active").and_then(Value::as_bool) == Some(true))
 }
 
 fn apply_focused_window_from_monitors(shared: &Arc<MangoSharedState>, value: &Value) -> bool {
-    let Some(monitor) = value
-        .get("monitors")
-        .and_then(Value::as_array)
-        .and_then(|monitors| {
-            monitors
-                .iter()
-                .find(|monitor| monitor.get("active").and_then(Value::as_bool) == Some(true))
-        })
-    else {
+    let Some(monitor) = active_monitor(value) else {
         return false;
     };
     let Some(output) = monitor.get("name").and_then(Value::as_str) else {
@@ -633,8 +666,15 @@ fn apply_window_list_from_clients(shared: &Arc<MangoSharedState>, value: &Value)
             .then(a_idx.cmp(b_idx))
     });
 
-    let windows = windows.into_iter().map(|(_, window)| window).collect();
-    *shared.windows.write() = windows;
+    let windows = windows
+        .into_iter()
+        .map(|(_, window)| window)
+        .collect::<Vec<_>>();
+    let mut current = shared.windows.write();
+    if *current == windows {
+        return false;
+    }
+    *current = windows;
     true
 }
 
@@ -708,14 +748,7 @@ fn client_value_to_window(
 }
 
 fn apply_keyboard_layout_from_monitors(shared: &Arc<MangoSharedState>, value: &Value) -> bool {
-    let Some(layout_name) = value
-        .get("monitors")
-        .and_then(Value::as_array)
-        .and_then(|monitors| {
-            monitors
-                .iter()
-                .find(|monitor| monitor.get("active").and_then(Value::as_bool) == Some(true))
-        })
+    let Some(layout_name) = active_monitor(value)
         .and_then(|monitor| monitor.get("keyboardlayout"))
         .and_then(Value::as_str)
     else {
@@ -723,7 +756,6 @@ fn apply_keyboard_layout_from_monitors(shared: &Arc<MangoSharedState>, value: &V
     };
     let info = KeyboardLayoutInfo {
         layout_name: layout_name.to_string(),
-        short_name: String::new(),
         layout_count: None,
     };
     let mut current = shared.keyboard_layout.write();
@@ -862,6 +894,50 @@ mod tests {
         assert_eq!(output.window_counts.get(&2), Some(&3));
         assert!(snapshot.active_workspace.contains(&2));
         assert!(snapshot.occupied_workspaces.contains(&2));
+        drop(snapshot);
+        assert!(!apply_workspace_from_monitors(&shared, &value));
+    }
+
+    #[test]
+    fn monitor_update_refreshes_window_list_for_workspace_only_change() {
+        let shared = Arc::new(MangoSharedState::default());
+        let initial = serde_json::json!({
+            "monitors": [{
+                "name": "eDP-1",
+                "active": true,
+                "active_tags": [1],
+                "active_client": {"id": 7, "title": "Terminal", "appid": "foot"},
+                "tags": [
+                    {"index": 1, "is_urgent": false, "client_count": 1},
+                    {"index": 2, "is_urgent": false, "client_count": 0}
+                ]
+            }]
+        });
+        let workspace_only = serde_json::json!({
+            "monitors": [{
+                "name": "eDP-1",
+                "active": true,
+                "active_tags": [1, 2],
+                "active_client": {"id": 7, "title": "Terminal", "appid": "foot"},
+                "tags": [
+                    {"index": 1, "is_urgent": false, "client_count": 1},
+                    {"index": 2, "is_urgent": false, "client_count": 0}
+                ]
+            }]
+        });
+
+        apply_monitor_update(&shared, &initial);
+        let changes = apply_monitor_update(&shared, &workspace_only);
+
+        assert_eq!(
+            changes,
+            MonitorChanges {
+                workspace: true,
+                focused_window: false,
+                window_list: true,
+                keyboard_layout: false,
+            }
+        );
     }
 
     #[test]
@@ -895,6 +971,46 @@ mod tests {
         assert!(snapshot.per_output["eDP-1"].active_workspace.contains(&2));
         assert!(snapshot.per_output["DP-1"].active_workspace.contains(&5));
         assert_eq!(snapshot.active_workspace, HashSet::from([2]));
+    }
+
+    #[test]
+    fn socket_workspace_parser_tracks_urgency_per_output() {
+        let shared = Arc::new(MangoSharedState::default());
+        let value = serde_json::json!({
+            "monitors": [
+                {
+                    "name": "eDP-1",
+                    "active": true,
+                    "active_tags": [2],
+                    "tags": [
+                        {"index": 1, "is_urgent": false, "client_count": 0},
+                        {"index": 2, "is_urgent": false, "client_count": 1}
+                    ]
+                },
+                {
+                    "name": "HDMI-A-1",
+                    "active": false,
+                    "active_tags": [1],
+                    "tags": [
+                        {"index": 1, "is_urgent": true, "client_count": 1},
+                        {"index": 2, "is_urgent": false, "client_count": 0}
+                    ]
+                }
+            ]
+        });
+
+        assert!(apply_workspace_from_monitors(&shared, &value));
+        let snapshot = shared.snapshot.read();
+
+        assert!(snapshot.urgent_workspaces.contains(&1));
+        assert_eq!(
+            snapshot.per_output["eDP-1"].urgent_workspaces,
+            Some(HashSet::new())
+        );
+        assert_eq!(
+            snapshot.per_output["HDMI-A-1"].urgent_workspaces,
+            Some(HashSet::from([1]))
+        );
     }
 
     #[test]
@@ -949,6 +1065,7 @@ mod tests {
         });
 
         assert!(apply_focused_window_from_monitors(&shared, &value));
+        assert!(!apply_focused_window_from_monitors(&shared, &value));
 
         assert_eq!(
             shared.focused_window.read().clone(),
@@ -987,6 +1104,7 @@ mod tests {
         });
 
         assert!(apply_window_list_from_clients(&shared, &value));
+        assert!(!apply_window_list_from_clients(&shared, &value));
         let windows = shared.windows.read();
 
         assert_eq!(windows.len(), 2);
@@ -1187,7 +1305,6 @@ mod tests {
         assert!(apply_keyboard_layout_from_monitors(&shared, &value));
         let info = shared.keyboard_layout.read().clone().unwrap();
 
-        assert!(info.short_name.is_empty());
         assert_eq!(info.layout_name, "English (US)");
         assert_eq!(info.layout_count, None);
         assert!(!apply_keyboard_layout_from_monitors(&shared, &value));
@@ -1289,7 +1406,7 @@ mod tests {
             ]
         });
 
-        assert!(apply_window_list_from_clients(&shared, &value));
+        assert!(!apply_window_list_from_clients(&shared, &value));
         let windows = shared.windows.read();
 
         assert!(

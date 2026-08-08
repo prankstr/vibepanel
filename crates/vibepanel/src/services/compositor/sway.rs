@@ -544,7 +544,6 @@ impl SwayBackend {
 
         *shared.keyboard_layout.write() = Some(KeyboardLayoutInfo {
             layout_name: active_layout,
-            short_name: String::new(),
             layout_count,
         });
     }
@@ -764,7 +763,6 @@ impl SwayBackend {
 
                         *shared.keyboard_layout.write() = Some(KeyboardLayoutInfo {
                             layout_name: active_layout,
-                            short_name: String::new(),
                             layout_count,
                         });
                         return (false, false, true);

@@ -622,7 +622,6 @@ impl NiriBackend {
         *shared.keyboard_layout_idx.write() = current_idx;
         *shared.keyboard_layout.write() = Some(KeyboardLayoutInfo {
             layout_name,
-            short_name: String::new(),
 
             layout_count: Some(layout_count),
         });
@@ -644,7 +643,6 @@ impl NiriBackend {
         *shared.keyboard_layout_idx.write() = idx;
         *shared.keyboard_layout.write() = Some(KeyboardLayoutInfo {
             layout_name,
-            short_name: String::new(),
 
             layout_count: Some(layout_count),
         });
