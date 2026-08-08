@@ -21,9 +21,7 @@ pango = { workspace = true }
 gtk4-layer-shell = { workspace = true }
 gdk4-wayland = { workspace = true }
 wayland-client = { workspace = true }
-wayland-backend = { workspace = true }
 wayland-protocols = { workspace = true }
-wayland-scanner = { workspace = true }
 notify = { workspace = true }
 notify-debouncer-mini = { workspace = true }
 serde = { workspace = true }

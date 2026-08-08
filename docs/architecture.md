@@ -88,8 +88,8 @@ services/compositor/
   manager.rs      # CompositorManager singleton
   hyprland.rs     # Hyprland IPC implementation
   niri.rs         # Niri IPC implementation
-  mango.rs        # MangoWC implementation
-  dwl_ipc.rs      # DWL/dwl-ipc protocol implementation
+  sway.rs         # Sway / Miracle WM / Scroll (i3 IPC) implementation
+  mango.rs        # MangoWC JSON IPC implementation
 ```
 
 The `CompositorBackend` trait defines the interface:
@@ -107,11 +107,12 @@ pub trait CompositorBackend: Send + Sync {
 ```
 
 Backend detection order:
-1. Check `workspace.backend` config (if not "auto")
+1. Check `advanced.compositor` config (if not "auto")
 2. Check `HYPRLAND_INSTANCE_SIGNATURE` env var
 3. Check `NIRI_SOCKET` env var
-4. Check for MangoWC socket
-5. Fall back to DWL/wlr-foreign-toplevel
+4. Check `SWAYSOCK` / `MIRACLESOCK` env vars
+5. Check `MANGO_INSTANCE_SIGNATURE` env var
+6. Fall back to MangoWC
 
 ## Widget System
 

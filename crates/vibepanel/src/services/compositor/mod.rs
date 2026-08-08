@@ -1,7 +1,7 @@
 //! Compositor backend abstraction for workspace and window title tracking.
 //!
 //! This module provides a pluggable backend system for different Wayland compositors:
-//! - MangoWC / DWL (via `mmsg` CLI tool)
+//! - MangoWC (via socket IPC with JSON protocol)
 //! - Niri (via socket IPC with JSON protocol)
 //! - Hyprland (via socket IPC with JSON protocol)
 //! - Sway / Miracle WM / Scroll (via i3 IPC binary protocol over Unix socket)
@@ -15,15 +15,14 @@
 //! Services should use `CompositorManager::global()` to get a shared backend instance,
 //! then register callbacks via `register_workspace_callback` and `register_window_callback`.
 
-pub mod dwl_ipc;
 mod factory;
 mod hyprland;
+pub mod layout_names;
 mod manager;
 mod mango;
 mod niri;
 mod sway;
 pub mod types;
-pub mod xkb_names;
 
 pub use factory::BackendKind;
 pub use hyprland::HyprlandBackend;

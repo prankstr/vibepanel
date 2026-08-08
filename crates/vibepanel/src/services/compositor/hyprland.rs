@@ -1286,16 +1286,6 @@ impl Drop for HyprlandBackend {
     }
 }
 
-// Implement PartialEq for WindowInfo for comparison
-impl PartialEq for WindowInfo {
-    fn eq(&self, other: &Self) -> bool {
-        self.title == other.title
-            && self.app_id == other.app_id
-            && self.workspace_id == other.workspace_id
-            && self.output == other.output
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

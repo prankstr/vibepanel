@@ -130,7 +130,7 @@ allow_overdrive = false
 # refresh_interval = 900  # Seconds; minimum 600
 
 [advanced]
-# compositor = "auto"  # "auto", "hyprland", "niri", "mango"
+# compositor = "auto"  # "auto", "hyprland", "niri", "mango", "sway", "miracle", "scroll"
 
 # Custom CSS: place style.css in same directory as this file.
 # See documentation for available CSS variables and classes.

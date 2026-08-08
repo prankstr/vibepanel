@@ -10,8 +10,8 @@ use super::{CompositorBackend, HyprlandBackend, MangoBackend, NiriBackend, SwayB
 /// Backend kind enum for configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendKind {
-    /// MangoWC / DWL (uses dwl-ipc-unstable-v2 or mmsg fallback).
-    MangoDwl,
+    /// MangoWC (uses Mango's JSON IPC socket).
+    Mango,
     /// Hyprland compositor.
     Hyprland,
     /// Niri compositor.
@@ -24,10 +24,9 @@ pub enum BackendKind {
 
 impl BackendKind {
     /// Parse a backend kind from a string (case-insensitive).
-    #[allow(dead_code)] // Used by tests and for config parsing
     pub fn from_str(s: &str) -> Self {
         match s.to_lowercase().as_str() {
-            "mango" | "mangowc" | "dwl" => BackendKind::MangoDwl,
+            "mango" | "mangowc" => BackendKind::Mango,
             "hyprland" => BackendKind::Hyprland,
             "niri" => BackendKind::Niri,
             "sway" | "miracle" | "miraclewm" | "scroll" => BackendKind::Sway,
@@ -44,7 +43,8 @@ impl BackendKind {
 /// 2. NIRI_SOCKET → Niri
 /// 3. SWAYSOCK → Sway
 /// 4. MIRACLESOCK → Sway (Miracle WM supports i3 IPC)
-/// 5. Default → MangoWC/DWL
+/// 5. MANGO_INSTANCE_SIGNATURE → MangoWC
+/// 6. Default → MangoWC
 pub fn detect_backend() -> BackendKind {
     // Check for Hyprland
     if env::var("HYPRLAND_INSTANCE_SIGNATURE").is_ok() {
@@ -70,9 +70,15 @@ pub fn detect_backend() -> BackendKind {
         return BackendKind::Sway;
     }
 
-    // Default to MangoWC/DWL
-    debug!("No specific compositor detected, defaulting to MangoWC/DWL");
-    BackendKind::MangoDwl
+    // Check for MangoWC. Match MangoBackend::new by treating an empty signature as absent.
+    if env::var("MANGO_INSTANCE_SIGNATURE").is_ok_and(|v| !v.is_empty()) {
+        debug!("Detected MangoWC via MANGO_INSTANCE_SIGNATURE");
+        return BackendKind::Mango;
+    }
+
+    // Default to MangoWC
+    debug!("No compositor-specific socket detected, defaulting to MangoWC");
+    BackendKind::Mango
 }
 
 /// Create a compositor backend based on kind and config.
@@ -98,7 +104,7 @@ pub fn create_backend(
     info!("Creating compositor backend: {:?}", resolved_kind);
 
     match resolved_kind {
-        BackendKind::MangoDwl => Box::new(MangoBackend::new(outputs)),
+        BackendKind::Mango => Box::new(MangoBackend::new(outputs)),
         BackendKind::Hyprland => Box::new(HyprlandBackend::new(outputs)),
         BackendKind::Niri => Box::new(NiriBackend::new(outputs)),
         BackendKind::Sway => Box::new(SwayBackend::new(outputs)),
@@ -115,9 +121,8 @@ mod tests {
 
     #[test]
     fn test_backend_kind_from_str() {
-        assert_eq!(BackendKind::from_str("mango"), BackendKind::MangoDwl);
-        assert_eq!(BackendKind::from_str("dwl"), BackendKind::MangoDwl);
-        assert_eq!(BackendKind::from_str("MangoWC"), BackendKind::MangoDwl);
+        assert_eq!(BackendKind::from_str("mango"), BackendKind::Mango);
+        assert_eq!(BackendKind::from_str("MangoWC"), BackendKind::Mango);
         assert_eq!(BackendKind::from_str("hyprland"), BackendKind::Hyprland);
         assert_eq!(BackendKind::from_str("HYPRLAND"), BackendKind::Hyprland);
         assert_eq!(BackendKind::from_str("niri"), BackendKind::Niri);

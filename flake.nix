@@ -50,14 +50,12 @@
         ];
 
         # Filter source to only include Rust-relevant files (improves caching)
-        # Also include .xml (Wayland protocol) and .ttf (embedded font) files
+        # Also include .ttf (embedded font) files
         src = pkgs.lib.cleanSourceWith {
           src = craneLib.path ./.;
           filter =
             path: type:
-            (craneLib.filterCargoSources path type)
-            || (pkgs.lib.hasSuffix ".xml" path)
-            || (pkgs.lib.hasSuffix ".ttf" path);
+            (craneLib.filterCargoSources path type) || (pkgs.lib.hasSuffix ".ttf" path);
         };
 
         commonArgs = {

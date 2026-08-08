@@ -58,7 +58,7 @@ pub struct WorkspaceMeta {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PerOutputState {
     /// Active workspace IDs on this output.
-    /// Most compositors have a single active workspace, but MangoWC/DWL
+    /// Most compositors have a single active workspace, but MangoWC
     /// supports viewing multiple tags simultaneously.
     pub active_workspace: HashSet<i32>,
     /// Set of workspace IDs that have windows on this output.
@@ -74,7 +74,7 @@ pub struct PerOutputState {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WorkspaceSnapshot {
     /// Currently active/focused workspace IDs.
-    /// Most compositors have a single active workspace, but MangoWC/DWL
+    /// Most compositors have a single active workspace, but MangoWC
     /// supports viewing multiple tags simultaneously.
     pub active_workspace: HashSet<i32>,
     /// Set of workspace IDs that have windows.
@@ -92,7 +92,7 @@ pub struct WorkspaceSnapshot {
 /// Information about a focused window.
 ///
 /// Represents the currently focused window's metadata.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct WindowInfo {
     /// Window title (may be empty).
     pub title: String,
@@ -102,14 +102,6 @@ pub struct WindowInfo {
     pub workspace_id: Option<i32>,
     /// Output/monitor name the window is on (None if unavailable).
     pub output: Option<String>,
-}
-
-impl WindowInfo {
-    /// Returns true if this window info has no meaningful content.
-    #[allow(dead_code)] // Used by tests and part of public API
-    pub fn is_empty(&self) -> bool {
-        self.title.is_empty() && self.app_id.is_empty()
-    }
 }
 
 /// Information about the current keyboard layout.
@@ -206,7 +198,7 @@ pub trait CompositorBackend: Send + Sync {
     /// Get the list of known workspaces.
     ///
     /// Returns static workspace metadata. For compositors with fixed
-    /// workspace counts (like DWL's tags), this returns all possible
+    /// workspace counts (like MangoWC's tags), this returns all possible
     /// workspaces. For dynamic compositors (like Niri), this returns
     /// currently existing workspaces.
     fn list_workspaces(&self) -> Vec<WorkspaceMeta>;
@@ -329,24 +321,6 @@ mod tests {
     }
 
     #[test]
-    fn test_window_info_is_empty() {
-        let empty = WindowInfo::default();
-        assert!(empty.is_empty());
-
-        let with_title = WindowInfo {
-            title: "Test".to_string(),
-            ..Default::default()
-        };
-        assert!(!with_title.is_empty());
-
-        let with_app_id = WindowInfo {
-            app_id: "test".to_string(),
-            ..Default::default()
-        };
-        assert!(!with_app_id.is_empty());
-    }
-
-    #[test]
     fn test_per_output_state_no_active() {
         let state = PerOutputState::default();
         assert!(state.active_workspace.is_empty());
@@ -381,7 +355,7 @@ mod tests {
 
     #[test]
     fn test_per_output_state_multiple_active() {
-        // Multiple active workspaces (Mango/DWL multi-tag case)
+        // Multiple active workspaces (MangoWC multi-tag case)
         let mut state = PerOutputState::default();
         state.active_workspace.insert(1);
         state.active_workspace.insert(3);

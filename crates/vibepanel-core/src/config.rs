@@ -15,8 +15,19 @@ use crate::error::{Error, Result};
 use crate::theme::DEFAULT_FONT_SCALE;
 
 /// Known valid values for advanced.compositor.
+///
+/// Must stay in sync with `BackendKind::from_str`; aliases accepted there but
+/// missing here are rejected during validation and can never reach the factory.
 const VALID_COMPOSITORS: &[&str] = &[
-    "auto", "mango", "hyprland", "niri", "sway", "miracle", "scroll",
+    "auto",
+    "mango",
+    "mangowc",
+    "hyprland",
+    "niri",
+    "sway",
+    "miracle",
+    "miraclewm",
+    "scroll",
 ];
 
 /// Known valid values for theme.mode.

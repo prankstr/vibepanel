@@ -10,7 +10,7 @@ use vibepanel_core::config::WidgetEntry;
 use crate::services::callbacks::CallbackId;
 use crate::services::compositor::CompositorManager;
 use crate::services::compositor::KeyboardLayoutInfo;
-use crate::services::compositor::xkb_names;
+use crate::services::compositor::layout_names;
 use crate::services::config_manager::ConfigManager;
 use crate::services::tooltip::TooltipManager;
 use crate::styles::{class, state, widget};
@@ -154,7 +154,7 @@ impl Drop for KeyboardLayoutWidget {
 /// Extract a short display code from a full layout name.
 ///
 /// Strategies: parenthesized code (`"English (US)"` → `"US"`), short string
-/// uppercasing (`"us"` → `"US"`), xkb_names lookup (`"Swedish"` → `"SE"`),
+/// uppercasing (`"us"` → `"US"`), language-name lookup (`"Swedish"` → `"SE"`),
 /// or fall back to the full name.
 fn extract_short_name(layout_name: &str) -> String {
     if layout_name.is_empty() {
@@ -167,16 +167,14 @@ fn extract_short_name(layout_name: &str) -> String {
     {
         let inner = layout_name[start + 1..start + 1 + rel_end].trim();
         if !inner.is_empty() {
-            // Spaces in the paren suggest a variant description ("no dead keys")
-            // rather than a short code ("US") — fall through to use the base name.
+            let base = layout_name[..start].trim();
+
             if !inner.contains(' ') {
                 return inner.to_string();
             }
 
-            let base = layout_name[..start].trim();
             if !base.is_empty() {
-                // Try the XKB names table for the base language name
-                if let Some(code) = xkb_names::short_code_from_language(base) {
+                if let Some(code) = layout_names::short_code_from_language(base) {
                     return code.to_string();
                 }
                 if base.len() <= 3 && base.chars().all(|c| c.is_ascii_alphabetic()) {
@@ -192,8 +190,8 @@ fn extract_short_name(layout_name: &str) -> String {
         return layout_name.to_uppercase();
     }
 
-    // Try the XKB names table for bare language names like "Swedish", "German"
-    if let Some(code) = xkb_names::short_code_from_language(layout_name) {
+    // Try the language names table for bare names like "Swedish" and "German".
+    if let Some(code) = layout_names::short_code_from_language(layout_name) {
         return code.to_string();
     }
 
@@ -229,17 +227,7 @@ fn update_keyboard_layout_widget(
                 info.layout_name.clone()
             }
         }
-        LayoutFormat::Short => {
-            if !info.short_name.is_empty() {
-                // Backend provided an XKB code (e.g. "swe") — look up a
-                // normalized display code, fall back to uppercasing.
-                xkb_names::short_code_from_xkb(&info.short_name)
-                    .map(String::from)
-                    .unwrap_or_else(|| info.short_name.to_uppercase())
-            } else {
-                extract_short_name(&info.layout_name)
-            }
-        }
+        LayoutFormat::Short => extract_short_name(&info.layout_name),
     };
 
     let label_text = if is_vertical {
@@ -280,7 +268,7 @@ mod tests {
 
     #[test]
     fn test_extract_short_name_full_name() {
-        // Known language names now resolve to 2-letter codes via xkb_names
+        // Known language names resolve to 2-letter display codes.
         assert_eq!(extract_short_name("French"), "FR");
         assert_eq!(extract_short_name("Japanese"), "JP");
         assert_eq!(extract_short_name("Swedish"), "SE");
@@ -312,11 +300,11 @@ mod tests {
     #[test]
     fn test_extract_short_name_variant_descriptions() {
         // Variant descriptions with spaces should fall back to the base name,
-        // which then resolves via xkb_names to a 2-letter code
+        // which then resolves via the language-name table to a 2-letter code
         assert_eq!(extract_short_name("Swedish (no dead keys)"), "SE");
         assert_eq!(extract_short_name("German (with AltGr dead keys)"), "DE");
         assert_eq!(extract_short_name("French (alt.)"), "alt.");
-        // Single-word variants are still treated as short codes
+        // Single-word variants are still treated as short codes.
         assert_eq!(extract_short_name("German (Dvorak)"), "Dvorak");
         assert_eq!(extract_short_name("Russian (phonetic)"), "phonetic");
     }

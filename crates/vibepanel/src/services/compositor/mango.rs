@@ -1,50 +1,35 @@
-//! MangoWC / DWL compositor backend.
+//! MangoWC compositor backend.
 //!
-//! This backend prefers Mango's socket IPC (`MANGO_INSTANCE_SIGNATURE`) and
-//! falls back to the legacy `zdwl_ipc_manager_v2` Wayland protocol for DWL and
-//! older Mango builds.
+//! Communicates with MangoWC over its line-delimited JSON IPC on the Unix
+//! socket advertised by `MANGO_INSTANCE_SIGNATURE`.
 //!
 //! # Protocol
 //!
-//! The Mango socket/DWL IPC paths provide:
-//! - Tag/workspace state: active, urgent, client count, focus state
-//! - Window info: title, app_id
-//! - Workspace switching
+//! Requests are single lines; responses are single JSON lines.
+//! - `get <topic>` — one-shot query
+//! - `watch <topic>` — streaming subscription (one line per update)
+//! - `dispatch <command>[,<args>]` — action request
 //!
-//! DWL protocol events are double-buffered: state is collected and applied on
-//! `frame` events.
+//! Topics consumed here: `all-monitors` (tag/workspace, focused-window and
+//! keyboard-layout state) and `all-clients` (window list).
 
-// TODO(mango): Remove the legacy DWL IPC fallback once Mango drops it upstream.
-
-use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::io::{BufRead, BufReader, Write};
-use std::os::fd::{AsFd, OwnedFd};
-use std::os::unix::io::{AsRawFd, FromRawFd};
 use std::os::unix::net::UnixStream;
-use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use gtk4::glib;
 use parking_lot::RwLock;
 use serde_json::Value;
 use tracing::{debug, error, trace, warn};
-use wayland_backend::client::ObjectId;
-use wayland_client::protocol::wl_output::WlOutput;
-use wayland_client::protocol::wl_registry::{self, WlRegistry};
-use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum};
 
-use super::dwl_ipc::{
-    TagState, ZdwlIpcManagerV2, ZdwlIpcOutputV2, zdwl_ipc_manager_v2, zdwl_ipc_output_v2,
-};
 use super::{
     CompositorBackend, KeyboardLayoutCallback, KeyboardLayoutInfo, Window, WindowCallback,
     WindowInfo, WindowListCallback, WindowListSnapshot, WorkspaceCallback, WorkspaceMeta,
-    WorkspaceSnapshot, xkb_names,
+    WorkspaceSnapshot,
 };
 
 const MANGO_SOCKET_ENV: &str = "MANGO_INSTANCE_SIGNATURE";
@@ -52,16 +37,14 @@ const SOCKET_READ_TIMEOUT: Duration = Duration::from_secs(1);
 const SOCKET_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 const SOCKET_RECONNECT_MS: u64 = 1000;
 
-/// Default number of workspaces/tags for DWL.
+/// Fallback tag count used until `all-monitors` reports the real one.
 const DEFAULT_WORKSPACE_COUNT: u32 = 9;
+/// Synthetic workspace id MangoWC uses to signal overview mode.
 const OVERVIEW_WORKSPACE_ID: i32 = 0;
 const OVERVIEW_WORKSPACE_NAME: &str = "overview";
-// Mango's DWL IPC path exposes only the layout symbol. This is Mango's
-// default overview symbol; custom compositor configs may need updating here.
-const OVERVIEW_LAYOUT_SYMBOL: &str = "󰃇";
 
 #[derive(Debug)]
-struct MangoSocketSharedState {
+struct MangoSharedState {
     snapshot: RwLock<WorkspaceSnapshot>,
     output_geometry: RwLock<HashMap<String, (i64, i64)>>,
     focused_window: RwLock<Option<WindowInfo>>,
@@ -71,7 +54,7 @@ struct MangoSocketSharedState {
     tag_count: AtomicU32,
 }
 
-impl Default for MangoSocketSharedState {
+impl Default for MangoSharedState {
     fn default() -> Self {
         Self {
             snapshot: RwLock::new(WorkspaceSnapshot::default()),
@@ -85,28 +68,28 @@ impl Default for MangoSocketSharedState {
     }
 }
 
-struct MangoSocketBackend {
-    socket_path: String,
-    shared: Arc<MangoSocketSharedState>,
+/// MangoWC compositor backend driven by Mango's JSON IPC socket.
+pub struct MangoBackend {
+    /// Path to the Mango IPC socket, or `None` when `MANGO_INSTANCE_SIGNATURE`
+    /// is unset (i.e. we are not running under MangoWC).
+    socket_path: Option<String>,
+    shared: Arc<MangoSharedState>,
     running: Arc<AtomicBool>,
     watch_threads: Mutex<Vec<JoinHandle<()>>>,
     keyboard_layout_callback: Mutex<Option<KeyboardLayoutCallback>>,
     window_list_callback: Mutex<Option<WindowListCallback>>,
 }
 
-impl MangoSocketBackend {
-    fn from_env() -> Option<Self> {
-        let socket_path = env::var(MANGO_SOCKET_ENV).ok()?;
-        if socket_path.is_empty() {
-            return None;
-        }
-        Some(Self::new(socket_path))
-    }
-
-    fn new(socket_path: String) -> Self {
+impl MangoBackend {
+    /// Create a MangoWC backend.
+    ///
+    /// The `outputs` allow-list is accepted for factory symmetry but unused:
+    /// Mango's IPC already reports per-output state and the panel filters
+    /// downstream.
+    pub fn new(_outputs: Option<Vec<String>>) -> Self {
         Self {
-            socket_path,
-            shared: Arc::new(MangoSocketSharedState::default()),
+            socket_path: env::var(MANGO_SOCKET_ENV).ok().filter(|p| !p.is_empty()),
+            shared: Arc::new(MangoSharedState::default()),
             running: Arc::new(AtomicBool::new(false)),
             watch_threads: Mutex::new(Vec::new()),
             keyboard_layout_callback: Mutex::new(None),
@@ -114,16 +97,27 @@ impl MangoSocketBackend {
         }
     }
 
-    fn send_command(&self, command: &str) -> Option<Value> {
-        let mut stream = match UnixStream::connect(&self.socket_path) {
-            Ok(stream) => stream,
-            Err(e) => {
-                warn!("Failed to connect to Mango socket IPC: {}", e);
-                return None;
+    /// Open a short-lived connection to the Mango IPC socket.
+    fn connect(&self) -> Option<UnixStream> {
+        let socket_path = self.socket_path.as_deref()?;
+        match UnixStream::connect(socket_path) {
+            Ok(stream) => {
+                let _ = stream.set_read_timeout(Some(SOCKET_REQUEST_TIMEOUT));
+                let _ = stream.set_write_timeout(Some(SOCKET_REQUEST_TIMEOUT));
+                Some(stream)
             }
-        };
-        let _ = stream.set_read_timeout(Some(SOCKET_REQUEST_TIMEOUT));
-        let _ = stream.set_write_timeout(Some(SOCKET_REQUEST_TIMEOUT));
+            Err(e) => {
+                warn!(
+                    "Failed to connect to Mango IPC socket {}: {}",
+                    socket_path, e
+                );
+                None
+            }
+        }
+    }
+
+    fn send_command(&self, command: &str) -> Option<Value> {
+        let mut stream = self.connect()?;
 
         if let Err(e) = writeln!(stream, "{}", command) {
             warn!("Failed to send Mango IPC command '{}': {}", command, e);
@@ -140,118 +134,55 @@ impl MangoSocketBackend {
     }
 
     fn send_dispatch(&self, command: &str) {
-        let mut stream = match UnixStream::connect(&self.socket_path) {
-            Ok(stream) => stream,
-            Err(e) => {
-                warn!("Failed to connect to Mango socket IPC: {}", e);
-                return;
-            }
-        };
-        let _ = stream.set_read_timeout(Some(SOCKET_REQUEST_TIMEOUT));
-        let _ = stream.set_write_timeout(Some(SOCKET_REQUEST_TIMEOUT));
-
-        if let Err(e) = writeln!(stream, "{}", command) {
-            warn!("Failed to send Mango IPC dispatch '{}': {}", command, e);
-            return;
-        }
-
-        let mut response = String::new();
-        let mut reader = BufReader::new(stream);
-        if let Err(e) = reader.read_line(&mut response) {
-            warn!(
-                "Failed to read Mango IPC dispatch response '{}': {}",
-                command, e
-            );
-        } else if response.contains("\"error\"") {
-            warn!(
-                "Mango IPC dispatch '{}' returned {}",
-                command,
-                response.trim()
-            );
+        if let Some(value) = self.send_command(command)
+            && let Some(error) = value.get("error").and_then(Value::as_str)
+        {
+            warn!("Mango IPC dispatch '{}' failed: {}", command, error);
         }
     }
 
     fn fetch_initial_state(&self) {
         if let Some(value) = self.send_command("get all-monitors") {
             apply_workspace_from_monitors(&self.shared, &value);
-        }
-        if let Some(value) = self.send_command("get focusing-client") {
-            apply_focused_window_from_client(&self.shared, &value);
+            apply_focused_window_from_monitors(&self.shared, &value);
+            apply_keyboard_layout_from_monitors(&self.shared, &value);
         }
         if let Some(value) = self.send_command("get all-clients") {
             apply_window_list_from_clients(&self.shared, &value);
-        }
-        if let Some(value) = self.send_command("get keyboardlayout") {
-            apply_keyboard_layout_from_value(&self.shared, &value);
         }
     }
 
     fn spawn_workspace_watch(
         socket_path: String,
-        shared: Arc<MangoSocketSharedState>,
+        shared: Arc<MangoSharedState>,
         running: Arc<AtomicBool>,
-        callback: WorkspaceCallback,
+        workspace_callback: WorkspaceCallback,
+        window_callback: WindowCallback,
         window_list_callback: Option<WindowListCallback>,
+        keyboard_layout_callback: Option<KeyboardLayoutCallback>,
     ) -> JoinHandle<()> {
         thread::spawn(move || {
             watch_mango_command(socket_path, "watch all-monitors", running, move |value| {
                 if apply_workspace_from_monitors(&shared, &value) {
                     let snapshot = shared.snapshot.read().clone();
-                    callback(snapshot);
-                    if let Some(callback) = &window_list_callback {
+                    workspace_callback(snapshot);
+                }
+                if apply_focused_window_from_monitors(&shared, &value) {
+                    let info = shared.focused_window.read().clone();
+                    if let Some(info) = info {
+                        window_callback(info);
+                    }
+                    let focused_id = *shared.focused_client_id.read();
+                    if apply_window_list_focus(&shared, focused_id)
+                        && let Some(callback) = &window_list_callback
+                    {
                         let windows = shared.windows.read().clone();
                         callback(WindowListSnapshot { windows });
                     }
                 }
-            });
-        })
-    }
-
-    fn spawn_focused_window_watch(
-        socket_path: String,
-        shared: Arc<MangoSocketSharedState>,
-        running: Arc<AtomicBool>,
-        callback: WindowCallback,
-        window_list_callback: Option<WindowListCallback>,
-    ) -> JoinHandle<()> {
-        thread::spawn(move || {
-            watch_mango_command(
-                socket_path,
-                "watch focusing-client",
-                running,
-                move |value| {
-                    if apply_focused_window_from_client(&shared, &value) {
-                        let info = shared.focused_window.read().clone();
-                        if let Some(info) = info {
-                            callback(info);
-                        }
-                        // Mango leaves all-clients focus state stale when focus moves to
-                        // an empty workspace. The focusing-client watch sends id:null,
-                        // which is the only signal that taskbar buttons should all clear
-                        // active styling.
-                        if apply_window_list_focus_from_client(&shared, &value)
-                            && let Some(callback) = &window_list_callback
-                        {
-                            let windows = shared.windows.read().clone();
-                            callback(WindowListSnapshot { windows });
-                        }
-                    }
-                },
-            );
-        })
-    }
-
-    fn spawn_keyboard_layout_watch(
-        socket_path: String,
-        shared: Arc<MangoSocketSharedState>,
-        running: Arc<AtomicBool>,
-        callback: KeyboardLayoutCallback,
-    ) -> JoinHandle<()> {
-        thread::spawn(move || {
-            watch_mango_command(socket_path, "watch keyboardlayout", running, move |value| {
-                if apply_keyboard_layout_from_value(&shared, &value) {
+                if apply_keyboard_layout_from_monitors(&shared, &value) {
                     let info = shared.keyboard_layout.read().clone();
-                    if let Some(info) = info {
+                    if let (Some(callback), Some(info)) = (&keyboard_layout_callback, info) {
                         callback(info);
                     }
                 }
@@ -261,7 +192,7 @@ impl MangoSocketBackend {
 
     fn spawn_window_list_watch(
         socket_path: String,
-        shared: Arc<MangoSocketSharedState>,
+        shared: Arc<MangoSharedState>,
         running: Arc<AtomicBool>,
         callback: WindowListCallback,
     ) -> JoinHandle<()> {
@@ -276,14 +207,35 @@ impl MangoSocketBackend {
     }
 }
 
-impl CompositorBackend for MangoSocketBackend {
+impl CompositorBackend for MangoBackend {
     fn start(&self, on_workspace_update: WorkspaceCallback, on_window_update: WindowCallback) {
+        let Some(socket_path) = self.socket_path.clone() else {
+            error!(
+                "{} is not set - MangoWC IPC is unavailable. Workspace and window \
+                 tracking are disabled. If you are not running MangoWC, set \
+                 `compositor` under [advanced] to a supported backend.",
+                MANGO_SOCKET_ENV
+            );
+            return;
+        };
+
         if self.running.swap(true, Ordering::SeqCst) {
-            warn!("MangoSocketBackend already running");
+            warn!("MangoBackend already running");
             return;
         }
 
-        debug!("Starting Mango socket IPC backend");
+        debug!("Starting Mango IPC backend on {}", socket_path);
+
+        let window_list_callback = self
+            .window_list_callback
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let keyboard_layout_callback = self
+            .keyboard_layout_callback
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
 
         self.fetch_initial_state();
         let snapshot = self.shared.snapshot.read().clone();
@@ -292,21 +244,11 @@ impl CompositorBackend for MangoSocketBackend {
         if let Some(info) = focused_window {
             on_window_update(info);
         }
-        if let Some(callback) = self
-            .window_list_callback
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
-        {
+        if let Some(callback) = &window_list_callback {
             let windows = self.shared.windows.read().clone();
             callback(WindowListSnapshot { windows });
         }
-        if let Some(callback) = self
-            .keyboard_layout_callback
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
-        {
+        if let Some(callback) = &keyboard_layout_callback {
             let keyboard_layout = self.shared.keyboard_layout.read().clone();
             if let Some(info) = keyboard_layout {
                 callback(info);
@@ -315,46 +257,17 @@ impl CompositorBackend for MangoSocketBackend {
 
         let mut threads = self.watch_threads.lock().unwrap_or_else(|e| e.into_inner());
         threads.push(Self::spawn_workspace_watch(
-            self.socket_path.clone(),
+            socket_path.clone(),
             self.shared.clone(),
             self.running.clone(),
             on_workspace_update,
-            self.window_list_callback
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone(),
-        ));
-        threads.push(Self::spawn_focused_window_watch(
-            self.socket_path.clone(),
-            self.shared.clone(),
-            self.running.clone(),
             on_window_update,
-            self.window_list_callback
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone(),
+            window_list_callback.clone(),
+            keyboard_layout_callback,
         ));
-        if let Some(callback) = self
-            .keyboard_layout_callback
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
-        {
-            threads.push(Self::spawn_keyboard_layout_watch(
-                self.socket_path.clone(),
-                self.shared.clone(),
-                self.running.clone(),
-                callback,
-            ));
-        }
-        if let Some(callback) = self
-            .window_list_callback
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
-        {
+        if let Some(callback) = window_list_callback {
             threads.push(Self::spawn_window_list_watch(
-                self.socket_path.clone(),
+                socket_path.clone(),
                 self.shared.clone(),
                 self.running.clone(),
                 callback,
@@ -403,7 +316,7 @@ impl CompositorBackend for MangoSocketBackend {
     }
 
     fn name(&self) -> &'static str {
-        "MangoWC socket IPC"
+        "MangoWC"
     }
 
     fn set_keyboard_layout_callback(&self, callback: KeyboardLayoutCallback) {
@@ -438,17 +351,16 @@ impl CompositorBackend for MangoSocketBackend {
     }
 
     fn focus_window(&self, window_id: u64) {
-        let target = self
-            .shared
-            .windows
-            .read()
-            .iter()
-            .find(|window| window.id == window_id)
-            .cloned();
+        self.send_dispatch(&format!("dispatch focusid client,{}", window_id));
+    }
+}
 
-        for command in mango_focus_window_commands(target.as_ref(), window_id) {
-            self.send_dispatch(&command);
-        }
+impl Drop for MangoBackend {
+    fn drop(&mut self) {
+        // Signal the watch threads to exit without joining, matching the other
+        // backends. `CompositorManager::drop` calls `stop()` first, which is
+        // where the joins happen; this is only the drop-without-stop safety net.
+        self.running.store(false, Ordering::SeqCst);
     }
 }
 
@@ -520,7 +432,7 @@ fn watch_mango_command<F>(
     }
 }
 
-fn apply_workspace_from_monitors(shared: &Arc<MangoSocketSharedState>, value: &Value) -> bool {
+fn apply_workspace_from_monitors(shared: &Arc<MangoSharedState>, value: &Value) -> bool {
     let Some(entries) = value.get("monitors").and_then(Value::as_array) else {
         return false;
     };
@@ -614,52 +526,51 @@ fn apply_workspace_from_monitors(shared: &Arc<MangoSocketSharedState>, value: &V
     true
 }
 
-fn apply_focused_window_from_client(shared: &Arc<MangoSocketSharedState>, value: &Value) -> bool {
-    let focused_client_id = parse_focused_client_id(value);
-
-    let info = if focused_client_id.is_none() {
-        WindowInfo::default()
-    } else {
-        client_value_to_window_info(value)
+fn apply_focused_window_from_monitors(shared: &Arc<MangoSharedState>, value: &Value) -> bool {
+    let Some(monitor) = value
+        .get("monitors")
+        .and_then(Value::as_array)
+        .and_then(|monitors| {
+            monitors
+                .iter()
+                .find(|monitor| monitor.get("active").and_then(Value::as_bool) == Some(true))
+        })
+    else {
+        return false;
     };
-    *shared.focused_client_id.write() = focused_client_id;
-    *shared.focused_window.write() = Some(info);
-    true
-}
+    let Some(output) = monitor.get("name").and_then(Value::as_str) else {
+        return false;
+    };
+    let Some(client) = monitor.get("active_client") else {
+        return false;
+    };
 
-fn parse_focused_client_id(value: &Value) -> Option<u64> {
-    if value.get("id").is_some_and(Value::is_null)
-        || value.get("error").and_then(Value::as_str) == Some("no focused client")
-    {
-        None
-    } else {
-        value.get("id").and_then(Value::as_u64)
-    }
-}
-
-fn client_value_to_window_info(value: &Value) -> WindowInfo {
-    WindowInfo {
-        title: value
+    let focused_client_id = client.get("id").and_then(Value::as_u64);
+    let info = WindowInfo {
+        title: client
             .get("title")
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string(),
-        app_id: value
+        app_id: client
             .get("appid")
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string(),
-        workspace_id: value
-            .get("tags")
+        workspace_id: monitor
+            .get("active_tags")
             .and_then(Value::as_array)
             .and_then(|tags| tags.first())
             .and_then(Value::as_i64)
             .map(|id| id as i32),
-        output: value
-            .get("monitor")
-            .and_then(Value::as_str)
-            .map(str::to_string),
-    }
+        output: Some(output.to_string()),
+    };
+
+    let changed = *shared.focused_client_id.read() != focused_client_id
+        || shared.focused_window.read().as_ref() != Some(&info);
+    *shared.focused_client_id.write() = focused_client_id;
+    *shared.focused_window.write() = Some(info);
+    changed
 }
 
 /// True if a client is a scratchpad (regular or named), regardless of visibility.
@@ -689,12 +600,12 @@ fn is_dismissed_scratchpad(client: &Value) -> bool {
     !has_tags
 }
 
-fn apply_window_list_from_clients(shared: &Arc<MangoSocketSharedState>, value: &Value) -> bool {
+fn apply_window_list_from_clients(shared: &Arc<MangoSharedState>, value: &Value) -> bool {
     let Some(clients) = value.get("clients").and_then(Value::as_array) else {
         return false;
     };
 
-    // Prefer focusing-client once seen. all-clients can keep a previously
+    // Prefer all-monitors focus state once seen. all-clients can keep a previously
     // focused client marked active after switching to an empty workspace.
     let focused_client_id = *shared.focused_client_id.read();
     let focused_client_known = shared.focused_window.read().is_some();
@@ -702,6 +613,13 @@ fn apply_window_list_from_clients(shared: &Arc<MangoSocketSharedState>, value: &
     let mut windows: Vec<_> = clients
         .iter()
         .filter_map(|client| {
+            if client
+                .get("is_swallowedby")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                return None;
+            }
             let window = client_value_to_window(client, focused_client_id, focused_client_known)?;
             // Always drop dismissed (hidden) scratchpads. Visible scratchpads are
             // flagged via Window.is_scratchpad and filtered by taskbar
@@ -743,33 +661,15 @@ fn window_output_sort_key<'a>(
     (x, y, output)
 }
 
-fn mango_focus_window_commands(window: Option<&Window>, window_id: u64) -> Vec<String> {
-    let mut commands = Vec::new();
-
-    if let Some(window) = window
-        && let (Some(workspace_id), Some(output)) = (window.workspace_id, window.output.as_deref())
-        && workspace_id > 0
-        && !output.is_empty()
-    {
-        commands.push(format!("dispatch viewcrossmon,{},{}", workspace_id, output));
-    }
-
-    commands.push(format!("dispatch focusid client,{}", window_id));
-    commands
-}
-
-fn apply_window_list_focus_from_client(
-    shared: &Arc<MangoSocketSharedState>,
-    value: &Value,
-) -> bool {
-    let focused_id = parse_focused_client_id(value);
-
-    *shared.focused_client_id.write() = focused_id;
+fn apply_window_list_focus(shared: &Arc<MangoSharedState>, focused_id: Option<u64>) -> bool {
     let mut windows = shared.windows.write();
+    let mut changed = false;
     for window in windows.iter_mut() {
-        window.is_focused = focused_id == Some(window.id);
+        let is_focused = focused_id == Some(window.id);
+        changed |= window.is_focused != is_focused;
+        window.is_focused = is_focused;
     }
-    true
+    changed
 }
 
 fn client_value_to_window(
@@ -817,19 +717,32 @@ fn client_value_to_window(
     })
 }
 
-fn apply_keyboard_layout_from_value(shared: &Arc<MangoSocketSharedState>, value: &Value) -> bool {
-    let Some(short_name) = value.get("layout").and_then(Value::as_str) else {
+fn apply_keyboard_layout_from_monitors(shared: &Arc<MangoSharedState>, value: &Value) -> bool {
+    let Some(layout_name) = value
+        .get("monitors")
+        .and_then(Value::as_array)
+        .and_then(|monitors| {
+            monitors
+                .iter()
+                .find(|monitor| monitor.get("active").and_then(Value::as_bool) == Some(true))
+        })
+        .and_then(|monitor| monitor.get("keyboardlayout"))
+        .and_then(Value::as_str)
+    else {
         return false;
     };
     let info = KeyboardLayoutInfo {
-        layout_name: xkb_names::language_from_xkb(short_name)
-            .map(String::from)
-            .unwrap_or_else(|| short_name.to_uppercase()),
-        short_name: short_name.to_string(),
+        layout_name: layout_name.to_string(),
+        short_name: String::new(),
         layout_count: None,
     };
-    *shared.keyboard_layout.write() = Some(info);
-    true
+    let mut current = shared.keyboard_layout.write();
+    if current.as_ref() == Some(&info) {
+        false
+    } else {
+        *current = Some(info);
+        true
+    }
 }
 
 fn mango_workspace_meta(count: u32, snapshot: &WorkspaceSnapshot) -> Vec<WorkspaceMeta> {
@@ -859,1045 +772,50 @@ fn mango_workspace_meta(count: u32, snapshot: &WorkspaceSnapshot) -> Vec<Workspa
     workspaces
 }
 
-/// Per-output state accumulated during a frame.
-#[derive(Debug, Clone, Default)]
-struct OutputFrameState {
-    /// Whether this output is active/focused.
-    active: Option<bool>,
-    /// Tag updates: (tag_index, is_active, is_urgent, clients, focused)
-    tags: Vec<(u32, bool, bool, u32, bool)>,
-    /// Window title update.
-    title: Option<String>,
-    /// Window app_id update.
-    appid: Option<String>,
-    /// Layout symbol update.
-    layout_symbol: Option<String>,
-}
-
-impl OutputFrameState {
-    fn clear(&mut self) {
-        self.active = None;
-        self.tags.clear();
-        self.title = None;
-        self.appid = None;
-        self.layout_symbol = None;
-    }
-}
-
-/// State for a tracked output.
-#[derive(Debug)]
-struct TrackedOutput {
-    /// The wl_output this tracks.
-    #[allow(dead_code)]
-    wl_output: WlOutput,
-    /// The DWL IPC output proxy.
-    dwl_output: ZdwlIpcOutputV2,
-    /// Output name (from wl_output, if available).
-    name: Option<String>,
-    /// Buffered frame state.
-    frame_state: OutputFrameState,
-    /// Last known window title.
-    last_title: String,
-    /// Last known app_id.
-    last_appid: String,
-}
-
-/// Thread-safe shared state that can be updated from callbacks.
-#[derive(Debug)]
-struct SharedState {
-    /// Current workspace snapshot.
-    snapshot: RwLock<WorkspaceSnapshot>,
-    /// Current focused window info.
-    focused_window: RwLock<Option<WindowInfo>>,
-    /// Current keyboard layout info.
-    keyboard_layout: RwLock<Option<KeyboardLayoutInfo>>,
-    /// Number of tags from protocol.
-    tag_count: AtomicU32,
-    /// Pending workspace switch request (-1 = none).
-    pending_switch: AtomicI32,
-    /// Pending compositor quit request.
-    pending_quit: AtomicBool,
-    /// Pending keyboard layout switch request.
-    pending_kb_switch: AtomicBool,
-}
-
-impl Default for SharedState {
-    fn default() -> Self {
-        Self {
-            snapshot: RwLock::new(WorkspaceSnapshot::default()),
-            focused_window: RwLock::new(None),
-            keyboard_layout: RwLock::new(None),
-            tag_count: AtomicU32::new(DEFAULT_WORKSPACE_COUNT),
-            pending_switch: AtomicI32::new(-1),
-            pending_quit: AtomicBool::new(false),
-            pending_kb_switch: AtomicBool::new(false),
-        }
-    }
-}
-
-/// Main-thread-only Wayland state.
-struct WaylandState {
-    /// The DWL IPC manager global.
-    manager: Option<ZdwlIpcManagerV2>,
-    /// Number of tags from protocol.
-    tag_count: u32,
-    /// Layout names from protocol.
-    layouts: Vec<String>,
-    /// Tracked outputs by wl_output ObjectId.
-    outputs: HashMap<ObjectId, TrackedOutput>,
-    /// wl_outputs waiting for DWL manager to be ready.
-    pending_outputs: Vec<(WlOutput, Option<String>)>,
-    /// Current workspace snapshot (local copy).
-    snapshot: WorkspaceSnapshot,
-    /// Current focused output ID.
-    focused_output: Option<ObjectId>,
-    /// Outputs currently reporting Mango's overview layout symbol.
-    overview_outputs: HashSet<ObjectId>,
-    /// Workspace update callback.
-    on_workspace_update: Option<WorkspaceCallback>,
-    /// Window update callback.
-    on_window_update: Option<WindowCallback>,
-    /// Keyboard layout update callback.
-    on_keyboard_layout_update: Option<KeyboardLayoutCallback>,
-    /// Shared state for cross-thread access.
-    shared: Arc<SharedState>,
-}
-
-impl WaylandState {
-    fn new(shared: Arc<SharedState>) -> Self {
-        Self {
-            manager: None,
-            tag_count: DEFAULT_WORKSPACE_COUNT,
-            layouts: Vec::new(),
-            outputs: HashMap::new(),
-            pending_outputs: Vec::new(),
-            snapshot: WorkspaceSnapshot::default(),
-            focused_output: None,
-            overview_outputs: HashSet::new(),
-            on_workspace_update: None,
-            on_window_update: None,
-            on_keyboard_layout_update: None,
-            shared,
-        }
-    }
-
-    /// Process pending outputs now that we have a manager.
-    fn process_pending_outputs(&mut self, qh: &QueueHandle<Self>) {
-        let Some(manager) = &self.manager else { return };
-
-        for (wl_output, name) in self.pending_outputs.drain(..) {
-            let id = wl_output.id();
-            debug!(
-                "Creating DWL output for wl_output {:?} (name: {:?})",
-                id, name
-            );
-
-            let dwl_output = manager.get_output(&wl_output, qh, id.clone());
-
-            self.outputs.insert(
-                id,
-                TrackedOutput {
-                    wl_output,
-                    dwl_output,
-                    name,
-                    frame_state: OutputFrameState::default(),
-                    last_title: String::new(),
-                    last_appid: String::new(),
-                },
-            );
-        }
-    }
-
-    fn output_name(output_id: &ObjectId, output: &TrackedOutput) -> String {
-        output
-            .name
-            .clone()
-            .unwrap_or_else(|| format!("output-{output_id:?}"))
-    }
-
-    fn is_overview_layout_symbol(symbol: &str) -> bool {
-        symbol == OVERVIEW_LAYOUT_SYMBOL || symbol.eq_ignore_ascii_case("overview")
-    }
-
-    /// Check for and process any pending workspace switch.
-    fn process_pending_switch(&self) {
-        let workspace_id = self.shared.pending_switch.swap(-1, Ordering::SeqCst);
-        if workspace_id > 0
-            && let Some(dwl_output) = self.get_focused_dwl_output()
-        {
-            let tagmask = 1u32 << (workspace_id - 1);
-            debug!("Setting tags to 0x{:x}", tagmask);
-            dwl_output.set_tags(tagmask, 0);
-        }
-    }
-
-    /// Check for and process any pending compositor quit request.
-    fn process_pending_quit(&self) {
-        if self.shared.pending_quit.swap(false, Ordering::SeqCst)
-            && let Some(dwl_output) = self.get_focused_dwl_output()
-        {
-            debug!("Sending quit request to compositor");
-            dwl_output.quit();
-        }
-    }
-
-    /// Check for and process any pending keyboard layout switch.
-    fn process_pending_kb_switch(&self) {
-        if self.shared.pending_kb_switch.swap(false, Ordering::SeqCst)
-            && let Some(dwl_output) = self.get_focused_dwl_output()
-        {
-            debug!("Sending keyboard layout switch via dispatch");
-            dwl_output.dispatch(
-                "switch_keyboard_layout".to_string(),
-                String::new(),
-                String::new(),
-                String::new(),
-                String::new(),
-                String::new(),
-            );
-        }
-    }
-
-    /// Apply buffered frame state for an output.
-    fn apply_frame(&mut self, output_id: &ObjectId) {
-        // First, extract all the data we need from the output
-        let (output_name, is_focused_output, frame_tags, frame_title, frame_appid, layout_symbol) = {
-            let Some(output) = self.outputs.get_mut(output_id) else {
-                return;
-            };
-
-            // Get output name for per-output tracking
-            let output_name = Self::output_name(output_id, output);
-
-            let frame = &mut output.frame_state;
-
-            // Handle active output change
-            if let Some(active) = frame.active
-                && active
-            {
-                self.focused_output = Some(output_id.clone());
-            }
-
-            let is_focused = self.focused_output.as_ref() == Some(output_id);
-
-            // Clone the data we need
-            let tags = frame.tags.clone();
-            let title = frame.title.take();
-            let appid = frame.appid.take();
-            let layout_symbol = frame.layout_symbol.take();
-
-            // Clear frame state for next frame
-            frame.clear();
-
-            (output_name, is_focused, tags, title, appid, layout_symbol)
-        };
-
-        if let Some(symbol) = layout_symbol {
-            if Self::is_overview_layout_symbol(&symbol) {
-                self.overview_outputs.insert(output_id.clone());
-            } else {
-                self.overview_outputs.remove(output_id);
-            }
-        }
-        let is_overview = self.overview_outputs.contains(output_id);
-
-        // Get or create per-output state
-        let per_output = self
-            .snapshot
-            .per_output
-            .entry(output_name.clone())
-            .or_default();
-
-        // Clear previous per-output state for this output
-        per_output.window_counts.clear();
-        per_output.occupied_workspaces.clear();
-        per_output.active_workspace.clear();
-
-        // Clear global active workspace if this is the focused output
-        // (will be rebuilt from the active tags below)
-        if is_focused_output {
-            self.snapshot.active_workspace.clear();
-        }
-
-        // Handle tag updates - store per-output state
-        for &(tag, is_active, is_urgent, clients, _focused) in &frame_tags {
-            // Tags are 0-indexed in protocol, we use 1-indexed IDs
-            let workspace_id = (tag + 1) as i32;
-
-            // In Mango overview, ext-workspace-v1 exposes only workspace 0.
-            // Keep the widget-facing per-output tag list equally narrow.
-            if !is_overview {
-                per_output.window_counts.insert(workspace_id, clients);
-                if clients > 0 {
-                    per_output.occupied_workspaces.insert(workspace_id);
-                }
-            }
-            if is_active && !is_overview {
-                per_output.active_workspace.insert(workspace_id);
-            }
-
-            // Update global active workspace (only for focused output)
-            if is_active && is_focused_output && !is_overview {
-                self.snapshot.active_workspace.insert(workspace_id);
-            }
-
-            // Urgent is global (any output can trigger urgency)
-            if is_urgent {
-                self.snapshot.urgent_workspaces.insert(workspace_id);
-            } else {
-                self.snapshot.urgent_workspaces.remove(&workspace_id);
-            }
-
-            trace!(
-                "Tag {} on {}: active={}, urgent={}, clients={}",
-                workspace_id, output_name, is_active, is_urgent, clients
-            );
-        }
-
-        if is_overview {
-            per_output.active_workspace.insert(OVERVIEW_WORKSPACE_ID);
-            if is_focused_output {
-                self.snapshot.active_workspace.insert(OVERVIEW_WORKSPACE_ID);
-            }
-        }
-
-        // Rebuild global window_counts and occupied from all per-output states
-        self.rebuild_global_from_per_output();
-
-        // Handle window info updates
-        let mut window_changed = false;
-        if let Some(title) = frame_title {
-            if let Some(output) = self.outputs.get_mut(output_id) {
-                output.last_title = title;
-            }
-            window_changed = true;
-        }
-        if let Some(appid) = frame_appid {
-            if let Some(output) = self.outputs.get_mut(output_id) {
-                output.last_appid = appid;
-            }
-            window_changed = true;
-        }
-
-        // Update shared state
-        *self.shared.snapshot.write() = self.snapshot.clone();
-
-        // Emit callbacks
-        if let Some(cb) = &self.on_workspace_update {
-            cb(self.snapshot.clone());
-        }
-
-        if window_changed && is_focused_output {
-            // Get the output info for the window.
-            // Use the same output_name key that we use for per_output state, so that
-            // WindowTitleWidget can reliably match its output_id against this value.
-            let window_info = if let Some(output) = self.outputs.get(output_id) {
-                WindowInfo {
-                    title: output.last_title.clone(),
-                    app_id: output.last_appid.clone(),
-                    // In multi-tag view, the focused window could be on any of the visible tags.
-                    // We pick an arbitrary one since WindowInfo only holds a single workspace_id.
-                    workspace_id: self.snapshot.active_workspace.iter().next().copied(),
-                    output: Some(output_name.clone()),
-                }
-            } else {
-                return;
-            };
-
-            *self.shared.focused_window.write() = Some(window_info.clone());
-
-            if let Some(cb) = &self.on_window_update {
-                cb(window_info);
-            }
-        }
-    }
-
-    /// Rebuild global window_counts and occupied_workspaces from per-output state.
-    fn rebuild_global_from_per_output(&mut self) {
-        self.snapshot.window_counts.clear();
-        self.snapshot.occupied_workspaces.clear();
-
-        for per_out in self.snapshot.per_output.values() {
-            for (&ws_id, &count) in &per_out.window_counts {
-                *self.snapshot.window_counts.entry(ws_id).or_insert(0) += count;
-                if count > 0 {
-                    self.snapshot.occupied_workspaces.insert(ws_id);
-                }
-            }
-        }
-    }
-
-    /// Get the DWL output for switching workspaces.
-    fn get_focused_dwl_output(&self) -> Option<&ZdwlIpcOutputV2> {
-        let output_id = self
-            .focused_output
-            .as_ref()
-            .or_else(|| self.outputs.keys().next())?;
-        self.outputs.get(output_id).map(|o| &o.dwl_output)
-    }
-}
-
-/// Parse TagState from WEnum.
-fn parse_tag_state(state: WEnum<TagState>) -> (bool, bool) {
-    match state {
-        WEnum::Value(TagState::None) => (false, false),
-        WEnum::Value(TagState::Active) => (true, false),
-        WEnum::Value(TagState::Urgent) => (false, true),
-        // Handle combined states - Active | Urgent would be 3
-        WEnum::Unknown(bits) => {
-            let is_active = (bits & 1) != 0;
-            let is_urgent = (bits & 2) != 0;
-            (is_active, is_urgent)
-        }
-    }
-}
-
-impl Dispatch<WlRegistry, ()> for WaylandState {
-    fn event(
-        state: &mut Self,
-        registry: &WlRegistry,
-        event: wl_registry::Event,
-        _data: &(),
-        _conn: &Connection,
-        qh: &QueueHandle<Self>,
-    ) {
-        match event {
-            wl_registry::Event::Global {
-                name,
-                interface,
-                version,
-            } => {
-                trace!("Global: {} v{} (name={})", interface, version, name);
-
-                if interface == "zdwl_ipc_manager_v2" {
-                    debug!("Found DWL IPC manager v{}", version);
-                    let manager: ZdwlIpcManagerV2 = registry.bind(name, version.min(2), qh, ());
-                    state.manager = Some(manager);
-
-                    // Process any outputs that were discovered before the manager
-                    state.process_pending_outputs(qh);
-                } else if interface == "wl_output" {
-                    // Bind to wl_output to get it for DWL
-                    let wl_output: WlOutput = registry.bind(name, version.min(4), qh, name);
-
-                    if let Some(manager) = &state.manager {
-                        // Manager already exists, create DWL output immediately
-                        let id = wl_output.id();
-                        debug!("Creating DWL output for wl_output {:?}", id);
-
-                        let dwl_output = manager.get_output(&wl_output, qh, id.clone());
-
-                        state.outputs.insert(
-                            id,
-                            TrackedOutput {
-                                wl_output,
-                                dwl_output,
-                                name: None,
-                                frame_state: OutputFrameState::default(),
-                                last_title: String::new(),
-                                last_appid: String::new(),
-                            },
-                        );
-                    } else {
-                        // Queue for later
-                        state.pending_outputs.push((wl_output, None));
-                    }
-                }
-            }
-            wl_registry::Event::GlobalRemove { name: _ } => {
-                // Handle global removal if needed
-            }
-            _ => {}
-        }
-    }
-}
-
-impl Dispatch<ZdwlIpcManagerV2, ()> for WaylandState {
-    fn event(
-        state: &mut Self,
-        _manager: &ZdwlIpcManagerV2,
-        event: zdwl_ipc_manager_v2::Event,
-        _data: &(),
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-    ) {
-        match event {
-            zdwl_ipc_manager_v2::Event::Tags { amount } => {
-                debug!("DWL tag count: {}", amount);
-                state.tag_count = amount;
-                state.shared.tag_count.store(amount, Ordering::Relaxed);
-            }
-            zdwl_ipc_manager_v2::Event::Layout { name } => {
-                debug!("DWL layout: {}", name);
-                state.layouts.push(name);
-            }
-        }
-    }
-}
-
-impl Dispatch<ZdwlIpcOutputV2, ObjectId> for WaylandState {
-    fn event(
-        state: &mut Self,
-        _output: &ZdwlIpcOutputV2,
-        event: zdwl_ipc_output_v2::Event,
-        output_id: &ObjectId,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-    ) {
-        let Some(tracked) = state.outputs.get_mut(output_id) else {
-            trace!("Event for unknown output {:?}", output_id);
-            return;
-        };
-
-        match event {
-            zdwl_ipc_output_v2::Event::Active { active } => {
-                tracked.frame_state.active = Some(active != 0);
-            }
-            zdwl_ipc_output_v2::Event::Tag {
-                tag,
-                state: tag_state,
-                clients,
-                focused,
-            } => {
-                let (is_active, is_urgent) = parse_tag_state(tag_state);
-                tracked
-                    .frame_state
-                    .tags
-                    .push((tag, is_active, is_urgent, clients, focused != 0));
-            }
-            zdwl_ipc_output_v2::Event::Title { title } => {
-                tracked.frame_state.title = Some(title);
-            }
-            zdwl_ipc_output_v2::Event::Appid { appid } => {
-                tracked.frame_state.appid = Some(appid);
-            }
-            zdwl_ipc_output_v2::Event::Frame => {
-                // Apply all buffered state
-                state.apply_frame(output_id);
-            }
-            zdwl_ipc_output_v2::Event::ToggleVisibility => {}
-            zdwl_ipc_output_v2::Event::Layout { layout: _ } => {}
-            zdwl_ipc_output_v2::Event::LayoutSymbol { layout } => {
-                tracked.frame_state.layout_symbol = Some(layout);
-            }
-            zdwl_ipc_output_v2::Event::Fullscreen { is_fullscreen: _ } => {}
-            zdwl_ipc_output_v2::Event::Floating { is_floating: _ } => {}
-            zdwl_ipc_output_v2::Event::KbLayout { kb_layout } => {
-                debug!("DWL keyboard layout: {}", kb_layout);
-
-                let info = KeyboardLayoutInfo {
-                    layout_name: xkb_names::language_from_xkb(&kb_layout)
-                        .map(String::from)
-                        .unwrap_or_else(|| kb_layout.to_uppercase()),
-                    short_name: kb_layout,
-                    layout_count: None,
-                };
-
-                *state.shared.keyboard_layout.write() = Some(info.clone());
-
-                if let Some(ref cb) = state.on_keyboard_layout_update {
-                    cb(info);
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
-impl Dispatch<WlOutput, u32> for WaylandState {
-    fn event(
-        state: &mut Self,
-        output: &WlOutput,
-        event: wayland_client::protocol::wl_output::Event,
-        _name: &u32,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-    ) {
-        if let wayland_client::protocol::wl_output::Event::Name { name } = event {
-            // Update the output name if we have it tracked
-            let id = output.id();
-            if let Some(tracked) = state.outputs.get_mut(&id) {
-                tracked.name = Some(name);
-            }
-        }
-    }
-}
-
-/// MangoWC/DWL backend using native Wayland protocol.
-pub struct MangoBackend {
-    /// New Mango socket IPC backend, when available.
-    socket_backend: Option<MangoSocketBackend>,
-    /// Output allow-list (empty = all outputs).
-    #[allow(dead_code)]
-    allowed_outputs: RwLock<Vec<String>>,
-    /// Shared state accessible from any thread.
-    shared: Arc<SharedState>,
-    /// Whether the backend is running.
-    running: AtomicBool,
-    /// glib source IDs for cleanup.
-    source_ids: Mutex<Vec<glib::SourceId>>,
-    /// Eventfd used to wake the fd watcher for workspace switching.
-    wake_fd: Mutex<Option<OwnedFd>>,
-    /// Keyboard layout change callback.
-    keyboard_layout_callback: Mutex<Option<KeyboardLayoutCallback>>,
-}
-
-impl MangoBackend {
-    /// Create a new MangoWC/DWL backend.
-    pub fn new(outputs: Option<Vec<String>>) -> Self {
-        Self {
-            socket_backend: MangoSocketBackend::from_env(),
-            allowed_outputs: RwLock::new(outputs.unwrap_or_default()),
-            shared: Arc::new(SharedState::default()),
-            running: AtomicBool::new(false),
-            source_ids: Mutex::new(Vec::new()),
-            wake_fd: Mutex::new(None),
-            keyboard_layout_callback: Mutex::new(None),
-        }
-    }
-
-    /// Get the Wayland connection by connecting directly.
-    fn get_wayland_connection() -> Option<Connection> {
-        Connection::connect_to_env().ok()
-    }
-}
-
-impl CompositorBackend for MangoBackend {
-    fn start(&self, on_workspace_update: WorkspaceCallback, on_window_update: WindowCallback) {
-        if let Some(socket_backend) = &self.socket_backend {
-            socket_backend.start(on_workspace_update, on_window_update);
-            return;
-        }
-
-        if self.running.swap(true, Ordering::SeqCst) {
-            warn!("MangoBackend already running");
-            return;
-        }
-
-        debug!("Starting MangoBackend with native Wayland protocol");
-
-        // Get the Wayland connection
-        let Some(connection) = Self::get_wayland_connection() else {
-            error!("Failed to connect to Wayland display");
-            self.running.store(false, Ordering::SeqCst);
-            return;
-        };
-
-        // Create event queue and state
-        let event_queue: EventQueue<WaylandState> = connection.new_event_queue();
-        let qh = event_queue.handle();
-
-        let shared = self.shared.clone();
-        let mut state = WaylandState::new(shared);
-        state.on_workspace_update = Some(on_workspace_update.clone());
-        state.on_window_update = Some(on_window_update.clone());
-        state.on_keyboard_layout_update = self
-            .keyboard_layout_callback
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-
-        // Get the registry and bind to globals
-        let display = connection.display();
-        let _registry = display.get_registry(&qh, ());
-
-        // Wrap in Rc<RefCell<>> for the glib closure
-        let event_queue = Rc::new(RefCell::new(event_queue));
-        let state = Rc::new(RefCell::new(state));
-
-        // Do initial roundtrips on the main thread via glib
-        {
-            let mut eq = event_queue.borrow_mut();
-            let mut st = state.borrow_mut();
-
-            // Roundtrip to get globals
-            if let Err(e) = eq.roundtrip(&mut *st) {
-                error!("Wayland roundtrip failed: {}", e);
-                self.running.store(false, Ordering::SeqCst);
-                return;
-            }
-
-            // Check if we found the DWL manager
-            if st.manager.is_none() {
-                error!("DWL IPC manager not found - is this a MangoWC/DWL compositor?");
-                self.running.store(false, Ordering::SeqCst);
-                return;
-            }
-
-            // Another roundtrip to process DWL manager events
-            if let Err(e) = eq.roundtrip(&mut *st) {
-                error!("Wayland roundtrip failed: {}", e);
-                self.running.store(false, Ordering::SeqCst);
-                return;
-            }
-
-            debug!(
-                "DWL manager ready: {} tags, {} layouts",
-                st.tag_count,
-                st.layouts.len()
-            );
-        }
-
-        // Set up fd-based event watching using glib's unix_fd_add_local.
-        // This is more efficient than polling - we only wake up when events are available.
-        let eq_fd = event_queue.borrow().as_fd().as_raw_fd();
-        let shared_for_loop = self.shared.clone();
-        let event_queue_for_fd = event_queue.clone();
-        let state_for_fd = state.clone();
-
-        // Create eventfd for wake-on-demand workspace switching.
-        // This avoids continuous polling - we only wake when switch_workspace() is called.
-        // SAFETY: eventfd() is a safe syscall that returns a valid fd or -1 on error.
-        let wake_fd_raw = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC) };
-        if wake_fd_raw < 0 {
-            error!(
-                "Failed to create eventfd: {}",
-                std::io::Error::last_os_error()
-            );
-            self.running.store(false, Ordering::SeqCst);
-            return;
-        }
-        // SAFETY: wake_fd_raw >= 0 (checked above), so it's a valid fd. OwnedFd takes ownership.
-        let wake_fd = unsafe { OwnedFd::from_raw_fd(wake_fd_raw) };
-        *self.wake_fd.lock().unwrap_or_else(|e| e.into_inner()) = Some(wake_fd);
-
-        let fd_source_id =
-            glib::unix_fd_add_local(eq_fd, glib::IOCondition::IN, move |_fd, _condition| {
-                // Check for pending workspace switch
-                {
-                    let st = state_for_fd.borrow();
-                    st.process_pending_switch();
-                }
-
-                let mut eq = event_queue_for_fd.borrow_mut();
-                let mut st = state_for_fd.borrow_mut();
-
-                // Dispatch pending events
-                if let Err(e) = eq.dispatch_pending(&mut *st) {
-                    error!("Wayland dispatch error: {}", e);
-                    return glib::ControlFlow::Break;
-                }
-
-                // Prepare read and check for events
-                if let Some(guard) = eq.prepare_read() {
-                    match guard.read() {
-                        Ok(_) => {
-                            // Events were read, dispatch them
-                            let _ = eq.dispatch_pending(&mut *st);
-                        }
-                        Err(wayland_client::backend::WaylandError::Io(io_err)) => {
-                            if io_err.kind() != std::io::ErrorKind::WouldBlock {
-                                error!("Wayland read error: {}", io_err);
-                            }
-                        }
-                        Err(e) => {
-                            error!("Wayland error: {}", e);
-                        }
-                    }
-                }
-
-                // Flush any pending requests (like workspace switches)
-                let _ = eq.flush();
-
-                // Check if we should stop
-                if shared_for_loop.pending_switch.load(Ordering::Relaxed) == i32::MIN {
-                    return glib::ControlFlow::Break;
-                }
-
-                glib::ControlFlow::Continue
-            });
-
-        // Watch the eventfd to wake up for workspace switch requests.
-        // When switch_workspace() writes to the eventfd, this callback fires
-        // and processes the pending switch without any continuous polling.
-        let state_for_wake = state.clone();
-        let event_queue_for_wake = event_queue.clone();
-        let shared_for_wake = self.shared.clone();
-
-        let wake_source_id =
-            glib::unix_fd_add_local(wake_fd_raw, glib::IOCondition::IN, move |fd, _condition| {
-                // Drain the eventfd (read the counter to reset it)
-                // SAFETY: fd is a valid eventfd from glib callback. Reading 8 bytes (u64 counter)
-                // into correctly-sized buffer. Return value ignored - we just need to reset it.
-                let mut buf = [0u8; 8];
-                unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, 8) };
-
-                // Check for stop signal
-                let pending = shared_for_wake.pending_switch.load(Ordering::Relaxed);
-                if pending == i32::MIN {
-                    return glib::ControlFlow::Break;
-                }
-
-                // Process the pending switch and quit requests
-                {
-                    let st = state_for_wake.borrow();
-                    st.process_pending_switch();
-                    st.process_pending_quit();
-                    st.process_pending_kb_switch();
-                }
-
-                // Flush to send the request
-                let eq = event_queue_for_wake.borrow();
-                let _ = eq.flush();
-
-                glib::ControlFlow::Continue
-            });
-
-        self.source_ids
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .extend([fd_source_id, wake_source_id]);
-
-        debug!("MangoBackend started");
-    }
-
-    fn stop(&self) {
-        if let Some(socket_backend) = &self.socket_backend {
-            socket_backend.stop();
-            return;
-        }
-
-        if !self.running.swap(false, Ordering::SeqCst) {
-            return;
-        }
-
-        debug!("Stopping MangoBackend");
-
-        // Signal the loop to stop
-        self.shared.pending_switch.store(i32::MIN, Ordering::SeqCst);
-
-        // Wake the eventfd watcher so it sees the stop signal
-        if let Some(wake_fd) = self
-            .wake_fd
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
-        {
-            // SAFETY: wake_fd is valid (held by Mutex), writing 8-byte u64 with correct alignment.
-            let val: u64 = 1;
-            unsafe {
-                libc::write(
-                    wake_fd.as_raw_fd(),
-                    &val as *const u64 as *const libc::c_void,
-                    8,
-                );
-            }
-        }
-
-        // Remove the glib sources
-        for source_id in self
-            .source_ids
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .drain(..)
-        {
-            source_id.remove();
-        }
-
-        // Drop the eventfd
-        *self.wake_fd.lock().unwrap_or_else(|e| e.into_inner()) = None;
-
-        debug!("MangoBackend stopped");
-    }
-
-    fn list_workspaces(&self) -> Vec<WorkspaceMeta> {
-        if let Some(socket_backend) = &self.socket_backend {
-            return socket_backend.list_workspaces();
-        }
-
-        let count = self.shared.tag_count.load(Ordering::Relaxed);
-        let snapshot = self.shared.snapshot.read();
-        mango_workspace_meta(count, &snapshot)
-    }
-
-    fn get_workspace_snapshot(&self) -> WorkspaceSnapshot {
-        if let Some(socket_backend) = &self.socket_backend {
-            return socket_backend.get_workspace_snapshot();
-        }
-
-        self.shared.snapshot.read().clone()
-    }
-
-    fn get_focused_window(&self) -> Option<WindowInfo> {
-        if let Some(socket_backend) = &self.socket_backend {
-            return socket_backend.get_focused_window();
-        }
-
-        self.shared.focused_window.read().clone()
-    }
-
-    fn switch_workspace(&self, workspace_id: i32) {
-        if let Some(socket_backend) = &self.socket_backend {
-            socket_backend.switch_workspace(workspace_id);
-            return;
-        }
-
-        debug!("Requesting switch to workspace {}", workspace_id);
-        self.shared
-            .pending_switch
-            .store(workspace_id, Ordering::SeqCst);
-
-        // Wake the fd watcher to process the switch immediately.
-        // Write any non-zero value to the eventfd.
-        if let Some(wake_fd) = self
-            .wake_fd
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
-        {
-            // SAFETY: wake_fd is valid (held by Mutex), writing 8-byte u64 with correct alignment.
-            let val: u64 = 1;
-            unsafe {
-                libc::write(
-                    wake_fd.as_raw_fd(),
-                    &val as *const u64 as *const libc::c_void,
-                    8,
-                );
-            }
-        }
-    }
-
-    fn quit_compositor(&self) {
-        if let Some(socket_backend) = &self.socket_backend {
-            socket_backend.quit_compositor();
-            return;
-        }
-
-        debug!("Requesting compositor quit");
-        self.shared.pending_quit.store(true, Ordering::SeqCst);
-
-        // Wake the fd watcher to process the quit immediately.
-        if let Some(wake_fd) = self
-            .wake_fd
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
-        {
-            // SAFETY: wake_fd is valid (held by Mutex), writing 8-byte u64 with correct alignment.
-            let val: u64 = 1;
-            unsafe {
-                libc::write(
-                    wake_fd.as_raw_fd(),
-                    &val as *const u64 as *const libc::c_void,
-                    8,
-                );
-            }
-        }
-    }
-
-    fn name(&self) -> &'static str {
-        if let Some(socket_backend) = &self.socket_backend {
-            return socket_backend.name();
-        }
-
-        "MangoWC/DWL"
-    }
-
-    fn set_keyboard_layout_callback(&self, callback: KeyboardLayoutCallback) {
-        if let Some(socket_backend) = &self.socket_backend {
-            socket_backend.set_keyboard_layout_callback(callback);
-            return;
-        }
-
-        *self
-            .keyboard_layout_callback
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Some(callback);
-    }
-
-    fn get_keyboard_layout(&self) -> Option<KeyboardLayoutInfo> {
-        if let Some(socket_backend) = &self.socket_backend {
-            return socket_backend.get_keyboard_layout();
-        }
-
-        self.shared.keyboard_layout.read().clone()
-    }
-
-    fn switch_keyboard_layout_next(&self) {
-        if let Some(socket_backend) = &self.socket_backend {
-            socket_backend.switch_keyboard_layout_next();
-            return;
-        }
-
-        // MangoWC uses the dispatch request with "switch_keyboard_layout".
-        // We need to signal the main thread to process this, similar to
-        // switch_workspace. For now, we store a pending request and wake
-        // the eventfd — but dispatch requires a DWL output proxy which
-        // is only accessible on the main thread.
-        //
-        // Since the WaylandState with the DWL output proxy runs on the
-        // glib main loop, we use a similar wake mechanism as switch_workspace.
-        // However, dispatch is a different operation — we use a separate
-        // atomic flag for it.
-        debug!("Requesting keyboard layout switch");
-        self.shared.pending_kb_switch.store(true, Ordering::SeqCst);
-
-        // Wake the fd watcher to process the switch.
-        if let Some(wake_fd) = self
-            .wake_fd
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
-        {
-            // SAFETY: wake_fd is valid (held by Mutex), writing 8-byte u64 with correct alignment.
-            let val: u64 = 1;
-            unsafe {
-                libc::write(
-                    wake_fd.as_raw_fd(),
-                    &val as *const u64 as *const libc::c_void,
-                    8,
-                );
-            }
-        }
-    }
-
-    fn list_windows(&self) -> Vec<Window> {
-        if let Some(socket_backend) = &self.socket_backend {
-            return socket_backend.list_windows();
-        }
-
-        Vec::new()
-    }
-
-    fn set_window_list_callback(&self, callback: WindowListCallback) {
-        if let Some(socket_backend) = &self.socket_backend {
-            socket_backend.set_window_list_callback(callback);
-        }
-    }
-
-    fn focus_window(&self, window_id: u64) {
-        if let Some(socket_backend) = &self.socket_backend {
-            socket_backend.focus_window(window_id);
-        }
-    }
-}
-
-impl Drop for MangoBackend {
-    fn drop(&mut self) {
-        if let Some(socket_backend) = &self.socket_backend {
-            socket_backend.stop();
-            return;
-        }
-
-        // Signal stop but don't call stop() directly (may already be stopped)
-        self.running.store(false, Ordering::SeqCst);
-        self.shared.pending_switch.store(i32::MIN, Ordering::SeqCst);
-        // Eventfd is dropped automatically via OwnedFd
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::services::compositor::PerOutputState;
 
+    /// Build a backend with no socket, simulating a non-MangoWC session.
+    fn backend_without_socket() -> MangoBackend {
+        let mut backend = MangoBackend::new(None);
+        backend.socket_path = None;
+        backend
+    }
+
     #[test]
-    fn overview_layout_symbol_matches_mango_symbol_and_name() {
-        assert!(WaylandState::is_overview_layout_symbol(
-            OVERVIEW_LAYOUT_SYMBOL
-        ));
-        assert!(WaylandState::is_overview_layout_symbol("overview"));
-        assert!(!WaylandState::is_overview_layout_symbol("tile"));
+    fn start_without_socket_env_is_a_no_op() {
+        let backend = backend_without_socket();
+
+        backend.start(Arc::new(|_| {}), Arc::new(|_| {}));
+
+        assert!(
+            !backend.running.load(Ordering::SeqCst),
+            "backend must not report running without MANGO_INSTANCE_SIGNATURE"
+        );
+        assert!(
+            backend
+                .watch_threads
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_empty(),
+            "no watch threads should be spawned without a socket"
+        );
+    }
+
+    #[test]
+    fn commands_without_socket_do_not_panic() {
+        let backend = backend_without_socket();
+
+        assert!(backend.send_command("get all-monitors").is_none());
+        backend.switch_workspace(2);
+        backend.quit_compositor();
+        backend.switch_keyboard_layout_next();
+        backend.focus_window(7);
+
+        assert!(backend.list_windows().is_empty());
+        assert!(backend.get_focused_window().is_none());
     }
 
     #[test]
@@ -1931,7 +849,7 @@ mod tests {
 
     #[test]
     fn socket_workspace_parser_accepts_all_monitors_name_field() {
-        let shared = Arc::new(MangoSocketSharedState::default());
+        let shared = Arc::new(MangoSharedState::default());
         let value = serde_json::json!({
             "monitors": [
                 {
@@ -1958,7 +876,7 @@ mod tests {
 
     #[test]
     fn socket_workspace_parser_global_active_uses_active_monitor_only() {
-        let shared = Arc::new(MangoSocketSharedState::default());
+        let shared = Arc::new(MangoSharedState::default());
         let value = serde_json::json!({
             "monitors": [
                 {
@@ -1991,7 +909,7 @@ mod tests {
 
     #[test]
     fn socket_workspace_parser_suppresses_real_tags_in_overview() {
-        let shared = Arc::new(MangoSocketSharedState::default());
+        let shared = Arc::new(MangoSharedState::default());
         let value = serde_json::json!({
             "monitors": [
                 {
@@ -2021,21 +939,41 @@ mod tests {
     }
 
     #[test]
-    fn socket_focused_window_parser_handles_no_client() {
-        let shared = Arc::new(MangoSocketSharedState::default());
-        let value = serde_json::json!({"id": null});
+    fn socket_focused_window_parser_scopes_no_client_to_active_monitor() {
+        let shared = Arc::new(MangoSharedState::default());
+        let value = serde_json::json!({
+            "monitors": [
+                {
+                    "name": "DP-1",
+                    "active": false,
+                    "active_tags": [1],
+                    "active_client": {"id": 10, "title": "Terminal", "appid": "foot"}
+                },
+                {
+                    "name": "HDMI-A-1",
+                    "active": true,
+                    "active_tags": [3],
+                    "active_client": {"id": null, "title": null, "appid": null}
+                }
+            ]
+        });
 
-        assert!(apply_focused_window_from_client(&shared, &value));
+        assert!(apply_focused_window_from_monitors(&shared, &value));
 
         assert_eq!(
             shared.focused_window.read().clone(),
-            Some(WindowInfo::default())
+            Some(WindowInfo {
+                workspace_id: Some(3),
+                output: Some("HDMI-A-1".to_string()),
+                ..Default::default()
+            })
         );
+        assert_eq!(*shared.focused_client_id.read(), None);
     }
 
     #[test]
     fn socket_window_list_parser_maps_mango_clients() {
-        let shared = Arc::new(MangoSocketSharedState::default());
+        let shared = Arc::new(MangoSharedState::default());
         let value = serde_json::json!({
             "clients": [
                 {
@@ -2080,7 +1018,7 @@ mod tests {
 
     #[test]
     fn socket_window_list_parser_orders_by_workspace() {
-        let shared = Arc::new(MangoSocketSharedState::default());
+        let shared = Arc::new(MangoSharedState::default());
         let value = serde_json::json!({
             "clients": [
                 {"id": 30, "monitor": "eDP-1", "tags": [3]},
@@ -2102,7 +1040,7 @@ mod tests {
 
     #[test]
     fn socket_window_list_parser_orders_outputs_by_geometry() {
-        let shared = Arc::new(MangoSocketSharedState::default());
+        let shared = Arc::new(MangoSharedState::default());
         let monitors = serde_json::json!({
             "monitors": [
                 {"name": "DP-1", "x": 1920, "y": 0, "tags": []},
@@ -2130,7 +1068,7 @@ mod tests {
 
     #[test]
     fn socket_window_list_focus_update_clears_empty_workspace_focus() {
-        let shared = Arc::new(MangoSocketSharedState::default());
+        let shared = Arc::new(MangoSharedState::default());
         let clients = serde_json::json!({
             "clients": [
                 {"id": 10, "tags": [1], "is_focused": true},
@@ -2141,10 +1079,7 @@ mod tests {
         assert!(apply_window_list_from_clients(&shared, &clients));
         assert!(shared.windows.read()[0].is_focused);
 
-        assert!(apply_window_list_focus_from_client(
-            &shared,
-            &serde_json::json!({"id": null})
-        ));
+        assert!(apply_window_list_focus(&shared, None));
 
         assert!(
             shared
@@ -2157,7 +1092,7 @@ mod tests {
 
     #[test]
     fn socket_window_list_focus_update_moves_active_window() {
-        let shared = Arc::new(MangoSocketSharedState::default());
+        let shared = Arc::new(MangoSharedState::default());
         let clients = serde_json::json!({
             "clients": [
                 {"id": 10, "tags": [1], "is_focused": true},
@@ -2166,10 +1101,7 @@ mod tests {
         });
 
         assert!(apply_window_list_from_clients(&shared, &clients));
-        assert!(apply_window_list_focus_from_client(
-            &shared,
-            &serde_json::json!({"id": 20})
-        ));
+        assert!(apply_window_list_focus(&shared, Some(20)));
         let windows = shared.windows.read();
 
         assert!(
@@ -2190,11 +1122,18 @@ mod tests {
 
     #[test]
     fn socket_window_list_parser_ignores_stale_all_clients_focus() {
-        let shared = Arc::new(MangoSocketSharedState::default());
+        let shared = Arc::new(MangoSharedState::default());
 
-        assert!(apply_focused_window_from_client(
+        assert!(apply_focused_window_from_monitors(
             &shared,
-            &serde_json::json!({"id": 20})
+            &serde_json::json!({
+                "monitors": [{
+                    "name": "DP-1",
+                    "active": true,
+                    "active_tags": [2],
+                    "active_client": {"id": 20, "title": "Browser", "appid": "firefox"}
+                }]
+            })
         ));
         assert!(apply_window_list_from_clients(
             &shared,
@@ -2224,34 +1163,8 @@ mod tests {
     }
 
     #[test]
-    fn socket_focus_window_commands_switch_target_output_workspace_first() {
-        let window = Window {
-            id: 13,
-            workspace_id: Some(5),
-            output: Some("DP-1".to_string()),
-            ..Default::default()
-        };
-
-        assert_eq!(
-            mango_focus_window_commands(Some(&window), window.id),
-            vec![
-                "dispatch viewcrossmon,5,DP-1".to_string(),
-                "dispatch focusid client,13".to_string()
-            ]
-        );
-    }
-
-    #[test]
-    fn socket_focus_window_commands_focus_directly_without_location() {
-        assert_eq!(
-            mango_focus_window_commands(None, 13),
-            vec!["dispatch focusid client,13".to_string()]
-        );
-    }
-
-    #[test]
     fn socket_window_list_parser_handles_optional_fields() {
-        let shared = Arc::new(MangoSocketSharedState::default());
+        let shared = Arc::new(MangoSharedState::default());
         let value = serde_json::json!({
             "clients": [
                 {"id": 9, "tags": []},
@@ -2273,16 +1186,22 @@ mod tests {
     }
 
     #[test]
-    fn socket_keyboard_layout_parser_maps_layout_name() {
-        let shared = Arc::new(MangoSocketSharedState::default());
-        let value = serde_json::json!({"layout": "us"});
+    fn socket_keyboard_layout_parser_uses_active_monitor() {
+        let shared = Arc::new(MangoSharedState::default());
+        let value = serde_json::json!({
+            "monitors": [
+                {"active": false, "keyboardlayout": "German"},
+                {"active": true, "keyboardlayout": "English (US)"}
+            ]
+        });
 
-        assert!(apply_keyboard_layout_from_value(&shared, &value));
+        assert!(apply_keyboard_layout_from_monitors(&shared, &value));
         let info = shared.keyboard_layout.read().clone().unwrap();
 
-        assert_eq!(info.short_name, "us");
-        assert_eq!(info.layout_name, "English");
+        assert!(info.short_name.is_empty());
+        assert_eq!(info.layout_name, "English (US)");
         assert_eq!(info.layout_count, None);
+        assert!(!apply_keyboard_layout_from_monitors(&shared, &value));
     }
 
     // --- scratchpad filtering ---
@@ -2291,8 +1210,8 @@ mod tests {
 
     #[test]
     fn socket_window_list_hides_dismissed_scratchpads() {
-        let shared = Arc::new(MangoSocketSharedState::default());
-        // Dismissed scratchpad + dismissed named scratchpad, plus a normal client.
+        let shared = Arc::new(MangoSharedState::default());
+        // Dismissed scratchpads and swallowed clients are not actionable taskbar entries.
         let value = serde_json::json!({
             "clients": [
                 {
@@ -2306,6 +1225,10 @@ mod tests {
                 {
                     "id": 3, "tags": [1],
                     "is_scratchpad": false, "is_namedscratchpad": false
+                },
+                {
+                    "id": 4, "tags": [1],
+                    "is_swallowedby": true
                 }
             ]
         });
@@ -2320,7 +1243,7 @@ mod tests {
     #[test]
     fn socket_window_list_keeps_summoned_scratchpad() {
         // A summoned (tagged) scratchpad stays in the taskbar even when unfocused.
-        let shared = Arc::new(MangoSocketSharedState::default());
+        let shared = Arc::new(MangoSharedState::default());
         let value = serde_json::json!({
             "clients": [
                 {
@@ -2349,7 +1272,7 @@ mod tests {
     #[test]
     fn socket_window_list_keeps_summoned_scratchpad_when_unfocused() {
         // Regression: a summoned scratchpad that lost focus must still show.
-        let shared = Arc::new(MangoSocketSharedState::default());
+        let shared = Arc::new(MangoSharedState::default());
         let value = serde_json::json!({
             "clients": [
                 {
@@ -2370,7 +1293,7 @@ mod tests {
     #[test]
     fn socket_window_list_hides_dismissed_scratchpad_missing_tags_field() {
         // A missing tags field is treated the same as empty (hidden).
-        let shared = Arc::new(MangoSocketSharedState::default());
+        let shared = Arc::new(MangoSharedState::default());
         let value = serde_json::json!({
             "clients": [
                 {"id": 20, "is_scratchpad": false, "is_namedscratchpad": true}

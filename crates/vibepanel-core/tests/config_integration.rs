@@ -29,7 +29,18 @@ fn test_load_real_config() {
 
     // Verify advanced config has valid compositor
     assert!(
-        ["auto", "mango", "hyprland", "niri"].contains(&config.advanced.compositor.as_str()),
+        [
+            "auto",
+            "mango",
+            "mangowc",
+            "hyprland",
+            "niri",
+            "sway",
+            "miracle",
+            "miraclewm",
+            "scroll",
+        ]
+        .contains(&config.advanced.compositor.as_str()),
         "Compositor should be valid"
     );
 

@@ -148,7 +148,7 @@ fn workspaces_for_output(
 #[derive(Debug, Clone)]
 pub struct PerOutputWorkspaces {
     /// Currently active workspace IDs on this output.
-    /// Most compositors have a single active workspace, but MangoWC/DWL
+    /// Most compositors have a single active workspace, but MangoWC
     /// supports viewing multiple tags simultaneously.
     pub active_workspace: HashSet<i32>,
     /// Workspaces relevant to this output with per-output state.
@@ -163,7 +163,7 @@ pub struct PerOutputWorkspaces {
 #[derive(Debug, Clone)]
 pub struct WorkspaceServiceSnapshot {
     /// Currently active workspace IDs.
-    /// Most compositors have a single active workspace, but MangoWC/DWL
+    /// Most compositors have a single active workspace, but MangoWC
     /// supports viewing multiple tags simultaneously.
     pub active_workspace: HashSet<i32>,
     /// Set of occupied workspace IDs.

@@ -29,7 +29,7 @@ Recommends:     power-profiles-daemon
 
 %description
 A GTK4 panel for Wayland with integrated notifications, OSD, and quick settings.
-Supports Hyprland, Niri, MangoWC and DWL.
+Supports Hyprland, Niri, MangoWC, Sway and other i3-IPC compatible compositors.
 
 %prep
 %autosetup

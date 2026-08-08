@@ -150,7 +150,7 @@ I review all code and use VibePanel daily on multiple computers.
 
 ### Compatibility
 
-- **Compositors:** [Hyprland](https://github.com/hyprwm/Hyprland), [Niri](https://github.com/niri-wm/niri), [Sway](https://github.com/swaywm/sway), [Miracle WM](https://github.com/miracle-wm-org/miracle-wm), [Scroll](https://github.com/dawsers/scroll) and other i3-IPC compatible compositors. [MangoWC](https://github.com/mangowm/mango)/[DWL](https://codeberg.org/dwl/dwl) via dwl-ipc.
+- **Compositors:** [Hyprland](https://github.com/hyprwm/Hyprland), [Niri](https://github.com/niri-wm/niri), [Sway](https://github.com/swaywm/sway), [Miracle WM](https://github.com/miracle-wm-org/miracle-wm), [Scroll](https://github.com/dawsers/scroll) and other i3-IPC compatible compositors. [MangoWC](https://github.com/mangowm/mango) via its JSON IPC socket.
 - **Updates widget:** dnf, pacman/paru and flatpak.
 
 ## Documentation
