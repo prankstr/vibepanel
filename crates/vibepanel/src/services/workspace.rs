@@ -75,10 +75,11 @@ impl Workspace {
             (
                 state.active_workspace.contains(&meta.id),
                 state.occupied_workspaces.contains(&meta.id),
-                state.urgent_workspaces.as_ref().map_or_else(
-                    || snapshot.urgent_workspaces.contains(&meta.id),
-                    |urgent| urgent.contains(&meta.id),
-                ),
+                state
+                    .urgent_workspaces
+                    .as_ref()
+                    .unwrap_or(&snapshot.urgent_workspaces)
+                    .contains(&meta.id),
                 state.window_counts.get(&meta.id).copied(),
             )
         } else {

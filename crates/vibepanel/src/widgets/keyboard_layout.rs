@@ -167,12 +167,13 @@ fn extract_short_name(layout_name: &str) -> String {
     {
         let inner = layout_name[start + 1..start + 1 + rel_end].trim();
         if !inner.is_empty() {
-            let base = layout_name[..start].trim();
-
+            // A single token is a layout code or named variant; phrases describe
+            // the variant, so derive the code from the base language instead.
             if !inner.contains(' ') {
                 return inner.to_string();
             }
 
+            let base = layout_name[..start].trim();
             if !base.is_empty() {
                 if let Some(code) = layout_names::short_code_from_language(base) {
                     return code.to_string();

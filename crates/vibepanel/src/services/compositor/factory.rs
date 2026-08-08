@@ -43,7 +43,8 @@ impl BackendKind {
 /// 2. NIRI_SOCKET → Niri
 /// 3. SWAYSOCK → Sway
 /// 4. MIRACLESOCK → Sway (Miracle WM supports i3 IPC)
-/// 5. Default → MangoWC
+/// 5. MANGO_INSTANCE_SIGNATURE → MangoWC
+/// 6. Default → MangoWC
 pub fn detect_backend() -> BackendKind {
     // Check for Hyprland
     if env::var("HYPRLAND_INSTANCE_SIGNATURE").is_ok() {
@@ -67,6 +68,11 @@ pub fn detect_backend() -> BackendKind {
     if env::var("MIRACLESOCK").is_ok() {
         debug!("Detected Miracle WM via MIRACLESOCK");
         return BackendKind::Sway;
+    }
+
+    if env::var("MANGO_INSTANCE_SIGNATURE").is_ok_and(|value| !value.is_empty()) {
+        debug!("Detected MangoWC via MANGO_INSTANCE_SIGNATURE");
+        return BackendKind::Mango;
     }
 
     // Default to MangoWC

@@ -54,11 +54,11 @@ struct MangoSharedState {
     tag_count: AtomicU32,
 }
 
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 struct MonitorChanges {
     workspace: bool,
     focused_window: bool,
-    window_list: bool,
+    notify_window_list: bool,
     keyboard_layout: bool,
 }
 
@@ -180,7 +180,7 @@ impl MangoBackend {
                 }
                 // Taskbar separator state depends on workspace metadata, matching
                 // Niri's workspace-triggered window-list refresh behavior.
-                if changes.window_list
+                if changes.notify_window_list
                     && let Some(callback) = &window_list_callback
                 {
                     let windows = shared.windows.read().clone();
@@ -218,8 +218,10 @@ impl CompositorBackend for MangoBackend {
         let Some(socket_path) = self.socket_path.clone() else {
             error!(
                 "{} is not set - MangoWC IPC is unavailable. Workspace and window \
-                 tracking are disabled. If you are not running MangoWC, set \
-                 `compositor` under [advanced] to a supported backend.",
+                 tracking are disabled. If VibePanel is launched through systemd, \
+                 import the MangoWC environment into the service. If you are not \
+                 running MangoWC, set `compositor` under [advanced] to a supported \
+                 backend.",
                 MANGO_SOCKET_ENV
             );
             return;
@@ -407,16 +409,24 @@ fn watch_mango_command<F>(
             continue;
         }
 
-        let reader = BufReader::new(stream);
-        for line in reader.lines() {
+        let mut reader = BufReader::new(stream);
+        let mut response = Vec::new();
+        loop {
             if !running.load(Ordering::SeqCst) {
                 return;
             }
-            match line {
-                Ok(line) => {
-                    if let Some(value) = parse_json_line(&line) {
+            match reader.read_until(b'\n', &mut response) {
+                Ok(0) => {
+                    if let Some(value) = parse_json_line(&String::from_utf8_lossy(&response)) {
                         handle_value(value);
                     }
+                    break;
+                }
+                Ok(_) => {
+                    if let Some(value) = parse_json_line(&String::from_utf8_lossy(&response)) {
+                        handle_value(value);
+                    }
+                    response.clear();
                 }
                 Err(e)
                     if e.kind() == std::io::ErrorKind::WouldBlock
@@ -541,16 +551,16 @@ fn apply_workspace_from_monitors(shared: &Arc<MangoSharedState>, value: &Value) 
 fn apply_monitor_update(shared: &Arc<MangoSharedState>, value: &Value) -> MonitorChanges {
     let workspace = apply_workspace_from_monitors(shared, value);
     let focused_window = apply_focused_window_from_monitors(shared, value);
-    let mut window_list = workspace;
+    let mut notify_window_list = workspace;
     if focused_window {
         let focused_id = *shared.focused_client_id.read();
-        window_list |= apply_window_list_focus(shared, focused_id);
+        notify_window_list |= apply_window_list_focus(shared, focused_id);
     }
 
     MonitorChanges {
         workspace,
         focused_window,
-        window_list,
+        notify_window_list,
         keyboard_layout: apply_keyboard_layout_from_monitors(shared, value),
     }
 }
@@ -628,10 +638,6 @@ fn apply_window_list_from_clients(shared: &Arc<MangoSharedState>, value: &Value)
         return false;
     };
 
-    // Prefer all-monitors focus state once seen. all-clients can keep a previously
-    // focused client marked active after switching to an empty workspace.
-    let focused_client_id = *shared.focused_client_id.read();
-    let focused_client_known = shared.focused_window.read().is_some();
     let output_geometry = shared.output_geometry.read().clone();
     let mut windows: Vec<_> = clients
         .iter()
@@ -643,7 +649,7 @@ fn apply_window_list_from_clients(shared: &Arc<MangoSharedState>, value: &Value)
             {
                 return None;
             }
-            let window = client_value_to_window(client, focused_client_id, focused_client_known)?;
+            let window = client_value_to_window(client)?;
             // Always drop dismissed (hidden) scratchpads. Visible scratchpads are
             // flagged via Window.is_scratchpad and filtered by taskbar
             // show_scratchpad_windows.
@@ -666,11 +672,22 @@ fn apply_window_list_from_clients(shared: &Arc<MangoSharedState>, value: &Value)
             .then(a_idx.cmp(b_idx))
     });
 
-    let windows = windows
+    let mut windows = windows
         .into_iter()
         .map(|(_, window)| window)
         .collect::<Vec<_>>();
+
     let mut current = shared.windows.write();
+    // Prefer all-monitors focus state once seen: all-clients can keep a previously
+    // focused client marked active after switching to an empty workspace. Read it
+    // under the `windows` lock so a concurrent all-monitors focus update either
+    // lands here or reapplies itself after this write.
+    if shared.focused_window.read().is_some() {
+        let focused_client_id = *shared.focused_client_id.read();
+        for window in &mut windows {
+            window.is_focused = focused_client_id == Some(window.id);
+        }
+    }
     if *current == windows {
         return false;
     }
@@ -702,11 +719,7 @@ fn apply_window_list_focus(shared: &Arc<MangoSharedState>, focused_id: Option<u6
     changed
 }
 
-fn client_value_to_window(
-    value: &Value,
-    focused_client_id: Option<u64>,
-    focused_client_known: bool,
-) -> Option<Window> {
+fn client_value_to_window(value: &Value) -> Option<Window> {
     let id = value.get("id")?.as_u64()?;
 
     Some(Window {
@@ -731,14 +744,10 @@ fn client_value_to_window(
             .get("monitor")
             .and_then(Value::as_str)
             .map(str::to_string),
-        is_focused: if focused_client_known {
-            focused_client_id == Some(id)
-        } else {
-            value
-                .get("is_focused")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-        },
+        is_focused: value
+            .get("is_focused")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
         is_urgent: value
             .get("is_urgent")
             .and_then(Value::as_bool)
@@ -934,7 +943,7 @@ mod tests {
             MonitorChanges {
                 workspace: true,
                 focused_window: false,
-                window_list: true,
+                notify_window_list: true,
                 keyboard_layout: false,
             }
         );
