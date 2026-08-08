@@ -111,8 +111,7 @@ Backend detection order:
 2. Check `HYPRLAND_INSTANCE_SIGNATURE` env var
 3. Check `NIRI_SOCKET` env var
 4. Check `SWAYSOCK` / `MIRACLESOCK` env vars
-5. Check `MANGO_INSTANCE_SIGNATURE` env var
-6. Fall back to MangoWC
+5. Fall back to MangoWC
 
 ## Widget System
 

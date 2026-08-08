@@ -339,7 +339,7 @@ impl CompositorManager {
         let backend_kind = BackendKind::from_str(&advanced_config.compositor);
 
         // Backends no longer filter by outputs - that's now handled at the widget level
-        let backend = factory::create_backend(backend_kind, None);
+        let backend = factory::create_backend(backend_kind);
 
         info!(
             "CompositorManager using backend: {} (config: {})",

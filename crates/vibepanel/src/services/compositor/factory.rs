@@ -43,8 +43,7 @@ impl BackendKind {
 /// 2. NIRI_SOCKET → Niri
 /// 3. SWAYSOCK → Sway
 /// 4. MIRACLESOCK → Sway (Miracle WM supports i3 IPC)
-/// 5. MANGO_INSTANCE_SIGNATURE → MangoWC
-/// 6. Default → MangoWC
+/// 5. Default → MangoWC
 pub fn detect_backend() -> BackendKind {
     // Check for Hyprland
     if env::var("HYPRLAND_INSTANCE_SIGNATURE").is_ok() {
@@ -70,12 +69,6 @@ pub fn detect_backend() -> BackendKind {
         return BackendKind::Sway;
     }
 
-    // Check for MangoWC. Match MangoBackend::new by treating an empty signature as absent.
-    if env::var("MANGO_INSTANCE_SIGNATURE").is_ok_and(|v| !v.is_empty()) {
-        debug!("Detected MangoWC via MANGO_INSTANCE_SIGNATURE");
-        return BackendKind::Mango;
-    }
-
     // Default to MangoWC
     debug!("No compositor-specific socket detected, defaulting to MangoWC");
     BackendKind::Mango
@@ -86,15 +79,11 @@ pub fn detect_backend() -> BackendKind {
 /// # Arguments
 ///
 /// * `kind` - The backend kind to create (or Auto for detection).
-/// * `outputs` - Optional output allow-list for filtering events.
 ///
 /// # Returns
 ///
 /// A boxed backend implementation ready for use.
-pub fn create_backend(
-    kind: BackendKind,
-    outputs: Option<Vec<String>>,
-) -> Box<dyn CompositorBackend> {
+pub fn create_backend(kind: BackendKind) -> Box<dyn CompositorBackend> {
     let resolved_kind = if kind == BackendKind::Auto {
         detect_backend()
     } else {
@@ -104,13 +93,13 @@ pub fn create_backend(
     info!("Creating compositor backend: {:?}", resolved_kind);
 
     match resolved_kind {
-        BackendKind::Mango => Box::new(MangoBackend::new(outputs)),
-        BackendKind::Hyprland => Box::new(HyprlandBackend::new(outputs)),
-        BackendKind::Niri => Box::new(NiriBackend::new(outputs)),
-        BackendKind::Sway => Box::new(SwayBackend::new(outputs)),
+        BackendKind::Mango => Box::new(MangoBackend::new()),
+        BackendKind::Hyprland => Box::new(HyprlandBackend::new()),
+        BackendKind::Niri => Box::new(NiriBackend::new()),
+        BackendKind::Sway => Box::new(SwayBackend::new()),
         BackendKind::Auto => {
             // Should never reach here after resolution, but handle gracefully
-            Box::new(MangoBackend::new(outputs))
+            Box::new(MangoBackend::new())
         }
     }
 }

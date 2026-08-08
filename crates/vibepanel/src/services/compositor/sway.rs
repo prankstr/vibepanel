@@ -192,7 +192,7 @@ pub struct SwayBackend {
 }
 
 impl SwayBackend {
-    pub fn new(_outputs: Option<Vec<String>>) -> Self {
+    pub fn new() -> Self {
         let (compositor_name, socket_env_var) = if env::var("MIRACLESOCK").is_ok() {
             ("Miracle WM", "MIRACLESOCK")
         } else {
@@ -370,7 +370,7 @@ impl SwayBackend {
                             .entry(ws_id)
                             .or_insert(0) += count;
 
-                        if let Some(win) = Self::find_focused_window(ws_node, ws_id, &output_name) {
+                        if let Some(win) = Self::find_focused_window(ws_node, &output_name) {
                             focused_window = Some(win);
                         }
                     }
@@ -427,11 +427,7 @@ impl SwayBackend {
         count
     }
 
-    fn find_focused_window(
-        node: &Value,
-        workspace_num: i32,
-        output_name: &str,
-    ) -> Option<WindowInfo> {
+    fn find_focused_window(node: &Value, output_name: &str) -> Option<WindowInfo> {
         let focused = node
             .get("focused")
             .and_then(|v| v.as_bool())
@@ -475,21 +471,20 @@ impl SwayBackend {
             return Some(WindowInfo {
                 title,
                 app_id,
-                workspace_id: Some(workspace_num),
                 output: Some(output_name.to_string()),
             });
         }
 
         if let Some(children) = children {
             for child in children {
-                if let Some(win) = Self::find_focused_window(child, workspace_num, output_name) {
+                if let Some(win) = Self::find_focused_window(child, output_name) {
                     return Some(win);
                 }
             }
         }
         if let Some(floating) = floating {
             for child in floating {
-                if let Some(win) = Self::find_focused_window(child, workspace_num, output_name) {
+                if let Some(win) = Self::find_focused_window(child, output_name) {
                     return Some(win);
                 }
             }

@@ -82,11 +82,7 @@ pub struct MangoBackend {
 
 impl MangoBackend {
     /// Create a MangoWC backend.
-    ///
-    /// The `outputs` allow-list is accepted for factory symmetry but unused:
-    /// Mango's IPC already reports per-output state and the panel filters
-    /// downstream.
-    pub fn new(_outputs: Option<Vec<String>>) -> Self {
+    pub fn new() -> Self {
         Self {
             socket_path: env::var(MANGO_SOCKET_ENV).ok().filter(|p| !p.is_empty()),
             shared: Arc::new(MangoSharedState::default()),
@@ -557,12 +553,6 @@ fn apply_focused_window_from_monitors(shared: &Arc<MangoSharedState>, value: &Va
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string(),
-        workspace_id: monitor
-            .get("active_tags")
-            .and_then(Value::as_array)
-            .and_then(|tags| tags.first())
-            .and_then(Value::as_i64)
-            .map(|id| id as i32),
         output: Some(output.to_string()),
     };
 
@@ -779,7 +769,7 @@ mod tests {
 
     /// Build a backend with no socket, simulating a non-MangoWC session.
     fn backend_without_socket() -> MangoBackend {
-        let mut backend = MangoBackend::new(None);
+        let mut backend = MangoBackend::new();
         backend.socket_path = None;
         backend
     }
@@ -963,7 +953,6 @@ mod tests {
         assert_eq!(
             shared.focused_window.read().clone(),
             Some(WindowInfo {
-                workspace_id: Some(3),
                 output: Some("HDMI-A-1".to_string()),
                 ..Default::default()
             })

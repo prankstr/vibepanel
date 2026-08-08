@@ -98,8 +98,6 @@ pub struct WindowInfo {
     pub title: String,
     /// Application ID (e.g., "firefox", "org.gnome.Nautilus").
     pub app_id: String,
-    /// Workspace ID the window is on (None if unavailable).
-    pub workspace_id: Option<i32>,
     /// Output/monitor name the window is on (None if unavailable).
     pub output: Option<String>,
 }

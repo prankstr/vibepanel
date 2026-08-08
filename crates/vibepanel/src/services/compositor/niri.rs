@@ -65,8 +65,6 @@ impl Default for SharedState {
 }
 
 pub struct NiriBackend {
-    #[allow(dead_code)] // For future filtering support
-    allowed_outputs: Vec<String>,
     running: Arc<AtomicBool>,
     event_thread: Mutex<Option<JoinHandle<()>>>,
     socket_path: RwLock<Option<String>>,
@@ -101,9 +99,8 @@ fn parse_layout_position(window: &Value) -> Option<(i32, i32)> {
 }
 
 impl NiriBackend {
-    pub fn new(outputs: Option<Vec<String>>) -> Self {
+    pub fn new() -> Self {
         Self {
-            allowed_outputs: outputs.unwrap_or_default(),
             running: Arc::new(AtomicBool::new(false)),
             event_thread: Mutex::new(None),
             socket_path: RwLock::new(None),
@@ -446,7 +443,6 @@ impl NiriBackend {
                 .map(|win| WindowInfo {
                     title: win.title.clone(),
                     app_id: win.app_id.clone(),
-                    workspace_id: active_ws_id.map(|id| id as i32),
                     output: Some(out_name.clone()),
                 })
                 .unwrap_or_else(|| WindowInfo {
@@ -470,7 +466,6 @@ impl NiriBackend {
                 continue;
             }
 
-            let workspace_id = win.workspace_id.map(|ws_id| ws_id as i32);
             // Look up the output directly from Niri's workspace ID
             let output = win
                 .workspace_id
@@ -479,7 +474,6 @@ impl NiriBackend {
             new_focused = Some(WindowInfo {
                 title: win.title.clone(),
                 app_id: win.app_id.clone(),
-                workspace_id,
                 output,
             });
             break;
@@ -832,7 +826,6 @@ impl NiriBackend {
                 let id_to_output = shared.id_to_output.read();
 
                 if let Some(output) = id_to_output.get(&ws_id).cloned() {
-                    let workspace_id = Some(ws_id as i32);
                     drop(id_to_output);
 
                     let win_info = if let Some(win_id) = active_win_id {
@@ -840,7 +833,6 @@ impl NiriBackend {
                         win_cache.get(&win_id).map(|win| WindowInfo {
                             title: win.title.clone(),
                             app_id: win.app_id.clone(),
-                            workspace_id,
                             output: Some(output.clone()),
                         })
                     } else {
