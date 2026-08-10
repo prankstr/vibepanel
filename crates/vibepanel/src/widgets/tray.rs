@@ -34,6 +34,7 @@ const DEFAULT_MAX_ICONS: usize = 12;
 const DEFAULT_PIXMAP_ICON_SIZE: i32 = 18;
 
 const GRAYSCALE_TOLERANCE: u8 = 15;
+const GRAYSCALE_DOMINANCE_PCT: usize = 90;
 
 fn configure_tray_popover(popover: &Popover) {
     configure_popover(popover);
@@ -140,7 +141,7 @@ impl Drop for MenuState {
 #[derive(Clone, Copy)]
 struct ContrastParams {
     bg_luminance: f64,
-    target_gray: u8,
+    fg: [u8; 3],
 }
 
 struct WidgetState {
@@ -154,7 +155,7 @@ struct WidgetState {
     /// Track the current button order to avoid unnecessary rebuilds.
     /// This prevents menu flickering when animated icons update rapidly.
     button_order: Vec<String>,
-    contrast_params: ContrastParams,
+    contrast_params: Option<ContrastParams>,
 }
 
 /// System tray widget displaying StatusNotifierItem icons.
@@ -165,24 +166,16 @@ pub struct TrayWidget {
     theme_callback_id: Option<CallbackId>,
 }
 
-fn compute_contrast_params() -> ContrastParams {
+fn compute_contrast_params() -> Option<ContrastParams> {
     let styles = SurfaceStyleManager::global();
-    let bg_color = styles.background_color();
-    let text_color = styles.text_color();
+    // GTK mode uses unresolved CSS colors; skip raster tinting rather than guess polarity.
+    let (br, bg, bb) = parse_hex_color(&styles.background_color())?;
+    let (fr, fg, fb) = parse_hex_color(&styles.text_color())?;
 
-    let bg_luminance = parse_hex_color(&bg_color)
-        .map(|(r, g, b)| relative_luminance(r, g, b))
-        .unwrap_or(0.1); // Default to dark if parsing fails
-
-    // Derive target gray from text color (sRGB average, consistent with adjust_grayscale_icon)
-    let target_gray = parse_hex_color(&text_color)
-        .map(|(r, g, b)| ((r as u16 + g as u16 + b as u16) / 3) as u8)
-        .unwrap_or(if bg_luminance > 0.5 { 0 } else { 255 });
-
-    ContrastParams {
-        bg_luminance,
-        target_gray,
-    }
+    Some(ContrastParams {
+        bg_luminance: relative_luminance(br, bg, bb),
+        fg: [fr, fg, fb],
+    })
 }
 
 impl TrayWidget {
@@ -365,6 +358,7 @@ fn create_button(state: &Rc<RefCell<WidgetState>>, identifier: &str) -> Button {
     button.add_css_class(btn::COMPACT); // Remove default button padding
 
     let image = Image::new();
+    image.add_css_class(color::PRIMARY);
     let icon_size = state.borrow().config.pixmap_icon_size;
     image.set_pixel_size(icon_size);
 
@@ -452,28 +446,19 @@ fn update_button(state: &Rc<RefCell<WidgetState>>, button: &Button, snapshot: &T
         snapshot.icon_name.as_ref()
     };
 
-    // Try pixmap first, then icon name, then fallback
-    if let Some(pixmap) = pixmap
-        && let Some(texture) = get_cached_texture(state, pixmap)
-    {
-        image.set_paintable(Some(&texture));
-        return;
-    }
-
-    // Try loading from custom icon theme path if provided
-    if let Some(name) = icon_name
-        && !name.is_empty()
-        && let Some(theme_path) = &snapshot.icon_theme_path
-        && !theme_path.is_empty()
-        && let Some(texture) = load_icon_from_theme_path(state, theme_path, name)
-    {
-        image.set_paintable(Some(&texture));
-        return;
-    }
-
+    // Prefer names so symbolic icons follow the active theme. Fall back to
+    // pixmaps when the advertised name cannot be resolved on the host.
     if let Some(name) = icon_name
         && !name.is_empty()
     {
+        if let Some(theme_path) = &snapshot.icon_theme_path
+            && !theme_path.is_empty()
+            && let Some(texture) = load_icon_from_theme_path(state, theme_path, name)
+        {
+            image.set_paintable(Some(&texture));
+            return;
+        }
+
         // Some apps set IconName to an absolute file path rather than a theme
         // name. Load it through the contrast pipeline, falling back to theme lookup.
         if name.starts_with('/')
@@ -483,11 +468,23 @@ fn update_button(state: &Rc<RefCell<WidgetState>>, button: &Button, snapshot: &T
             image.set_paintable(Some(&texture));
             return;
         }
-        image.set_icon_name(Some(name));
+
+        if gdk::Display::default()
+            .is_some_and(|display| gtk4::IconTheme::for_display(&display).has_icon(name))
+        {
+            image.set_icon_name(Some(name));
+            return;
+        }
+    }
+
+    if let Some(pixmap) = pixmap
+        && let Some(texture) = get_cached_texture(state, pixmap)
+    {
+        image.set_paintable(Some(&texture));
         return;
     }
 
-    image.set_icon_name(Some("application-default-icon"));
+    image.set_icon_name(Some("application-x-executable"));
 }
 
 fn rebuild_icon_order(state: &Rc<RefCell<WidgetState>>, container: &GtkBox, order: &[String]) {
@@ -527,7 +524,7 @@ fn get_cached_texture(
     }
 
     let contrast_params = state.borrow().contrast_params;
-    let texture = texture_from_pixmap(pixmap, &contrast_params)?;
+    let texture = texture_from_pixmap(pixmap, contrast_params.as_ref())?;
 
     // Bounded size to prevent unbounded growth from animated icons
     {
@@ -541,14 +538,17 @@ fn get_cached_texture(
     Some(texture)
 }
 
-fn texture_from_pixmap(pixmap: &TrayPixmap, params: &ContrastParams) -> Option<gdk::Texture> {
+fn texture_from_pixmap(
+    pixmap: &TrayPixmap,
+    params: Option<&ContrastParams>,
+) -> Option<gdk::Texture> {
     if pixmap.width <= 0 || pixmap.height <= 0 {
         return None;
     }
 
-    let mut rgba_data = argb_to_rgba(&pixmap.buffer);
+    let mut rgba_data = argb_to_rgba(&pixmap.buffer, pixmap.width, pixmap.height)?;
 
-    apply_contrast_adjustment(&mut rgba_data, pixmap.width, pixmap.height, params);
+    apply_contrast_adjustment(&mut rgba_data, params);
 
     Some(texture_from_rgba_data(
         rgba_data,
@@ -560,53 +560,62 @@ fn texture_from_pixmap(pixmap: &TrayPixmap, params: &ContrastParams) -> Option<g
 /// Adjust low-contrast grayscale icons toward the theme text color.
 ///
 /// Shared by both the pixmap path and the file-backed icon path.
-fn apply_contrast_adjustment(
-    rgba_data: &mut [u8],
-    width: i32,
-    height: i32,
-    params: &ContrastParams,
-) {
-    if let Some(edge_analysis) = analyze_edge_pixels(rgba_data, width, height) {
-        let contrast = calculate_contrast_ratio(edge_analysis.avg_luminance, params.bg_luminance);
-
-        if edge_analysis.is_grayscale {
-            const MIN_CONTRAST: f64 = 3.0; // WCAG minimum for UI graphics
-
-            if contrast < MIN_CONTRAST {
-                debug!(
-                    "Adjusting grayscale tray icon: contrast={:.2}:1 -> gray {}",
-                    contrast, params.target_gray
-                );
-                adjust_grayscale_icon(rgba_data, params.target_gray);
-            }
-        }
+fn apply_contrast_adjustment(rgba_data: &mut [u8], params: Option<&ContrastParams>) {
+    let Some(params) = params else {
+        return;
+    };
+    let Some(analysis) = analyze_visible_pixels(rgba_data) else {
+        return;
+    };
+    if !analysis.is_grayscale {
+        return;
     }
+
+    let anchor_luminance = relative_luminance(
+        analysis.anchor_gray,
+        analysis.anchor_gray,
+        analysis.anchor_gray,
+    );
+    let contrast = calculate_contrast_ratio(anchor_luminance, params.bg_luminance);
+    const MIN_CONTRAST: f64 = 3.0; // WCAG minimum for UI graphics
+    if contrast >= MIN_CONTRAST {
+        return;
+    }
+
+    // Soften the target 15% toward mid-gray.
+    let target = params.fg.map(|c| ((c as u16 * 85 + 128 * 15) / 100) as u8);
+    let target_luminance = relative_luminance(target[0], target[1], target[2]);
+    if calculate_contrast_ratio(target_luminance, params.bg_luminance) <= contrast {
+        debug!(
+            "Skipping grayscale adjustment: anchor {} would not improve contrast",
+            analysis.anchor_gray
+        );
+        return;
+    }
+
+    debug!(
+        "Adjusting grayscale tray icon: contrast={:.2}:1 -> fg {:?}",
+        contrast, target
+    );
+    adjust_grayscale_icon(rgba_data, target, analysis.anchor_gray);
 }
 
 /// Convert ARGB pixel data to RGBA format.
 ///
 /// StatusNotifierItem pixmaps use ARGB format (network byte order),
 /// but GTK expects RGBA. This function converts by reordering bytes.
-fn argb_to_rgba(data: &glib::Bytes) -> Vec<u8> {
-    let raw = data.as_ref();
-    let len = raw.len();
+fn argb_to_rgba(data: &glib::Bytes, width: i32, height: i32) -> Option<Vec<u8>> {
+    let byte_count = usize::try_from(width)
+        .ok()?
+        .checked_mul(usize::try_from(height).ok()?)?
+        .checked_mul(4)?;
+    let mut result = data.as_ref().get(..byte_count)?.to_vec();
 
-    let mut result = Vec::with_capacity(len);
-
-    let mut idx = 0;
-    while idx + 3 < len {
-        let a = raw[idx];
-        let r = raw[idx + 1];
-        let g = raw[idx + 2];
-        let b = raw[idx + 3];
-        result.push(r);
-        result.push(g);
-        result.push(b);
-        result.push(a);
-        idx += 4;
+    for pixel in result.chunks_exact_mut(4) {
+        pixel.rotate_left(1);
     }
 
-    result
+    Some(result)
 }
 
 /// Check if an RGB pixel is grayscale (within tolerance).
@@ -616,78 +625,32 @@ fn is_grayscale_pixel(r: u8, g: u8, b: u8) -> bool {
         && r.abs_diff(b) <= GRAYSCALE_TOLERANCE
 }
 
-struct EdgeAnalysis {
-    avg_luminance: f64,
+struct IconAnalysis {
     is_grayscale: bool,
+    anchor_gray: u8,
 }
 
-/// Sample edge pixels to analyze icon appearance.
-fn analyze_edge_pixels(rgba_data: &[u8], width: i32, height: i32) -> Option<EdgeAnalysis> {
-    let w = width as usize;
-    let h = height as usize;
+/// Analyze every visible pixel so sparse outlines are not missed.
+fn analyze_visible_pixels(pixels: &[u8]) -> Option<IconAnalysis> {
+    let mut grayscale_count = 0_usize;
+    let mut visible_count = 0_usize;
+    let mut grayscale_histogram = [0_usize; 256];
 
-    if w < 2 || h < 2 {
-        return None;
-    }
-
-    // Sample positions: outer edges, inner ring at 25%, and center region
-    // This handles icons with transparent padding around them
-    let w25 = w / 4;
-    let w75 = w * 3 / 4;
-    let h25 = h / 4;
-    let h75 = h * 3 / 4;
-
-    let positions = [
-        // Outer corners
-        (0, 0),
-        (w - 1, 0),
-        (0, h - 1),
-        (w - 1, h - 1),
-        // Outer edge midpoints
-        (w / 2, 0),
-        (w / 2, h - 1),
-        (0, h / 2),
-        (w - 1, h / 2),
-        // Inner ring at 25% from edges (for icons with transparent padding)
-        (w25, h25),
-        (w75, h25),
-        (w25, h75),
-        (w75, h75),
-        // Inner edge midpoints
-        (w / 2, h25),
-        (w / 2, h75),
-        (w25, h / 2),
-        (w75, h / 2),
-        // Center
-        (w / 2, h / 2),
-    ];
-
-    let mut total_luminance = 0.0;
-    let mut grayscale_count = 0;
-    let mut visible_count = 0;
-
+    // Derive the anchor from materially visible pixels. Low-alpha antialias noise
+    // and rare bright outliers should not collapse the correction.
     const ALPHA_THRESHOLD: u8 = 128;
 
-    for (x, y) in positions {
-        let idx = (y * w + x) * 4;
-        if idx + 3 >= rgba_data.len() {
-            continue;
-        }
-
-        let r = rgba_data[idx];
-        let g = rgba_data[idx + 1];
-        let b = rgba_data[idx + 2];
-        let a = rgba_data[idx + 3];
-
+    for pixel in pixels.chunks_exact(4) {
+        let [r, g, b, a] = [pixel[0], pixel[1], pixel[2], pixel[3]];
         if a < ALPHA_THRESHOLD {
             continue;
         }
 
         visible_count += 1;
-        total_luminance += relative_luminance(r, g, b);
-
         if is_grayscale_pixel(r, g, b) {
             grayscale_count += 1;
+            let gray = ((r as u16 + g as u16 + b as u16) / 3) as usize;
+            grayscale_histogram[gray] += 1;
         }
     }
 
@@ -695,37 +658,46 @@ fn analyze_edge_pixels(rgba_data: &[u8], width: i32, height: i32) -> Option<Edge
         return None;
     }
 
-    Some(EdgeAnalysis {
-        avg_luminance: total_luminance / visible_count as f64,
-        // Consider grayscale if majority of visible pixels are grayscale
-        is_grayscale: grayscale_count > visible_count / 2,
+    let rank = (grayscale_count * 9).div_ceil(10);
+    let mut seen = 0;
+    let anchor_gray = grayscale_histogram
+        .iter()
+        .position(|count| {
+            seen += count;
+            seen >= rank
+        })
+        .unwrap_or_default() as u8;
+
+    Some(IconAnalysis {
+        // Avoid recoloring mixed artwork with a large grayscale background.
+        is_grayscale: grayscale_count * 100 > visible_count * GRAYSCALE_DOMINANCE_PCT,
+        anchor_gray,
     })
 }
 
-/// Scale grayscale pixels toward target gray, preserving antialiasing.
-fn adjust_grayscale_icon(rgba_data: &mut [u8], base_gray: u8) {
-    // Blend 15% toward mid-gray (128) to soften the contrast
-    let target_gray = ((base_gray as u16 * 85 + 128 * 15) / 100) as u8;
+/// Tint grayscale pixels while preserving relative brightness and alpha.
+fn adjust_grayscale_icon(rgba_data: &mut [u8], target: [u8; 3], source_anchor: u8) {
+    // All-black icons have no brightness structure to scale.
+    let scale = (source_anchor != 0).then(|| target.map(|c| c as f32 / source_anchor as f32));
 
-    // Scale factor: maps white (255) to target_gray, preserving relative brightness
-    // For antialiasing: darker pixels stay proportionally darker than solid pixels
-    let scale = target_gray as f32 / 255.0;
+    for pixel in rgba_data.chunks_exact_mut(4) {
+        let [r, g, b, a] = [pixel[0], pixel[1], pixel[2], pixel[3]];
 
-    let mut idx = 0;
-    while idx + 3 < rgba_data.len() {
-        let r = rgba_data[idx];
-        let g = rgba_data[idx + 1];
-        let b = rgba_data[idx + 2];
-
-        if is_grayscale_pixel(r, g, b) {
-            let original_gray = ((r as u16 + g as u16 + b as u16) / 3) as f32;
-            let new_gray = (original_gray * scale + 0.5) as u8;
-            rgba_data[idx] = new_gray;
-            rgba_data[idx + 1] = new_gray;
-            rgba_data[idx + 2] = new_gray;
+        // Include low-alpha antialiased edges excluded from peak analysis.
+        if a == 0 || !is_grayscale_pixel(r, g, b) {
+            continue;
         }
 
-        idx += 4;
+        match scale {
+            Some(scale) => {
+                let original_gray =
+                    (((r as u16 + g as u16 + b as u16) / 3) as u8).min(source_anchor) as f32;
+                for channel in 0..3 {
+                    pixel[channel] = (original_gray * scale[channel] + 0.5) as u8;
+                }
+            }
+            None => pixel[..3].copy_from_slice(&target),
+        }
     }
 }
 
@@ -785,7 +757,7 @@ fn texture_from_rgba_data(rgba_data: Vec<u8>, width: i32, height: i32) -> gdk::T
 /// their intrinsic/default size, which avoids blurry or oversized icons at tray scale.
 fn texture_from_file(
     path: &std::path::Path,
-    params: &ContrastParams,
+    params: Option<&ContrastParams>,
     icon_size: i32,
 ) -> Option<gdk::Texture> {
     let is_svg = path
@@ -804,7 +776,7 @@ fn texture_from_file(
     let height = pixbuf.height();
 
     let mut rgba_data = normalize_pixbuf_to_rgba(&pixbuf);
-    apply_contrast_adjustment(&mut rgba_data, width, height, params);
+    apply_contrast_adjustment(&mut rgba_data, params);
 
     Some(texture_from_rgba_data(rgba_data, width, height))
 }
@@ -833,7 +805,7 @@ fn get_cached_file_texture(
 
     let contrast_params = state.borrow().contrast_params;
     let icon_size = state.borrow().config.pixmap_icon_size;
-    let texture = texture_from_file(path, &contrast_params, icon_size)?;
+    let texture = texture_from_file(path, contrast_params.as_ref(), icon_size)?;
 
     {
         let mut st = state.borrow_mut();
@@ -1173,5 +1145,124 @@ fn on_menu_entry_clicked(
     if let Some(menu) = menu {
         menu.parent.remove_css_class(widget::TRAY_ITEM_MENU_OPEN);
         close_menu_popover(&menu.popover);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rgba_icon(width: usize, height: usize, x: usize, y: usize, gray: u8) -> Vec<u8> {
+        let mut pixels = vec![0; width * height * 4];
+        let offset = (y * width + x) * 4;
+        pixels[offset..offset + 4].copy_from_slice(&[gray, gray, gray, 255]);
+        pixels
+    }
+
+    #[test]
+    fn sparse_grayscale_outline_is_analyzed() {
+        let pixels = rgba_icon(8, 8, 1, 1, 48);
+        let analysis = analyze_visible_pixels(&pixels).unwrap();
+
+        assert!(analysis.is_grayscale);
+        assert_eq!(analysis.anchor_gray, 48);
+    }
+
+    #[test]
+    fn low_contrast_dark_outline_is_brightened_on_dark_background() {
+        let mut pixels = rgba_icon(8, 8, 1, 1, 48);
+        let offset = (8 + 1) * 4;
+
+        apply_contrast_adjustment(
+            &mut pixels,
+            Some(&ContrastParams {
+                bg_luminance: 0.0,
+                fg: [255; 3],
+            }),
+        );
+
+        assert_eq!(&pixels[offset..offset + 4], &[235, 235, 235, 255]);
+    }
+
+    #[test]
+    fn high_contrast_outline_is_unchanged() {
+        let mut pixels = rgba_icon(8, 8, 1, 1, 255);
+        let original = pixels.clone();
+
+        apply_contrast_adjustment(
+            &mut pixels,
+            Some(&ContrastParams {
+                bg_luminance: 0.0,
+                fg: [255; 3],
+            }),
+        );
+
+        assert_eq!(pixels, original);
+    }
+
+    #[test]
+    fn mixed_color_artwork_is_unchanged() {
+        let mut pixels = [[48, 48, 48, 255]; 10].concat();
+        pixels[..4].copy_from_slice(&[48, 0, 0, 255]);
+        let original = pixels.clone();
+
+        apply_contrast_adjustment(
+            &mut pixels,
+            Some(&ContrastParams {
+                bg_luminance: 0.0,
+                fg: [255; 3],
+            }),
+        );
+
+        assert_eq!(pixels, original);
+    }
+
+    #[test]
+    fn tinted_foreground_hue_is_preserved() {
+        let mut pixels = rgba_icon(8, 8, 1, 1, 48);
+        let offset = (8 + 1) * 4;
+        let edge_offset = (8 + 2) * 4;
+        pixels[edge_offset..edge_offset + 4].copy_from_slice(&[60, 60, 60, 100]);
+
+        apply_contrast_adjustment(
+            &mut pixels,
+            Some(&ContrastParams {
+                bg_luminance: 0.0,
+                fg: [180, 200, 255],
+            }),
+        );
+
+        // Foreground softened 15% toward mid-gray.
+        assert_eq!(&pixels[offset..offset + 4], &[172, 189, 235, 255]);
+        assert_eq!(&pixels[edge_offset..edge_offset + 4], &[172, 189, 235, 100]);
+    }
+
+    #[test]
+    fn percentile_anchor_drives_contrast_gate() {
+        let mut pixels = [[32, 32, 32, 255]; 20].concat();
+        pixels[..8].copy_from_slice(&[255, 255, 255, 255, 255, 255, 255, 255]);
+
+        apply_contrast_adjustment(
+            &mut pixels,
+            Some(&ContrastParams {
+                bg_luminance: 0.0,
+                fg: [255; 3],
+            }),
+        );
+
+        assert!(
+            pixels
+                .chunks_exact(4)
+                .all(|pixel| pixel == [235, 235, 235, 255])
+        );
+    }
+
+    #[test]
+    fn argb_conversion_validates_extent() {
+        let short = glib::Bytes::from_owned(vec![255; 7]);
+        assert!(argb_to_rgba(&short, 2, 1).is_none());
+
+        let trailing = glib::Bytes::from_owned(vec![40, 10, 20, 30, 255]);
+        assert_eq!(argb_to_rgba(&trailing, 1, 1), Some(vec![10, 20, 30, 40]));
     }
 }
