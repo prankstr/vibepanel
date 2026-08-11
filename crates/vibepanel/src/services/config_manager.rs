@@ -1497,6 +1497,7 @@ fn widget_config_fingerprint(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui_regression_test_support::TestDir;
     use std::path::Path;
     use vibepanel_core::config::{WeatherUnits, WidgetOptions, WidgetPlacement};
 
@@ -1676,17 +1677,8 @@ mod tests {
 
     #[test]
     fn test_discover_css_dependencies_resolves_nested_imports_and_cycles() {
-        use std::time::{SystemTime, UNIX_EPOCH};
-
-        let unique = format!(
-            "vibepanel_test_imports_{}_{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        );
-        let root_dir = std::env::temp_dir().join(unique);
+        let root_dir = TestDir::new("vibepanel_test_imports");
+        let root_dir = root_dir.path();
         let nested_dir = root_dir.join("nested");
         std::fs::create_dir_all(&nested_dir).unwrap();
 
@@ -1708,24 +1700,13 @@ mod tests {
         assert!(dependencies.contains(&normalize_path(&nested)));
         assert!(dependencies.contains(&normalize_path(&base)));
         assert!(dependencies.contains(&normalize_path(&missing)));
-
-        let _ = std::fs::remove_dir_all(&root_dir);
     }
 
     #[test]
     fn test_discover_css_dependencies_caps_total_work() {
-        use std::time::{SystemTime, UNIX_EPOCH};
-
-        let unique = format!(
-            "vibepanel_test_import_limit_{}_{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        );
-        let root_dir = std::env::temp_dir().join(unique);
-        std::fs::create_dir_all(&root_dir).unwrap();
+        let root_dir = TestDir::new("vibepanel_test_import_limit");
+        let root_dir = root_dir.path();
+        std::fs::create_dir_all(root_dir).unwrap();
 
         let root = root_dir.join("style.css");
         let css = (0..CSS_IMPORT_SCAN_LIMIT)
@@ -1737,8 +1718,6 @@ mod tests {
             discover_css_dependencies(&root).len(),
             CSS_IMPORT_SCAN_LIMIT
         );
-
-        let _ = std::fs::remove_dir_all(&root_dir);
     }
 
     #[test]
@@ -1764,22 +1743,12 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn test_compute_style_watch_paths_adds_symlink_target_dir() {
-        use std::time::{SystemTime, UNIX_EPOCH};
-
         // Create two temp dirs: one for the "config" dir (where style.css lives
         // as a symlink) and one for the "target" dir (where the real file lives).
-        let unique = format!(
-            "vibepanel_test_symlink_{}_{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        );
-        let config_dir = std::env::temp_dir().join(format!("{}_config", unique));
-        let target_dir = std::env::temp_dir().join(format!("{}_target", unique));
-        std::fs::create_dir_all(&config_dir).unwrap();
-        std::fs::create_dir_all(&target_dir).unwrap();
+        let config_dir = TestDir::new("vibepanel_test_symlink_config");
+        let target_dir = TestDir::new("vibepanel_test_symlink_target");
+        let config_dir = config_dir.path();
+        let target_dir = target_dir.path();
 
         let target_file = target_dir.join("colors.css");
         std::fs::write(&target_file, "@import \"imported.css\";").unwrap();
@@ -1795,41 +1764,29 @@ mod tests {
         let search_paths = vec![symlink_path.clone()];
         let watched_paths =
             ConfigManager::compute_style_watch_paths(search_paths, Some(symlink_path));
-        let watch_dirs = style_watch_dirs(&watched_paths, &config_dir);
+        let watch_dirs = style_watch_dirs(&watched_paths, config_dir);
 
         // The symlink target's parent directory must be added for direct-write detection.
         assert!(
-            watch_dirs.contains(&target_dir),
+            watch_dirs.contains(target_dir),
             "expected target_dir {:?} in watch_dirs {:?}",
             target_dir,
             watch_dirs,
         );
-        assert!(!watch_dirs.contains(&config_dir));
+        assert!(!watch_dirs.contains(config_dir));
         assert!(watched_paths.contains(&canonical_target));
         assert!(
             watched_paths.contains(&normalize_path(&imported_file)),
             "imports must resolve relative to the logical symlink path"
         );
-
-        let _ = std::fs::remove_dir_all(&config_dir);
-        let _ = std::fs::remove_dir_all(&target_dir);
     }
 
     #[test]
     fn test_compute_style_watch_paths_discovers_import_added_after_startup() {
-        use std::time::{SystemTime, UNIX_EPOCH};
-
-        let unique = format!(
-            "vibepanel_test_dynamic_import_{}_{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        );
-        let config_dir = std::env::temp_dir().join(format!("{}_config", unique));
-        let external_dir = std::env::temp_dir().join(format!("{}_external", unique));
-        std::fs::create_dir_all(&config_dir).unwrap();
+        let config_dir = TestDir::new("vibepanel_test_dynamic_import_config");
+        let external_dir = TestDir::new("vibepanel_test_dynamic_import_external");
+        let config_dir = config_dir.path();
+        let external_dir = external_dir.path();
 
         let root = config_dir.join("style.css");
         let imported = external_dir.join("colors.css");
@@ -1837,19 +1794,16 @@ mod tests {
 
         let initial =
             ConfigManager::compute_style_watch_paths(vec![root.clone()], Some(root.clone()));
-        assert!(!style_watch_dirs(&initial, &config_dir).contains(&external_dir));
+        assert!(!style_watch_dirs(&initial, config_dir).contains(external_dir));
         assert!(!initial.contains(&normalize_path(&imported)));
 
-        std::fs::create_dir_all(&external_dir).unwrap();
+        std::fs::create_dir_all(external_dir).unwrap();
         std::fs::write(&imported, "/* generated colors */").unwrap();
         std::fs::write(&root, format!("@import \"{}\";", imported.display())).unwrap();
 
         let refreshed = ConfigManager::compute_style_watch_paths(vec![root.clone()], Some(root));
-        assert!(style_watch_dirs(&refreshed, &config_dir).contains(&external_dir));
+        assert!(style_watch_dirs(&refreshed, config_dir).contains(external_dir));
         assert!(refreshed.contains(&normalize_path(&imported)));
-
-        let _ = std::fs::remove_dir_all(&config_dir);
-        let _ = std::fs::remove_dir_all(&external_dir);
     }
 
     #[test]

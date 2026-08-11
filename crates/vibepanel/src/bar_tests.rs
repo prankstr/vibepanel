@@ -2,45 +2,15 @@ use super::*;
 use crate::popover_registry::{self, DispatchAction};
 use crate::services::compositor::CompositorManager;
 use crate::ui_regression_test_support::{
-    find_descendant_with_class, first_monitor_or_skip, flush_gtk, init_layer_shell_or_skip,
-    registered_test_app, run_ignored_contract_subprocess,
+    TestDir, find_descendant_with_class, first_monitor_or_skip, flush_gtk,
+    init_layer_shell_or_skip, registered_test_app, run_ignored_contract_subprocess,
 };
 use crate::widgets::PopoverKind::{System, Unmergeable};
 use crate::widgets::layer_shell_popover::{
     LayerShellPopover, PopoverAnchor, calculate_bar_exclusive_zone, calculate_popover_bar_margin,
     popover_bar_edge,
 };
-use std::time::{SystemTime, UNIX_EPOCH};
 use vibepanel_core::config::{BarPosition, WidgetPlacement};
-
-struct TestDir(PathBuf);
-
-impl TestDir {
-    fn new(name: &str) -> Self {
-        let unique = format!(
-            "{}_{}_{}",
-            name,
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        );
-        let path = std::env::temp_dir().join(unique);
-        std::fs::create_dir_all(&path).unwrap();
-        Self(path)
-    }
-
-    fn path(&self) -> &Path {
-        &self.0
-    }
-}
-
-impl Drop for TestDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
 
 fn layer_shell_test_config() -> Config {
     let mut config = Config::default();

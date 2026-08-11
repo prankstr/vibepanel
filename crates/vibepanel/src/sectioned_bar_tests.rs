@@ -1,15 +1,15 @@
 use super::*;
 use crate::theme_vars::{THEME_VAR_EXPECTATIONS, ThemeVarRole, ThemeVarScope};
 use crate::ui_regression_test_support::{
-    CssProviderGuard, Rgba8, assert_pixel_close, center_pixel_of_surface,
+    CssProviderGuard, Rgba8, TestDir, assert_pixel_close, center_pixel_of_surface,
     find_descendant_with_class, flush_gtk, init_gtk_or_skip, label_with_text,
     maybe_hold_probe_window, painted_surface_fixture_with_classes, run_ignored_contract_subprocess,
     sample_widget_pixel,
 };
 use crate::widgets::css::{POPOVER_BG_WITH_OPACITY, WIDGET_BG_WITH_OPACITY};
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
 use vibepanel_core::Config;
 
 fn bounds_in_window(
@@ -218,35 +218,6 @@ struct PaintedBarFixture {
     bar: SectionedBar,
     first_surface: gtk4::Widget,
     second_surface: gtk4::Widget,
-}
-
-struct UiRegressionTestDir(PathBuf);
-
-impl UiRegressionTestDir {
-    fn new(name: &str) -> Self {
-        let unique = format!(
-            "{}_{}_{}",
-            name,
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        );
-        let path = std::env::temp_dir().join(unique);
-        std::fs::create_dir_all(&path).unwrap();
-        Self(path)
-    }
-
-    fn path(&self) -> &Path {
-        &self.0
-    }
-}
-
-impl Drop for UiRegressionTestDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
 }
 
 fn set_ui_regression_config(config: &Config) {
@@ -1966,7 +1937,7 @@ fn run_test_user_style_css_production_path_pixel() {
             .insert("label".to_string(), toml::Value::String(String::new()));
     }
 
-    let dir = UiRegressionTestDir::new("vibepanel-style-css-ui-regression");
+    let dir = TestDir::new("vibepanel-style-css-ui-regression");
     let config_path = dir.path().join("config.toml");
     let style_path = dir.path().join("style.css");
     let imported_dir = dir.path().join("generated");

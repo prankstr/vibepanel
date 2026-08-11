@@ -4,11 +4,42 @@ use gtk4::prelude::{
     ApplicationExt, Cast, DisplayExt, GtkWindowExt, ListModelExt, NativeExt, SnapshotExt,
     TextureExt, WidgetExt,
 };
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use vibepanel_core::Config;
 
 static UI_REGRESSION_SUBPROCESS_LOCK: Mutex<()> = Mutex::new(());
+
+pub(crate) struct TestDir(PathBuf);
+
+impl TestDir {
+    pub(crate) fn new(name: &str) -> Self {
+        let unique = format!(
+            "{}_{}_{}",
+            name,
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let path = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(&path).unwrap();
+        Self(path)
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TestDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
 
 pub(crate) fn ui_regression_subprocess_lock() -> MutexGuard<'static, ()> {
     UI_REGRESSION_SUBPROCESS_LOCK
