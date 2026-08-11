@@ -1550,9 +1550,10 @@ fn load_transient_css(display: &gtk4::gdk::Display) {
 /// Replace user's custom CSS provider (fail-safe).
 ///
 /// This is the single function for both initial load and hot-reload of user
-/// `style.css`. It reads and builds the new provider *before* removing the old
-/// one, so a read failure keeps the current CSS intact rather than leaving the
-/// bar un-styled.
+/// `style.css`. It validates the file *before* removing the old provider, so a
+/// read failure keeps the current CSS intact rather than leaving the bar
+/// un-styled. GTK parse errors are logged and retain GTK's normal partial-load
+/// behavior; they do not keep the previous provider.
 ///
 /// Called from:
 /// - `load_css()` after theme CSS is applied
@@ -1575,10 +1576,15 @@ pub(crate) fn replace_user_css() {
         return;
     };
 
+    // Probe readability and UTF-8 before touching the live provider; GTK re-reads
+    // the file so relative imports resolve against its directory.
     match std::fs::read_to_string(&path) {
-        Ok(css) => {
+        Ok(_) => {
             let provider = gtk4::CssProvider::new();
-            provider.load_from_string(&css);
+            provider.connect_parsing_error(|_, section, error| {
+                warn!("User CSS parse error at {}: {}", section, error);
+            });
+            provider.load_from_path(&path);
 
             // Success — swap: remove old provider first, then add new
             USER_CSS_PROVIDER.with(|cell| {

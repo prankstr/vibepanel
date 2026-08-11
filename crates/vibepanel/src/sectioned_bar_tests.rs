@@ -1969,12 +1969,16 @@ fn run_test_user_style_css_production_path_pixel() {
     let dir = UiRegressionTestDir::new("vibepanel-style-css-ui-regression");
     let config_path = dir.path().join("config.toml");
     let style_path = dir.path().join("style.css");
+    let imported_dir = dir.path().join("generated");
+    let imported_path = imported_dir.join("colors.css");
+    std::fs::create_dir_all(&imported_dir).unwrap();
     std::fs::write(&config_path, "# test config placeholder\n").unwrap();
     std::fs::write(
-        &style_path,
+        &imported_path,
         format!(".widget.custom-a {{ --widget-background-color: {css_color}; }}"),
     )
     .unwrap();
+    std::fs::write(&style_path, "@import \"generated/colors.css\";\n").unwrap();
 
     set_ui_regression_config_path(&config, config_path);
     crate::bar::load_css(&config);
@@ -2021,7 +2025,7 @@ fn run_test_user_style_css_production_path_pixel() {
     assert_pixel_close(
         rendered,
         Rgba8::from_hex(css_color),
-        "config-adjacent style.css loaded by production load_css should override rendered widget pixels",
+        "relative import from config-adjacent style.css should override rendered widget pixels",
     );
 
     std::fs::remove_file(style_path).unwrap();

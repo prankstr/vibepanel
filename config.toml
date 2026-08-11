@@ -132,5 +132,7 @@ allow_overdrive = false
 [advanced]
 # compositor = "auto"  # "auto", "hyprland", "niri", "mango", "sway", "miracle", "scroll"
 
-# Custom CSS: place style.css in same directory as this file.
+# Custom CSS: place style.css in same directory as this file. Relative @import
+# paths resolve from the importing stylesheet, and imported files hot-reload.
+# GTK does not expand ~ in import paths.
 # See documentation for available CSS variables and classes.
