@@ -576,8 +576,6 @@ impl SurfaceHeightFreeze {
         let Some(root) = window.child() else {
             return;
         };
-        let (root_min_width, _, _, _) = root.measure(Orientation::Horizontal, -1);
-
         let mut revealers = self.active.borrow().clone();
         revealers.push(revealer.clone());
         let mut old_height_requests = Vec::with_capacity(revealers.len());
@@ -592,6 +590,7 @@ impl SurfaceHeightFreeze {
             old_height_requests.push((active.clone(), active.height_request()));
             active.set_height_request(child_nat);
         }
+        let (root_min_width, _, _, _) = root.measure(Orientation::Horizontal, -1);
         let (_, target, _, _) =
             root.measure(Orientation::Vertical, root.width().max(root_min_width));
         for (active, request) in old_height_requests {

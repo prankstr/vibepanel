@@ -103,7 +103,11 @@ impl HyprlandBackend {
     ///
     /// Session-scoped, only set on startup and not persisted anywhere
     fn apply_layer_rules(&self) {
-        let cmd = "keyword layerrule no_anim on, match:namespace ^vibepanel-.*-popover$";
+        let cmd = if self.supports_lua_dispatch.load(Ordering::Relaxed) {
+            "eval hl.layer_rule({ match = { namespace = \"^vibepanel-.*-popover$\" }, no_anim = true })"
+        } else {
+            "keyword layerrule no_anim on, match:namespace ^vibepanel-.*-popover$"
+        };
         match self.send_command(cmd) {
             Some(response) if Self::response_is_ok(&response) => {
                 info!("Applied Hyprland layerrule: no_anim for vibepanel surfaces");
@@ -1130,10 +1134,10 @@ impl CompositorBackend for HyprlandBackend {
             return;
         }
 
+        self.probe_lua_dispatch_support();
+
         // Disable compositor-level layer animations for our surfaces.
         self.apply_layer_rules();
-
-        self.probe_lua_dispatch_support();
 
         // Store callbacks
         *self.callbacks.lock().unwrap_or_else(|e| e.into_inner()) =
