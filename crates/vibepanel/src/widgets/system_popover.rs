@@ -36,6 +36,7 @@ use crate::services::gpu::{GpuService, GpuSnapshot};
 use crate::services::icons::{IconHandle, IconsService};
 use crate::services::system::{SystemService, SystemSnapshot, format_bytes_long, format_speed};
 use crate::styles::{button, card, color, icon, surface, system_popover as sp};
+use crate::widgets::layer_shell_popover::animate_reveal;
 
 /// A single pre-allocated per-core row with its updatable widgets.
 #[derive(Clone)]
@@ -182,7 +183,7 @@ impl SystemPopoverController {
     fn toggle_cores(&self) {
         let expanded = !self.cores_expanded.get();
         self.cores_expanded.set(expanded);
-        self.cores_revealer.set_reveal_child(expanded);
+        animate_reveal(&self.cores_revealer, expanded);
 
         let chevron = if expanded {
             "pan-up-symbolic"

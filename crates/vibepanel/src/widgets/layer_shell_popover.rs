@@ -189,15 +189,18 @@ pub(crate) fn snap_anim_shell(shell: &ScaleBox, opacity: f64, scale: f64) {
 
 /// Drive a popover animation, preserving progress during mid-flight reversals.
 ///
-/// `blur_target` pairs the target window with its shadow margin. `on_complete`
-/// runs once with the direction of the completed segment.
+/// `blur_target` contains the target window and content. `on_complete` runs once
+/// with the completed segment direction.
 pub(crate) fn run_popover_animation(
     shell: &ScaleBox,
     anim_state: &Rc<RefCell<AnimState>>,
     anim_generation: &Rc<Cell<u32>>,
     generation: u32,
     direction: AnimDirection,
-    blur_target: Option<(glib::WeakRef<ApplicationWindow>, i32)>,
+    blur_target: Option<(
+        glib::WeakRef<ApplicationWindow>,
+        glib::WeakRef<gtk4::Widget>,
+    )>,
     on_complete: impl Fn(AnimDirection, &ScaleBox) + 'static,
 ) {
     let start_time_us = shell.frame_clock().map(|fc| fc.frame_time()).unwrap_or(0);
@@ -241,11 +244,12 @@ pub(crate) fn run_popover_animation(
             && ConfigManager::global().blur_enabled()
             && let Some(blur) =
                 crate::services::background_effect::BackgroundEffectManager::global()
-            && let Some((ref window_weak, blur_margin)) = blur_target
+            && let Some((ref window_weak, ref content_weak)) = blur_target
             && let Some(window) = window_weak.upgrade()
+            && let Some(content) = content_weak.upgrade()
         {
             // Match the blur to the quantized scale that ScaleBox renders.
-            blur.apply_open_animation_blur(&window, blur_margin, shell.scale(), complete);
+            blur.apply_open_animation_blur(&window, &content, shell.scale(), complete);
         }
 
         if complete {
@@ -527,6 +531,297 @@ where
         }
     });
     window.add_controller(key_controller);
+}
+
+const HEIGHT_FREEZE_DATA_KEY: &str = "vibepanel-surface-height-freeze";
+const HEIGHT_FREEZE_RELEASE_HOOK_KEY: &str = "vibepanel-surface-height-freeze-release-hook";
+
+/// Keeps a shrink-wrapped layer-shell surface at a constant height while child
+/// revealers animate. Expansion pins the final height; collapse pins the initial
+/// height, avoiding per-frame Wayland surface configures and buffer reallocations.
+struct SurfaceHeightFreeze {
+    window: glib::WeakRef<ApplicationWindow>,
+    blur_widget: glib::WeakRef<gtk4::Widget>,
+    active: RefCell<Vec<gtk4::Revealer>>,
+    frozen_height: Cell<i32>,
+    blur_generation: Cell<u32>,
+}
+
+impl SurfaceHeightFreeze {
+    fn new(window: &ApplicationWindow, blur_widget: &impl IsA<gtk4::Widget>) -> Rc<Self> {
+        Rc::new(Self {
+            window: window.downgrade(),
+            blur_widget: blur_widget.as_ref().downgrade(),
+            active: RefCell::new(Vec::new()),
+            frozen_height: Cell::new(0),
+            blur_generation: Cell::new(0),
+        })
+    }
+
+    fn begin_expand(self: &Rc<Self>, revealer: &gtk4::Revealer) {
+        if !ConfigManager::global().animations_enabled()
+            || self.active.borrow().iter().any(|active| active == revealer)
+        {
+            return;
+        }
+        let Some(window) = self.window.upgrade() else {
+            return;
+        };
+        if !window.is_mapped() {
+            return;
+        }
+        if revealer.child().is_none() {
+            return;
+        }
+        let Some(root) = window.child() else {
+            return;
+        };
+        let (root_min_width, _, _, _) = root.measure(Orientation::Horizontal, -1);
+
+        let mut revealers = self.active.borrow().clone();
+        revealers.push(revealer.clone());
+        let mut old_height_requests = Vec::with_capacity(revealers.len());
+        for active in revealers {
+            let Some(child) = active.child() else {
+                continue;
+            };
+            // Revealers retain their parent-allocated width while collapsed.
+            let (child_min_width, _, _, _) = child.measure(Orientation::Horizontal, -1);
+            let (_, child_nat, _, _) =
+                child.measure(Orientation::Vertical, active.width().max(child_min_width));
+            old_height_requests.push((active.clone(), active.height_request()));
+            active.set_height_request(child_nat);
+        }
+        let (_, target, _, _) =
+            root.measure(Orientation::Vertical, root.width().max(root_min_width));
+        for (active, request) in old_height_requests {
+            active.set_height_request(request);
+        }
+
+        // Active collapses may over-reserve space, but avoid another surface resize.
+        let target = target.max(self.frozen_height.get());
+        if target <= 0 {
+            return;
+        }
+
+        let first = self.active.borrow().is_empty();
+        self.active.borrow_mut().push(revealer.clone());
+        self.frozen_height.set(target);
+        self.apply(target);
+        if first {
+            self.start_blur_tracking();
+        }
+    }
+
+    fn begin_collapse(self: &Rc<Self>, revealer: &gtk4::Revealer) {
+        if !ConfigManager::global().animations_enabled()
+            || self.active.borrow().iter().any(|active| active == revealer)
+        {
+            return;
+        }
+        let Some(window) = self.window.upgrade() else {
+            return;
+        };
+        let current = window.height();
+        if current <= 0 {
+            return;
+        }
+
+        let first = self.active.borrow().is_empty();
+        self.active.borrow_mut().push(revealer.clone());
+        if first {
+            self.frozen_height.set(current);
+            self.apply(current);
+            self.start_blur_tracking();
+        }
+    }
+
+    fn apply(&self, height: i32) {
+        let Some(window) = self.window.upgrade() else {
+            return;
+        };
+        if let Some(widget) = window.child() {
+            // Match the content alignment to the layer-shell edge anchoring.
+            widget.set_valign(if popover_bar_edge() == Edge::Top {
+                gtk4::Align::Start
+            } else {
+                gtk4::Align::End
+            });
+        }
+        // This is a floor: excess stays transparent; shortages resize naturally.
+        window.set_size_request(-1, height);
+    }
+
+    fn end(self: &Rc<Self>, revealer: &gtk4::Revealer) {
+        let removed = {
+            let mut active = self.active.borrow_mut();
+            let old_len = active.len();
+            active.retain(|active| active != revealer);
+            active.len() != old_len
+        };
+        if !removed {
+            return;
+        }
+        if !self.active.borrow().is_empty() {
+            return;
+        }
+        self.release();
+        if !ConfigManager::global().blur_enabled() {
+            return;
+        }
+
+        let generation = self.blur_generation.get();
+        let weak_self = Rc::downgrade(self);
+        // Expansion needs an explicit final commit because releasing its equal
+        // height floor does not resize; collapse is corrected by the resize watcher.
+        glib::idle_add_local_once(move || {
+            let Some(freeze) = weak_self.upgrade() else {
+                return;
+            };
+            if freeze.blur_generation.get() != generation || !ConfigManager::global().blur_enabled()
+            {
+                return;
+            }
+            let (Some(window), Some(content)) =
+                (freeze.window.upgrade(), freeze.blur_widget.upgrade())
+            else {
+                return;
+            };
+            if let Some(blur) =
+                crate::services::background_effect::BackgroundEffectManager::global()
+            {
+                blur.apply_blur_surface(&window, &content, || {
+                    ConfigManager::global().surface_border_radius() as i32
+                });
+            }
+        });
+    }
+
+    fn clear(&self) {
+        self.active.borrow_mut().clear();
+        self.blur_generation
+            .set(self.blur_generation.get().wrapping_add(1));
+        self.release();
+    }
+
+    fn release(&self) {
+        self.frozen_height.set(0);
+        if let Some(window) = self.window.upgrade() {
+            window.set_size_request(-1, -1);
+            if let Some(widget) = window.child() {
+                widget.set_valign(gtk4::Align::Fill);
+            }
+        }
+    }
+
+    fn start_blur_tracking(self: &Rc<Self>) {
+        if !ConfigManager::global().blur_enabled() {
+            return;
+        }
+        let Some(window) = self.window.upgrade() else {
+            return;
+        };
+        let generation = self.blur_generation.get().wrapping_add(1);
+        self.blur_generation.set(generation);
+        let weak_self = Rc::downgrade(self);
+        window.add_tick_callback(move |_, _| {
+            let Some(freeze) = weak_self.upgrade() else {
+                return ControlFlow::Break;
+            };
+            if freeze.blur_generation.get() != generation || freeze.active.borrow().is_empty() {
+                return ControlFlow::Break;
+            }
+            freeze.apply_blur();
+            ControlFlow::Continue
+        });
+    }
+
+    fn apply_blur(&self) {
+        if !ConfigManager::global().blur_enabled() {
+            return;
+        }
+        let (Some(window), Some(content)) = (self.window.upgrade(), self.blur_widget.upgrade())
+        else {
+            return;
+        };
+        if let Some(blur) = crate::services::background_effect::BackgroundEffectManager::global() {
+            blur.apply_blur_region_animated(&window, &content, 1.0);
+        }
+    }
+}
+
+/// Install shared revealer surface-freeze handling on a popover window.
+pub(crate) fn install_surface_height_freeze(
+    window: &ApplicationWindow,
+    blur_widget: &impl IsA<gtk4::Widget>,
+) {
+    unsafe {
+        window.set_data(
+            HEIGHT_FREEZE_DATA_KEY,
+            SurfaceHeightFreeze::new(window, blur_widget),
+        );
+    }
+}
+
+fn surface_height_freeze_for(widget: &impl IsA<gtk4::Widget>) -> Option<Rc<SurfaceHeightFreeze>> {
+    let window = widget
+        .as_ref()
+        .root()?
+        .downcast::<ApplicationWindow>()
+        .ok()?;
+    unsafe {
+        window
+            .data::<Rc<SurfaceHeightFreeze>>(HEIGHT_FREEZE_DATA_KEY)
+            .map(|freeze| freeze.as_ref().clone())
+    }
+}
+
+pub(crate) fn clear_surface_height_freeze(window: &ApplicationWindow) {
+    unsafe {
+        if let Some(freeze) = window.data::<Rc<SurfaceHeightFreeze>>(HEIGHT_FREEZE_DATA_KEY) {
+            freeze.as_ref().clear();
+        }
+    }
+}
+
+/// Animate a revealer without resizing its layer-shell surface every frame.
+pub(crate) fn animate_reveal(revealer: &gtk4::Revealer, expanding: bool) {
+    if revealer.reveals_child() == expanding {
+        return;
+    }
+    if let Some(freeze) = surface_height_freeze_for(revealer) {
+        if expanding {
+            freeze.begin_expand(revealer);
+        } else {
+            freeze.begin_collapse(revealer);
+        }
+        ensure_height_freeze_release_hook(revealer, &freeze);
+    }
+    revealer.set_reveal_child(expanding);
+}
+
+fn ensure_height_freeze_release_hook(revealer: &gtk4::Revealer, freeze: &Rc<SurfaceHeightFreeze>) {
+    unsafe {
+        if revealer
+            .data::<bool>(HEIGHT_FREEZE_RELEASE_HOOK_KEY)
+            .is_some()
+        {
+            return;
+        }
+        revealer.set_data(HEIGHT_FREEZE_RELEASE_HOOK_KEY, true);
+    }
+    let weak_freeze = Rc::downgrade(freeze);
+    revealer.connect_child_revealed_notify(move |revealer| {
+        if let Some(freeze) = weak_freeze.upgrade() {
+            freeze.end(revealer);
+        }
+    });
+    let weak_freeze = Rc::downgrade(freeze);
+    revealer.connect_unmap(move |revealer| {
+        if let Some(freeze) = weak_freeze.upgrade() {
+            freeze.end(revealer);
+        }
+    });
 }
 
 /// A layer-shell popover for widget menus.
@@ -827,6 +1122,8 @@ impl LayerShellPopover {
             return;
         };
 
+        clear_surface_height_freeze(&window);
+
         // Release keyboard grab while hiding.
         window.set_keyboard_mode(KeyboardMode::None);
 
@@ -874,6 +1171,10 @@ impl LayerShellPopover {
         let Some(anim_shell) = self.anim_shell.borrow().as_ref().cloned() else {
             return;
         };
+
+        if let Some(ref window) = *self.window.borrow() {
+            clear_surface_height_freeze(window);
+        }
 
         anim_shell.remove_child();
 
@@ -1039,6 +1340,7 @@ impl LayerShellPopover {
             SurfaceStyleManager::global().apply_shadow_margins(&outer, POPOVER_SHADOW_MARGIN);
             outer.append(&anim_shell);
             window.set_child(Some(&outer));
+            install_surface_height_freeze(&window, &anim_shell);
         }
 
         // Restore keyboard mode (hide() sets it to None).
@@ -1163,12 +1465,11 @@ impl LayerShellPopover {
             });
         }
 
-        // Apply blur on every map (first show and re-show).  Close calls
+        // Apply blur on every map (first show and re-show). Close calls
         // set_visible(false) which unmaps the surface, so connect_map fires
-        // again when the window is re-shown.  On first map the surface has no
-        // size yet, so apply_blur_region defers via idle.  On re-show it sets
-        // the full-size region, which the animation tick overwrites with a
-        // scaled region within 1-2 frames.
+        // again when the window is re-shown. The content-bounds resize watcher
+        // handles first-map readiness. On re-show the animation tick overwrites
+        // the full-size region with a scaled region within 1-2 frames.
         //
         // The else-branch removes any stale protocol object left from a
         // previous map cycle.  This handles the case where blur was enabled
@@ -1179,12 +1480,17 @@ impl LayerShellPopover {
         // Known limitation: config changes to `theme.blur` or border radius
         // while the popover is open take effect on next open, not immediately.
         // Popovers grab focus so config edits are unlikely while open.
+        let weak_self = Rc::downgrade(self);
         window.connect_map(move |win| {
             if ConfigManager::global().blur_enabled() {
                 if let Some(blur) =
                     crate::services::background_effect::BackgroundEffectManager::global()
+                    && let Some(popover) = weak_self.upgrade()
+                    && let Some(anim_shell) = popover.anim_shell.borrow().as_ref().cloned()
                 {
-                    blur.apply_blur_region(win, POPOVER_SHADOW_MARGIN);
+                    blur.apply_blur_surface(win, &anim_shell, || {
+                        ConfigManager::global().surface_border_radius() as i32
+                    });
                 }
             } else if let Some(blur) =
                 crate::services::background_effect::BackgroundEffectManager::global()
@@ -1253,6 +1559,7 @@ impl LayerShellPopover {
 
         let window = self.window.borrow().as_ref().cloned();
         let window_for_complete = window.as_ref().map(|w| w.downgrade());
+        let blur_content = anim_shell.clone().upcast::<gtk4::Widget>().downgrade();
         let on_close = self.on_close.borrow().clone();
 
         run_popover_animation(
@@ -1261,9 +1568,7 @@ impl LayerShellPopover {
             &self.anim_generation,
             generation,
             direction,
-            window
-                .as_ref()
-                .map(|w| (w.downgrade(), POPOVER_SHADOW_MARGIN)),
+            window.as_ref().map(|w| (w.downgrade(), blur_content)),
             move |direction, shell| {
                 if direction == AnimDirection::Closing {
                     // Close complete — remove content and hide window.

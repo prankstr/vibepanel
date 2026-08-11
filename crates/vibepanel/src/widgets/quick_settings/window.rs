@@ -31,11 +31,12 @@ use crate::services::updates::UpdatesService;
 use crate::services::vpn::VpnService;
 use crate::styles::{qs, state, surface};
 use crate::widgets::layer_shell_popover::{
-    ANIM_SCALE_FROM, AnimDirection, AnimState, Dismissible, PopoverAnchor,
+    ANIM_SCALE_FROM, AnimDirection, AnimState, Dismissible, PopoverAnchor, animate_reveal,
     calculate_bar_exclusive_zone, calculate_popover_bar_margin, calculate_popover_bottom_margin,
-    calculate_popover_right_margin, configure_popover_layer_anchors, create_click_catcher,
-    is_keynav_key, popover_bar_edge, popover_keyboard_mode, reset_popover_margins,
-    run_popover_animation, setup_esc_handler, snap_anim_shell,
+    calculate_popover_right_margin, clear_surface_height_freeze, configure_popover_layer_anchors,
+    create_click_catcher, install_surface_height_freeze, is_keynav_key, popover_bar_edge,
+    popover_keyboard_mode, reset_popover_margins, run_popover_animation, setup_esc_handler,
+    snap_anim_shell,
 };
 use crate::widgets::scale_box::ScaleBox;
 
@@ -283,6 +284,7 @@ impl QuickSettingsWindow {
 
         // Store outer container reference.
         *qs.outer_container.borrow_mut() = Some(outer.clone());
+        install_surface_height_freeze(&qs.window, &outer);
 
         // Apply Pango font attributes to all labels if enabled in config.
         // This is the central hook for quick settings - widgets create standard
@@ -302,10 +304,9 @@ impl QuickSettingsWindow {
             });
         }
 
-        // Apply blur when mapped.  On first map the surface has no size yet
-        // so apply_blur_region defers via idle.  On re-show, anim_shell is at
-        // opacity 0 (transparent) until the animation tick overwrites the region
-        // with a scaled version within 1-2 frames.
+        // Apply blur when mapped. The content-bounds resize watcher handles
+        // first-map readiness. On re-show, anim_shell is transparent until the
+        // animation tick overwrites the region with a scaled version.
         //
         // The else-branch removes any stale protocol object left from a
         // previous map cycle.  This handles the case where blur was enabled
@@ -316,12 +317,16 @@ impl QuickSettingsWindow {
         // Known limitation: config changes to `theme.blur` or border radius
         // while Quick Settings is open take effect on next open, not
         // immediately.  QS grabs focus so config edits are unlikely while open.
+        let outer_weak = outer.downgrade();
         window.connect_map(move |win| {
             if ConfigManager::global().blur_enabled() {
                 if let Some(blur) =
                     crate::services::background_effect::BackgroundEffectManager::global()
+                    && let Some(outer) = outer_weak.upgrade()
                 {
-                    blur.apply_blur_region(win, QUICK_SETTINGS_OUTER_MARGIN);
+                    blur.apply_blur_surface(win, &outer, || {
+                        ConfigManager::global().surface_border_radius() as i32
+                    });
                 }
             } else if let Some(blur) =
                 crate::services::background_effect::BackgroundEffectManager::global()
@@ -1067,7 +1072,7 @@ impl QuickSettingsWindow {
             let arrow = audio_widgets.arrow_handle.clone();
             audio_widgets.expander_button.connect_clicked(move |_| {
                 let expanding = !revealer.reveals_child();
-                revealer.set_reveal_child(expanding);
+                animate_reveal(&revealer, expanding);
                 if expanding {
                     arrow.widget().add_css_class(state::EXPANDED);
                 } else {
@@ -1163,7 +1168,7 @@ impl QuickSettingsWindow {
             let arrow = mic_widgets.arrow_handle.clone();
             mic_widgets.expander_button.connect_clicked(move |_| {
                 let expanding = !revealer.reveals_child();
-                revealer.set_reveal_child(expanding);
+                animate_reveal(&revealer, expanding);
                 if expanding {
                     arrow.widget().add_css_class(state::EXPANDED);
                 } else {
@@ -1632,6 +1637,10 @@ impl QuickSettingsWindow {
         // Restore keyboard mode if it was released for VPN password dialogs
         vpn_card::restore_keyboard_if_released();
 
+        // Drop any in-flight surface height freeze so the hidden window
+        // returns to natural sizing for the next open.
+        clear_surface_height_freeze(&self.window);
+
         // Clear the global QS window reference so card-level actions
         // (e.g., show_wifi_password_dialog) don't fire while hidden.
         clear_current_qs_window();
@@ -1713,6 +1722,11 @@ impl QuickSettingsWindow {
     /// that point with proportional timing — no snapping.
     fn start_animation(&self, direction: AnimDirection, generation: u32) {
         let window_weak = self.window.downgrade();
+        let blur_content = self
+            .outer_container
+            .borrow()
+            .as_ref()
+            .map(|outer| outer.clone().upcast::<gtk4::Widget>().downgrade());
 
         run_popover_animation(
             &self.anim_shell,
@@ -1720,7 +1734,7 @@ impl QuickSettingsWindow {
             &self.anim_generation,
             generation,
             direction,
-            Some((self.window.downgrade(), QUICK_SETTINGS_OUTER_MARGIN)),
+            blur_content.map(|content| (self.window.downgrade(), content)),
             move |direction, shell| {
                 if direction == AnimDirection::Closing {
                     snap_anim_shell(shell, 0.0, ANIM_SCALE_FROM);

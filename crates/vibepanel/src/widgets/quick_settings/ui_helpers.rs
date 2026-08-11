@@ -8,6 +8,7 @@ use std::rc::Rc;
 use crate::services::icons::{CairoSpinner, IconHandle, IconsService};
 use crate::styles::{button, color, icon, qs, row, state};
 use crate::widgets::base::add_ripple_to_row;
+use crate::widgets::layer_shell_popover::animate_reveal;
 use gtk4::pango::EllipsizeMode;
 use gtk4::prelude::*;
 use gtk4::{
@@ -401,7 +402,7 @@ impl AccordionManager {
                 accordion.collapse_others(revealer);
             }
 
-            revealer.set_reveal_child(expanding);
+            animate_reveal(revealer, expanding);
 
             if let Some(ref arrow) = arrow {
                 if expanding {

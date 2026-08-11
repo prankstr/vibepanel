@@ -453,7 +453,7 @@ fn build_notification_row(
 
         // Fade out the row content and collapse height via the Revealer
         card_for_dismiss.add_css_class(notif::ROW_DISMISSING);
-        revealer_for_dismiss.set_reveal_child(false);
+        crate::widgets::layer_shell_popover::animate_reveal(&revealer_for_dismiss, false);
 
         // Remove immediately when animations are disabled.
         let duration = if ConfigManager::global().animations_enabled() {

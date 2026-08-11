@@ -25,6 +25,7 @@ use crate::services::surfaces::SurfaceStyleManager;
 use crate::services::vpn::{VpnConnection, VpnService, VpnSnapshot};
 use crate::services::vpn_secret_agent::VpnAuthRequest;
 use crate::styles::{button, color, icon, qs, row, state};
+use crate::widgets::layer_shell_popover::animate_reveal;
 
 // Global state for VPN keyboard grab management.
 // Thread-local so it survives QS window hide/show cycles and bar teardown.
@@ -708,7 +709,7 @@ fn show_vpn_auth_dialog(state: &Rc<VpnCardState>, request: &VpnAuthRequest) {
 
     // Expand the VPN card revealer so the auth row is visible
     if let Some(revealer) = state.base.revealer.borrow().as_ref() {
-        revealer.set_reveal_child(true);
+        animate_reveal(revealer, true);
     }
     if let Some(arrow) = state.base.arrow.borrow().as_ref() {
         arrow.set_icon("pan-up-symbolic");
