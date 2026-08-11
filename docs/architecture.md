@@ -167,7 +167,11 @@ Each bar receives its monitor's connector name (e.g., "eDP-1") which is passed t
 
 Two types of hot-reload:
 
-1. **CSS reload**: `ConfigManager` watches for changes, reloads CSS provider
+1. **CSS reload**: `ConfigManager` watches `style.css` and local files imported
+   with `@import`, then reloads the root CSS provider when any dependency changes.
+   GTK loads imports relative to each stylesheet; VibePanel only discovers files
+   for watching. The dependency graph and watched directories refresh after
+   stylesheet changes.
 2. **Config reload**: Currently reloads CSS variables; full widget rebuild planned
 
 File watching uses `notify` crate with debouncing to avoid rapid updates during saves.

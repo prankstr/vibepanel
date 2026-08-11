@@ -18,7 +18,7 @@
 //!   bar rebuild with a brief visual flicker.
 
 use std::cell::{Cell, RefCell};
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -27,7 +27,8 @@ use std::time::Duration;
 
 use gtk4::{gio, glib, prelude::*};
 use notify_debouncer_mini::{DebounceEventResult, new_debouncer, notify::RecursiveMode};
-use std::collections::HashSet;
+use parking_lot::RwLock;
+use std::collections::{HashSet, VecDeque};
 use tracing::{debug, error, info, warn};
 
 use vibepanel_core::{
@@ -49,6 +50,8 @@ const GTK_INTERFACE_SCHEMA: &str = "org.gnome.desktop.interface";
 const GTK_COLOR_SCHEME_KEY: &str = "color-scheme";
 const CLOCK_WIDGET_NAME: &str = "clock";
 const WEATHER_WIDGET_NAME: &str = "weather";
+// Bounds both depth and breadth when symlinked directories evade the visited set.
+const CSS_IMPORT_SCAN_LIMIT: usize = 256;
 
 use crate::bar;
 use crate::services::audio::AudioService;
@@ -87,18 +90,182 @@ fn send_config_message(msg: ConfigMessage) {
     });
 }
 
-/// Return true when an event path should trigger user CSS reload.
-///
-/// Matches `style.css` by name (for direct writes to the logical path), or an
-/// exact match against the full canonical symlink target path (to avoid false
-/// positives when another watched directory coincidentally contains a file with
-/// the same basename).
-fn is_style_change_path(
-    path: &std::path::Path,
-    symlink_canonical_target: Option<&std::path::Path>,
-) -> bool {
-    path.file_name() == Some(std::ffi::OsStr::new("style.css"))
-        || symlink_canonical_target.is_some_and(|target| path == target)
+/// Normalize `.` and `..` components lexically to match GTK's import resolution.
+fn normalize_path(path: &Path) -> PathBuf {
+    let absolute = make_absolute(path);
+    let mut normalized = PathBuf::new();
+
+    for component in absolute.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(component.as_os_str()),
+            Component::Normal(part) => normalized.push(part),
+        }
+    }
+
+    normalized
+}
+
+/// Remove `/* ... */` comments. CSS comments don't nest.
+/// Comment markers inside string literals confuse this (e.g. `content: "/*"`);
+/// worst case is a wrong or missing hot-reload watch — GTK stays the
+/// authoritative parser.
+fn strip_css_comments(css: &str) -> String {
+    let mut stripped = String::with_capacity(css.len());
+    let mut rest = css;
+    while let Some(start) = rest.find("/*") {
+        stripped.push_str(&rest[..start]);
+        rest = match rest[start + 2..].find("*/") {
+            Some(end) => &rest[start + 2 + end + 2..],
+            None => "",
+        };
+    }
+    stripped.push_str(rest);
+    stripped
+}
+
+fn strip_prefix_ci<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
+    value
+        .get(..prefix.len())
+        .filter(|head| head.eq_ignore_ascii_case(prefix))
+        .map(|_| &value[prefix.len()..])
+}
+
+/// Extract quoted, `url()`, and unquoted local `@import` paths.
+/// GTK remains the authoritative parser; this scan only picks watch paths.
+/// Naive statement scan on comment-stripped CSS — imports inside string
+/// literals produce spurious watches, CSS escapes stay unsupported, and paths
+/// containing `;` are truncated; worst case is a wrong or missing hot-reload
+/// watch, never wrong styling.
+fn css_import_values(css: &str) -> Vec<String> {
+    let stripped = strip_css_comments(css);
+    let lower = stripped.to_ascii_lowercase();
+    let mut imports = Vec::new();
+
+    for (index, _) in lower.match_indices("@import") {
+        let rest = &stripped[index + "@import".len()..];
+        if rest.starts_with(|c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | '-')) {
+            continue; // @important, @importurl(...), ...
+        }
+        let line = rest.split(';').next().unwrap_or("").trim();
+        let line = strip_prefix_ci(line, "url(")
+            .map(str::trim_start)
+            .unwrap_or(line);
+        let value = match line.chars().next() {
+            Some(quote @ ('"' | '\'')) => line[1..].split(quote).next().unwrap_or(""),
+            _ => line.split([')', ';']).next().unwrap_or(""),
+        };
+        let value = value.trim();
+        if !value.is_empty() && !value.contains('\\') && value.len() <= 512 {
+            imports.push(value.to_string());
+        }
+    }
+
+    imports
+}
+
+fn local_css_import_path(value: &str) -> Option<PathBuf> {
+    let value = value.trim();
+    if value.is_empty() || value.starts_with('#') || value.starts_with("//") {
+        return None;
+    }
+
+    if let Some(colon) = value.find(':') {
+        let scheme = &value[..colon];
+        if !scheme.is_empty()
+            && scheme.bytes().enumerate().all(|(index, byte)| {
+                byte.is_ascii_alphabetic()
+                    || (index > 0 && (byte.is_ascii_digit() || matches!(byte, b'+' | b'-' | b'.')))
+            })
+        {
+            return None;
+        }
+    }
+
+    Some(PathBuf::from(value))
+}
+
+fn discover_css_dependencies(root: &Path) -> HashSet<PathBuf> {
+    let root = normalize_path(root);
+    let mut dependencies = HashSet::new();
+    let mut pending = VecDeque::from([root]);
+
+    while let Some(logical_path) = pending.pop_front() {
+        if !dependencies.insert(logical_path.clone()) {
+            continue;
+        }
+        if dependencies.len() >= CSS_IMPORT_SCAN_LIMIT {
+            warn!("CSS import scan reached dependency limit");
+            break;
+        }
+
+        let Ok(css) = std::fs::read_to_string(&logical_path) else {
+            continue;
+        };
+        let importer_dir = logical_path.parent().unwrap_or(Path::new("/"));
+
+        for import in css_import_values(&css) {
+            let Some(import_path) = local_css_import_path(&import) else {
+                continue;
+            };
+            let resolved = if import_path.is_absolute() {
+                normalize_path(&import_path)
+            } else {
+                normalize_path(&importer_dir.join(import_path))
+            };
+            pending.push_back(resolved);
+        }
+    }
+
+    dependencies
+}
+
+fn style_watch_dirs(watched_paths: &HashSet<PathBuf>, config_watch_dir: &Path) -> HashSet<PathBuf> {
+    watched_paths
+        .iter()
+        .filter_map(|path| path.parent().map(Path::to_path_buf))
+        .filter(|dir| dir != config_watch_dir)
+        .collect()
+}
+
+fn arm_style_dirs(
+    watcher: &mut (impl notify_debouncer_mini::notify::Watcher + ?Sized),
+    dirs: &HashSet<PathBuf>,
+    failed_dirs: &mut HashSet<PathBuf>,
+) -> HashSet<PathBuf> {
+    failed_dirs.retain(|dir| dirs.contains(dir));
+    let mut armed = HashSet::new();
+    for dir in dirs {
+        if !dir.is_dir() {
+            continue;
+        }
+
+        match watcher.watch(dir, RecursiveMode::NonRecursive) {
+            Ok(()) => {
+                armed.insert(dir.clone());
+                failed_dirs.remove(dir);
+            }
+            Err(error) => {
+                if failed_dirs.insert(dir.clone()) {
+                    warn!("Failed to watch CSS directory {}: {}", dir.display(), error);
+                }
+            }
+        }
+    }
+    armed
+}
+
+/// Return true for a stylesheet or its parent directory being replaced or removed.
+fn is_style_change_path(path: &Path, watched_paths: &HashSet<PathBuf>) -> bool {
+    let normalized = normalize_path(path);
+    watched_paths.contains(&normalized)
+        || watched_paths
+            .iter()
+            .any(|watched| watched.parent() == Some(normalized.as_path()))
 }
 
 fn config_uses_gtk_scheme(config: &Config) -> bool {
@@ -608,59 +775,45 @@ impl ConfigManager {
         debug!("Watching GTK color-scheme preference for theme.scheme=gtk");
     }
 
-    /// Compute the set of directories to watch for `style.css` changes, and
-    /// (if the active `style.css` is a symlink) the full canonical path of the
-    /// symlink target.
+    /// Compute exact root/import paths to watch.
     ///
     /// `search_paths` and `style_css_logical` are passed in so the function
     /// can be unit-tested without touching global env vars.
-    ///
-    /// `config_watch_dir` is excluded from the returned set because it is
-    /// already covered by the config file watcher.
-    fn compute_style_watch_info(
+    fn compute_style_watch_paths(
         search_paths: Vec<PathBuf>,
         style_css_logical: Option<PathBuf>,
-        config_watch_dir: &std::path::Path,
-    ) -> (HashSet<PathBuf>, Option<PathBuf>) {
-        let mut watch_dirs: HashSet<PathBuf> = search_paths
-            .into_iter()
-            .map(|path| make_absolute(&path))
-            .filter_map(|path| path.parent().map(|dir| dir.to_path_buf()))
-            .collect();
-        watch_dirs.remove(config_watch_dir);
-
-        let mut symlink_canonical_target: Option<PathBuf> = None;
-
-        if let Some(logical) = style_css_logical
-            && let Ok(meta) = std::fs::symlink_metadata(&logical)
-            && meta.file_type().is_symlink()
-            && let Ok(canonical) = logical.canonicalize()
-            && let Some(target_dir) = canonical.parent()
-        {
-            info!(
-                "style.css is a symlink: {} -> {}",
-                logical.display(),
-                canonical.display()
-            );
-            watch_dirs.insert(target_dir.to_path_buf());
-            symlink_canonical_target = Some(canonical);
+    ) -> HashSet<PathBuf> {
+        let mut watched_paths = HashSet::new();
+        for search_path in search_paths {
+            let logical = normalize_path(&search_path);
+            watched_paths.insert(logical);
         }
 
-        (watch_dirs, symlink_canonical_target)
+        if let Some(root) = style_css_logical {
+            for logical in discover_css_dependencies(&root) {
+                watched_paths.insert(logical.clone());
+
+                if let Ok(canonical) = logical.canonicalize() {
+                    if canonical != logical {
+                        debug!(
+                            "Watching CSS symlink target: {} -> {}",
+                            logical.display(),
+                            canonical.display()
+                        );
+                    }
+                    watched_paths.insert(canonical);
+                }
+            }
+        }
+
+        watched_paths
     }
 
     /// Run the file watcher loop (called on a background thread).
     ///
-    /// Watches `config.toml` and user `style.css`, including the symlink target's
-    /// parent directory so direct writes (e.g. Matugen) are detected.
-    ///
-    /// **Limitation:** watch directories are resolved once at startup. Changes
-    /// within already-watched directories (including a new higher-priority
-    /// `style.css` appearing there) are detected normally. Writes will be
-    /// missed until restart in two cases: if `style.css` becomes a symlink
-    /// after startup (or an existing symlink is re-pointed to a directory not
-    /// already watched), or if a candidate directory that did not exist at
-    /// startup is created later.
+    /// Watches `config.toml`, user `style.css`, and local CSS imports. The CSS
+    /// dependency graph is refreshed after stylesheet changes. Logical and
+    /// canonical symlink paths are both tracked.
     fn run_file_watcher(
         config_path: PathBuf,
         config_dir: Option<PathBuf>,
@@ -684,19 +837,32 @@ impl ConfigManager {
             .unwrap_or(&config_canonical)
             .to_path_buf();
 
-        let (style_watch_dirs, symlink_canonical_target) = Self::compute_style_watch_info(
+        let style_watch_paths = Self::compute_style_watch_paths(
             crate::bar::user_css_search_paths(config_dir.as_deref()),
             crate::bar::find_user_css(config_dir.as_deref()),
-            &config_watch_dir,
         );
+        let mut desired_style_dirs = style_watch_dirs(&style_watch_paths, &config_watch_dir);
 
         debug!(
             "Style CSS watch directories: {:?}",
-            style_watch_dirs
+            desired_style_dirs
                 .iter()
                 .map(|p| p.display().to_string())
                 .collect::<Vec<_>>()
         );
+        debug!(
+            "Watched CSS files: {:?}",
+            style_watch_paths
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+        );
+
+        let watched_style_paths = Arc::new(RwLock::new(style_watch_paths));
+        let needs_style_rescan = Arc::new(AtomicBool::new(false));
+
+        let callback_watched_style_paths = watched_style_paths.clone();
+        let callback_needs_style_rescan = needs_style_rescan.clone();
 
         let mut debouncer =
             match new_debouncer(debounce_duration, move |res: DebounceEventResult| {
@@ -709,16 +875,21 @@ impl ConfigManager {
                             Self::reload_and_send(&config_canonical);
                         }
 
-                        let style_changed = events.iter().any(|e| {
-                            is_style_change_path(&e.path, symlink_canonical_target.as_deref())
-                        });
+                        let watched_paths = callback_watched_style_paths.read();
+                        let style_changed = events
+                            .iter()
+                            .any(|e| is_style_change_path(&e.path, &watched_paths));
+                        drop(watched_paths);
                         if style_changed {
                             debug!("User style.css change detected");
+                            callback_needs_style_rescan.store(true, Ordering::Relaxed);
                             send_config_message(ConfigMessage::StyleCssChanged);
                         }
                     }
                     Err(err) => {
                         error!("File watcher error: {}", err);
+                        callback_needs_style_rescan.store(true, Ordering::Relaxed);
+                        send_config_message(ConfigMessage::StyleCssChanged);
                     }
                 }
             }) {
@@ -742,32 +913,67 @@ impl ConfigManager {
             config_watch_dir.display()
         );
 
-        for watch_dir in style_watch_dirs {
-            if !watch_dir.is_dir() {
-                debug!(
-                    "Skipping style.css watch for non-directory path: {}",
-                    watch_dir.display()
-                );
-                continue;
-            }
-
-            if let Err(e) = debouncer
-                .watcher()
-                .watch(&watch_dir, RecursiveMode::NonRecursive)
-            {
-                warn!(
-                    "Failed to watch style.css directory {}: {}",
-                    watch_dir.display(),
-                    e
-                );
-            } else {
-                info!("Also watching style.css directory: {}", watch_dir.display());
-            }
-        }
+        let mut failed_style_dirs = HashSet::new();
+        let mut armed_style_dirs = arm_style_dirs(
+            debouncer.watcher(),
+            &desired_style_dirs,
+            &mut failed_style_dirs,
+        );
 
         // Keep the thread alive until shutdown is signaled
         // Use shorter sleep intervals to allow responsive shutdown
         while !shutdown_flag.load(Ordering::Relaxed) {
+            let mut reload_style = false;
+            let force_rearm = needs_style_rescan.swap(false, Ordering::Relaxed);
+            if force_rearm {
+                let refreshed = Self::compute_style_watch_paths(
+                    crate::bar::user_css_search_paths(config_dir.as_deref()),
+                    crate::bar::find_user_css(config_dir.as_deref()),
+                );
+                let mut watched = watched_style_paths.write();
+                // A dependency discovered after the reload may have changed while untracked.
+                reload_style = !refreshed.is_subset(&watched);
+                let previous = std::mem::replace(&mut *watched, refreshed);
+                // Retain vanished dependencies for delete/recreate recovery, with a bound for
+                // paths that never reappear.
+                watched.extend(
+                    previous
+                        .into_iter()
+                        .filter(|path| !path.exists())
+                        .take(CSS_IMPORT_SCAN_LIMIT),
+                );
+                desired_style_dirs = style_watch_dirs(&watched, &config_watch_dir);
+            }
+
+            for stale in armed_style_dirs.difference(&desired_style_dirs) {
+                let _ = debouncer.watcher().unwatch(stale);
+            }
+
+            let dirs_to_arm = if force_rearm {
+                desired_style_dirs.clone()
+            } else {
+                desired_style_dirs
+                    .difference(&armed_style_dirs)
+                    .cloned()
+                    .collect()
+            };
+            let armed_now =
+                arm_style_dirs(debouncer.watcher(), &dirs_to_arm, &mut failed_style_dirs);
+            if !armed_now.is_subset(&armed_style_dirs) {
+                needs_style_rescan.store(true, Ordering::Relaxed);
+                reload_style = true;
+            }
+            if force_rearm {
+                armed_style_dirs = armed_now;
+            } else {
+                armed_style_dirs.extend(armed_now);
+            }
+
+            if reload_style {
+                // A newly armed directory may already contain a change emitted while unwatched.
+                debug!("CSS dependencies changed; reloading after updating watches");
+                send_config_message(ConfigMessage::StyleCssChanged);
+            }
             thread::sleep(Duration::from_millis(500));
         }
 
@@ -1291,6 +1497,7 @@ fn widget_config_fingerprint(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui_regression_test_support::TestDir;
     use std::path::Path;
     use vibepanel_core::config::{WeatherUnits, WidgetOptions, WidgetPlacement};
 
@@ -1407,54 +1614,147 @@ mod tests {
     }
 
     #[test]
-    fn test_is_style_change_path_matches_style_css() {
-        assert!(is_style_change_path(Path::new("/tmp/style.css"), None));
+    fn test_css_import_values_supports_common_forms() {
+        let css = r#"
+            @import "colors.css";
+            @import 'layout.css';
+            @import url("widgets.css");
+            @import url('popover.css');
+            @import url(plain.css);
+            @IMPORT /* generated */ URL("upper.css");
+            @import
+                "multiline.css";
+            @import url(
+                "multiline-url.css"
+            );
+        "#;
+
+        assert_eq!(
+            css_import_values(css),
+            vec![
+                "colors.css",
+                "layout.css",
+                "widgets.css",
+                "popover.css",
+                "plain.css",
+                "upper.css",
+                "multiline.css",
+                "multiline-url.css",
+            ]
+        );
     }
 
     #[test]
-    fn test_is_style_change_path_matches_exact_canonical_target() {
-        // Only the exact canonical path triggers a reload — not a same-named
-        // file in a different directory.
-        let target = Path::new("/run/matugen/colors.css");
-        assert!(is_style_change_path(target, Some(target)));
+    fn test_css_import_values_ignores_comments_and_longer_at_rules() {
+        let css = r#"
+            /* @import "comment.css"; */
+            @important "not-an-import.css";
+            @importurl("also-not-an-import.css");
+            @import "real.css";
+        "#;
+
+        assert_eq!(css_import_values(css), vec!["real.css"]);
+        assert!(css_import_values("/* unterminated @import \"fake.css\";").is_empty());
     }
 
     #[test]
-    fn test_is_style_change_path_rejects_same_name_different_dir() {
-        // A file named "colors.css" in a different directory must NOT match,
-        // unlike the old basename-only comparison which would have fired.
-        let target = Path::new("/run/matugen/colors.css");
-        let unrelated = Path::new("/home/user/.cache/colors.css");
-        assert!(!is_style_change_path(unrelated, Some(target)));
+    fn test_css_import_values_rejects_escaped_and_oversized_values() {
+        assert!(css_import_values(r#"@import "escaped\"name.css";"#).is_empty());
+        let long = format!("@import \"{}\";", "a".repeat(600));
+        assert!(css_import_values(&long).is_empty());
     }
 
     #[test]
-    fn test_is_style_change_path_target_name_none() {
-        assert!(!is_style_change_path(Path::new("/tmp/colors.css"), None));
+    fn test_local_css_import_path_rejects_non_file_urls() {
+        assert_eq!(
+            local_css_import_path("../theme.css"),
+            Some(PathBuf::from("../theme.css"))
+        );
+        assert!(local_css_import_path("https://example.com/theme.css").is_none());
+        assert!(local_css_import_path("resource:///theme.css").is_none());
+        assert!(local_css_import_path("data:text/css,body{}").is_none());
+    }
+
+    #[test]
+    fn test_discover_css_dependencies_resolves_nested_imports_and_cycles() {
+        let root_dir = TestDir::new("vibepanel_test_imports");
+        let root_dir = root_dir.path();
+        let nested_dir = root_dir.join("nested");
+        std::fs::create_dir_all(&nested_dir).unwrap();
+
+        let root = root_dir.join("style.css");
+        let nested = nested_dir.join("colors.css");
+        let base = root_dir.join("base.css");
+        let missing = root_dir.join("missing.css");
+        std::fs::write(
+            &root,
+            "@import \"nested/colors.css\"; @import \"missing.css\";",
+        )
+        .unwrap();
+        std::fs::write(&nested, "@import \"../base.css\";").unwrap();
+        std::fs::write(&base, "@import \"style.css\";").unwrap();
+
+        let dependencies = discover_css_dependencies(&root);
+        assert_eq!(dependencies.len(), 4);
+        assert!(dependencies.contains(&normalize_path(&root)));
+        assert!(dependencies.contains(&normalize_path(&nested)));
+        assert!(dependencies.contains(&normalize_path(&base)));
+        assert!(dependencies.contains(&normalize_path(&missing)));
+    }
+
+    #[test]
+    fn test_discover_css_dependencies_caps_total_work() {
+        let root_dir = TestDir::new("vibepanel_test_import_limit");
+        let root_dir = root_dir.path();
+        std::fs::create_dir_all(root_dir).unwrap();
+
+        let root = root_dir.join("style.css");
+        let css = (0..CSS_IMPORT_SCAN_LIMIT)
+            .map(|index| format!("@import \"{index}.css\";"))
+            .collect::<String>();
+        std::fs::write(&root, css).unwrap();
+
+        assert_eq!(
+            discover_css_dependencies(&root).len(),
+            CSS_IMPORT_SCAN_LIMIT
+        );
+    }
+
+    #[test]
+    fn test_is_style_change_path_matches_dependency_or_parent_directory() {
+        let target = normalize_path(Path::new("/run/matugen/colors.css"));
+        let watched_paths = HashSet::from([target.clone()]);
+
+        assert!(is_style_change_path(&target, &watched_paths));
+        assert!(is_style_change_path(
+            Path::new("/run/matugen"),
+            &watched_paths
+        ));
+        assert!(!is_style_change_path(
+            Path::new("/home/user/.cache/colors.css"),
+            &watched_paths
+        ));
+        assert!(!is_style_change_path(
+            Path::new("/tmp/style.css"),
+            &watched_paths
+        ));
     }
 
     #[cfg(unix)]
     #[test]
-    fn test_compute_style_watch_info_adds_symlink_target_dir() {
-        use std::time::{SystemTime, UNIX_EPOCH};
-
+    fn test_compute_style_watch_paths_adds_symlink_target_dir() {
         // Create two temp dirs: one for the "config" dir (where style.css lives
         // as a symlink) and one for the "target" dir (where the real file lives).
-        let unique = format!(
-            "vibepanel_test_symlink_{}_{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        );
-        let config_dir = std::env::temp_dir().join(format!("{}_config", unique));
-        let target_dir = std::env::temp_dir().join(format!("{}_target", unique));
-        std::fs::create_dir_all(&config_dir).unwrap();
-        std::fs::create_dir_all(&target_dir).unwrap();
+        let config_dir = TestDir::new("vibepanel_test_symlink_config");
+        let target_dir = TestDir::new("vibepanel_test_symlink_target");
+        let config_dir = config_dir.path();
+        let target_dir = target_dir.path();
 
         let target_file = target_dir.join("colors.css");
-        std::fs::write(&target_file, "/* target */").unwrap();
+        std::fs::write(&target_file, "@import \"imported.css\";").unwrap();
+
+        let imported_file = config_dir.join("imported.css");
+        std::fs::write(&imported_file, "/* imported */").unwrap();
 
         let symlink_path = config_dir.join("style.css");
         std::os::unix::fs::symlink(&target_file, &symlink_path).unwrap();
@@ -1462,25 +1762,48 @@ mod tests {
         let canonical_target = target_file.canonicalize().unwrap();
 
         let search_paths = vec![symlink_path.clone()];
-        let (watch_dirs, symlink_canonical_target) = ConfigManager::compute_style_watch_info(
-            search_paths,
-            Some(symlink_path),
-            // Exclude config_dir to mirror the real usage.
-            &config_dir,
-        );
+        let watched_paths =
+            ConfigManager::compute_style_watch_paths(search_paths, Some(symlink_path));
+        let watch_dirs = style_watch_dirs(&watched_paths, config_dir);
 
         // The symlink target's parent directory must be added for direct-write detection.
         assert!(
-            watch_dirs.contains(&target_dir),
+            watch_dirs.contains(target_dir),
             "expected target_dir {:?} in watch_dirs {:?}",
             target_dir,
             watch_dirs,
         );
-        // The returned canonical target must be the exact target file path.
-        assert_eq!(symlink_canonical_target, Some(canonical_target));
+        assert!(!watch_dirs.contains(config_dir));
+        assert!(watched_paths.contains(&canonical_target));
+        assert!(
+            watched_paths.contains(&normalize_path(&imported_file)),
+            "imports must resolve relative to the logical symlink path"
+        );
+    }
 
-        let _ = std::fs::remove_dir_all(&config_dir);
-        let _ = std::fs::remove_dir_all(&target_dir);
+    #[test]
+    fn test_compute_style_watch_paths_discovers_import_added_after_startup() {
+        let config_dir = TestDir::new("vibepanel_test_dynamic_import_config");
+        let external_dir = TestDir::new("vibepanel_test_dynamic_import_external");
+        let config_dir = config_dir.path();
+        let external_dir = external_dir.path();
+
+        let root = config_dir.join("style.css");
+        let imported = external_dir.join("colors.css");
+        std::fs::write(&root, "/* no imports */").unwrap();
+
+        let initial =
+            ConfigManager::compute_style_watch_paths(vec![root.clone()], Some(root.clone()));
+        assert!(!style_watch_dirs(&initial, config_dir).contains(external_dir));
+        assert!(!initial.contains(&normalize_path(&imported)));
+
+        std::fs::create_dir_all(external_dir).unwrap();
+        std::fs::write(&imported, "/* generated colors */").unwrap();
+        std::fs::write(&root, format!("@import \"{}\";", imported.display())).unwrap();
+
+        let refreshed = ConfigManager::compute_style_watch_paths(vec![root.clone()], Some(root));
+        assert!(style_watch_dirs(&refreshed, config_dir).contains(external_dir));
+        assert!(refreshed.contains(&normalize_path(&imported)));
     }
 
     #[test]
