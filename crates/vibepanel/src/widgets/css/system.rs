@@ -34,6 +34,9 @@ pub fn css() -> &'static str {
 .system-progress-bar trough,
 .system-core-bar trough {
     background-color: var(--color-slider-track);
+    background-image: none;
+    border: none;
+    box-shadow: none;
     border-radius: var(--slider-radius);
     min-height: var(--slider-height);
 }
@@ -41,6 +44,10 @@ pub fn css() -> &'static str {
 .system-progress-bar trough progress,
 .system-core-bar trough progress {
     background-color: var(--color-accent-slider, var(--color-accent-primary));
+    background-image: none;
+    border: none;
+    box-shadow: none;
+    margin: 0;
     border-radius: var(--slider-radius);
     min-height: var(--slider-height);
 }
@@ -80,4 +87,23 @@ button.system-expander-header > overlay > box {
 .system-gpu-metrics {
 }
 "#
+}
+
+#[cfg(test)]
+mod tests {
+    use super::css;
+
+    #[test]
+    fn progress_bars_clear_gtk_theme_chrome() {
+        let css = css();
+
+        for property in [
+            "background-image: none;",
+            "border: none;",
+            "box-shadow: none;",
+        ] {
+            assert_eq!(css.matches(property).count(), 2);
+        }
+        assert!(css.contains("margin: 0;"));
+    }
 }

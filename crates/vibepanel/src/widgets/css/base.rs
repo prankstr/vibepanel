@@ -23,6 +23,27 @@ pub fn css(animations: bool) -> String {
         r#"
 /* ===== SHARED UTILITY CSS ===== */
 
+scale > trough {{
+    border: none;
+    outline: none;
+    box-shadow: none;
+    background-image: none;
+}}
+
+scale > trough > highlight,
+scale > trough > fill {{
+    margin: 0;
+    border: none;
+    box-shadow: none;
+    background-image: none;
+}}
+
+scale > trough > slider {{
+    border: none;
+    box-shadow: none;
+    background-image: none;
+}}
+
 /* Layer-shell popover window - transparent so content can have proper shadow */
 window.layer-shell-popover {{
     background: transparent;
@@ -533,4 +554,24 @@ button:hover {{
 }}
 "#
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::css;
+
+    #[test]
+    fn scales_clear_gtk_theme_chrome() {
+        let css = css(false);
+
+        assert!(css.contains(
+            "scale > trough {\n    border: none;\n    outline: none;\n    box-shadow: none;\n    background-image: none;\n}"
+        ));
+        assert!(css.contains(
+            "scale > trough > highlight,\nscale > trough > fill {\n    margin: 0;\n    border: none;\n    box-shadow: none;\n    background-image: none;\n}"
+        ));
+        assert!(css.contains(
+            "scale > trough > slider {\n    border: none;\n    box-shadow: none;\n    background-image: none;\n}"
+        ));
+    }
 }
