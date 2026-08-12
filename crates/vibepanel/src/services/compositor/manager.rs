@@ -34,7 +34,8 @@ use vibepanel_core::config::AdvancedConfig;
 
 use super::{
     BackendKind, CompositorBackend, KeyboardLayoutCallback, KeyboardLayoutInfo, WindowCallback,
-    WindowInfo, WorkspaceCallback, WorkspaceMeta, WorkspaceSnapshot, factory,
+    WindowInfo, WindowLayoutCallback, WindowLayoutSnapshot, WorkspaceCallback, WorkspaceMeta,
+    WorkspaceSnapshot, factory,
 };
 use crate::services::callbacks::{CallbackId, Callbacks};
 
@@ -49,10 +50,12 @@ pub struct CompositorManager {
     workspace_callbacks: Callbacks<WorkspaceSnapshot>,
     window_callbacks: Callbacks<WindowInfo>,
     keyboard_layout_callbacks: Callbacks<KeyboardLayoutInfo>,
+    window_layout_callbacks: Callbacks<WindowLayoutSnapshot>,
     window_list_callbacks: Callbacks<super::WindowListSnapshot>,
     last_workspace_snapshot: RefCell<Option<WorkspaceSnapshot>>,
     last_window_info: RefCell<Option<WindowInfo>>,
     last_keyboard_layout: RefCell<Option<KeyboardLayoutInfo>>,
+    last_window_layouts: RefCell<Option<WindowLayoutSnapshot>>,
     last_window_list: RefCell<Option<super::WindowListSnapshot>>,
     started: RefCell<bool>,
 }
@@ -64,10 +67,12 @@ impl CompositorManager {
             workspace_callbacks: Callbacks::new(),
             window_callbacks: Callbacks::new(),
             keyboard_layout_callbacks: Callbacks::new(),
+            window_layout_callbacks: Callbacks::new(),
             window_list_callbacks: Callbacks::new(),
             last_workspace_snapshot: RefCell::new(None),
             last_window_info: RefCell::new(None),
             last_keyboard_layout: RefCell::new(None),
+            last_window_layouts: RefCell::new(None),
             last_window_list: RefCell::new(None),
             started: RefCell::new(false),
         });
@@ -113,10 +118,12 @@ impl CompositorManager {
                 workspace_callbacks: Callbacks::new(),
                 window_callbacks: Callbacks::new(),
                 keyboard_layout_callbacks: Callbacks::new(),
+                window_layout_callbacks: Callbacks::new(),
                 window_list_callbacks: Callbacks::new(),
                 last_workspace_snapshot: RefCell::new(Some(snapshot)),
                 last_window_info: RefCell::new(None),
                 last_keyboard_layout: RefCell::new(None),
+                last_window_layouts: RefCell::new(None),
                 last_window_list: RefCell::new(None),
                 started: RefCell::new(true),
             }));
@@ -261,6 +268,30 @@ impl CompositorManager {
         }
     }
 
+    /// Register a callback for window-layout changes.
+    pub fn register_window_layout_callback<F>(&self, callback: F) -> CallbackId
+    where
+        F: Fn(&WindowLayoutSnapshot) + 'static,
+    {
+        let id = self.window_layout_callbacks.register(callback);
+        if let Some(ref snapshot) = *self.last_window_layouts.borrow() {
+            self.window_layout_callbacks.notify_single(id, snapshot);
+        }
+        id
+    }
+
+    /// Unregister a window-layout callback by its ID.
+    pub fn unregister_window_layout_callback(&self, id: CallbackId) -> bool {
+        self.window_layout_callbacks.unregister(id)
+    }
+
+    /// Set the active tag's window layout on an output.
+    pub fn set_window_layout(&self, output: &str, layout_name: &str) {
+        if let Some(ref backend) = *self.backend.borrow() {
+            backend.set_window_layout(output, layout_name);
+        }
+    }
+
     /// Ask the active compositor to refresh pointer focus, if supported.
     pub fn refresh_pointer_focus(&self) {
         if let Some(ref backend) = *self.backend.borrow() {
@@ -321,6 +352,11 @@ impl CompositorManager {
 
         // Dispatch to all registered callbacks
         self.keyboard_layout_callbacks.notify(&info);
+    }
+
+    pub(crate) fn handle_window_layout_update(&self, snapshot: WindowLayoutSnapshot) {
+        *self.last_window_layouts.borrow_mut() = Some(snapshot.clone());
+        self.window_layout_callbacks.notify(&snapshot);
     }
 
     /// Handle a window list update from the backend.
@@ -394,6 +430,12 @@ impl CompositorManager {
                 });
             });
 
+        let on_window_layout_update: WindowLayoutCallback = Arc::new(move |snapshot| {
+            glib::idle_add_once(move || {
+                CompositorManager::global().handle_window_layout_update(snapshot);
+            });
+        });
+
         // Window list events: no coalescing needed — window changes are
         // relatively infrequent and each event should update the UI.
         let on_window_list_update: super::WindowListCallback =
@@ -406,6 +448,7 @@ impl CompositorManager {
         // Register callbacks before start() so the backend
         // can fire them during initialization.
         backend.set_keyboard_layout_callback(on_keyboard_layout_update);
+        backend.set_window_layout_callback(on_window_layout_update);
         backend.set_window_list_callback(on_window_list_update);
 
         // Start the backend first (which fetches initial state internally)
@@ -415,6 +458,7 @@ impl CompositorManager {
         *this.last_workspace_snapshot.borrow_mut() = Some(backend.get_workspace_snapshot());
         *this.last_window_info.borrow_mut() = backend.get_focused_window();
         *this.last_keyboard_layout.borrow_mut() = backend.get_keyboard_layout();
+        *this.last_window_layouts.borrow_mut() = backend.get_window_layouts();
 
         // Store backend
         *this.backend.borrow_mut() = Some(backend);

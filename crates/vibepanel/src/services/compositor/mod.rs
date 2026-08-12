@@ -20,6 +20,7 @@ mod hyprland;
 pub mod layout_names;
 mod manager;
 mod mango;
+pub mod mango_layouts;
 mod niri;
 mod sway;
 pub mod types;

@@ -23,6 +23,7 @@ mod custom;
 mod gpu;
 mod keyboard_layout;
 pub mod layer_shell_popover;
+mod mango_layout;
 mod marquee_label;
 mod media;
 mod media_components;
@@ -76,6 +77,7 @@ pub use cpu::{CpuConfig, CpuWidget};
 pub use custom::{CustomConfig, CustomWidget};
 pub use gpu::{GpuConfig, GpuWidget};
 pub use keyboard_layout::{KeyboardLayoutConfig, KeyboardLayoutWidget};
+pub use mango_layout::{MangoLayoutConfig, MangoLayoutWidget};
 pub use memory::{MemoryConfig, MemoryWidget};
 pub use network_speed::{NetworkSpeedConfig, NetworkSpeedWidget};
 
@@ -348,6 +350,19 @@ impl WidgetFactory {
                 let keyboard_layout = KeyboardLayoutWidget::new(cfg);
                 let root = keyboard_layout.widget().clone().upcast::<Widget>();
                 Some(BuiltWidget::new(root, keyboard_layout))
+            }
+            "mango_layout" => {
+                if crate::services::compositor::CompositorManager::global().backend_name()
+                    != "MangoWC"
+                {
+                    debug!("Skipping mango_layout widget: active compositor is not MangoWC");
+                    return None;
+                }
+                let cfg = MangoLayoutConfig::from_entry(entry);
+                let mango_layout = MangoLayoutWidget::new(cfg, output_id.map(str::to_string));
+                let root = mango_layout.widget().clone().upcast::<Widget>();
+                let edge_interaction = mango_layout.edge_interaction();
+                Some(BuiltWidget::new(root, mango_layout).with_edge_interaction(edge_interaction))
             }
             "media" => {
                 let cfg = MediaConfig::from_entry(entry);

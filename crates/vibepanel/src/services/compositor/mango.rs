@@ -26,10 +26,11 @@ use parking_lot::RwLock;
 use serde_json::Value;
 use tracing::{debug, error, trace, warn};
 
+use super::mango_layouts;
 use super::{
     CompositorBackend, KeyboardLayoutCallback, KeyboardLayoutInfo, Window, WindowCallback,
-    WindowInfo, WindowListCallback, WindowListSnapshot, WorkspaceCallback, WorkspaceMeta,
-    WorkspaceSnapshot,
+    WindowInfo, WindowLayoutCallback, WindowLayoutInfo, WindowLayoutSnapshot, WindowListCallback,
+    WindowListSnapshot, WorkspaceCallback, WorkspaceMeta, WorkspaceSnapshot,
 };
 
 const MANGO_SOCKET_ENV: &str = "MANGO_INSTANCE_SIGNATURE";
@@ -51,6 +52,7 @@ struct MangoSharedState {
     focused_client_id: RwLock<Option<u64>>,
     windows: RwLock<Vec<Window>>,
     keyboard_layout: RwLock<Option<KeyboardLayoutInfo>>,
+    window_layouts: RwLock<WindowLayoutSnapshot>,
     tag_count: AtomicU32,
 }
 
@@ -60,6 +62,7 @@ struct MonitorChanges {
     focused_window: bool,
     notify_window_list: bool,
     keyboard_layout: bool,
+    window_layout: bool,
 }
 
 impl Default for MangoSharedState {
@@ -71,6 +74,7 @@ impl Default for MangoSharedState {
             focused_client_id: RwLock::new(None),
             windows: RwLock::new(Vec::new()),
             keyboard_layout: RwLock::new(None),
+            window_layouts: RwLock::new(WindowLayoutSnapshot::default()),
             tag_count: AtomicU32::new(DEFAULT_WORKSPACE_COUNT),
         }
     }
@@ -85,7 +89,16 @@ pub struct MangoBackend {
     running: Arc<AtomicBool>,
     watch_threads: Mutex<Vec<JoinHandle<()>>>,
     keyboard_layout_callback: Mutex<Option<KeyboardLayoutCallback>>,
+    window_layout_callback: Mutex<Option<WindowLayoutCallback>>,
     window_list_callback: Mutex<Option<WindowListCallback>>,
+}
+
+struct MonitorWatchCallbacks {
+    workspace: WorkspaceCallback,
+    window: WindowCallback,
+    window_list: Option<WindowListCallback>,
+    keyboard_layout: Option<KeyboardLayoutCallback>,
+    window_layout: Option<WindowLayoutCallback>,
 }
 
 impl MangoBackend {
@@ -97,6 +110,7 @@ impl MangoBackend {
             running: Arc::new(AtomicBool::new(false)),
             watch_threads: Mutex::new(Vec::new()),
             keyboard_layout_callback: Mutex::new(None),
+            window_layout_callback: Mutex::new(None),
             window_list_callback: Mutex::new(None),
         }
     }
@@ -150,6 +164,7 @@ impl MangoBackend {
             apply_workspace_from_monitors(&self.shared, &value);
             apply_focused_window_from_monitors(&self.shared, &value);
             apply_keyboard_layout_from_monitors(&self.shared, &value);
+            apply_window_layouts_from_monitors(&self.shared, &value);
         }
         if let Some(value) = self.send_command("get all-clients") {
             apply_window_list_from_clients(&self.shared, &value);
@@ -160,37 +175,39 @@ impl MangoBackend {
         socket_path: String,
         shared: Arc<MangoSharedState>,
         running: Arc<AtomicBool>,
-        workspace_callback: WorkspaceCallback,
-        window_callback: WindowCallback,
-        window_list_callback: Option<WindowListCallback>,
-        keyboard_layout_callback: Option<KeyboardLayoutCallback>,
+        callbacks: MonitorWatchCallbacks,
     ) -> JoinHandle<()> {
         thread::spawn(move || {
             watch_mango_command(socket_path, "watch all-monitors", running, move |value| {
                 let changes = apply_monitor_update(&shared, &value);
                 if changes.workspace {
                     let snapshot = shared.snapshot.read().clone();
-                    workspace_callback(snapshot);
+                    (callbacks.workspace)(snapshot);
                 }
                 if changes.focused_window {
                     let info = shared.focused_window.read().clone();
                     if let Some(info) = info {
-                        window_callback(info);
+                        (callbacks.window)(info);
                     }
                 }
                 // Taskbar separator state depends on workspace metadata, matching
                 // Niri's workspace-triggered window-list refresh behavior.
                 if changes.notify_window_list
-                    && let Some(callback) = &window_list_callback
+                    && let Some(callback) = &callbacks.window_list
                 {
                     let windows = shared.windows.read().clone();
                     callback(WindowListSnapshot { windows });
                 }
                 if changes.keyboard_layout {
                     let info = shared.keyboard_layout.read().clone();
-                    if let (Some(callback), Some(info)) = (&keyboard_layout_callback, info) {
+                    if let (Some(callback), Some(info)) = (&callbacks.keyboard_layout, info) {
                         callback(info);
                     }
+                }
+                if changes.window_layout
+                    && let Some(callback) = &callbacks.window_layout
+                {
+                    callback(shared.window_layouts.read().clone());
                 }
             });
         })
@@ -244,6 +261,11 @@ impl CompositorBackend for MangoBackend {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
+        let window_layout_callback = self
+            .window_layout_callback
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
 
         self.fetch_initial_state();
         let snapshot = self.shared.snapshot.read().clone();
@@ -262,16 +284,22 @@ impl CompositorBackend for MangoBackend {
                 callback(info);
             }
         }
+        if let Some(callback) = &window_layout_callback {
+            callback(self.shared.window_layouts.read().clone());
+        }
 
         let mut threads = self.watch_threads.lock().unwrap_or_else(|e| e.into_inner());
         threads.push(Self::spawn_workspace_watch(
             socket_path.clone(),
             self.shared.clone(),
             self.running.clone(),
-            on_workspace_update,
-            on_window_update,
-            window_list_callback.clone(),
-            keyboard_layout_callback,
+            MonitorWatchCallbacks {
+                workspace: on_workspace_update,
+                window: on_window_update,
+                window_list: window_list_callback.clone(),
+                keyboard_layout: keyboard_layout_callback,
+                window_layout: window_layout_callback,
+            },
         ));
         if let Some(callback) = window_list_callback {
             threads.push(Self::spawn_window_list_watch(
@@ -340,6 +368,36 @@ impl CompositorBackend for MangoBackend {
 
     fn switch_keyboard_layout_next(&self) {
         self.send_dispatch("dispatch switch_keyboard_layout");
+    }
+
+    fn set_window_layout_callback(&self, callback: WindowLayoutCallback) {
+        *self
+            .window_layout_callback
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(callback);
+    }
+
+    fn get_window_layouts(&self) -> Option<WindowLayoutSnapshot> {
+        Some(self.shared.window_layouts.read().clone())
+    }
+
+    fn set_window_layout(&self, output: &str, layout_name: &str) {
+        if mango_layouts::by_name(layout_name).is_none() {
+            warn!("Refusing unknown Mango layout '{}'", layout_name);
+            return;
+        }
+        if output.is_empty()
+            || !output
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        {
+            warn!("Refusing invalid Mango output name '{}'", output);
+            return;
+        }
+
+        // Mango applies setlayout to its selected monitor.
+        self.send_dispatch(&format!("dispatch focusmon,^\\Q{}\\E$", output));
+        self.send_dispatch(&format!("dispatch setlayout,{}", layout_name));
     }
 
     fn list_windows(&self) -> Vec<Window> {
@@ -562,7 +620,56 @@ fn apply_monitor_update(shared: &Arc<MangoSharedState>, value: &Value) -> Monito
         focused_window,
         notify_window_list,
         keyboard_layout: apply_keyboard_layout_from_monitors(shared, value),
+        window_layout: apply_window_layouts_from_monitors(shared, value),
     }
+}
+
+fn apply_window_layouts_from_monitors(shared: &Arc<MangoSharedState>, value: &Value) -> bool {
+    let Some(monitors) = value.get("monitors").and_then(Value::as_array) else {
+        return false;
+    };
+
+    let mut snapshot = WindowLayoutSnapshot::default();
+    for monitor in monitors {
+        let Some(output) = monitor.get("name").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(symbol) = monitor.get("layout_symbol").and_then(Value::as_str) else {
+            continue;
+        };
+        if monitor.get("active").and_then(Value::as_bool) == Some(true) {
+            snapshot.active_output = Some(output.to_string());
+        }
+        let layout_name = mango_layouts::by_symbol(symbol)
+            .map(|layout| layout.name)
+            .unwrap_or(symbol);
+        let active_tags = monitor
+            .get("active_tags")
+            .and_then(Value::as_array)
+            .map(|tags| {
+                tags.iter()
+                    .filter_map(Value::as_u64)
+                    .filter_map(|tag| u32::try_from(tag).ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+        snapshot.per_output.insert(
+            output.to_string(),
+            WindowLayoutInfo {
+                output: output.to_string(),
+                active_tags,
+                layout_name: layout_name.to_string(),
+                symbol: symbol.to_string(),
+            },
+        );
+    }
+
+    let mut current = shared.window_layouts.write();
+    if *current == snapshot {
+        return false;
+    }
+    *current = snapshot;
+    true
 }
 
 fn active_monitor(value: &Value) -> Option<&Value> {
@@ -844,9 +951,67 @@ mod tests {
         backend.quit_compositor();
         backend.switch_keyboard_layout_next();
         backend.focus_window(7);
+        backend.set_window_layout("eDP-1", "tile");
+        backend.set_window_layout("bad,output", "tile");
+        backend.set_window_layout("eDP-1", "unknown");
 
         assert!(backend.list_windows().is_empty());
         assert!(backend.get_focused_window().is_none());
+    }
+
+    fn capture_commands(count: usize) -> (String, JoinHandle<Vec<String>>) {
+        use std::os::unix::net::UnixListener;
+
+        let path =
+            std::env::temp_dir().join(format!("vp-mango-{}-{}.sock", std::process::id(), count));
+        let _ = std::fs::remove_file(&path);
+        let listener = UnixListener::bind(&path).expect("bind test Mango socket");
+        listener
+            .set_nonblocking(true)
+            .expect("make test Mango socket nonblocking");
+        let handle = thread::spawn(move || {
+            let mut commands = Vec::new();
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            while commands.len() < count && std::time::Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let mut command = String::new();
+                        BufReader::new(stream.try_clone().expect("clone test stream"))
+                            .read_line(&mut command)
+                            .expect("read Mango command");
+                        commands.push(command.trim().to_string());
+                        writeln!(stream, "{{}} ").expect("write Mango response");
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("accept Mango command: {error}"),
+                }
+            }
+            assert_eq!(
+                commands.len(),
+                count,
+                "timed out waiting for Mango commands"
+            );
+            commands
+        });
+        (path.to_string_lossy().into_owned(), handle)
+    }
+
+    #[test]
+    fn set_window_layout_always_focuses_target_output() {
+        let (socket_path, server) = capture_commands(2);
+        let mut backend = backend_without_socket();
+        backend.socket_path = Some(socket_path.clone());
+        backend.shared.window_layouts.write().active_output = Some("eDP-1".to_string());
+
+        backend.set_window_layout("eDP-1", "tile");
+
+        assert_eq!(
+            server.join().expect("join test Mango server"),
+            vec!["dispatch focusmon,^\\QeDP-1\\E$", "dispatch setlayout,tile"]
+        );
+        let _ = std::fs::remove_file(socket_path);
     }
 
     #[test]
@@ -945,8 +1110,52 @@ mod tests {
                 focused_window: false,
                 notify_window_list: true,
                 keyboard_layout: false,
+                window_layout: false,
             }
         );
+    }
+
+    #[test]
+    fn socket_window_layout_parser_tracks_each_output_and_active_output() {
+        let shared = Arc::new(MangoSharedState::default());
+        let value = serde_json::json!({
+            "monitors": [
+                {"name": "eDP-1", "active": false, "active_tags": [1], "layout_symbol": "T"},
+                {"name": "DP-1", "active": true, "active_tags": [2, 3], "layout_symbol": "DW"}
+            ]
+        });
+
+        assert!(apply_window_layouts_from_monitors(&shared, &value));
+        let snapshot = shared.window_layouts.read();
+        assert_eq!(snapshot.active_output.as_deref(), Some("DP-1"));
+        assert_eq!(snapshot.per_output["eDP-1"].layout_name, "tile");
+        assert_eq!(snapshot.per_output["eDP-1"].active_tags, vec![1]);
+        assert_eq!(snapshot.per_output["DP-1"].layout_name, "dwindle");
+        assert_eq!(snapshot.per_output["DP-1"].active_tags, vec![2, 3]);
+        assert!(!snapshot.per_output.contains_key("HDMI-A-1"));
+        drop(snapshot);
+
+        assert!(!apply_window_layouts_from_monitors(&shared, &value));
+    }
+
+    #[test]
+    fn socket_window_layout_parser_removes_disconnected_outputs() {
+        let shared = Arc::new(MangoSharedState::default());
+        let initial = serde_json::json!({
+            "monitors": [
+                {"name": "eDP-1", "active": true, "layout_symbol": "T"},
+                {"name": "DP-1", "active": false, "layout_symbol": "G"}
+            ]
+        });
+        let disconnected = serde_json::json!({
+            "monitors": [
+                {"name": "eDP-1", "active": true, "layout_symbol": "T"}
+            ]
+        });
+
+        assert!(apply_window_layouts_from_monitors(&shared, &initial));
+        assert!(apply_window_layouts_from_monitors(&shared, &disconnected));
+        assert_eq!(shared.window_layouts.read().per_output.len(), 1);
     }
 
     #[test]

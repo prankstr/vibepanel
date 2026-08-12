@@ -66,12 +66,10 @@ thread_local! {
 /// On multi-monitor setups, multiple handles may be registered under the same
 /// name (one per bar). Dispatch resolves to the focused monitor's handle.
 pub fn register(name: &str, handle: Rc<dyn PopoverToggleable>) {
+    let normalized = name.replace('-', "_");
     REGISTRY.with(|r| {
-        debug!("PopoverRegistry: registered '{}'", name);
-        r.borrow_mut()
-            .entry(name.to_string())
-            .or_default()
-            .push(handle);
+        debug!("PopoverRegistry: registered '{}'", normalized);
+        r.borrow_mut().entry(normalized).or_default().push(handle);
     });
 }
 
@@ -177,4 +175,44 @@ pub fn clear() {
         r.borrow_mut().clear();
         debug!("PopoverRegistry: cleared {} handle(s)", count);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+
+    use super::*;
+
+    struct TestPopover {
+        shown: Cell<bool>,
+    }
+
+    impl PopoverToggleable for TestPopover {
+        fn ipc_show(&self) {
+            self.shown.set(true);
+        }
+
+        fn ipc_hide(&self) {
+            self.shown.set(false);
+        }
+
+        fn ipc_is_visible(&self) -> bool {
+            self.shown.get()
+        }
+    }
+
+    #[test]
+    fn registration_and_dispatch_normalize_hyphens() {
+        clear();
+        let popover = Rc::new(TestPopover {
+            shown: Cell::new(false),
+        });
+        register("mango-layout", popover.clone());
+
+        assert!(dispatch("mango-layout", DispatchAction::Show));
+        assert!(popover.shown.get());
+        assert!(dispatch("mango_layout", DispatchAction::Hide));
+        assert!(!popover.shown.get());
+        clear();
+    }
 }

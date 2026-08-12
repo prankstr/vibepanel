@@ -2,6 +2,7 @@ air
 album
 arrow_downward
 arrow_upward
+auto_awesome_mosaic
 battery_1_bar
 battery_2_bar
 battery_3_bar
@@ -32,6 +33,7 @@ close
 cloud
 coffee
 computer
+content_copy
 delete
 developer_board
 devices
@@ -74,6 +76,7 @@ radio_button_checked
 radio_button_unchecked
 rainy
 rainy_light
+rectangle
 repeat
 restart_alt
 settings_ethernet
@@ -91,7 +94,11 @@ speed
 sports_esports
 stop
 sunny
+table
 thunderstorm
+view_array
+view_module
+view_quilt
 volume_down
 volume_off
 volume_up
@@ -99,6 +106,7 @@ vpn_key
 vpn_key_off
 vpn_lock
 weather_snowy
+width_wide
 wifi
 wifi_1_bar
 wifi_2_bar
