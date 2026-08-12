@@ -9,6 +9,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::time::Duration;
 
 use gtk4::glib::{self, WeakRef};
 use gtk4::prelude::*;
@@ -364,7 +365,7 @@ pub struct NetworkCardState {
     /// distinguish "user switched to a different network" from "user was already
     /// connected to something else when they opened the dialog."
     pub password_opened_ssid: RefCell<Option<String>>,
-    pub connect_anim_source: RefCell<Option<glib::SourceId>>,
+    pub connect_anim_source: Rc<RefCell<Option<glib::SourceId>>>,
     pub connect_anim_step: Cell<u8>,
     /// Prevents `state_set` handlers from dispatching during programmatic updates.
     pub updating_wifi_toggle: Cell<bool>,
@@ -376,9 +377,9 @@ pub struct NetworkCardState {
     pub ethernet: RefCell<Option<EthernetRowWidgets>>,
     pub mobile: MobileRowState,
     /// Prevents timer accumulation under rapid state transitions.
-    pub wifi_failed_clear_source: RefCell<Option<glib::SourceId>>,
+    pub wifi_failed_clear_source: Rc<RefCell<Option<glib::SourceId>>>,
     /// Separate from Wi-Fi so simultaneous failures are cleared independently.
-    pub mobile_failed_clear_source: RefCell<Option<glib::SourceId>>,
+    pub mobile_failed_clear_source: Rc<RefCell<Option<glib::SourceId>>>,
     /// Keeps the connecting WiFi row's `IconHandle` alive so the spinner
     /// timer isn't killed when the handle goes out of scope in `populate_wifi_list`.
     /// Without this, the `Rc<IconHandleInner>` drops at end of the loop body,
@@ -402,7 +403,7 @@ impl NetworkCardState {
             password_connect_button: RefCell::new(None),
             password_target_ssid: RefCell::new(None),
             password_opened_ssid: RefCell::new(None),
-            connect_anim_source: RefCell::new(None),
+            connect_anim_source: Rc::new(RefCell::new(None)),
             connect_anim_step: Cell::new(0),
             updating_wifi_toggle: Cell::new(false),
             updating_mobile_switch: Cell::new(false),
@@ -411,8 +412,8 @@ impl NetworkCardState {
             wifi_switch: RefCell::new(None),
             ethernet: RefCell::new(None),
             mobile: MobileRowState::new(),
-            wifi_failed_clear_source: RefCell::new(None),
-            mobile_failed_clear_source: RefCell::new(None),
+            wifi_failed_clear_source: Rc::new(RefCell::new(None)),
+            mobile_failed_clear_source: Rc::new(RefCell::new(None)),
             wifi_connecting_icon: RefCell::new(None),
         }
     }
@@ -1436,17 +1437,29 @@ fn on_password_cancel_clicked(state: &NetworkCardState) {
 
 /// Schedule a delayed clear of a failed-connection state after 5 seconds.
 fn schedule_failed_clear<F: FnOnce() + 'static>(
-    source: &RefCell<Option<glib::SourceId>>,
+    source: &Rc<RefCell<Option<glib::SourceId>>>,
     clear_fn: F,
 ) {
-    let mut source = source.borrow_mut();
+    schedule_failed_clear_after(source, Duration::from_secs(5), clear_fn);
+}
+
+fn schedule_failed_clear_after<F: FnOnce() + 'static>(
+    source_slot: &Rc<RefCell<Option<glib::SourceId>>>,
+    delay: Duration,
+    clear_fn: F,
+) {
+    let mut source = source_slot.borrow_mut();
     if let Some(prev) = source.take() {
         prev.remove();
     }
-    *source = Some(glib::timeout_add_local_once(
-        std::time::Duration::from_secs(5),
-        clear_fn,
-    ));
+
+    let source_for_callback = Rc::clone(source_slot);
+    *source = Some(glib::timeout_add_local_once(delay, move || {
+        // GLib removes one-shot sources after this callback. Clear our ID first
+        // so later rescheduling or teardown never tries to remove a stale ID.
+        source_for_callback.borrow_mut().take();
+        clear_fn();
+    }));
 }
 
 /// Hide the password dialog and reset its state.
@@ -1563,7 +1576,8 @@ fn set_password_connecting_state(
         {
             // Start a simple dot animation: "Connecting", "Connecting.", ...
             let step_cell = state.connect_anim_step.clone();
-            let source_id = glib::timeout_add_local(std::time::Duration::from_millis(450), {
+            let source_for_callback = Rc::clone(&state.connect_anim_source);
+            let source_id = glib::timeout_add_local(Duration::from_millis(450), {
                 move || {
                     if let Some(window) = window.upgrade()
                         && let Some(qs) = super::window::get_qs_window_data(&window)
@@ -1580,6 +1594,9 @@ fn set_password_connecting_state(
                         label.set_label(&format!("Connecting{}", dots));
                         glib::ControlFlow::Continue
                     } else {
+                        // Returning Break removes this source. Clear the stored ID
+                        // first so teardown cannot attempt to remove it again.
+                        source_for_callback.borrow_mut().take();
                         glib::ControlFlow::Break
                     }
                 }
@@ -1925,6 +1942,26 @@ mod tests {
     use crate::services::network::iwd::StationState;
     use crate::services::network::network_manager::{MobileState, WifiState, WiredState};
     use crate::services::network::{IwdSnapshot, NmSnapshot};
+
+    #[test]
+    fn failed_clear_timer_drops_source_id_before_callback() {
+        let source_slot = Rc::new(RefCell::new(None));
+        let fired = Rc::new(Cell::new(0));
+        let context = glib::MainContext::default();
+
+        for expected in 1..=2 {
+            let fired_for_callback = Rc::clone(&fired);
+            schedule_failed_clear_after(&source_slot, Duration::ZERO, move || {
+                fired_for_callback.set(expected);
+            });
+
+            while fired.get() < expected {
+                context.iteration(true);
+            }
+
+            assert!(source_slot.borrow().is_none());
+        }
+    }
 
     /// Default icon context for tests: available Wi-Fi system, nothing connected.
     /// Tests override only the fields relevant to the scenario being tested.
