@@ -350,6 +350,22 @@ fn material_symbol_lookup(icon_name: &str) -> Option<&'static str> {
         // Loading / progress spinner
         "process-working-symbolic" => "progress_activity",
 
+        // Mango window layouts (always rendered as Material Symbols)
+        "mango-layout-tile" => "auto_awesome_mosaic",
+        "mango-layout-scroller" => "view_array",
+        "mango-layout-grid" => "view_module",
+        "mango-layout-monocle" => "rectangle",
+        "mango-layout-deck" => "content_copy",
+        "mango-layout-center-tile" => "width_wide",
+        "mango-layout-right-tile" => "auto_awesome_mosaic",
+        "mango-layout-vertical-scroller" => "view_array",
+        "mango-layout-vertical-tile" => "auto_awesome_mosaic",
+        "mango-layout-vertical-grid" => "view_module",
+        "mango-layout-vertical-deck" => "content_copy",
+        "mango-layout-dwindle" => "view_quilt",
+        "mango-layout-fair" => "table",
+        "mango-layout-vertical-fair" => "table",
+
         // No mapping found
         _ => return None,
     };
@@ -2027,6 +2043,22 @@ impl IconsService {
         handle
     }
 
+    /// Create a Material Symbol label regardless of the configured icon theme.
+    ///
+    /// Intended for visuals whose glyph and geometry are part of widget semantics,
+    /// rather than interchangeable theme icons.
+    pub fn create_material_symbol(&self, name: &str, css_classes: &[&str]) -> Label {
+        self.ensure_material_css();
+
+        let label = Label::new(Some(material_symbol_name(name)));
+        label.set_valign(gtk4::Align::Center);
+        label.add_css_class(icon::MATERIAL_SYMBOL);
+        for class in css_classes {
+            label.add_css_class(class);
+        }
+        label
+    }
+
     /// Reapply icons on all registered handles (called after theme change).
     fn reapply_all_icons(&self) {
         let mut handles = self.handles.borrow_mut();
@@ -2201,7 +2233,7 @@ impl IconsService {
 
     /// Re-register the Material Symbols font if a font map reset dropped it.
     fn handle_font_map_change(&self, font_map: &pango::FontMap) {
-        if self.registering_font.get() || !self.uses_material() {
+        if self.registering_font.get() || !*self.material_ready.borrow() {
             return;
         }
         if material_font_registered(font_map) {

@@ -769,6 +769,20 @@ pub mod widget {
 
     /// Keyboard layout label (`.keyboard-layout-label`).
     pub const KEYBOARD_LAYOUT_LABEL: &str = "keyboard-layout-label";
+
+    // Mango window layout
+    pub const MANGO_LAYOUT: &str = "mango-layout";
+    pub const MANGO_LAYOUT_ICON: &str = "mango-layout-icon";
+    pub const MANGO_LAYOUT_LABEL: &str = "mango-layout-label";
+    pub const MANGO_LAYOUT_POPOVER: &str = "mango-layout-popover";
+    pub const MANGO_LAYOUT_GRID: &str = "mango-layout-grid";
+    pub const MANGO_LAYOUT_TILE: &str = "mango-layout-tile";
+    pub const MANGO_LAYOUT_TILE_LABEL: &str = "mango-layout-tile-label";
+    pub const MANGO_LAYOUT_TILE_ICON: &str = "mango-layout-tile-icon";
+    pub const MANGO_LAYOUT_MIRROR_HORIZONTAL: &str = "mango-layout-mirror-horizontal";
+    pub const MANGO_LAYOUT_ROTATE_POSITIVE_90: &str = "mango-layout-rotate-positive-90";
+    pub const MANGO_LAYOUT_ROTATE_NEGATIVE_90: &str = "mango-layout-rotate-negative-90";
+    pub const MANGO_LAYOUT_SELECTED: &str = "mango-layout-selected";
 }
 
 /// Surface and popover classes.

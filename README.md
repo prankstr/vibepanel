@@ -51,6 +51,7 @@ https://github.com/user-attachments/assets/fba27921-0886-4e7b-850d-b51341583693
 - **Workspaces** - clickable indicators with tooltips
 - **Window title** - active window with app icon
 - **Keyboard layout** - layout indicator with click to cycle
+- **Mango layout** - per-output Mango window-layout indicator and preview chooser
 - **Clock** - configurable format with calendar popover
 - **Battery** - status with detailed popover and power profiles
 - **System tray** - XDG tray support

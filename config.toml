@@ -69,6 +69,13 @@ background_opacity = 1.0
 #   [widgets.notifications]
 #   toast_position = "top-right"  # "top-left", "top-center", "top-right", "bottom-left", "bottom-center", "bottom-right"
 #
+#   [widgets.mango_layout]
+#   # Mango-only per-output layout chooser. Add "mango_layout" to a widget section above.
+#   show_icon = true
+#   show_label = true
+#   # Selecting from another output focuses that output before changing its active tag layout.
+#   layouts = ["tile", "scroller", "grid", "monocle", "dwindle"]
+#
 # Custom widgets use the "custom-" prefix for user-defined buttons:
 #   right = ["custom-os", "tray", "clock"]
 #

@@ -113,6 +113,28 @@ pub struct KeyboardLayoutInfo {
     pub layout_count: Option<usize>,
 }
 
+/// Current window-layout state for one compositor output.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WindowLayoutInfo {
+    /// Output/monitor connector name (e.g., "eDP-1").
+    pub output: String,
+    /// Tags currently visible on this output.
+    pub active_tags: Vec<u32>,
+    /// Canonical compositor layout name (e.g., "center_tile").
+    pub layout_name: String,
+    /// Compact compositor-provided symbol (e.g., "CT").
+    pub symbol: String,
+}
+
+/// Current window layouts across compositor outputs.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WindowLayoutSnapshot {
+    /// Output currently selected by the compositor.
+    pub active_output: Option<String>,
+    /// Layout state keyed by output connector name.
+    pub per_output: HashMap<String, WindowLayoutInfo>,
+}
+
 /// Callback type for workspace state updates.
 pub type WorkspaceCallback = Arc<dyn Fn(WorkspaceSnapshot) + Send + Sync>;
 
@@ -122,6 +144,9 @@ pub type WindowCallback = Arc<dyn Fn(WindowInfo) + Send + Sync>;
 
 /// Callback type for keyboard layout updates.
 pub type KeyboardLayoutCallback = Arc<dyn Fn(KeyboardLayoutInfo) + Send + Sync>;
+
+/// Callback type for window-layout updates.
+pub type WindowLayoutCallback = Arc<dyn Fn(WindowLayoutSnapshot) + Send + Sync>;
 
 /// Information about a window in the window list.
 ///
@@ -247,6 +272,25 @@ pub trait CompositorBackend: Send + Sync {
     ///
     /// Default no-op for backends without keyboard layout support.
     fn switch_keyboard_layout_next(&self) {
+        // Default no-op
+    }
+
+    /// Register a callback for window-layout changes.
+    ///
+    /// Default no-op for backends without window-layout support.
+    fn set_window_layout_callback(&self, _callback: WindowLayoutCallback) {
+        // Default no-op
+    }
+
+    /// Get current window layouts, if supported.
+    fn get_window_layouts(&self) -> Option<WindowLayoutSnapshot> {
+        None
+    }
+
+    /// Set the active tag's window layout on an output.
+    ///
+    /// Default no-op for backends without window-layout support.
+    fn set_window_layout(&self, _output: &str, _layout_name: &str) {
         // Default no-op
     }
 
