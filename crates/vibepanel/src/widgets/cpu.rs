@@ -21,7 +21,9 @@ use crate::services::tooltip::TooltipManager;
 use crate::styles::{class, widget};
 use crate::widgets::base::BaseWidget;
 use crate::widgets::system_popover::SystemPopoverBinding;
-use crate::widgets::{WidgetConfig, format_vertical_metric, warn_unknown_options};
+use crate::widgets::{
+    VERTICAL_METRIC_CHARS, WidgetConfig, format_vertical_metric, warn_unknown_options,
+};
 
 /// Default configuration values
 const DEFAULT_SHOW_ICON: bool = true;
@@ -209,12 +211,12 @@ fn cpu_label_width(format: &CpuFormat, stable_width: bool, is_vertical: bool) ->
     }
 
     Some(match (format, is_vertical) {
-        (CpuFormat::Usage, false) => 3,       // 99%
-        (CpuFormat::Usage, true) => 3,        // 99%
-        (CpuFormat::Temperature, false) => 4, // 99°C
-        (CpuFormat::Temperature, true) => 3,  // 99°
-        (CpuFormat::Both, false) => 8,        // 99% 99°C
-        (CpuFormat::Both, true) => 3,         // 99% / 99°
+        (CpuFormat::Usage, false) => 3,                          // 99%
+        (CpuFormat::Usage, true) => VERTICAL_METRIC_CHARS,       // 99%
+        (CpuFormat::Temperature, false) => 4,                    // 99°C
+        (CpuFormat::Temperature, true) => VERTICAL_METRIC_CHARS, // 99°
+        (CpuFormat::Both, false) => 8,                           // 99% 99°C
+        (CpuFormat::Both, true) => VERTICAL_METRIC_CHARS,        // 99% / 99°
     })
 }
 

@@ -30,20 +30,26 @@ use std::rc::Rc;
 use gtk4::pango::EllipsizeMode;
 use gtk4::prelude::*;
 use gtk4::{
-    Align, Box as GtkBox, Label, Orientation, ProgressBar, Revealer, RevealerTransitionType, Widget,
+    Align, Box as GtkBox, Label, Orientation, PolicyType, ProgressBar, Revealer,
+    RevealerTransitionType, ScrolledWindow, Widget,
 };
 
 use crate::services::callbacks::CallbackId;
 use crate::services::config_manager::ConfigManager;
-use crate::services::gpu::{GpuDeviceSnapshot, GpuPowerState, GpuService, GpuSnapshot};
+use crate::services::gpu::{
+    GpuDeviceSnapshot, GpuHistorySample, GpuPowerState, GpuService, GpuSnapshot,
+};
 use crate::services::icons::{IconHandle, IconsService};
 use crate::services::system::{SystemService, SystemSnapshot, format_bytes_long, format_speed};
 use crate::styles::{button, card, color, icon, surface, system_popover as sp};
+use crate::widgets::gpu_format;
+use crate::widgets::history_graph::{HistoryGraph, HistoryScale, HistorySeries};
 use crate::widgets::layer_shell_popover::animate_reveal;
 
-const GPU_TITLE_MAX_CHARS: i32 = 34;
-const GPU_VRAM_MAX_CHARS: i32 = 18;
-const GPU_METRICS_MAX_CHARS: i32 = 24;
+const GPU_TITLE_MAX_CHARS: i32 = 44;
+const GPU_GRAPH_HEIGHT: i32 = 56;
+const GPU_VALUE_MAX_CHARS: i32 = 20;
+const GPU_DEVICES_MAX_HEIGHT: i32 = 360;
 
 /// A single pre-allocated per-core row with its updatable widgets.
 #[derive(Clone)]
@@ -55,11 +61,60 @@ struct CoreRow {
 #[derive(Clone)]
 struct GpuDeviceRow {
     container: GtkBox,
+    header: GtkBox,
+    graph: HistoryGraph,
     title_label: Label,
     usage_label: Label,
-    usage_progress: ProgressBar,
-    vram_detail_label: Label,
-    metrics_label: Label,
+    temp_label: Label,
+    metrics: GtkBox,
+    vram: GpuMetricBar,
+    power: GpuMetricBar,
+    clock: GpuMetricBar,
+}
+
+#[derive(Clone)]
+struct GpuMetricBar {
+    container: GtkBox,
+    bar: ProgressBar,
+    value: Label,
+}
+
+impl GpuMetricBar {
+    fn new(caption: &str) -> Self {
+        let container = GtkBox::new(Orientation::Vertical, 4);
+        container.set_hexpand(true);
+
+        let label = Label::new(Some(caption));
+        label.add_css_class(color::MUTED);
+        label.set_halign(Align::Start);
+        container.append(&label);
+
+        let bar = ProgressBar::new();
+        bar.add_css_class(sp::PROGRESS_BAR);
+        container.append(&bar);
+
+        let value = Label::new(Some("--"));
+        value.add_css_class(color::MUTED);
+        value.set_halign(Align::Start);
+        value.set_xalign(0.0);
+        value.set_max_width_chars(GPU_VALUE_MAX_CHARS);
+        value.set_ellipsize(EllipsizeMode::End);
+        container.append(&value);
+
+        Self {
+            container,
+            bar,
+            value,
+        }
+    }
+
+    fn show(&self, value: &str, fraction: Option<f64>) {
+        self.value.set_label(value);
+        self.bar
+            .set_fraction(fraction.unwrap_or(0.0).clamp(0.0, 1.0));
+        self.bar
+            .set_opacity(if fraction.is_some() { 1.0 } else { 0.35 });
+    }
 }
 
 /// Controller owning the system popover UI elements and update logic.
@@ -92,6 +147,8 @@ pub struct SystemPopoverController {
 
     // GPU section (conditional: only present when GPUs are detected)
     gpu_card: GtkBox,
+    gpu_usage_label: Label,
+    gpu_temp_label: Label,
     gpu_devices_box: GtkBox,
     gpu_device_rows: Rc<RefCell<Vec<GpuDeviceRow>>>,
 }
@@ -151,9 +208,18 @@ impl SystemPopoverController {
         self.gpu_card.set_visible(true);
         self.sync_gpu_device_rows(devices.len());
 
+        let show_index = devices.len() > 1;
+        self.gpu_usage_label.set_visible(!show_index);
+        self.gpu_temp_label.set_visible(!show_index);
+        if let [device] = devices.as_slice() {
+            update_gpu_headline(&self.gpu_usage_label, &self.gpu_temp_label, device);
+        }
+
         let rows = self.gpu_device_rows.borrow();
+        let gpu_service = GpuService::global();
         for (row, device) in rows.iter().zip(devices.iter()) {
-            update_gpu_device_row(row, device, devices.len() > 1);
+            let history = gpu_service.history(device.device_index);
+            update_gpu_device_row(row, device, &history, show_index);
         }
     }
 
@@ -256,6 +322,19 @@ fn section_title(icon_name: &str, text: &str, icons: &IconsService) -> GtkBox {
 
 /// Create a section title with icon, label, and a right-aligned value (for CPU temp).
 fn section_title_with_value(icon_name: &str, text: &str, icons: &IconsService) -> (GtkBox, Label) {
+    let (container, values) = section_title_with_values(icon_name, text, icons);
+    let value = Label::new(Some(""));
+    value.add_css_class(color::MUTED);
+    values.append(&value);
+
+    (container, value)
+}
+
+fn section_title_with_values(
+    icon_name: &str,
+    text: &str,
+    icons: &IconsService,
+) -> (GtkBox, GtkBox) {
     let container = GtkBox::new(Orientation::Horizontal, 6);
     container.add_css_class(sp::SECTION_TITLE);
 
@@ -266,13 +345,12 @@ fn section_title_with_value(icon_name: &str, text: &str, icons: &IconsService) -
     label.add_css_class(surface::POPOVER_TITLE);
     container.append(&label);
 
-    let value = Label::new(Some(""));
-    value.add_css_class(color::MUTED);
-    value.set_hexpand(true);
-    value.set_halign(Align::End);
-    container.append(&value);
+    let values = GtkBox::new(Orientation::Horizontal, 8);
+    values.set_hexpand(true);
+    values.set_halign(Align::End);
+    container.append(&values);
 
-    (container, value)
+    (container, values)
 }
 
 /// Create a stat row with label and value.
@@ -296,7 +374,7 @@ fn stat_row(label_text: &str, value_width_chars: i32) -> (GtkBox, Label) {
 
 fn build_gpu_device_row() -> GpuDeviceRow {
     let container = GtkBox::new(Orientation::Vertical, 6);
-    let summary_row = GtkBox::new(Orientation::Horizontal, 8);
+    let header = GtkBox::new(Orientation::Horizontal, 8);
 
     let title_label = Label::new(Some("GPU"));
     title_label.set_halign(Align::Start);
@@ -305,116 +383,135 @@ fn build_gpu_device_row() -> GpuDeviceRow {
     title_label.set_ellipsize(EllipsizeMode::End);
     title_label.set_single_line_mode(true);
     title_label.set_max_width_chars(GPU_TITLE_MAX_CHARS);
-    summary_row.append(&title_label);
+    header.append(&title_label);
+
+    let temp_label = Label::new(None);
+    temp_label.add_css_class(color::MUTED);
+    temp_label.set_halign(Align::End);
+    header.append(&temp_label);
 
     let usage_label = Label::new(Some("--"));
+    usage_label.add_css_class(color::ACCENT);
     usage_label.set_halign(Align::End);
-    usage_label.set_width_chars(6);
+    usage_label.set_width_chars(4);
     usage_label.set_xalign(1.0);
-    summary_row.append(&usage_label);
-    container.append(&summary_row);
+    header.append(&usage_label);
 
-    let usage_progress = ProgressBar::new();
-    usage_progress.add_css_class(sp::PROGRESS_BAR);
-    container.append(&usage_progress);
+    let graph = HistoryGraph::new(
+        crate::services::gpu::GPU_HISTORY_SAMPLES,
+        GPU_GRAPH_HEIGHT,
+        HistoryScale::Fixed {
+            min: 0.0,
+            max: 100.0,
+        },
+    );
+    graph.widget().add_css_class(color::ACCENT);
 
-    let detail_row = GtkBox::new(Orientation::Horizontal, 8);
+    let vram = GpuMetricBar::new("VRAM");
+    let power = GpuMetricBar::new("Power");
+    let clock = GpuMetricBar::new("Clock");
+    let metrics = GtkBox::new(Orientation::Horizontal, 12);
+    metrics.set_homogeneous(true);
+    for metric in [&vram, &power, &clock] {
+        metrics.append(&metric.container);
+    }
 
-    let vram_detail_label = Label::new(Some("--"));
-    vram_detail_label.add_css_class(color::MUTED);
-    vram_detail_label.set_halign(Align::Start);
-    vram_detail_label.set_xalign(0.0);
-    vram_detail_label.set_ellipsize(EllipsizeMode::End);
-    vram_detail_label.set_single_line_mode(true);
-    vram_detail_label.set_hexpand(true);
-    vram_detail_label.set_max_width_chars(GPU_VRAM_MAX_CHARS);
-    detail_row.append(&vram_detail_label);
-
-    let metrics_label = Label::new(None);
-    metrics_label.add_css_class(color::MUTED);
-    metrics_label.set_halign(Align::End);
-    metrics_label.set_xalign(1.0);
-    metrics_label.set_ellipsize(EllipsizeMode::End);
-    metrics_label.set_single_line_mode(true);
-    metrics_label.set_max_width_chars(GPU_METRICS_MAX_CHARS);
-    detail_row.append(&metrics_label);
-
-    container.append(&detail_row);
+    container.append(&header);
+    container.append(graph.widget());
+    container.append(&metrics);
 
     GpuDeviceRow {
         container,
+        header,
+        graph,
         title_label,
         usage_label,
-        usage_progress,
-        vram_detail_label,
-        metrics_label,
+        temp_label,
+        metrics,
+        vram,
+        power,
+        clock,
     }
 }
 
-fn update_gpu_device_row(row: &GpuDeviceRow, snapshot: &GpuDeviceSnapshot, show_index: bool) {
-    row.title_label
-        .set_label(&format_gpu_device_title(snapshot, show_index));
+fn update_gpu_device_row(
+    row: &GpuDeviceRow,
+    snapshot: &GpuDeviceSnapshot,
+    history: &[GpuHistorySample],
+    show_index: bool,
+) {
+    row.header.set_visible(show_index);
+    if show_index {
+        row.title_label
+            .set_label(&gpu_format::device_title(snapshot, true));
+        update_gpu_headline(&row.usage_label, &row.temp_label, snapshot);
+    }
+    row.graph.set_series(vec![HistorySeries::solid(
+        history
+            .iter()
+            .map(|sample| sample.usage.map(f64::from))
+            .collect(),
+    )]);
 
     if snapshot.power_state == GpuPowerState::Suspended {
-        row.usage_label.set_label("Idle");
-        row.usage_progress.set_fraction(0.0);
-    } else if let Some(usage) = snapshot.gpu_usage {
-        row.usage_label.set_label(&format!("{:.1}%", usage));
-        row.usage_progress.set_fraction(usage as f64 / 100.0);
+        row.graph.widget().set_visible(false);
+        row.metrics.set_visible(false);
+        return;
+    }
+
+    row.graph.widget().set_visible(true);
+    row.metrics.set_visible(true);
+    row.vram.show(
+        &gpu_format::vram(snapshot).unwrap_or_else(|| "--".to_string()),
+        gpu_vram_fraction(snapshot),
+    );
+    row.power.show(
+        &gpu_format::power(snapshot).unwrap_or_else(|| "--".to_string()),
+        gpu_power_fraction(snapshot),
+    );
+    row.clock.show(
+        &gpu_format::clock(snapshot).unwrap_or_else(|| "--".to_string()),
+        gpu_clock_fraction(snapshot),
+    );
+}
+
+fn update_gpu_headline(usage: &Label, temperature: &Label, snapshot: &GpuDeviceSnapshot) {
+    if snapshot.power_state == GpuPowerState::Suspended {
+        usage.set_label("Idle");
+        temperature.set_visible(false);
+        return;
+    }
+    usage.set_label(
+        &snapshot
+            .gpu_usage
+            .map_or_else(|| "--".to_string(), |v| format!("{v:.0}%")),
+    );
+    if let Some(value) = snapshot.temperature {
+        temperature.set_label(&format!("{value:.0}°C"));
+        temperature.set_visible(true);
     } else {
-        row.usage_label.set_label("--");
-        row.usage_progress.set_fraction(0.0);
-    }
-
-    row.vram_detail_label
-        .set_label(&format_gpu_device_vram(snapshot));
-    let metrics = format_gpu_device_metrics(snapshot);
-    row.metrics_label.set_label(&metrics);
-    row.metrics_label.set_visible(!metrics.is_empty());
-}
-
-fn format_gpu_device_title(snapshot: &GpuDeviceSnapshot, show_index: bool) -> String {
-    let name = snapshot
-        .device_name
-        .as_ref()
-        .filter(|name| !name.trim().is_empty())
-        .map(String::as_str);
-
-    match (show_index, name) {
-        (true, Some(name)) => format!("GPU {}: {name}", snapshot.device_index),
-        (true, None) => format!("GPU {}", snapshot.device_index),
-        (false, Some(name)) => name.to_string(),
-        (false, None) => "GPU".to_string(),
+        temperature.set_visible(false);
     }
 }
 
-fn format_gpu_device_vram(snapshot: &GpuDeviceSnapshot) -> String {
-    match (snapshot.vram_used, snapshot.vram_total) {
-        (Some(used), Some(total)) => {
-            format!("{} / {}", format_bytes_long(used), format_bytes_long(total))
-        }
-        (Some(used), None) => format!("{} used", format_bytes_long(used)),
-        _ if snapshot.power_state == GpuPowerState::Suspended => "Suspended".to_string(),
-        _ => "--".to_string(),
+fn gpu_vram_fraction(snapshot: &GpuDeviceSnapshot) -> Option<f64> {
+    snapshot
+        .vram_percent()
+        .map(|value| f64::from(value / 100.0))
+}
+
+fn gpu_power_fraction(snapshot: &GpuDeviceSnapshot) -> Option<f64> {
+    match (snapshot.power_watts, snapshot.power_limit_watts) {
+        (Some(value), Some(limit)) if limit > 0.0 => Some(f64::from(value / limit)),
+        _ => None,
     }
 }
 
-fn format_gpu_device_metrics(snapshot: &GpuDeviceSnapshot) -> String {
-    let mut parts = Vec::new();
-
-    if let Some(temp) = snapshot.temperature {
-        parts.push(format!("{:.0}°C", temp));
+fn gpu_clock_fraction(snapshot: &GpuDeviceSnapshot) -> Option<f64> {
+    match (snapshot.clock_mhz, snapshot.max_clock_mhz) {
+        (Some(value), Some(limit)) if limit > 0 => Some(value as f64 / limit as f64),
+        _ => None,
     }
-
-    if let Some(watts) = snapshot.power_watts {
-        parts.push(format!("{:.0}W", watts));
-    }
-
-    if let Some(mhz) = snapshot.clock_mhz {
-        parts.push(format!("{}MHz", mhz));
-    }
-
-    parts.join(" · ")
 }
 
 /// Build a system resource popover content widget.
@@ -514,12 +611,26 @@ pub fn build_system_popover_with_controller() -> (Widget, SystemPopoverControlle
     gpu_card.set_visible(gpu_snapshot.available());
 
     let gpu_section = GtkBox::new(Orientation::Vertical, 8);
-    let gpu_title = section_title("video-display-symbolic", "GPU", &icons);
+    let (gpu_title, gpu_values) =
+        section_title_with_values("video-display-symbolic", "GPU", &icons);
     gpu_title.add_css_class(sp::GPU_TITLE);
+    let gpu_temp_label = Label::new(None);
+    gpu_temp_label.add_css_class(color::MUTED);
+    gpu_values.append(&gpu_temp_label);
+    let gpu_usage_label = Label::new(Some("--"));
+    gpu_usage_label.add_css_class(color::ACCENT);
+    gpu_usage_label.set_width_chars(4);
+    gpu_usage_label.set_xalign(1.0);
+    gpu_values.append(&gpu_usage_label);
     gpu_section.append(&gpu_title);
 
     let gpu_devices_box = GtkBox::new(Orientation::Vertical, 14);
-    gpu_section.append(&gpu_devices_box);
+    let gpu_devices_scroller = ScrolledWindow::new();
+    gpu_devices_scroller.set_policy(PolicyType::Never, PolicyType::Automatic);
+    gpu_devices_scroller.set_propagate_natural_height(true);
+    gpu_devices_scroller.set_max_content_height(GPU_DEVICES_MAX_HEIGHT);
+    gpu_devices_scroller.set_child(Some(&gpu_devices_box));
+    gpu_section.append(&gpu_devices_scroller);
     gpu_card.append(&gpu_section);
     container.append(&gpu_card);
 
@@ -656,6 +767,8 @@ pub fn build_system_popover_with_controller() -> (Widget, SystemPopoverControlle
         load_5_label,
         load_15_label,
         gpu_card,
+        gpu_usage_label,
+        gpu_temp_label,
         gpu_devices_box,
         gpu_device_rows: Rc::new(RefCell::new(Vec::new())),
     };
@@ -674,65 +787,20 @@ pub fn build_system_popover_with_controller() -> (Widget, SystemPopoverControlle
 
 #[cfg(test)]
 mod tests {
-    use super::{format_gpu_device_metrics, format_gpu_device_title, format_gpu_device_vram};
-    use crate::services::gpu::{GpuDeviceSnapshot, GpuPowerState};
+    use super::{gpu_clock_fraction, gpu_power_fraction};
+    use crate::services::gpu::GpuDeviceSnapshot;
 
     #[test]
-    fn test_format_gpu_device_details_group_vram_and_metrics() {
+    fn test_gpu_metric_fractions_use_real_limits() {
         let snapshot = GpuDeviceSnapshot {
-            vram_used: Some(4 * 1024 * 1024 * 1024),
-            vram_total: Some(8 * 1024 * 1024 * 1024),
-            temperature: Some(62.0),
-            power_watts: Some(118.6),
-            clock_mhz: Some(2430),
-            device_name: Some("Very Long GPU Name".to_string()),
+            power_watts: Some(120.0),
+            power_limit_watts: Some(300.0),
+            clock_mhz: Some(1500),
+            max_clock_mhz: Some(2500),
             ..Default::default()
         };
-
-        assert_eq!(format_gpu_device_vram(&snapshot), "4.0 GB / 8.0 GB");
-        assert_eq!(
-            format_gpu_device_metrics(&snapshot),
-            "62°C · 119W · 2430MHz"
-        );
-    }
-
-    #[test]
-    fn test_format_gpu_device_vram_shows_suspended_state_when_missing() {
-        let snapshot = GpuDeviceSnapshot {
-            power_state: GpuPowerState::Suspended,
-            device_name: Some("Intel Integrated Graphics".to_string()),
-            ..Default::default()
-        };
-
-        assert_eq!(format_gpu_device_vram(&snapshot), "Suspended");
-        assert_eq!(format_gpu_device_metrics(&snapshot), "");
-    }
-
-    #[test]
-    fn test_format_gpu_device_title_prefers_device_name() {
-        let snapshot = GpuDeviceSnapshot {
-            device_name: Some("NVIDIA GeForce RTX 4090".to_string()),
-            ..Default::default()
-        };
-
-        assert_eq!(
-            format_gpu_device_title(&snapshot, false),
-            "NVIDIA GeForce RTX 4090"
-        );
-    }
-
-    #[test]
-    fn test_format_gpu_device_title_uses_config_index_for_multiple_devices() {
-        let snapshot = GpuDeviceSnapshot {
-            device_index: 3,
-            device_name: Some("NVIDIA GeForce RTX 4090".to_string()),
-            ..Default::default()
-        };
-
-        assert_eq!(
-            format_gpu_device_title(&snapshot, true),
-            "GPU 3: NVIDIA GeForce RTX 4090"
-        );
+        assert!(gpu_power_fraction(&snapshot).is_some_and(|value| (value - 0.4).abs() < 0.001));
+        assert_eq!(gpu_clock_fraction(&snapshot), Some(0.6));
     }
 }
 
@@ -740,9 +808,6 @@ mod tests {
 #[derive(Clone)]
 pub struct SystemPopoverBinding {
     controller: Rc<RefCell<Option<SystemPopoverController>>>,
-    /// Held to keep the `Rc` alive; managed via clones in open/close closures.
-    #[allow(dead_code)]
-    gpu_callback_id: Rc<Cell<Option<CallbackId>>>,
 }
 
 impl SystemPopoverBinding {
@@ -821,23 +886,13 @@ impl SystemPopoverBinding {
             }
         });
 
-        Self {
-            controller,
-            gpu_callback_id,
-        }
+        Self { controller }
     }
 
     /// Update the popover if it's currently open.
     pub fn update_if_open(&self, snapshot: &SystemSnapshot) {
         if let Some(controller) = self.controller.borrow().as_ref() {
             controller.update_from_snapshot(snapshot);
-        }
-    }
-
-    /// Update the GPU section of the popover if it's currently open.
-    pub fn update_gpu_if_open(&self, snapshot: &GpuSnapshot) {
-        if let Some(controller) = self.controller.borrow().as_ref() {
-            controller.update_from_gpu_snapshot(snapshot);
         }
     }
 }

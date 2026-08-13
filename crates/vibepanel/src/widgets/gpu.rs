@@ -17,16 +17,20 @@ use crate::services::callbacks::CallbackId;
 use crate::services::config_manager::ConfigManager;
 use crate::services::gpu::{GpuDeviceSnapshot, GpuPowerState, GpuService, GpuSnapshot};
 use crate::services::icons::IconHandle;
-use crate::services::system::{SystemService, SystemSnapshot, format_bytes_long};
+use crate::services::system::{SystemService, SystemSnapshot};
 use crate::services::tooltip::TooltipManager;
 use crate::styles::{class, widget};
 use crate::widgets::base::BaseWidget;
+use crate::widgets::gpu_format;
 use crate::widgets::system_popover::SystemPopoverBinding;
-use crate::widgets::{WidgetConfig, format_vertical_metric, warn_unknown_options};
+use crate::widgets::{
+    VERTICAL_METRIC_CHARS, WidgetConfig, format_vertical_metric, warn_unknown_options,
+};
 
 const DEFAULT_SHOW_ICON: bool = true;
 const DEFAULT_STABLE_WIDTH: bool = true;
 const DEVICE_SEPARATOR: &str = " | ";
+const VERTICAL_DEVICE_SEPARATOR: &str = "\n<span size=\"2pt\">&#x2009;</span>\n";
 
 /// GPU display format options.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -154,7 +158,6 @@ impl GpuWidget {
             let icon_handle = icon_handle.clone();
             let gpu_label = gpu_label.clone();
             let config = config.clone();
-            let popover_binding = popover_binding.clone();
 
             gpu_service.connect(move |snapshot: &GpuSnapshot| {
                 update_gpu_widget(
@@ -165,8 +168,6 @@ impl GpuWidget {
                     is_vertical,
                     snapshot,
                 );
-
-                popover_binding.update_gpu_if_open(snapshot);
             })
         };
 
@@ -208,19 +209,19 @@ fn gpu_label_width(
     }
 
     let per_device = match (format, is_vertical) {
-        (GpuFormat::Usage, false) => 3,       // 99%
-        (GpuFormat::Usage, true) => 3,        // 99%
-        (GpuFormat::Temperature, false) => 4, // 99°C
-        (GpuFormat::Temperature, true) => 3,  // 99°
-        (GpuFormat::Both, false) => 8,        // 99% 99°C
-        (GpuFormat::Both, true) => 3,         // 99% / 99°
+        (GpuFormat::Usage, false) => 3,                          // 99%
+        (GpuFormat::Usage, true) => VERTICAL_METRIC_CHARS,       // 99%
+        (GpuFormat::Temperature, false) => 4,                    // 99°C
+        (GpuFormat::Temperature, true) => VERTICAL_METRIC_CHARS, // 99°
+        (GpuFormat::Both, false) => 8,                           // 99% 99°C
+        (GpuFormat::Both, true) => VERTICAL_METRIC_CHARS,        // 99% / 99°
     };
 
     let device_count = device_count.max(1) as i32;
     Some(if is_vertical {
         per_device
     } else {
-        device_count * per_device + (device_count - 1) * DEVICE_SEPARATOR.len() as i32
+        device_count * per_device + (device_count - 1) * DEVICE_SEPARATOR.chars().count() as i32
     })
 }
 
@@ -246,7 +247,7 @@ fn format_gpu_label(snapshot: &GpuSnapshot, format: &GpuFormat, is_vertical: boo
         .collect::<Vec<_>>();
 
     labels.join(if is_vertical {
-        "\n\n"
+        VERTICAL_DEVICE_SEPARATOR
     } else {
         DEVICE_SEPARATOR
     })
@@ -313,13 +314,7 @@ fn format_gpu_tooltip(snapshot: &GpuSnapshot) -> String {
 
 fn format_gpu_tooltip_block(snapshot: &GpuDeviceSnapshot, show_index: bool) -> String {
     let mut lines = Vec::new();
-    let title = match (show_index, snapshot.device_name.as_deref()) {
-        (true, Some(name)) => format!("GPU {}: {}", snapshot.device_index, name),
-        (true, None) => format!("GPU {}", snapshot.device_index),
-        (false, Some(name)) => format!("GPU: {name}"),
-        (false, None) => "GPU".to_string(),
-    };
-    lines.push(title);
+    lines.push(gpu_format::device_title(snapshot, show_index));
 
     if snapshot.power_state == GpuPowerState::Suspended {
         lines.push("State: Idle (suspended)".to_string());
@@ -333,22 +328,16 @@ fn format_gpu_tooltip_block(snapshot: &GpuDeviceSnapshot, show_index: bool) -> S
         lines.push(format!("Temp: {:.0}°C", temp));
     }
 
-    match (snapshot.vram_used, snapshot.vram_total) {
-        (Some(used), Some(total)) => lines.push(format!(
-            "VRAM: {} / {}",
-            format_bytes_long(used),
-            format_bytes_long(total)
-        )),
-        (Some(used), None) => lines.push(format!("VRAM: {} used", format_bytes_long(used))),
-        _ => {}
+    if let Some(value) = gpu_format::vram(snapshot) {
+        lines.push(format!("VRAM: {value}"));
     }
 
-    if let Some(mhz) = snapshot.clock_mhz {
-        lines.push(format!("Clock: {} MHz", mhz));
+    if let Some(value) = gpu_format::clock(snapshot) {
+        lines.push(format!("Clock: {value}"));
     }
 
-    if let Some(watts) = snapshot.power_watts {
-        lines.push(format!("Power: {:.1} W", watts));
+    if let Some(value) = gpu_format::power(snapshot) {
+        lines.push(format!("Power: {value}"));
     }
 
     lines.join("\n")
@@ -370,7 +359,7 @@ fn update_gpu_widget(
         snapshot.devices.len(),
     );
     gpu_label.set_width_chars(width_chars.unwrap_or(-1));
-    gpu_label.set_label(&format_gpu_label(snapshot, &config.format, is_vertical));
+    gpu_label.set_markup(&format_gpu_label(snapshot, &config.format, is_vertical));
     gpu_label.set_visible(true);
 
     if snapshot.is_gpu_high() {
@@ -571,11 +560,11 @@ mod tests {
         );
         assert_eq!(
             format_gpu_label(&snapshot, &GpuFormat::Usage, true),
-            "76%\n\n41%"
+            "76%\n<span size=\"2pt\">&#x2009;</span>\n41%"
         );
         assert_eq!(
             format_gpu_label(&snapshot, &GpuFormat::Both, true),
-            "76%\n72°\n\n41%\n61°"
+            "76%\n72°\n<span size=\"2pt\">&#x2009;</span>\n41%\n61°"
         );
     }
 

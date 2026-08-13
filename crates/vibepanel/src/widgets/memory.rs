@@ -21,7 +21,9 @@ use crate::services::tooltip::TooltipManager;
 use crate::styles::{class, widget};
 use crate::widgets::base::BaseWidget;
 use crate::widgets::system_popover::SystemPopoverBinding;
-use crate::widgets::{WidgetConfig, format_vertical_metric, warn_unknown_options};
+use crate::widgets::{
+    VERTICAL_METRIC_CHARS, WidgetConfig, format_vertical_metric, warn_unknown_options,
+};
 
 /// Default configuration values
 const DEFAULT_SHOW_ICON: bool = true;
@@ -191,7 +193,7 @@ fn memory_label_width(format: &MemoryFormat, stable_width: bool, is_vertical: bo
     }
 
     Some(match (format, is_vertical) {
-        (_, true) => 3,                     // vertical mode always renders percentage
+        (_, true) => VERTICAL_METRIC_CHARS, // vertical mode always renders percentage
         (MemoryFormat::Percentage, _) => 3, // 99%
         (MemoryFormat::Absolute, _) => 5,   // 10.0G / 999M
         (MemoryFormat::Both, _) => 10,      // 10.0/16.0G

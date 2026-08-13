@@ -39,11 +39,13 @@
 //! ```
 
 use std::cell::{Cell, RefCell};
+use std::collections::{HashMap, VecDeque};
 use std::fs::{self, OpenOptions};
 use std::mem;
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use gtk4::glib::{self, SourceId};
 use nvml_wrapper::Nvml;
@@ -54,6 +56,20 @@ use super::callbacks::{CallbackId, Callbacks};
 use super::config_manager::ConfigManager;
 
 const DEFAULT_POLL_INTERVAL_SECS: u32 = 3;
+
+/// Number of utilization samples retained per device.
+pub const GPU_HISTORY_SAMPLES: usize = 60;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct GpuHistorySample {
+    pub usage: Option<f32>,
+}
+
+impl GpuHistorySample {
+    fn is_gap(&self) -> bool {
+        self.usage.is_none()
+    }
+}
 
 /// Threshold above which GPU usage is considered "high" (higher than CPU since sustained GPU load is normal).
 pub(crate) const GPU_HIGH_USAGE_THRESHOLD: f32 = 90.0;
@@ -163,15 +179,26 @@ pub struct GpuDeviceSnapshot {
     pub vram_total: Option<u64>,
     /// GPU temperature in degrees Celsius.
     pub temperature: Option<f32>,
-    /// GPU clock speed in MHz.
+    /// Current GPU graphics clock in MHz.
     pub clock_mhz: Option<u64>,
+    /// Maximum GPU graphics clock in MHz.
+    pub max_clock_mhz: Option<u64>,
     /// GPU power draw in watts.
     pub power_watts: Option<f32>,
+    /// Enforced GPU power limit in watts.
+    pub power_limit_watts: Option<f32>,
     /// Device name (product name, or `vendor:device` PCI ID fallback).
     pub device_name: Option<String>,
 }
 
 impl GpuDeviceSnapshot {
+    pub fn vram_percent(&self) -> Option<f32> {
+        match (self.vram_used, self.vram_total) {
+            (Some(used), Some(total)) if total > 0 => Some(used as f32 / total as f32 * 100.0),
+            _ => None,
+        }
+    }
+
     fn is_gpu_high(&self) -> bool {
         self.gpu_usage
             .map(|u| u >= GPU_HIGH_USAGE_THRESHOLD)
@@ -181,7 +208,7 @@ impl GpuDeviceSnapshot {
 
 #[derive(Debug, Clone, Default)]
 pub struct GpuSnapshot {
-    /// Per-device snapshots in display order (preferred GPU first).
+    /// Per-device snapshots in configured display order.
     pub devices: Vec<GpuDeviceSnapshot>,
 }
 
@@ -222,6 +249,8 @@ struct AmdGpuDevice {
 
     device_name: Option<String>,
 
+    max_clock_mhz: Option<u64>,
+
     /// Whether this is a discrete GPU (determined via AMDGPU FUSION flag or fallback markers).
     is_discrete: bool,
 
@@ -236,6 +265,7 @@ struct NvidiaGpuDevice {
 
     device_index: u32,
     device_name: Option<String>,
+    max_clock_mhz: Option<u64>,
 
     /// Sysfs `power/runtime_status` path for checking hardware power state.
     runtime_status_path: Option<PathBuf>,
@@ -271,6 +301,20 @@ impl GpuDevice {
             GpuDevice::Nvidia(d) => d.is_primary,
         }
     }
+
+    fn max_clock_mhz(&self) -> Option<u64> {
+        match self {
+            GpuDevice::Amd(d) => d.max_clock_mhz,
+            GpuDevice::Nvidia(d) => d.max_clock_mhz,
+        }
+    }
+
+    fn runtime_status_path(&self) -> Option<&Path> {
+        match self {
+            GpuDevice::Amd(d) => d.runtime_status_path.as_deref(),
+            GpuDevice::Nvidia(d) => d.runtime_status_path.as_deref(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -279,6 +323,127 @@ enum GpuDisplaySelection {
     Auto,
     All,
     Explicit(Vec<usize>),
+}
+
+#[cfg(debug_assertions)]
+const MAX_MOCK_GPUS: usize = 4;
+#[cfg(debug_assertions)]
+const MOCK_GPU_NAMES: [&str; MAX_MOCK_GPUS] = [
+    "NVIDIA GeForce RTX 4070 Laptop GPU",
+    "Intel(R) UHD Graphics 620",
+    "Navi 31 [Radeon RX 7900 XT]",
+    "AMD Radeon 780M",
+];
+#[cfg(debug_assertions)]
+const MOCK_GPU_POWER_LIMITS: [f32; MAX_MOCK_GPUS] = [140.0, 28.0, 355.0, 65.0];
+#[cfg(debug_assertions)]
+const MOCK_GPU_MAX_CLOCKS: [u64; MAX_MOCK_GPUS] = [2475, 1150, 2500, 2900];
+#[cfg(debug_assertions)]
+const MOCK_GPU_VRAM_TOTALS: [u64; MAX_MOCK_GPUS] = [
+    8 * 1024 * 1024 * 1024,
+    2 * 1024 * 1024 * 1024,
+    20 * 1024 * 1024 * 1024,
+    4 * 1024 * 1024 * 1024,
+];
+
+/// Debug-only synthetic GPUs for evaluating multi-device layouts.
+#[cfg(debug_assertions)]
+#[derive(Debug, Clone, Default)]
+struct MockGpuConfig {
+    count: usize,
+    suspended: Vec<usize>,
+}
+
+#[cfg(debug_assertions)]
+impl MockGpuConfig {
+    fn from_env() -> Self {
+        Self::parse(
+            std::env::var("VIBEPANEL_MOCK_GPUS").ok().as_deref(),
+            std::env::var("VIBEPANEL_MOCK_GPU_SUSPEND").ok().as_deref(),
+        )
+    }
+
+    fn parse(count: Option<&str>, suspended: Option<&str>) -> Self {
+        let count = count
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .unwrap_or(0)
+            .min(MAX_MOCK_GPUS);
+        let suspended = suspended
+            .map(|value| {
+                value
+                    .split(',')
+                    .filter_map(|part| part.trim().parse::<usize>().ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+        Self { count, suspended }
+    }
+
+    fn enabled(&self) -> bool {
+        self.count > 0
+    }
+
+    fn devices(&self, first_index: usize, seconds: f64) -> Vec<GpuDeviceSnapshot> {
+        (0..self.count)
+            .map(|slot| {
+                let device_index = first_index + slot;
+                let device_name = Some(MOCK_GPU_NAMES[slot].to_string());
+                if self.suspended.contains(&slot) {
+                    return GpuDeviceSnapshot {
+                        device_index,
+                        power_state: GpuPowerState::Suspended,
+                        device_name,
+                        ..Default::default()
+                    };
+                }
+
+                let phase = slot as f64 * 2.1;
+                let usage = mock_wave(seconds, phase);
+                let vram_total = MOCK_GPU_VRAM_TOTALS[slot];
+                let vram_fraction = 0.32 + 0.34 * mock_wave(seconds * 0.18, phase + 1.3);
+                let power_limit = MOCK_GPU_POWER_LIMITS[slot];
+                let max_clock = MOCK_GPU_MAX_CLOCKS[slot];
+
+                GpuDeviceSnapshot {
+                    device_index,
+                    power_state: GpuPowerState::Active,
+                    gpu_usage: Some((usage * 100.0) as f32),
+                    vram_used: Some((vram_total as f64 * vram_fraction) as u64),
+                    vram_total: Some(vram_total),
+                    temperature: Some((42.0 + usage * 42.0) as f32),
+                    clock_mhz: Some((300.0 + usage * (max_clock as f64 - 300.0)) as u64),
+                    max_clock_mhz: Some(max_clock),
+                    power_watts: Some((f64::from(power_limit) * (0.12 + 0.78 * usage)) as f32),
+                    power_limit_watts: Some(power_limit),
+                    device_name,
+                }
+            })
+            .collect()
+    }
+}
+
+fn push_history_sample(samples: &mut VecDeque<GpuHistorySample>, value: GpuHistorySample) {
+    if samples.len() == GPU_HISTORY_SAMPLES {
+        samples.pop_front();
+    }
+    samples.push_back(value);
+}
+
+#[cfg(debug_assertions)]
+fn mock_wave(seconds: f64, phase: f64) -> f64 {
+    (0.48
+        + 0.30 * ((seconds / 13.0) + phase).sin()
+        + 0.14 * ((seconds / 4.3) + phase * 2.0).sin()
+        + 0.06 * ((seconds / 1.7) + phase * 3.0).sin())
+    .clamp(0.0, 1.0)
+}
+
+#[cfg(debug_assertions)]
+fn mock_seconds() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs_f64())
+        .unwrap_or(0.0)
 }
 
 /// Shared, process-wide GPU monitoring service.
@@ -309,6 +474,12 @@ pub struct GpuService {
 
     /// Reference count for polling requests. Polling runs only while > 0.
     poll_requests: Cell<u32>,
+
+    history: RefCell<HashMap<usize, VecDeque<GpuHistorySample>>>,
+    last_sample_at: Cell<Option<Instant>>,
+
+    #[cfg(debug_assertions)]
+    mock: MockGpuConfig,
 }
 
 impl GpuService {
@@ -323,6 +494,21 @@ impl GpuService {
 
         let initial_snapshot = Self::placeholder_snapshot(&devices, &display_indices);
 
+        #[cfg(debug_assertions)]
+        let mock = MockGpuConfig::from_env();
+        #[cfg(debug_assertions)]
+        let initial_snapshot = if mock.enabled() {
+            warn!(
+                "GpuService: VIBEPANEL_MOCK_GPUS is set, appending {} synthetic GPU(s)",
+                mock.count
+            );
+            let mut snapshots = initial_snapshot.devices;
+            snapshots.extend(mock.devices(devices.len(), mock_seconds()));
+            GpuSnapshot::from_devices(snapshots)
+        } else {
+            initial_snapshot
+        };
+
         Rc::new(Self {
             snapshot: RefCell::new(initial_snapshot),
             callbacks: Callbacks::new(),
@@ -331,6 +517,10 @@ impl GpuService {
             display_indices: RefCell::new(display_indices),
             poll_interval: Cell::new(DEFAULT_POLL_INTERVAL_SECS),
             poll_requests: Cell::new(0),
+            history: RefCell::new(HashMap::new()),
+            last_sample_at: Cell::new(None),
+            #[cfg(debug_assertions)]
+            mock,
         })
     }
 
@@ -363,19 +553,9 @@ impl GpuService {
     }
 
     pub fn reconfigure(&self) {
-        if !self.refresh_display_selection() {
-            return;
-        }
-
-        if self.poll_requests.get() > 0 {
+        if self.refresh_display_selection() && self.poll_requests.get() > 0 {
             self.poll();
-            return;
         }
-
-        let snapshot = Self::placeholder_snapshot(&self.devices, &self.display_indices.borrow());
-
-        *self.snapshot.borrow_mut() = snapshot;
-        self.callbacks.notify(&self.snapshot.borrow());
     }
 
     fn start_polling(this: &Rc<Self>) {
@@ -411,7 +591,12 @@ impl GpuService {
     /// Requires `&Rc<Self>` because `start_polling` creates a weak reference
     /// for the timer closure.
     pub fn request_polling(this: &Rc<Self>) {
-        if this.devices.is_empty() {
+        #[cfg(debug_assertions)]
+        let has_mock = this.mock.enabled();
+        #[cfg(not(debug_assertions))]
+        let has_mock = false;
+
+        if this.devices.is_empty() && !has_mock {
             return;
         }
         let prev = this.poll_requests.get();
@@ -434,34 +619,79 @@ impl GpuService {
         if prev == 1 {
             debug!("GpuService: last poll request released, stopping polling");
             self.stop_polling();
+            self.record_history_break();
         }
     }
 
     fn poll(&self) {
-        let snapshot = GpuSnapshot::from_devices(
-            self.display_indices
-                .borrow()
-                .iter()
-                .filter_map(|&idx| {
-                    self.devices
-                        .get(idx)
-                        .map(|device| Self::poll_device(idx, device))
-                })
-                .collect(),
-        );
+        #[allow(unused_mut)]
+        let mut devices: Vec<GpuDeviceSnapshot> = self
+            .display_indices
+            .borrow()
+            .iter()
+            .filter_map(|&idx| {
+                self.devices
+                    .get(idx)
+                    .map(|device| Self::poll_device(idx, device))
+            })
+            .collect();
+
+        #[cfg(debug_assertions)]
+        if self.mock.enabled() {
+            devices.extend(self.mock.devices(self.devices.len(), mock_seconds()));
+        }
+
+        self.record_history(&devices);
+        let snapshot = GpuSnapshot::from_devices(devices);
 
         *self.snapshot.borrow_mut() = snapshot;
         self.callbacks.notify(&self.snapshot.borrow());
     }
 
+    fn record_history(&self, devices: &[GpuDeviceSnapshot]) {
+        let now = Instant::now();
+        let history_window =
+            Duration::from_secs(u64::from(self.poll_interval.get()) * GPU_HISTORY_SAMPLES as u64);
+        let mut history = self.history.borrow_mut();
+        if self
+            .last_sample_at
+            .replace(Some(now))
+            .is_some_and(|previous| now.duration_since(previous) > history_window)
+        {
+            history.clear();
+        }
+
+        for device in devices {
+            push_history_sample(
+                history.entry(device.device_index).or_default(),
+                GpuHistorySample {
+                    usage: device.gpu_usage,
+                },
+            );
+        }
+    }
+
+    fn record_history_break(&self) {
+        for samples in self.history.borrow_mut().values_mut() {
+            if !samples.back().is_some_and(GpuHistorySample::is_gap) {
+                push_history_sample(samples, GpuHistorySample::default());
+            }
+        }
+    }
+
+    pub fn history(&self, device_index: usize) -> Vec<GpuHistorySample> {
+        self.history
+            .borrow()
+            .get(&device_index)
+            .map(|samples| samples.iter().copied().collect())
+            .unwrap_or_default()
+    }
+
     fn poll_device(idx: usize, device: &GpuDevice) -> GpuDeviceSnapshot {
         trace!("GpuService: polling GPU {} metrics", idx);
 
-        let runtime_path = match device {
-            GpuDevice::Amd(d) => d.runtime_status_path.as_deref(),
-            GpuDevice::Nvidia(d) => d.runtime_status_path.as_deref(),
-        };
-        let power_state = runtime_path
+        let power_state = device
+            .runtime_status_path()
             .map(read_runtime_status)
             .unwrap_or(GpuPowerState::Unknown);
 
@@ -471,6 +701,7 @@ impl GpuService {
                 device_index: idx,
                 power_state: GpuPowerState::Suspended,
                 device_name: device.name().map(str::to_string),
+                max_clock_mhz: device.max_clock_mhz(),
                 ..Default::default()
             };
         }
@@ -492,6 +723,7 @@ impl GpuService {
                     devices.get(device_index).map(|device| GpuDeviceSnapshot {
                         device_index,
                         device_name: device.name().map(str::to_string),
+                        max_clock_mhz: device.max_clock_mhz(),
                         ..Default::default()
                     })
                 })
@@ -506,18 +738,23 @@ impl GpuService {
         let vram_used = read_sysfs_u64(&device.device_path.join("mem_info_vram_used"));
         let vram_total = read_sysfs_u64(&device.device_path.join("mem_info_vram_total"));
 
-        let (temperature, clock_mhz, power_watts) = if let Some(ref hwmon) = device.hwmon_path {
-            let temp = read_sysfs_u32(&hwmon.join("temp1_input")).map(|v| v as f32 / 1000.0);
+        let (temperature, clock_mhz, power_watts, power_limit_watts) =
+            if let Some(ref hwmon) = device.hwmon_path {
+                let temp = read_sysfs_u32(&hwmon.join("temp1_input")).map(|v| v as f32 / 1000.0);
 
-            let clock = read_sysfs_u64(&hwmon.join("freq1_input")).map(|v| v / 1_000_000);
+                let clock = read_sysfs_u64(&hwmon.join("freq1_input")).map(|v| v / 1_000_000);
 
-            let power =
-                read_sysfs_u64(&hwmon.join("power1_average")).map(|v| v as f32 / 1_000_000.0);
+                let power = read_sysfs_u64(&hwmon.join("power1_average"))
+                    .or_else(|| read_sysfs_u64(&hwmon.join("power1_input")))
+                    .map(|v| v as f32 / 1_000_000.0);
 
-            (temp, clock, power)
-        } else {
-            (None, None, None)
-        };
+                let power_limit =
+                    read_sysfs_u64(&hwmon.join("power1_cap")).map(|v| v as f32 / 1_000_000.0);
+
+                (temp, clock, power, power_limit)
+            } else {
+                (None, None, None, None)
+            };
 
         GpuDeviceSnapshot {
             gpu_usage,
@@ -525,7 +762,9 @@ impl GpuService {
             vram_total,
             temperature,
             clock_mhz,
+            max_clock_mhz: device.max_clock_mhz,
             power_watts,
+            power_limit_watts,
             device_name: device.device_name.clone(),
             ..Default::default()
         }
@@ -562,6 +801,10 @@ impl GpuService {
         let clock_mhz = device.clock_info(Clock::Graphics).ok().map(|c| c as u64);
 
         let power_watts = device.power_usage().ok().map(|mw| mw as f32 / 1000.0);
+        let power_limit_watts = device
+            .enforced_power_limit()
+            .ok()
+            .map(|mw| mw as f32 / 1000.0);
 
         GpuDeviceSnapshot {
             gpu_usage,
@@ -569,7 +812,9 @@ impl GpuService {
             vram_total,
             temperature,
             clock_mhz,
+            max_clock_mhz: nvidia.max_clock_mhz,
             power_watts,
+            power_limit_watts,
             device_name: nvidia.device_name.clone(),
             ..Default::default()
         }
@@ -640,8 +885,15 @@ impl GpuService {
                 if driver_name == "amdgpu" {
                     let hwmon_path = discover_hwmon(&device_path);
                     let device_name = read_device_name(&device_path);
+                    let device_info = query_amd_device_info(&device_path);
 
-                    let is_discrete = is_amd_discrete_gpu(&device_path);
+                    let is_discrete = device_info
+                        .as_ref()
+                        .map(|info| info.ids_flags & AMDGPU_IDS_FLAGS_FUSION == 0)
+                        .unwrap_or_else(|| is_amd_discrete_gpu_sysfs_fallback(&device_path));
+                    let max_clock_mhz = device_info
+                        .as_ref()
+                        .and_then(|info| amd_max_clock_mhz(info.max_engine_clock));
                     // boot_vga: 1 = primary VGA device, 0 = non-primary.
                     let boot_vga = read_sysfs_u32(&device_path.join("boot_vga"));
                     let is_primary = boot_vga == Some(1);
@@ -664,6 +916,7 @@ impl GpuService {
                         hwmon_path,
                         runtime_status_path,
                         device_name,
+                        max_clock_mhz,
                         is_discrete,
                         is_primary,
                     });
@@ -701,7 +954,8 @@ impl GpuService {
                 }
             };
 
-            let device_name = device.name().ok();
+            let device_name = device.name().ok().filter(|name| !name.trim().is_empty());
+            let max_clock_mhz = device.max_clock_info(Clock::Graphics).ok().map(u64::from);
 
             let pci_device_path = device
                 .pci_info()
@@ -712,6 +966,13 @@ impl GpuService {
                 .as_ref()
                 .map(|path| path.join("power/runtime_status"))
                 .filter(|p| p.exists());
+
+            if runtime_status_path.is_none() {
+                debug!(
+                    "GpuService: could not resolve runtime power status path for NVIDIA GPU {}",
+                    device_index
+                );
+            }
 
             let is_primary = pci_device_path
                 .as_ref()
@@ -727,6 +988,7 @@ impl GpuService {
                 nvml: nvml.clone(),
                 device_index,
                 device_name,
+                max_clock_mhz,
                 runtime_status_path,
                 is_primary,
             });
@@ -864,6 +1126,9 @@ impl GpuService {
 
         if changed {
             Self::log_display_selection(&self.devices, &display_selection, &display_indices);
+            self.history
+                .borrow_mut()
+                .retain(|idx, _| display_indices.contains(idx));
             *self.display_indices.borrow_mut() = display_indices;
         }
 
@@ -1064,16 +1329,11 @@ fn choose_device_name(
     ))
 }
 
-/// Prefer the AMDGPU kernel driver's FUSION flag for integrated/discrete
-/// classification and fall back to sysfs files exposed for dedicated AMD GPUs.
-fn is_amd_discrete_gpu(device_path: &Path) -> bool {
-    match query_amd_fusion_flag(device_path) {
-        Some(is_fusion) => !is_fusion,
-        None => is_amd_discrete_gpu_sysfs_fallback(device_path),
-    }
+fn amd_max_clock_mhz(max_engine_clock_khz: u64) -> Option<u64> {
+    (max_engine_clock_khz > 0).then_some(max_engine_clock_khz / 1_000)
 }
 
-fn query_amd_fusion_flag(device_path: &Path) -> Option<bool> {
+fn query_amd_device_info(device_path: &Path) -> Option<DrmAmdgpuInfoDeviceIds> {
     let render_node = render_node_for_device(device_path)?;
     let file = OpenOptions::new().read(true).open(&render_node).ok()?;
 
@@ -1101,7 +1361,7 @@ fn query_amd_fusion_flag(device_path: &Path) -> Option<bool> {
         return None;
     }
 
-    Some(device_info.ids_flags & AMDGPU_IDS_FLAGS_FUSION != 0)
+    Some(device_info)
 }
 
 fn render_node_for_device(device_path: &Path) -> Option<PathBuf> {
@@ -1205,18 +1465,63 @@ mod tests {
         }
     }
 
-    fn device_vram_percent(snapshot: &GpuDeviceSnapshot) -> Option<f32> {
-        match (snapshot.vram_used, snapshot.vram_total) {
-            (Some(used), Some(total)) if total > 0 => Some(used as f32 / total as f32 * 100.0),
-            _ => None,
-        }
-    }
-
     #[test]
     fn test_gpu_snapshot_defaults() {
         let snap = GpuSnapshot::default();
         assert!(!snap.available());
         assert!(snap.devices.is_empty());
+    }
+
+    #[test]
+    fn test_vram_percent() {
+        let snapshot = GpuDeviceSnapshot {
+            vram_used: Some(4),
+            vram_total: Some(8),
+            ..Default::default()
+        };
+        assert_eq!(snapshot.vram_percent(), Some(50.0));
+
+        let zero_total = GpuDeviceSnapshot {
+            vram_used: Some(4),
+            vram_total: Some(0),
+            ..Default::default()
+        };
+        assert_eq!(zero_total.vram_percent(), None);
+    }
+
+    #[test]
+    fn test_history_discards_oldest_samples_beyond_the_cap() {
+        let mut samples = VecDeque::new();
+        for value in 0..=GPU_HISTORY_SAMPLES {
+            push_history_sample(
+                &mut samples,
+                GpuHistorySample {
+                    usage: Some(value as f32),
+                },
+            );
+        }
+        assert_eq!(samples.len(), GPU_HISTORY_SAMPLES);
+        assert_eq!(samples.front().and_then(|sample| sample.usage), Some(1.0));
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn test_mock_gpu_config_requires_explicit_positive_count() {
+        assert!(!MockGpuConfig::parse(None, None).enabled());
+        assert!(!MockGpuConfig::parse(Some("0"), None).enabled());
+        assert!(!MockGpuConfig::parse(Some("invalid"), None).enabled());
+        assert_eq!(MockGpuConfig::parse(Some("99"), None).count, MAX_MOCK_GPUS);
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn test_mock_gpu_devices_include_current_and_max_clock() {
+        let devices = MockGpuConfig::parse(Some("2"), None).devices(3, 1234.0);
+        assert_eq!(devices[0].device_index, 3);
+        for device in devices {
+            assert!(device.clock_mhz.is_some());
+            assert!(device.max_clock_mhz >= device.clock_mhz);
+        }
     }
 
     #[test]
@@ -1314,6 +1619,7 @@ mod tests {
             hwmon_path: None,
             runtime_status_path: None,
             device_name: Some(name.to_string()),
+            max_clock_mhz: None,
             is_discrete,
             is_primary,
         })
@@ -1469,8 +1775,12 @@ mod tests {
 
         let device_info = DrmAmdgpuInfoDeviceIds::default();
         let base = &device_info as *const _ as usize;
+        let max_engine_clock = &device_info.max_engine_clock as *const _ as usize;
         let ids_flags = &device_info.ids_flags as *const _ as usize;
+        assert_eq!(max_engine_clock - base, 32);
         assert_eq!(ids_flags - base, 136);
+        assert_eq!(amd_max_clock_mhz(2_430_000), Some(2430));
+        assert_eq!(amd_max_clock_mhz(0), None);
     }
 
     #[test]

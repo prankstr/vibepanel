@@ -21,6 +21,8 @@ mod clock;
 mod cpu;
 mod custom;
 mod gpu;
+mod gpu_format;
+mod history_graph;
 mod keyboard_layout;
 pub mod layer_shell_popover;
 mod mango_layout;
@@ -121,11 +123,13 @@ pub(crate) fn popover_kind_for(widget_name: &str) -> PopoverKind {
     }
 }
 
+pub(crate) const VERTICAL_METRIC_CHARS: i32 = 3;
+
 /// Format a rounded vertical metric without exceeding the three-character
 /// width budget solely to show its unit.
 pub(crate) fn format_vertical_metric(value: f32, unit: char) -> String {
     let value = format!("{value:.0}");
-    if value.chars().count() < 3 {
+    if value.chars().count() < VERTICAL_METRIC_CHARS as usize {
         format!("{value}{unit}")
     } else {
         value
