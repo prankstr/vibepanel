@@ -21,7 +21,9 @@ use crate::services::tooltip::TooltipManager;
 use crate::styles::{class, widget};
 use crate::widgets::base::BaseWidget;
 use crate::widgets::system_popover::SystemPopoverBinding;
-use crate::widgets::{WidgetConfig, warn_unknown_options};
+use crate::widgets::{
+    VERTICAL_METRIC_CHARS, WidgetConfig, format_vertical_metric, warn_unknown_options,
+};
 
 /// Default configuration values
 const DEFAULT_SHOW_ICON: bool = true;
@@ -151,6 +153,9 @@ impl CpuWidget {
 
         let is_vertical = ConfigManager::global().bar_position().is_vertical();
         let percentage_label = base.add_label(None, &[widget::CPU_LABEL, class::VCENTER_CAPS]);
+        if is_vertical {
+            percentage_label.set_justify(gtk4::Justification::Center);
+        }
         if let Some(width_chars) = cpu_label_width(&config.format, config.stable_width, is_vertical)
         {
             percentage_label.set_width_chars(width_chars);
@@ -206,12 +211,12 @@ fn cpu_label_width(format: &CpuFormat, stable_width: bool, is_vertical: bool) ->
     }
 
     Some(match (format, is_vertical) {
-        (CpuFormat::Usage, false) => 3,       // 99%
-        (CpuFormat::Usage, true) => 2,        // 99
-        (CpuFormat::Temperature, false) => 4, // 99°C
-        (CpuFormat::Temperature, true) => 3,  // 99°
-        (CpuFormat::Both, false) => 8,        // 99% 99°C
-        (CpuFormat::Both, true) => 3,         // widest line: 99°
+        (CpuFormat::Usage, false) => 3,                          // 99%
+        (CpuFormat::Usage, true) => VERTICAL_METRIC_CHARS,       // 99%
+        (CpuFormat::Temperature, false) => 4,                    // 99°C
+        (CpuFormat::Temperature, true) => VERTICAL_METRIC_CHARS, // 99°
+        (CpuFormat::Both, false) => 8,                           // 99% 99°C
+        (CpuFormat::Both, true) => VERTICAL_METRIC_CHARS,        // 99% / 99°
     })
 }
 
@@ -277,7 +282,7 @@ fn update_cpu_widget(
 
 fn format_cpu_usage(cpu_usage: f32, is_vertical: bool) -> String {
     if is_vertical {
-        format!("{cpu_usage:.0}")
+        format_vertical_metric(cpu_usage, '%')
     } else {
         format!("{cpu_usage:.0}%")
     }
@@ -288,14 +293,14 @@ fn format_cpu_label(snapshot: &SystemSnapshot, format: &CpuFormat, is_vertical: 
     match format {
         CpuFormat::Usage => format_cpu_usage(snapshot.cpu_usage, is_vertical),
         CpuFormat::Temperature => match snapshot.cpu_temp {
-            Some(temp) if is_vertical => format!("{temp:.0}°"),
+            Some(temp) if is_vertical => format_vertical_metric(temp, '°'),
             Some(temp) => format!("{temp:.0}°C"),
             None => "—".to_string(),
         },
         CpuFormat::Both => {
             let usage_part = format_cpu_usage(snapshot.cpu_usage, is_vertical);
             let temp_part = match snapshot.cpu_temp {
-                Some(temp) if is_vertical => format!("{temp:.0}°"),
+                Some(temp) if is_vertical => format_vertical_metric(temp, '°'),
                 Some(temp) => format!("{temp:.0}°C"),
                 None => "—".to_string(),
             };
@@ -356,14 +361,29 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(format_cpu_label(&snapshot, &CpuFormat::Usage, false), "42%");
-        assert_eq!(format_cpu_label(&snapshot, &CpuFormat::Usage, true), "42");
+        assert_eq!(format_cpu_label(&snapshot, &CpuFormat::Usage, true), "42%");
         assert_eq!(
             format_cpu_label(&snapshot, &CpuFormat::Both, true),
-            "42\n72°"
+            "42%\n72°"
         );
         assert_eq!(
             format_cpu_label(&snapshot, &CpuFormat::Temperature, true),
             "72°"
+        );
+
+        let boundary = SystemSnapshot {
+            cpu_usage: 100.0,
+            cpu_temp: Some(100.0),
+            ..snapshot
+        };
+        assert_eq!(format_cpu_label(&boundary, &CpuFormat::Usage, true), "100");
+        assert_eq!(
+            format_cpu_label(&boundary, &CpuFormat::Temperature, true),
+            "100"
+        );
+        assert_eq!(
+            format_cpu_label(&boundary, &CpuFormat::Both, true),
+            "100\n100"
         );
     }
 

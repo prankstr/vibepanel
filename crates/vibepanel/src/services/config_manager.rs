@@ -56,6 +56,7 @@ const CSS_IMPORT_SCAN_LIMIT: usize = 256;
 use crate::bar;
 use crate::services::audio::AudioService;
 use crate::services::bar_manager::BarManager;
+use crate::services::gpu::GpuService;
 use crate::services::icons::IconsService;
 use crate::services::network::NetworkService;
 use crate::services::surfaces::SurfaceStyleManager;
@@ -1116,6 +1117,10 @@ impl ConfigManager {
         if old_config.battery_alert_config() != new_config.battery_alert_config() {
             crate::services::battery_alert::BatteryAlertController::global()
                 .configure(new_config.battery_alert_config());
+        }
+
+        if old_config.widgets.get_options("gpu") != new_config.widgets.get_options("gpu") {
+            GpuService::global().reconfigure();
         }
 
         // Restart or stop wallpaper polling if auto mode or wallpaper config changed

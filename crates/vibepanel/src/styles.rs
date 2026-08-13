@@ -1404,7 +1404,4 @@ pub mod system_popover {
 
     /// GPU title row container (`.system-gpu-title`).
     pub const GPU_TITLE: &str = "system-gpu-title";
-
-    /// GPU metrics label in title row (clock · power · temp) (`.system-gpu-metrics`).
-    pub const GPU_METRICS: &str = "system-gpu-metrics";
 }
