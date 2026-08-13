@@ -30,8 +30,7 @@ mod imp {
     impl ObjectImpl for RoundedPicture {
         fn constructed(&self) {
             self.parent_constructed();
-            // Default to no expansion and center alignment
-            // This prevents the widget from stretching to fill parent allocation
+            // Keep the widget from stretching to its parent's allocation.
             self.obj().set_hexpand(false);
             self.obj().set_vexpand(false);
             self.obj().set_halign(gtk4::Align::Center);
@@ -43,10 +42,8 @@ mod imp {
         fn measure(&self, orientation: gtk4::Orientation, _for_size: i32) -> (i32, i32, i32, i32) {
             let size = self.pixel_size.get();
             if size > 0 {
-                // Fixed size mode
                 (size, size, -1, -1)
             } else if let Some(paintable) = self.paintable.borrow().as_ref() {
-                // Use paintable's intrinsic size
                 let intrinsic = match orientation {
                     gtk4::Orientation::Horizontal => paintable.intrinsic_width(),
                     gtk4::Orientation::Vertical => paintable.intrinsic_height(),
@@ -66,7 +63,6 @@ mod imp {
             let widget = self.obj();
             let pixel_size = self.pixel_size.get();
 
-            // Use pixel_size if set, otherwise use actual allocation
             let (width, height) = if pixel_size > 0 {
                 (pixel_size as f32, pixel_size as f32)
             } else {
@@ -80,7 +76,6 @@ mod imp {
             let radius = self.corner_radius.get().min(width / 2.0).min(height / 2.0);
 
             if radius > 0.0 {
-                // Create rounded rectangle for clipping
                 let bounds = gtk4::graphene::Rect::new(0.0, 0.0, width, height);
                 let corner = gtk4::graphene::Size::new(radius, radius);
                 let rounded_rect = gtk4::gsk::RoundedRect::new(
@@ -90,19 +85,44 @@ mod imp {
                     corner, // bottom-left
                 );
 
-                // Push the rounded clip, render, pop
                 snapshot.push_rounded_clip(&rounded_rect);
-                paintable.snapshot(snapshot, width as f64, height as f64);
+                snapshot_paintable_cropped(snapshot, &paintable, width, height);
                 snapshot.pop();
             } else {
-                // No rounding needed
-                paintable.snapshot(snapshot, width as f64, height as f64);
+                snapshot.push_clip(&gtk4::graphene::Rect::new(0.0, 0.0, width, height));
+                snapshot_paintable_cropped(snapshot, &paintable, width, height);
+                snapshot.pop();
             }
         }
     }
 
     impl AccessibleImpl for RoundedPicture {}
     impl BuildableImpl for RoundedPicture {}
+}
+
+fn snapshot_paintable_cropped(
+    snapshot: &gtk4::Snapshot,
+    paintable: &Paintable,
+    width: f32,
+    height: f32,
+) {
+    let intrinsic_width = paintable.intrinsic_width() as f32;
+    let intrinsic_height = paintable.intrinsic_height() as f32;
+    if intrinsic_width <= 0.0 || intrinsic_height <= 0.0 {
+        paintable.snapshot(snapshot, width as f64, height as f64);
+        return;
+    }
+
+    let scale = (width / intrinsic_width).max(height / intrinsic_height);
+    let render_width = intrinsic_width * scale;
+    let render_height = intrinsic_height * scale;
+    let offset =
+        gtk4::graphene::Point::new((width - render_width) / 2.0, (height - render_height) / 2.0);
+
+    snapshot.save();
+    snapshot.translate(&offset);
+    paintable.snapshot(snapshot, render_width as f64, render_height as f64);
+    snapshot.restore();
 }
 
 glib::wrapper! {

@@ -1165,8 +1165,8 @@ fn update_widgets_from_snapshot_impl(ctx: &WidgetUpdateContext<'_>, snapshot: &M
     // updates below — stale-but-recent track info is preferable to blank content
     // during the brief transition window.
     //
-    // Album art has its own debounce, so genuine no-art tracks can still clear
-    // stale art to the fallback without flashing during brief track switches.
+    // Album art has a clear grace and Chromium file settle, so genuine no-art
+    // tracks can still clear stale art without flashing during transitions.
     if !has_metadata {
         return;
     }
@@ -1195,21 +1195,15 @@ fn update_widgets_from_snapshot_impl(ctx: &WidgetUpdateContext<'_>, snapshot: &M
         let picture_for_failure = picture.clone();
         let fallback_for_failure = ctx.art_fallback_icon.clone();
         let player_id = snapshot.player_id.clone();
-        let art_state_for_failure = ctx.art_state.clone();
         let on_failure = move || {
-            // Read generation at call time (not capture time) so
-            // show_player_icon_in_art checks against the current generation.
-            let generation = art_state_for_failure.borrow().generation;
             show_player_icon_in_art(
                 &picture_for_failure,
                 fallback_for_failure.as_ref(),
                 player_id.as_deref(),
-                &art_state_for_failure,
-                generation,
             );
         };
 
-        ArtState::debounced_load(
+        ArtState::load_or_schedule_clear(
             ctx.art_state,
             art_url,
             snapshot.player_id.as_deref(),
@@ -1258,13 +1252,7 @@ fn show_player_icon_in_art(
     art_picture: &RoundedPicture,
     fallback_icon: Option<&Image>,
     player_id: Option<&str>,
-    art_state: &Rc<RefCell<ArtState>>,
-    generation: u64,
 ) {
-    if art_state.borrow().generation != generation {
-        return;
-    }
-
     let icon_name = player_id
         .map(|id| resolve_app_icon_name(id, media::ICON_AUDIO_GENERIC))
         .unwrap_or_else(|| media::ICON_AUDIO_GENERIC.to_string());
