@@ -14,7 +14,9 @@ use tracing::{debug, warn};
 
 use crate::services::config_manager::ConfigManager;
 use crate::services::icons::{IconHandle, IconsService};
-use crate::services::media::{MediaService, MediaSnapshot, PlaybackStatus, format_duration};
+use crate::services::media::{
+    MediaService, MediaSnapshot, PlaybackStatus, format_duration, youtube_thumbnail_fallback_url,
+};
 use crate::styles::{button, color, icon, media};
 use crate::widgets::marquee_label::MarqueeLabel;
 use crate::widgets::media_visualizer::MediaVisualizer;
@@ -133,13 +135,23 @@ impl MediaViewController {
 // Art State
 // ============================================================================
 
-/// Grace period (ms) before loading new album art.
+/// Grace period (ms) before clearing album art or loading Chromium artwork.
 ///
-/// Chromium creates multiple temporary image files during a track switch — the
-/// first is typically the player's own icon, followed by the real album art
-/// ~150-200ms later.  By waiting for the URL to settle we avoid briefly
-/// displaying the intermediate (wrong) image.
-pub const ART_DEBOUNCE_MS: u64 = 200;
+/// Browser players briefly emit empty artwork during track switches, while
+/// Chromium publishes a temporary local icon before its real artwork. Waiting
+/// for Chromium's local URL to settle avoids both flashes.
+const ART_SETTLE_MS: u64 = 200;
+const CHROMIUM_ART_PLAYERS: &[&str] = &["chromium", "brave"];
+
+fn should_settle_art_url(url: Option<&str>, player_id: Option<&str>) -> bool {
+    match url {
+        None => true,
+        Some(url) => {
+            url.starts_with("file://")
+                && player_id.is_some_and(|id| CHROMIUM_ART_PLAYERS.contains(&id))
+        }
+    }
+}
 
 /// State for tracking album art loading with cancellation support.
 pub struct ArtState {
@@ -147,8 +159,8 @@ pub struct ArtState {
     pub current_player_id: Option<String>,
     pub generation: u64,
     pub cancellable: gio::Cancellable,
-    /// Pending debounce timer (see [`ART_DEBOUNCE_MS`]).
-    pub debounce_source: Option<glib::SourceId>,
+    /// Pending settle timer (see [`ART_SETTLE_MS`]).
+    pub pending_source: Option<glib::SourceId>,
 }
 
 impl ArtState {
@@ -158,25 +170,25 @@ impl ArtState {
             current_player_id: None,
             generation: 0,
             cancellable: gio::Cancellable::new(),
-            debounce_source: None,
+            pending_source: None,
         }
     }
 
-    pub fn cancel_debounce(&mut self) {
-        if let Some(source_id) = self.debounce_source.take() {
+    pub fn cancel_pending_load(&mut self) {
+        if let Some(source_id) = self.pending_source.take() {
             source_id.remove();
         }
     }
 
     /// Decide whether a new art URL warrants a fresh load, and if so prepare
-    /// the state (cancel previous load/debounce, record the new URL).
+    /// the state (cancel previous load/pending clear, record the new URL).
     ///
     /// `player_id` identifies the current MPRIS player. When the player changes,
     /// any cached URL is invalidated so that a `None` art URL correctly clears
     /// stale art from the previous player.
     ///
     /// Within the same player, returns `false` when the URL is unchanged. A
-    /// `Some -> None` transition is still scheduled through the debounce timer
+    /// `Some -> None` transition is still scheduled through the clear timer
     /// so tracks that genuinely lack album art clear stale art to the fallback.
     pub fn prepare_art_load(&mut self, new_url: Option<&str>, player_id: Option<&str>) -> bool {
         let player_changed = self.current_player_id.as_deref() != player_id;
@@ -185,8 +197,9 @@ impl ArtState {
             // Force reset so the new player's art (or lack thereof) takes effect.
             self.cancellable.cancel();
             self.cancellable = gio::Cancellable::new();
-            self.cancel_debounce();
+            self.cancel_pending_load();
             self.current_url = new_url.map(String::from);
+            self.generation += 1;
             return true;
         }
 
@@ -195,21 +208,22 @@ impl ArtState {
         }
         self.cancellable.cancel();
         self.cancellable = gio::Cancellable::new();
-        self.cancel_debounce();
+        self.cancel_pending_load();
         self.current_url = new_url.map(String::from);
+        self.generation += 1;
         true
     }
 
-    /// Schedule a debounced album art load.
+    /// Load remote album art immediately, or schedule local art and missing-art clears.
     ///
     /// Calls [`prepare_art_load`](Self::prepare_art_load) and, if a load is
-    /// needed, starts a [`ART_DEBOUNCE_MS`] timer.  When the timer fires the
-    /// generation is bumped and [`load_art_from_url`] is called with the
-    /// supplied `on_success` / `on_failure` callbacks.
+    /// needed, invalidates the previous generation and either loads remote art
+    /// immediately or starts an [`ART_SETTLE_MS`] timer. Changed local URLs
+    /// restart the timer so Chromium's temporary artwork is not displayed.
     ///
     /// Both call sites (bar widget and popover/window) delegate here so the
-    /// debounce + generation logic lives in one place.
-    pub fn debounced_load<S, F>(
+    /// settle timer + generation logic lives in one place.
+    pub fn load_or_schedule_clear<S, F>(
         art_state: &Rc<RefCell<Self>>,
         url: Option<&str>,
         player_id: Option<&str>,
@@ -229,35 +243,35 @@ impl ArtState {
 
         let art_state_for_closure = Rc::clone(art_state);
         let url_owned = url.map(String::from);
+        let generation = art_state.borrow().generation;
 
-        let source_id = glib::timeout_add_local_once(
-            std::time::Duration::from_millis(ART_DEBOUNCE_MS),
-            move || {
-                {
-                    let mut st = art_state_for_closure.borrow_mut();
-                    st.debounce_source = None;
-                    st.generation += 1;
-                }
+        let start_load = move || {
+            art_state_for_closure.borrow_mut().pending_source = None;
+            let cancellable = art_state_for_closure.borrow().cancellable.clone();
 
-                let generation = art_state_for_closure.borrow().generation;
-                let cancellable = art_state_for_closure.borrow().cancellable.clone();
+            match url_owned {
+                Some(ref url) => load_art_from_url(
+                    url,
+                    picture,
+                    &art_state_for_closure,
+                    generation,
+                    &cancellable,
+                    on_success,
+                    on_failure,
+                ),
+                None => on_failure(),
+            }
+        };
 
-                match url_owned {
-                    Some(ref url) => load_art_from_url(
-                        url,
-                        picture,
-                        &art_state_for_closure,
-                        generation,
-                        &cancellable,
-                        on_success,
-                        on_failure,
-                    ),
-                    None => on_failure(),
-                }
-            },
-        );
-
-        art_state.borrow_mut().debounce_source = Some(source_id);
+        if should_settle_art_url(url, player_id) {
+            let source_id = glib::timeout_add_local_once(
+                std::time::Duration::from_millis(ART_SETTLE_MS),
+                start_load,
+            );
+            art_state.borrow_mut().pending_source = Some(source_id);
+        } else {
+            start_load();
+        }
     }
 }
 
@@ -269,7 +283,7 @@ impl Default for ArtState {
 
 impl Drop for ArtState {
     fn drop(&mut self) {
-        self.cancel_debounce();
+        self.cancel_pending_load();
         self.cancellable.cancel();
     }
 }
@@ -670,7 +684,7 @@ pub fn update_seek_position(
 /// Load album art, handling URL changes and cancellation.
 ///
 /// Shows placeholder box on failure, hides it on success.
-/// Delegates to [`ArtState::debounced_load`] for the debounce + generation
+/// Delegates to [`ArtState::load_or_schedule_clear`] for the settle timer + generation
 /// logic shared with the bar widget.
 pub fn load_album_art(
     art_url: Option<&str>,
@@ -691,7 +705,7 @@ pub fn load_album_art(
         placeholder_for_failure.set_visible(true);
     };
 
-    ArtState::debounced_load(
+    ArtState::load_or_schedule_clear(
         art_state,
         art_url,
         player_id,
@@ -762,12 +776,19 @@ pub fn load_art_from_url<S, F>(
         // minreq is blocking, so spawn in thread pool
         glib::spawn_future_local(async move {
             let fetch_result = gio::spawn_blocking(move || {
-                minreq::get(&url_for_fetch)
-                    .with_timeout(10)
-                    .send()
-                    .ok()
-                    .filter(|r| r.status_code >= 200 && r.status_code < 300)
-                    .map(|r| r.into_bytes())
+                let fetch = |url: &str| {
+                    minreq::get(url)
+                        .with_timeout(10)
+                        .send()
+                        .ok()
+                        .filter(|r| r.status_code >= 200 && r.status_code < 300)
+                        .map(|r| r.into_bytes())
+                };
+
+                fetch(&url_for_fetch).or_else(|| {
+                    youtube_thumbnail_fallback_url(&url_for_fetch)
+                        .and_then(|fallback| fetch(&fallback))
+                })
             })
             .await;
 
@@ -939,6 +960,7 @@ mod tests {
         let mut state = ArtState::new();
         state.current_url = Some("http://example.com/art.jpg".into());
         assert!(!state.prepare_art_load(Some("http://example.com/art.jpg"), None));
+        assert_eq!(state.generation, 0);
     }
 
     #[test]
@@ -970,6 +992,7 @@ mod tests {
         let mut state = ArtState::new();
         state.current_url = Some("http://example.com/old.jpg".into());
         assert!(state.prepare_art_load(Some("http://example.com/new.jpg"), None));
+        assert_eq!(state.generation, 1);
         assert_eq!(
             state.current_url.as_deref(),
             Some("http://example.com/new.jpg")
@@ -986,6 +1009,7 @@ mod tests {
 
         assert!(old_cancellable.is_cancelled());
         assert!(!state.cancellable.is_cancelled());
+        assert_eq!(state.generation, 1);
     }
 
     #[test]
@@ -998,6 +1022,7 @@ mod tests {
         assert!(state.prepare_art_load(None, Some("firefox")));
         assert_eq!(state.current_url, None);
         assert_eq!(state.current_player_id.as_deref(), Some("firefox"));
+        assert_eq!(state.generation, 1);
     }
 
     #[test]
@@ -1006,9 +1031,38 @@ mod tests {
         state.current_url = Some("http://example.com/art.jpg".into());
         state.current_player_id = Some("spotify".into());
 
-        // Same player, genuine no-art track should clear stale art after debounce.
+        // Same player, genuine no-art track should clear stale art after the grace period.
         assert!(state.prepare_art_load(None, Some("spotify")));
         assert_eq!(state.current_url, None);
+    }
+
+    #[test]
+    fn test_chromium_file_art_and_missing_art_settle() {
+        assert!(should_settle_art_url(
+            Some("file:///tmp/album-art.jpg"),
+            Some("chromium")
+        ));
+        assert!(should_settle_art_url(
+            Some("file:///tmp/album-art.jpg"),
+            Some("brave")
+        ));
+        assert!(should_settle_art_url(None, Some("firefox")));
+    }
+
+    #[test]
+    fn test_non_chromium_art_loads_immediately() {
+        assert!(!should_settle_art_url(
+            Some("file:///tmp/album-art.jpg"),
+            Some("firefox")
+        ));
+        assert!(!should_settle_art_url(
+            Some("https://example.com/art.jpg"),
+            Some("chromium")
+        ));
+        assert!(!should_settle_art_url(
+            Some("data:image/jpeg;base64,aGVsbG8="),
+            None
+        ));
     }
 
     #[test]

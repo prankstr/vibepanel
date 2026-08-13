@@ -26,10 +26,10 @@
 //!   - `org.mpris.MediaPlayer2` - Base interface (Identity, Quit, etc.)
 //!   - `org.mpris.MediaPlayer2.Player` - Playback control and state
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gtk4::gio;
 use gtk4::glib::{self, ControlFlow, Variant, clone};
@@ -53,6 +53,8 @@ const POSITION_POLL_INTERVAL_MS: u64 = 1000;
 const DBUS_CALL_TIMEOUT_MS: i32 = 5000;
 /// Shorter timeout for position polling queries.
 const DBUS_POLL_TIMEOUT_MS: i32 = 1000;
+/// Skip at least one poll after local or externally observed seeks.
+const SEEK_GRACE_WINDOW: Duration = Duration::from_millis(1500);
 
 // ========== Helper Functions ==========
 
@@ -63,6 +65,205 @@ fn player_id_from_bus_name(bus_name: &str) -> String {
         .map(|s| s.split('.').next().unwrap_or(s))
         .unwrap_or(bus_name)
         .to_string()
+}
+
+fn is_youtube_video_id(video_id: &str) -> bool {
+    video_id.len() == 11
+        && video_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
+fn youtube_video_id(source_url: &str) -> Option<&str> {
+    let rest = source_url
+        .strip_prefix("https://")
+        .or_else(|| source_url.strip_prefix("http://"))?;
+    let (host, path) = rest.split_once('/')?;
+
+    let video_id = match host {
+        "youtube.com" | "www.youtube.com" | "m.youtube.com" | "music.youtube.com" => {
+            if let Some(query) = path.strip_prefix("watch?") {
+                query
+                    .split('&')
+                    .find_map(|part| part.strip_prefix("v="))?
+                    .split(['#', '?'])
+                    .next()?
+            } else {
+                path.strip_prefix("shorts/")?
+                    .split(['/', '?', '#', '&'])
+                    .next()?
+            }
+        }
+        "youtu.be" | "www.youtu.be" => path.split(['/', '?', '#', '&']).next()?,
+        _ => return None,
+    };
+
+    is_youtube_video_id(video_id).then_some(video_id)
+}
+
+/// Derive a stable YouTube thumbnail when browser MPRIS metadata omits artwork.
+fn youtube_thumbnail_url(source_url: &str) -> Option<String> {
+    youtube_video_id(source_url)
+        .map(|video_id| format!("https://i.ytimg.com/vi/{video_id}/maxresdefault.jpg"))
+}
+
+pub(crate) fn youtube_thumbnail_fallback_url(art_url: &str) -> Option<String> {
+    art_url
+        .strip_prefix("https://i.ytimg.com/vi/")
+        .and_then(|path| path.strip_suffix("/maxresdefault.jpg"))
+        .filter(|video_id| is_youtube_video_id(video_id))
+        // Unlike other lower-resolution variants, mqdefault remains 16:9.
+        .map(|video_id| format!("https://i.ytimg.com/vi/{video_id}/mqdefault.jpg"))
+}
+
+fn differs_when_both_present(previous: &Option<String>, current: &Option<String>) -> bool {
+    matches!(
+        (
+            previous.as_deref().filter(|value| !value.is_empty()),
+            current.as_deref().filter(|value| !value.is_empty()),
+        ),
+        (Some(previous), Some(current)) if previous != current
+    )
+}
+
+fn source_urls_differ(previous: &str, current: &str) -> bool {
+    match (youtube_video_id(previous), youtube_video_id(current)) {
+        (Some(previous_id), Some(current_id)) => previous_id != current_id,
+        _ => previous != current,
+    }
+}
+
+fn source_urls_differ_when_both_present(
+    previous: &Option<String>,
+    current: &Option<String>,
+) -> bool {
+    match (
+        previous.as_deref().filter(|url| !url.is_empty()),
+        current.as_deref().filter(|url| !url.is_empty()),
+    ) {
+        (Some(previous), Some(current)) => source_urls_differ(previous, current),
+        _ => false,
+    }
+}
+
+fn has_conflicting_identity(previous: &MediaMetadata, current: &MediaMetadata) -> bool {
+    differs_when_both_present(&previous.track_id, &current.track_id)
+        || differs_when_both_present(&previous.title, &current.title)
+        || source_urls_differ_when_both_present(&previous.url, &current.url)
+}
+
+// Missing identity is unknown, so this is not the inverse of `has_track_changed`.
+fn is_same_logical_track(previous: &MediaMetadata, current: &MediaMetadata) -> bool {
+    if has_conflicting_identity(previous, current) {
+        return false;
+    }
+
+    if let Some(current_id) = current.track_id.as_deref() {
+        return previous.track_id.as_deref() == Some(current_id);
+    }
+
+    if let Some(current_url) = current.url.as_deref().filter(|url| !url.is_empty()) {
+        return previous
+            .url
+            .as_deref()
+            .is_some_and(|previous_url| !source_urls_differ(previous_url, current_url));
+    }
+
+    current
+        .title
+        .as_ref()
+        .is_some_and(|title| !title.is_empty())
+        && previous.title == current.title
+        && previous.artist == current.artist
+}
+
+fn has_track_changed(previous: &MediaMetadata, current: &MediaMetadata) -> bool {
+    previous.track_id != current.track_id || has_conflicting_identity(previous, current)
+}
+
+fn preserve_same_track_metadata(previous: &MediaMetadata, current: &mut MediaMetadata) {
+    if !is_same_logical_track(previous, current) {
+        return;
+    }
+
+    if current.length.is_none() {
+        current.length = previous.length;
+    }
+    if current.art_url.as_ref().is_none_or(String::is_empty) {
+        current.art_url = previous.art_url.clone();
+    }
+    if current.url.as_ref().is_none_or(String::is_empty) {
+        current.url = previous.url.clone();
+    }
+    if current.track_id.is_none() {
+        current.track_id = previous.track_id.clone();
+    }
+}
+
+/// Browsers can stay active after navigating away from a video while dropping
+/// its media session. Keep the last useful art instead of showing the app icon;
+/// unlike a clear delay, no later metadata update is expected in this state.
+fn preserve_art_when_track_identity_unknown(previous: &MediaMetadata, current: &mut MediaMetadata) {
+    let source_missing = current.url.as_ref().is_none_or(String::is_empty);
+    let track_changed = current
+        .track_id
+        .as_deref()
+        .is_some_and(|id| previous.track_id.as_deref() != Some(id));
+
+    if source_missing && !track_changed && current.art_url.as_ref().is_none_or(String::is_empty) {
+        current.art_url = previous.art_url.clone();
+    }
+}
+
+fn resolve_metadata(
+    previous: &MediaMetadata,
+    mut current: MediaMetadata,
+    status: PlaybackStatus,
+) -> MediaMetadata {
+    preserve_incomplete_active_metadata(previous, &mut current, status);
+    preserve_art_when_track_identity_unknown(previous, &mut current);
+    preserve_same_track_metadata(previous, &mut current);
+
+    if current.art_url.as_ref().is_none_or(String::is_empty) {
+        current.art_url = current.url.as_deref().and_then(youtube_thumbnail_url);
+    }
+
+    current
+}
+
+fn preserve_incomplete_active_metadata(
+    previous: &MediaMetadata,
+    current: &mut MediaMetadata,
+    status: PlaybackStatus,
+) {
+    let current_is_empty = current
+        .title
+        .as_ref()
+        .is_none_or(|value| value.trim().is_empty())
+        && current
+            .artist
+            .as_ref()
+            .is_none_or(|value| value.trim().is_empty())
+        && current
+            .album
+            .as_ref()
+            .is_none_or(|value| value.trim().is_empty())
+        && current.art_url.as_ref().is_none_or(String::is_empty)
+        && current.url.as_ref().is_none_or(String::is_empty)
+        && current.length.is_none()
+        && current.track_id.is_none();
+    if status != PlaybackStatus::Stopped
+        && current_is_empty
+        && previous.title.is_some()
+        && !has_conflicting_identity(previous, current)
+    {
+        *current = previous.clone();
+    }
+}
+
+/// Ignore transient zeroes from playing browsers until a non-zero poll arrives.
+fn should_accept_position_poll(current: i64, polled: i64, status: PlaybackStatus) -> bool {
+    !(polled == 0 && current > 0 && status == PlaybackStatus::Playing)
 }
 
 /// Capitalize the first character of a string (e.g., "spotify" -> "Spotify").
@@ -104,8 +305,7 @@ pub struct MediaMetadata {
     pub artist: Option<String>,
     /// Album name (xesam:album).
     pub album: Option<String>,
-    /// Album art URL (mpris:artUrl) - can be file://, http(s)://, or a
-    /// data: URI (e.g. base64-encoded embedded cover art from mpv-mpris).
+    /// Resolved artwork URL, normally from mpris:artUrl.
     pub art_url: Option<String>,
     /// Track URL (xesam:url) - useful for identifying web players.
     pub url: Option<String>,
@@ -200,6 +400,8 @@ struct MprisPlayer {
     can_control: bool,
     /// Signal subscription for PropertiesChanged (set after creation).
     _properties_subscription: Option<gio::SignalSubscription>,
+    /// MPRIS Seeked subscription for immediate external seek updates.
+    _seeked_subscription: Option<gio::SignalSubscription>,
     /// Track generation for invalidating stale position polls.
     track_generation: u64,
 }
@@ -235,6 +437,8 @@ pub struct MediaService {
     position_poll_source: RefCell<Option<glib::SourceId>>,
     /// Cancellable for position polling D-Bus calls.
     poll_cancellable: RefCell<gio::Cancellable>,
+    /// When the last seek was observed or issued.
+    last_seek: Cell<Option<Instant>>,
 }
 
 impl MediaService {
@@ -249,6 +453,7 @@ impl MediaService {
             _name_owner_subscription: RefCell::new(None),
             position_poll_source: RefCell::new(None),
             poll_cancellable: RefCell::new(gio::Cancellable::new()),
+            last_seek: Cell::new(None),
         });
 
         Self::init_dbus(&service);
@@ -505,6 +710,7 @@ impl MediaService {
                         can_seek: false,
                         can_control: true,
                         _properties_subscription: None,
+                        _seeked_subscription: None,
                         track_generation: 0,
                     }));
 
@@ -534,19 +740,23 @@ impl MediaService {
                             let new_status = player.borrow().playback_status;
                             let status_changed = old_status != new_status;
 
+                            let bus_name = player.borrow().bus_name.clone();
+                            let is_active = this.active_player.borrow().as_ref() == Some(&bus_name);
+                            if track_changed && is_active {
+                                this.last_seek.set(None);
+                            }
+
                             // Track the most recently playing player
                             if new_status == PlaybackStatus::Playing
                                 && old_status != PlaybackStatus::Playing
                             {
-                                let bus_name = player.borrow().bus_name.clone();
-                                this.last_playing.replace(Some(bus_name));
+                                this.last_playing.replace(Some(bus_name.clone()));
                             }
 
                             // In auto mode, if this player just started playing, make it active
                             if this.is_auto_selection() && status_changed {
                                 if new_status == PlaybackStatus::Playing {
                                     // This player just started playing - make it the active player
-                                    let bus_name = player.borrow().bus_name.clone();
                                     let current_active = this.active_player.borrow().clone();
                                     if current_active.as_ref() != Some(&bus_name) {
                                         debug!("Switching to newly playing player: {}", bus_name);
@@ -562,9 +772,6 @@ impl MediaService {
                                 }
                             } else if status_changed {
                                 // Manual mode: if the active player changed status, handle polling
-                                let bus_name = player.borrow().bus_name.clone();
-                                let is_active =
-                                    this.active_player.borrow().as_ref() == Some(&bus_name);
                                 if is_active {
                                     if new_status == PlaybackStatus::Playing {
                                         this.start_position_polling();
@@ -576,9 +783,8 @@ impl MediaService {
 
                             this.notify_callbacks();
 
-                            // Some players (notably YouTube Music) report stale
-                            // position data immediately after a track or status change.
-                            // Give them a moment to sort themselves out, then re-poll.
+                            // Some players briefly report stale positions after track
+                            // or status changes, so re-poll once they settle.
                             if track_changed || status_changed {
                                 let this_weak = Rc::downgrade(&this);
                                 glib::timeout_add_local_once(
@@ -594,6 +800,41 @@ impl MediaService {
                     );
 
                     player.borrow_mut()._properties_subscription = Some(subscription);
+
+                    let player_weak = Rc::downgrade(&player);
+                    let this_weak = Rc::downgrade(&this);
+                    let seeked_subscription = connection.subscribe_to_signal(
+                        Some(&bus_name_owned),
+                        Some(MPRIS_PLAYER_INTERFACE),
+                        Some("Seeked"),
+                        Some(MPRIS_PATH),
+                        None,
+                        gio::DBusSignalFlags::NONE,
+                        move |signal| {
+                            let Some(player) = player_weak.upgrade() else {
+                                return;
+                            };
+                            let Some(this) = this_weak.upgrade() else {
+                                return;
+                            };
+                            let Some(position) = signal
+                                .parameters
+                                .try_child_value(0)
+                                .and_then(|value| value.get::<i64>())
+                            else {
+                                return;
+                            };
+
+                            let bus_name = player.borrow().bus_name.clone();
+                            player.borrow_mut().position = position.max(0);
+                            if this.active_player.borrow().as_ref() == Some(&bus_name) {
+                                this.reset_poll_cancellable();
+                                this.last_seek.set(Some(Instant::now()));
+                                this.notify_callbacks();
+                            }
+                        },
+                    );
+                    player.borrow_mut()._seeked_subscription = Some(seeked_subscription);
 
                     debug!("Added MPRIS player: {} ({})", player_name, bus_name_owned);
                     this.players.borrow_mut().insert(bus_name_owned, player);
@@ -688,10 +929,14 @@ impl MediaService {
             )
         };
 
-        // Now mutate with all the values we read
+        // Preserve artwork and duration when a browser emits a partial update
+        // that still identifies the same track.
+        let metadata = {
+            let p = player.borrow();
+            resolve_metadata(&p.metadata, metadata, playback_status)
+        };
         let mut p = player.borrow_mut();
-        let old_track_id = p.metadata.track_id.clone();
-        let old_title = p.metadata.title.clone();
+        let old_metadata = p.metadata.clone();
 
         p.playback_status = playback_status;
         p.metadata = metadata;
@@ -702,12 +947,7 @@ impl MediaService {
         p.can_seek = can_seek;
         p.can_control = can_control;
 
-        // Track change detection
-        let track_id_changed = old_track_id != p.metadata.track_id;
-        let title_changed =
-            old_title.is_some() && p.metadata.title.is_some() && old_title != p.metadata.title;
-
-        if track_id_changed || title_changed {
+        if has_track_changed(&old_metadata, &p.metadata) {
             p.position = 0;
             p.track_generation += 1;
             true
@@ -844,8 +1084,8 @@ impl MediaService {
     /// Called when the active player changes.
     fn on_active_player_changed(self: &Rc<Self>) {
         self.stop_position_polling();
-        self.poll_cancellable.borrow().cancel();
-        self.poll_cancellable.replace(gio::Cancellable::new());
+        self.reset_poll_cancellable();
+        self.last_seek.set(None);
 
         // Write state for CLI to read
         self.write_ipc_state();
@@ -941,11 +1181,14 @@ impl MediaService {
             }
 
             if let Some(track_id) = dict.get("mpris:trackid") {
-                if let Some(id) = track_id.get::<String>() {
-                    meta.track_id = Some(id);
-                } else if let Some(path) = track_id.get::<glib::variant::ObjectPath>() {
-                    meta.track_id = Some(path.to_string());
-                }
+                meta.track_id = track_id
+                    .get::<String>()
+                    .or_else(|| {
+                        track_id
+                            .get::<glib::variant::ObjectPath>()
+                            .map(|path| path.to_string())
+                    })
+                    .filter(|id| !id.is_empty() && !id.ends_with("/NoTrack"));
             }
         }
 
@@ -994,7 +1237,20 @@ impl MediaService {
         }
     }
 
+    fn reset_poll_cancellable(&self) {
+        self.poll_cancellable.borrow().cancel();
+        self.poll_cancellable.replace(gio::Cancellable::new());
+    }
+
     fn poll_position(self: &Rc<Self>) {
+        if self
+            .last_seek
+            .get()
+            .is_some_and(|at| at.elapsed() < SEEK_GRACE_WINDOW)
+        {
+            return;
+        }
+
         let (bus_name, generation) = {
             let players = self.players.borrow();
             let active = self.active_player.borrow();
@@ -1050,7 +1306,14 @@ impl MediaService {
                             if let Some(inner) = reply.child_value(0).get::<Variant>()
                                 && let Some(position) = inner.get::<i64>()
                             {
-                                let changed = player.borrow().position != position;
+                                let p = player.borrow();
+                                let accept = should_accept_position_poll(
+                                    p.position,
+                                    position,
+                                    p.playback_status,
+                                );
+                                let changed = accept && p.position != position;
+                                drop(p);
                                 if changed {
                                     player.borrow_mut().position = position;
                                     drop(players);
@@ -1110,6 +1373,9 @@ impl MediaService {
                 return;
             }
         };
+
+        self.reset_poll_cancellable();
+        self.last_seek.set(Some(Instant::now()));
 
         // Optimistic update
         {
@@ -1497,5 +1763,502 @@ mod tests {
         assert!(!snapshot.available);
         assert!(snapshot.player_name.is_none());
         assert_eq!(snapshot.playback_status, PlaybackStatus::Stopped);
+    }
+
+    #[test]
+    fn test_parse_metadata_normalizes_track_id() {
+        let parse_track_id = |track_id: Variant| {
+            let metadata = HashMap::from([("mpris:trackid".to_string(), track_id)]).to_variant();
+            MediaService::parse_metadata(&metadata).track_id
+        };
+
+        let no_track =
+            glib::variant::ObjectPath::try_from("/org/mpris/MediaPlayer2/TrackList/NoTrack")
+                .unwrap();
+        assert_eq!(parse_track_id(no_track.to_variant()), None);
+        assert_eq!(parse_track_id("".to_variant()), None);
+
+        let real_track = "/org/chromium/MediaPlayer2/TrackList/Track/1";
+        let real_track_path = glib::variant::ObjectPath::try_from(real_track).unwrap();
+        assert_eq!(
+            parse_track_id(real_track_path.to_variant()).as_deref(),
+            Some(real_track)
+        );
+    }
+
+    #[test]
+    fn test_youtube_thumbnail_url() {
+        let expected = Some("https://i.ytimg.com/vi/dQw4w9WgXcQ/maxresdefault.jpg".to_string());
+        assert_eq!(
+            youtube_thumbnail_url("https://www.youtube.com/watch?v=dQw4w9WgXcQ"),
+            expected
+        );
+        let synthetic_expected =
+            Some("https://i.ytimg.com/vi/abcdefghijk/maxresdefault.jpg".to_string());
+        assert_eq!(
+            youtube_thumbnail_url("https://youtu.be/abcdefghijk?t=30"),
+            synthetic_expected
+        );
+        assert_eq!(
+            youtube_thumbnail_url("https://www.youtube.com/shorts/abcdefghijk"),
+            synthetic_expected
+        );
+    }
+
+    #[test]
+    fn test_youtube_thumbnail_url_rejects_unrelated_or_invalid_urls() {
+        assert_eq!(
+            youtube_thumbnail_url("https://example.com/watch?v=abcdefghijk"),
+            None
+        );
+        assert_eq!(
+            youtube_thumbnail_url("https://youtube.com.evil.test/watch?v=abcdefghijk"),
+            None
+        );
+        assert_eq!(
+            youtube_thumbnail_url("https://www.youtube.com/watch?v=too-short"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_youtube_source_identity_uses_video_id() {
+        let base = "https://www.youtube.com/watch?v=abcdefghijk";
+
+        assert!(!source_urls_differ(
+            base,
+            "https://youtu.be/abcdefghijk?t=30#player"
+        ));
+        assert!(!source_urls_differ(
+            base,
+            "https://www.youtube.com/watch?v=abcdefghijk&list=PL123&pp=test"
+        ));
+        assert!(source_urls_differ(
+            base,
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+        ));
+        assert!(source_urls_differ(
+            "https://example.com/watch?t=1",
+            "https://example.com/watch?t=2"
+        ));
+        assert!(source_urls_differ(
+            base,
+            "https://example.com/watch?v=abcdefghijk"
+        ));
+    }
+
+    #[test]
+    fn test_youtube_thumbnail_fallback_url() {
+        assert_eq!(
+            youtube_thumbnail_fallback_url("https://i.ytimg.com/vi/dQw4w9WgXcQ/maxresdefault.jpg"),
+            Some("https://i.ytimg.com/vi/dQw4w9WgXcQ/mqdefault.jpg".into())
+        );
+        assert_eq!(
+            youtube_thumbnail_fallback_url("https://example.com/vi/abcdefghijk/maxresdefault.jpg"),
+            None
+        );
+        assert_eq!(
+            youtube_thumbnail_fallback_url("https://i.ytimg.com/vi/too-short/maxresdefault.jpg"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_preserve_same_track_metadata() {
+        let previous = MediaMetadata {
+            title: Some("Video".into()),
+            artist: Some("Creator".into()),
+            art_url: Some("file:///tmp/video.png".into()),
+            url: Some("https://www.youtube.com/watch?v=dQw4w9WgXcQ".into()),
+            length: Some(534_000_000),
+            ..Default::default()
+        };
+        let mut current = MediaMetadata {
+            title: previous.title.clone(),
+            url: previous.url.clone(),
+            ..Default::default()
+        };
+
+        preserve_same_track_metadata(&previous, &mut current);
+
+        assert_eq!(current.length, previous.length);
+        assert_eq!(current.art_url, previous.art_url);
+        assert_eq!(current.url, previous.url);
+    }
+
+    #[test]
+    fn test_same_youtube_track_retains_previous_native_artwork() {
+        let previous = MediaMetadata {
+            title: Some("Video".into()),
+            artist: Some("Creator".into()),
+            art_url: Some("file:///tmp/native.png".into()),
+            url: Some("https://www.youtube.com/watch?v=dQw4w9WgXcQ".into()),
+            length: Some(534_000_000),
+            track_id: Some("/track/1".into()),
+            ..Default::default()
+        };
+        let current = MediaMetadata {
+            title: previous.title.clone(),
+            artist: previous.artist.clone(),
+            url: previous.url.clone(),
+            track_id: previous.track_id.clone(),
+            ..Default::default()
+        };
+
+        let resolved = resolve_metadata(&previous, current, PlaybackStatus::Playing);
+
+        assert_eq!(resolved.art_url, previous.art_url);
+        assert_eq!(resolved.length, previous.length);
+    }
+
+    #[test]
+    fn test_new_same_track_artwork_wins_over_previous_artwork() {
+        let previous = MediaMetadata {
+            title: Some("Video".into()),
+            artist: Some("Creator".into()),
+            art_url: Some("file:///tmp/old.png".into()),
+            url: Some("https://www.youtube.com/watch?v=dQw4w9WgXcQ".into()),
+            ..Default::default()
+        };
+        let current = MediaMetadata {
+            title: previous.title.clone(),
+            artist: previous.artist.clone(),
+            art_url: Some("file:///tmp/new.png".into()),
+            url: previous.url.clone(),
+            ..Default::default()
+        };
+
+        let resolved = resolve_metadata(&previous, current, PlaybackStatus::Playing);
+
+        assert_eq!(resolved.art_url.as_deref(), Some("file:///tmp/new.png"));
+    }
+
+    #[test]
+    fn test_browser_back_state_preserves_previous_artwork() {
+        let previous = MediaMetadata {
+            title: Some("Video".into()),
+            art_url: Some("file:///tmp/video.png".into()),
+            ..Default::default()
+        };
+        let current = MediaMetadata {
+            title: Some("Firefox".into()),
+            ..Default::default()
+        };
+
+        let resolved = resolve_metadata(&previous, current, PlaybackStatus::Paused);
+
+        assert_eq!(resolved.art_url, previous.art_url);
+    }
+
+    #[test]
+    fn test_changed_track_id_does_not_preserve_previous_artwork() {
+        let previous = MediaMetadata {
+            track_id: Some("old".into()),
+            art_url: Some("file:///tmp/old.png".into()),
+            ..Default::default()
+        };
+        let current = MediaMetadata {
+            track_id: Some("new".into()),
+            title: Some("New track".into()),
+            ..Default::default()
+        };
+
+        let resolved = resolve_metadata(&previous, current, PlaybackStatus::Playing);
+
+        assert_eq!(resolved.art_url, None);
+    }
+
+    #[test]
+    fn test_do_not_preserve_metadata_for_new_track() {
+        let previous = MediaMetadata {
+            title: Some("Old video".into()),
+            artist: Some("Creator".into()),
+            art_url: Some("file:///tmp/old.png".into()),
+            url: Some("https://example.com/old-video".into()),
+            length: Some(534_000_000),
+            ..Default::default()
+        };
+        let current = MediaMetadata {
+            title: Some("New video".into()),
+            url: Some("https://www.youtube.com/watch?v=dQw4w9WgXcQ".into()),
+            ..Default::default()
+        };
+
+        let resolved = resolve_metadata(&previous, current, PlaybackStatus::Playing);
+
+        assert_eq!(resolved.length, None);
+        assert_eq!(
+            resolved.art_url.as_deref(),
+            Some("https://i.ytimg.com/vi/dQw4w9WgXcQ/maxresdefault.jpg")
+        );
+    }
+
+    #[test]
+    fn test_preserve_metadata_without_url_by_title_and_artist() {
+        let previous = MediaMetadata {
+            title: Some("Track".into()),
+            artist: Some("Artist".into()),
+            art_url: Some("file:///tmp/track.png".into()),
+            length: Some(180_000_000),
+            ..Default::default()
+        };
+        let mut current = MediaMetadata {
+            title: previous.title.clone(),
+            artist: previous.artist.clone(),
+            ..Default::default()
+        };
+
+        preserve_same_track_metadata(&previous, &mut current);
+
+        assert_eq!(current.length, previous.length);
+        assert_eq!(current.art_url, previous.art_url);
+    }
+
+    #[test]
+    fn test_different_track_ids_veto_title_artist_fallback() {
+        let previous = MediaMetadata {
+            title: Some("Track".into()),
+            artist: Some("Artist".into()),
+            art_url: Some("file:///tmp/old.png".into()),
+            length: Some(180_000_000),
+            track_id: Some("/track/old".into()),
+            ..Default::default()
+        };
+        let current = MediaMetadata {
+            title: previous.title.clone(),
+            artist: previous.artist.clone(),
+            track_id: Some("/track/new".into()),
+            ..Default::default()
+        };
+
+        let resolved = resolve_metadata(&previous, current, PlaybackStatus::Playing);
+
+        assert_eq!(resolved.art_url, None);
+        assert_eq!(resolved.length, None);
+    }
+
+    #[test]
+    fn test_different_track_ids_veto_equal_url() {
+        let previous = MediaMetadata {
+            title: Some("Track".into()),
+            artist: Some("Artist".into()),
+            art_url: Some("file:///tmp/old.png".into()),
+            url: Some("https://example.com/track".into()),
+            length: Some(180_000_000),
+            track_id: Some("/track/old".into()),
+            ..Default::default()
+        };
+        let current = MediaMetadata {
+            title: previous.title.clone(),
+            artist: previous.artist.clone(),
+            url: previous.url.clone(),
+            track_id: Some("/track/new".into()),
+            ..Default::default()
+        };
+
+        let resolved = resolve_metadata(&previous, current, PlaybackStatus::Playing);
+
+        assert_eq!(resolved.art_url, None);
+        assert_eq!(resolved.length, None);
+    }
+
+    #[test]
+    fn test_different_titles_veto_equal_url() {
+        let previous = MediaMetadata {
+            title: Some("Old track".into()),
+            art_url: Some("file:///tmp/old.png".into()),
+            url: Some("https://example.com/radio".into()),
+            length: Some(180_000_000),
+            ..Default::default()
+        };
+        let mut current = previous.clone();
+        current.title = Some("New track".into());
+        current.art_url = None;
+        current.length = None;
+
+        let resolved = resolve_metadata(&previous, current, PlaybackStatus::Playing);
+
+        assert_eq!(resolved.art_url, None);
+        assert_eq!(resolved.length, None);
+    }
+
+    #[test]
+    fn test_different_non_empty_urls_mark_track_changed() {
+        let previous = MediaMetadata {
+            url: Some("https://example.com/old".into()),
+            ..Default::default()
+        };
+        let mut current = previous.clone();
+        current.url = Some("https://example.com/new".into());
+
+        assert!(has_track_changed(&previous, &current));
+
+        current.url = None;
+        assert!(!has_track_changed(&previous, &current));
+    }
+
+    #[test]
+    fn test_same_track_restores_omitted_track_id() {
+        let previous = MediaMetadata {
+            title: Some("Track".into()),
+            artist: Some("Artist".into()),
+            url: Some("https://example.com/track".into()),
+            track_id: Some("/track/current".into()),
+            ..Default::default()
+        };
+        let current = MediaMetadata {
+            title: previous.title.clone(),
+            artist: previous.artist.clone(),
+            url: previous.url.clone(),
+            ..Default::default()
+        };
+
+        let resolved = resolve_metadata(&previous, current, PlaybackStatus::Playing);
+
+        assert_eq!(resolved.track_id, previous.track_id);
+    }
+
+    #[test]
+    fn test_same_track_id_preserves_partial_metadata() {
+        let previous = MediaMetadata {
+            title: Some("Track".into()),
+            artist: Some("Artist".into()),
+            art_url: Some("file:///tmp/art.png".into()),
+            url: Some("https://example.com/track".into()),
+            length: Some(180_000_000),
+            track_id: Some("/track/current".into()),
+            ..Default::default()
+        };
+        let current = MediaMetadata {
+            title: previous.title.clone(),
+            track_id: previous.track_id.clone(),
+            ..Default::default()
+        };
+
+        let resolved = resolve_metadata(&previous, current, PlaybackStatus::Playing);
+
+        assert_eq!(resolved.art_url, previous.art_url);
+        assert_eq!(resolved.url, previous.url);
+        assert_eq!(resolved.length, previous.length);
+    }
+
+    #[test]
+    fn test_meaningful_preview_artwork_replaces_previous_track() {
+        let previous = MediaMetadata {
+            title: Some("Playing video".into()),
+            artist: Some("Creator".into()),
+            art_url: Some("file:///tmp/playing.png".into()),
+            url: Some("https://example.com/playing-video".into()),
+            ..Default::default()
+        };
+        let mut preview = MediaMetadata {
+            title: Some("Short preview".into()),
+            artist: Some("Other creator".into()),
+            art_url: youtube_thumbnail_url("https://www.youtube.com/watch?v=dQw4w9WgXcQ"),
+            url: Some("https://www.youtube.com/watch?v=dQw4w9WgXcQ".into()),
+            ..Default::default()
+        };
+        let preview_art = preview.art_url.clone();
+
+        preserve_same_track_metadata(&previous, &mut preview);
+
+        assert_eq!(preview.art_url, preview_art);
+        assert_ne!(preview.art_url, previous.art_url);
+    }
+
+    #[test]
+    fn test_incomplete_active_metadata_preserves_previous_presentation() {
+        let previous = MediaMetadata {
+            title: Some("Playing video".into()),
+            artist: Some("Creator".into()),
+            art_url: Some("file:///tmp/playing.png".into()),
+            url: Some("https://www.youtube.com/watch?v=dQw4w9WgXcQ".into()),
+            length: Some(534_000_000),
+            ..Default::default()
+        };
+        let mut current = MediaMetadata::default();
+
+        preserve_incomplete_active_metadata(&previous, &mut current, PlaybackStatus::Paused);
+
+        assert_eq!(current.title, previous.title);
+        assert_eq!(current.art_url, previous.art_url);
+        assert_eq!(current.length, previous.length);
+    }
+
+    #[test]
+    fn test_titleless_metadata_with_artwork_is_not_overwritten() {
+        let previous = MediaMetadata {
+            title: Some("Old track".into()),
+            art_url: Some("file:///tmp/old.png".into()),
+            ..Default::default()
+        };
+        let mut current = MediaMetadata {
+            art_url: Some("file:///tmp/new.png".into()),
+            ..Default::default()
+        };
+
+        preserve_incomplete_active_metadata(&previous, &mut current, PlaybackStatus::Playing);
+
+        assert_eq!(current.title, None);
+        assert_eq!(current.art_url.as_deref(), Some("file:///tmp/new.png"));
+    }
+
+    #[test]
+    fn test_incomplete_new_track_metadata_is_not_overwritten() {
+        let previous = MediaMetadata {
+            title: Some("Old track".into()),
+            art_url: Some("file:///tmp/old.png".into()),
+            url: Some("https://example.com/old".into()),
+            length: Some(180_000_000),
+            track_id: Some("/track/old".into()),
+            ..Default::default()
+        };
+        let current = MediaMetadata {
+            url: Some("https://example.com/new".into()),
+            track_id: Some("/track/new".into()),
+            ..Default::default()
+        };
+
+        let resolved = resolve_metadata(&previous, current, PlaybackStatus::Playing);
+
+        assert_eq!(resolved.title, None);
+        assert_eq!(resolved.art_url, None);
+        assert_eq!(resolved.url.as_deref(), Some("https://example.com/new"));
+        assert_eq!(resolved.track_id.as_deref(), Some("/track/new"));
+        assert!(has_track_changed(&previous, &resolved));
+    }
+
+    #[test]
+    fn test_stopped_player_does_not_preserve_incomplete_metadata() {
+        let previous = MediaMetadata {
+            title: Some("Playing video".into()),
+            art_url: Some("file:///tmp/playing.png".into()),
+            ..Default::default()
+        };
+        let mut current = MediaMetadata::default();
+
+        preserve_incomplete_active_metadata(&previous, &mut current, PlaybackStatus::Stopped);
+
+        assert_eq!(current.title, None);
+        assert_eq!(current.art_url, None);
+    }
+
+    #[test]
+    fn test_position_poll_ignores_transient_zero_while_playing() {
+        assert!(!should_accept_position_poll(
+            120_000_000,
+            0,
+            PlaybackStatus::Playing
+        ));
+        assert!(should_accept_position_poll(
+            120_000_000,
+            0,
+            PlaybackStatus::Paused
+        ));
+        assert!(should_accept_position_poll(
+            120_000_000,
+            30_000_000,
+            PlaybackStatus::Playing
+        ));
     }
 }
