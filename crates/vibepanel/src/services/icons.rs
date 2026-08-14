@@ -334,10 +334,11 @@ fn material_symbol_lookup(icon_name: &str) -> Option<&'static str> {
         "window-new-symbolic" => "open_in_new",
         "view-fullscreen-symbolic" => "fullscreen",
 
-        // System monitor icons (CPU, RAM, GPU, load)
+        // System monitor icons (CPU, RAM, GPU, disk, load)
         "cpu-symbolic" => "memory",
         "ram-symbolic" => "memory_alt",
         "video-display-symbolic" => "developer_board",
+        "disk-symbolic" => "hard_drive",
         "system-monitor-symbolic" => "speed",
 
         // Directional arrows
@@ -967,7 +968,7 @@ pub fn gtk_icon_candidates(logical: &str) -> &'static [&'static str] {
         "media-playlist-shuffle-symbolic" => {
             &["media-playlist-shuffle-symbolic", "media-playlist-shuffle"]
         }
-        // System monitor icons (CPU, RAM, GPU, load)
+        // System monitor icons (CPU, RAM, GPU, disk, load)
         // CPU: rocket/performance concept
         "cpu-symbolic" => &[
             "cpu-symbolic",
@@ -987,6 +988,11 @@ pub fn gtk_icon_candidates(logical: &str) -> &'static [&'static str] {
             "video-display",
             "computer-symbolic",
             "computer",
+        ],
+        "disk-symbolic" => &[
+            "drive-harddisk-symbolic",
+            "drive-harddisk",
+            "media-flash-symbolic",
         ],
         "system-monitor-symbolic" => &[
             "applications-engineering-symbolic",

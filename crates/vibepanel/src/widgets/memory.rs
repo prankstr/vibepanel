@@ -20,7 +20,7 @@ use crate::services::system::{SystemService, SystemSnapshot, format_bytes, forma
 use crate::services::tooltip::TooltipManager;
 use crate::styles::{class, widget};
 use crate::widgets::base::BaseWidget;
-use crate::widgets::system_popover::SystemPopoverBinding;
+use crate::widgets::system_popover::wire_system_popover;
 use crate::widgets::{
     VERTICAL_METRIC_CHARS, WidgetConfig, format_vertical_metric, warn_unknown_options,
 };
@@ -117,22 +117,18 @@ impl MemoryWidget {
     /// Create a new Memory widget with the given configuration.
     pub fn new(config: MemoryConfig) -> Self {
         let base = BaseWidget::new(&[widget::MEMORY]);
-        let popover_binding = SystemPopoverBinding::new(&base);
-        Self::build(config, base, popover_binding)
+        wire_system_popover(&base);
+        Self::build(config, base)
     }
 
     /// Create a passive Memory widget for use in a merge group.
-    pub fn new_passive(config: MemoryConfig, shared_binding: SystemPopoverBinding) -> Self {
+    pub fn new_passive(config: MemoryConfig) -> Self {
         let base = BaseWidget::new_passive(&[widget::MEMORY]);
-        Self::build(config, base, shared_binding)
+        Self::build(config, base)
     }
 
     /// Shared construction for active and passive modes.
-    fn build(
-        config: MemoryConfig,
-        base: BaseWidget,
-        popover_binding: SystemPopoverBinding,
-    ) -> Self {
+    fn build(config: MemoryConfig, base: BaseWidget) -> Self {
         base.set_tooltip("Memory: unknown");
 
         let icon_handle = base.add_icon("ram-symbolic", &[widget::MEMORY_ICON]);
@@ -154,7 +150,6 @@ impl MemoryWidget {
             let memory_label = memory_label.clone();
             let show_icon = config.show_icon;
             let format = config.format.clone();
-            let popover_binding = popover_binding.clone();
 
             system_service.connect(move |snapshot: &SystemSnapshot| {
                 update_memory_widget(
@@ -166,8 +161,6 @@ impl MemoryWidget {
                     is_vertical,
                     snapshot,
                 );
-
-                popover_binding.update_if_open(snapshot);
             })
         };
 

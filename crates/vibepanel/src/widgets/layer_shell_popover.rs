@@ -1683,7 +1683,7 @@ impl Drop for LayerShellPopover {
     fn drop(&mut self) {
         // If the popover was still open (or mid-animation) when destroyed,
         // fire on_close synchronously so consumers can clean up resources
-        // (e.g. SystemPopoverBinding releases GPU polling).
+        // (e.g. the system popover releases GPU polling).
         if (self.logically_open.get() || self.anim_state.borrow().active)
             && let Some(ref cb) = *self.on_close.borrow()
         {

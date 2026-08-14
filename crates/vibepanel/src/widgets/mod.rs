@@ -83,7 +83,7 @@ pub use mango_layout::{MangoLayoutConfig, MangoLayoutWidget};
 pub use memory::{MemoryConfig, MemoryWidget};
 pub use network_speed::{NetworkSpeedConfig, NetworkSpeedWidget};
 
-pub(crate) use system_popover::SystemPopoverBinding;
+pub(crate) use system_popover::wire_system_popover_for_menu;
 
 use gtk4::Widget;
 use gtk4::prelude::*;
@@ -416,20 +416,17 @@ impl WidgetFactory {
     ///
     /// Returns `None` for unsupported widget types or if the widget should be
     /// skipped (e.g., gpu when no GPU is detected).
-    pub(crate) fn build_passive(
-        entry: &WidgetEntry,
-        shared_binding: &SystemPopoverBinding,
-    ) -> Option<BuiltWidget> {
+    pub(crate) fn build_passive(entry: &WidgetEntry) -> Option<BuiltWidget> {
         match entry.name.as_str() {
             "cpu" => {
                 let cfg = CpuConfig::from_entry(entry);
-                let cpu = CpuWidget::new_passive(cfg, shared_binding.clone());
+                let cpu = CpuWidget::new_passive(cfg);
                 let root = cpu.widget().clone().upcast::<Widget>();
                 Some(BuiltWidget::new(root, cpu))
             }
             "memory" => {
                 let cfg = MemoryConfig::from_entry(entry);
-                let memory = MemoryWidget::new_passive(cfg, shared_binding.clone());
+                let memory = MemoryWidget::new_passive(cfg);
                 let root = memory.widget().clone().upcast::<Widget>();
                 Some(BuiltWidget::new(root, memory))
             }
@@ -439,13 +436,13 @@ impl WidgetFactory {
                     return None;
                 }
                 let cfg = GpuConfig::from_entry(entry);
-                let gpu = GpuWidget::new_passive(cfg, shared_binding.clone());
+                let gpu = GpuWidget::new_passive(cfg);
                 let root = gpu.widget().clone().upcast::<Widget>();
                 Some(BuiltWidget::new(root, gpu))
             }
             "network_speed" => {
                 let cfg = NetworkSpeedConfig::from_entry(entry);
-                let network = NetworkSpeedWidget::new_passive(cfg, shared_binding.clone());
+                let network = NetworkSpeedWidget::new_passive(cfg);
                 let root = network.widget().clone().upcast::<Widget>();
                 Some(BuiltWidget::new(root, network))
             }
