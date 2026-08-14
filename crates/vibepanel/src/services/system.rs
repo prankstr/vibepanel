@@ -1,6 +1,6 @@
 //! SystemService - shared, polling-based system resource monitoring.
 //!
-//! This service provides CPU, memory, network, and load average metrics by polling
+//! This service provides CPU, memory, network, and disk I/O metrics by polling
 //! the system at a configurable interval (default: 3 seconds).
 //!
 //! Uses the `sysinfo` crate for cross-platform system information gathering.
@@ -17,16 +17,23 @@
 //! ```
 
 use std::cell::{Cell, RefCell};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::fs;
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use gtk4::glib::{self, SourceId};
 use sysinfo::{Components, CpuRefreshKind, MemoryRefreshKind, Networks, RefreshKind, System};
 use tracing::{debug, trace};
 
 use super::callbacks::{CallbackId, Callbacks};
+use super::sleep_watcher::SleepWatcher;
 
 /// Default polling interval in seconds.
 const DEFAULT_POLL_INTERVAL_SECS: u32 = 3;
+
+/// Number of samples retained for system popover history graphs.
+pub const SYSTEM_HISTORY_SAMPLES: usize = 60;
 
 /// Threshold above which CPU/memory is considered "high" usage.
 pub const HIGH_USAGE_THRESHOLD: f32 = 80.0;
@@ -67,9 +74,12 @@ pub struct SystemSnapshot {
     /// Network upload speed in bytes/sec (aggregated across all interfaces).
     pub net_upload_speed: u64,
 
-    // Load Average
-    /// System load averages: (1 min, 5 min, 15 min).
-    pub load_avg: (f64, f64, f64),
+    // Disk I/O
+    /// Aggregate physical disk read speed in bytes/sec.
+    pub disk_read_speed: u64,
+
+    /// Aggregate physical disk write speed in bytes/sec.
+    pub disk_write_speed: u64,
 }
 
 impl SystemSnapshot {
@@ -91,6 +101,117 @@ impl SystemSnapshot {
     }
 }
 
+/// One synchronized CPU, memory, network, and disk history sample.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct SystemHistorySample {
+    pub cpu_usage: Option<f32>,
+    pub memory_percent: Option<f32>,
+    pub net_download_speed: Option<u64>,
+    pub net_upload_speed: Option<u64>,
+    pub disk_read_speed: Option<u64>,
+    pub disk_write_speed: Option<u64>,
+}
+
+impl SystemHistorySample {
+    fn from_snapshot(snapshot: &SystemSnapshot) -> Self {
+        if snapshot.available {
+            Self {
+                cpu_usage: Some(snapshot.cpu_usage),
+                memory_percent: Some(snapshot.memory_percent),
+                net_download_speed: Some(snapshot.net_download_speed),
+                net_upload_speed: Some(snapshot.net_upload_speed),
+                disk_read_speed: Some(snapshot.disk_read_speed),
+                disk_write_speed: Some(snapshot.disk_write_speed),
+            }
+        } else {
+            Self::default()
+        }
+    }
+
+    fn is_gap(&self) -> bool {
+        self.cpu_usage.is_none()
+    }
+}
+
+fn push_history_sample(history: &mut VecDeque<SystemHistorySample>, sample: SystemHistorySample) {
+    if history.len() == SYSTEM_HISTORY_SAMPLES {
+        history.pop_front();
+    }
+    history.push_back(sample);
+}
+
+fn bytes_per_second(bytes: u64, elapsed: Duration) -> u64 {
+    if elapsed.is_zero() {
+        return 0;
+    }
+    (bytes as f64 / elapsed.as_secs_f64()) as u64
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct DiskCounters {
+    sectors_read: u64,
+    sectors_written: u64,
+}
+
+fn physical_disk_names() -> HashSet<String> {
+    fs::read_dir("/sys/block")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| {
+            fs::read_dir(entry.path().join("slaves"))
+                .is_ok_and(|mut slaves| slaves.next().is_none())
+        })
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .filter(|name| {
+            !name.starts_with("loop") && !name.starts_with("ram") && !name.starts_with("zram")
+        })
+        .collect()
+}
+
+fn parse_diskstats(input: &str, devices: &HashSet<String>) -> HashMap<String, DiskCounters> {
+    input
+        .lines()
+        .filter_map(|line| {
+            let fields: Vec<_> = line.split_whitespace().collect();
+            let name = *fields.get(2)?;
+            if !devices.contains(name) {
+                return None;
+            }
+            Some((
+                name.to_string(),
+                DiskCounters {
+                    sectors_read: fields.get(5)?.parse().ok()?,
+                    sectors_written: fields.get(9)?.parse().ok()?,
+                },
+            ))
+        })
+        .collect()
+}
+
+fn disk_delta_bytes(
+    previous: &HashMap<String, DiskCounters>,
+    current: &HashMap<String, DiskCounters>,
+) -> (u64, u64) {
+    current
+        .iter()
+        .filter_map(|(name, counters)| previous.get(name).map(|old| (old, counters)))
+        .fold((0u64, 0u64), |(read, write), (old, current)| {
+            let read_delta = current
+                .sectors_read
+                .saturating_sub(old.sectors_read)
+                .saturating_mul(512);
+            let write_delta = current
+                .sectors_written
+                .saturating_sub(old.sectors_written)
+                .saturating_mul(512);
+            (
+                read.saturating_add(read_delta),
+                write.saturating_add(write_delta),
+            )
+        })
+}
+
 /// Shared, process-wide system monitoring service.
 ///
 /// This service polls system metrics at regular intervals and notifies
@@ -98,6 +219,12 @@ impl SystemSnapshot {
 pub struct SystemService {
     /// Current system snapshot.
     snapshot: RefCell<SystemSnapshot>,
+
+    /// Synchronized history used by system popover graphs.
+    history: RefCell<VecDeque<SystemHistorySample>>,
+
+    /// Last poll time used for rate calculation and stale-history detection.
+    last_poll_at: Cell<Option<Instant>>,
 
     /// Registered callbacks for snapshot updates.
     callbacks: Callbacks<SystemSnapshot>,
@@ -113,6 +240,9 @@ pub struct SystemService {
 
     /// Reusable sysinfo Components instance for temperature sensors.
     components: RefCell<Components>,
+
+    /// Previous cumulative disk counters used to calculate throughput.
+    disk_counters: RefCell<HashMap<String, DiskCounters>>,
 
     /// Polling interval in seconds.
     poll_interval: Cell<u32>,
@@ -135,15 +265,27 @@ impl SystemService {
 
         // Create Components instance for temperature sensors
         let components = Components::new_with_refreshed_list();
-
         let service = Rc::new(Self {
             snapshot: RefCell::new(SystemSnapshot::unknown()),
+            history: RefCell::new(VecDeque::with_capacity(SYSTEM_HISTORY_SAMPLES)),
+            last_poll_at: Cell::new(None),
             callbacks: Callbacks::new(),
             timer_source: RefCell::new(None),
             sys: RefCell::new(sys),
             networks: RefCell::new(networks),
             components: RefCell::new(components),
+            disk_counters: RefCell::new(HashMap::new()),
             poll_interval: Cell::new(DEFAULT_POLL_INTERVAL_SECS),
+        });
+
+        let weak = Rc::downgrade(&service);
+        let _resume_callback_id = SleepWatcher::global().on_resume(move || {
+            if let Some(service) = weak.upgrade() {
+                service.record_history_break();
+                service.last_poll_at.set(None);
+                service.disk_counters.borrow_mut().clear();
+                service.networks.borrow_mut().refresh(true);
+            }
         });
 
         // Start polling
@@ -184,6 +326,19 @@ impl SystemService {
         self.snapshot.borrow().clone()
     }
 
+    /// Return retained system history, oldest sample first.
+    pub fn history(&self) -> Vec<SystemHistorySample> {
+        self.history.borrow().iter().copied().collect()
+    }
+
+    /// Insert a discontinuity so graphs do not connect samples across it.
+    fn record_history_break(&self) {
+        let mut history = self.history.borrow_mut();
+        if !history.back().is_some_and(SystemHistorySample::is_gap) {
+            push_history_sample(&mut history, SystemHistorySample::default());
+        }
+    }
+
     /// Start the periodic polling timer.
     fn start_polling(this: &Rc<Self>) {
         // Do an initial poll immediately
@@ -210,6 +365,12 @@ impl SystemService {
     /// Poll system metrics and update the snapshot.
     fn poll(&self) {
         trace!("SystemService: polling system metrics");
+
+        let now = Instant::now();
+        let previous_poll = self.last_poll_at.replace(Some(now));
+        let elapsed = previous_poll
+            .map(|previous| now.duration_since(previous))
+            .unwrap_or_else(|| Duration::from_secs(u64::from(self.poll_interval.get())));
 
         let mut sys = self.sys.borrow_mut();
         let mut networks = self.networks.borrow_mut();
@@ -260,20 +421,21 @@ impl SystemService {
 
         // Network speeds (aggregate across all interfaces)
         // received() and transmitted() return bytes since last refresh
-        let poll_interval = self.poll_interval.get() as u64;
         let (net_download, net_upload) =
             networks.iter().fold((0u64, 0u64), |(dl, ul), (_, data)| {
                 (dl + data.received(), ul + data.transmitted())
             });
-        // Convert to bytes/sec
-        let net_download_speed = net_download
-            .checked_div(poll_interval)
-            .unwrap_or(net_download);
-        let net_upload_speed = net_upload.checked_div(poll_interval).unwrap_or(net_upload);
+        let net_download_speed = bytes_per_second(net_download, elapsed);
+        let net_upload_speed = bytes_per_second(net_upload, elapsed);
 
-        // Load average
-        let load_avg = System::load_average();
-        let load_avg_tuple = (load_avg.one, load_avg.five, load_avg.fifteen);
+        let current_disk_counters = fs::read_to_string("/proc/diskstats")
+            .map(|input| parse_diskstats(&input, &physical_disk_names()))
+            .unwrap_or_default();
+        let (disk_read, disk_write) =
+            disk_delta_bytes(&self.disk_counters.borrow(), &current_disk_counters);
+        *self.disk_counters.borrow_mut() = current_disk_counters;
+        let disk_read_speed = bytes_per_second(disk_read, elapsed);
+        let disk_write_speed = bytes_per_second(disk_write, elapsed);
 
         // Update snapshot
         let new_snapshot = SystemSnapshot {
@@ -287,8 +449,22 @@ impl SystemService {
             memory_percent,
             net_download_speed,
             net_upload_speed,
-            load_avg: load_avg_tuple,
+            disk_read_speed,
+            disk_write_speed,
         };
+
+        // Do not connect samples across a prolonged stall in the main loop.
+        // Suspend is handled separately because Instant does not advance during it.
+        let history_window = Duration::from_secs(
+            u64::from(self.poll_interval.get()) * SYSTEM_HISTORY_SAMPLES as u64,
+        );
+        if elapsed > history_window {
+            self.record_history_break();
+        }
+        push_history_sample(
+            &mut self.history.borrow_mut(),
+            SystemHistorySample::from_snapshot(&new_snapshot),
+        );
 
         // Store and notify
         *self.snapshot.borrow_mut() = new_snapshot;
@@ -409,5 +585,114 @@ mod tests {
 
         snapshot.memory_percent = 85.0;
         assert!(snapshot.is_memory_high());
+    }
+
+    #[test]
+    fn test_history_sample_uses_synchronized_snapshot_values() {
+        let snapshot = SystemSnapshot {
+            available: true,
+            cpu_usage: 42.0,
+            memory_percent: 63.0,
+            net_download_speed: 2048,
+            net_upload_speed: 1024,
+            disk_read_speed: 4096,
+            disk_write_speed: 512,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            SystemHistorySample::from_snapshot(&snapshot),
+            SystemHistorySample {
+                cpu_usage: Some(42.0),
+                memory_percent: Some(63.0),
+                net_download_speed: Some(2048),
+                net_upload_speed: Some(1024),
+                disk_read_speed: Some(4096),
+                disk_write_speed: Some(512),
+            }
+        );
+    }
+
+    #[test]
+    fn test_history_discards_oldest_samples_beyond_the_cap() {
+        let mut history = VecDeque::new();
+        for value in 0..=SYSTEM_HISTORY_SAMPLES {
+            push_history_sample(
+                &mut history,
+                SystemHistorySample {
+                    net_download_speed: Some(value as u64),
+                    ..Default::default()
+                },
+            );
+        }
+
+        assert_eq!(history.len(), SYSTEM_HISTORY_SAMPLES);
+        assert_eq!(
+            history.front().and_then(|sample| sample.net_download_speed),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn test_rate_uses_actual_elapsed_time() {
+        assert_eq!(bytes_per_second(3_000, Duration::from_secs(3)), 1_000);
+        assert_eq!(bytes_per_second(3_000, Duration::ZERO), 0);
+    }
+
+    #[test]
+    fn test_diskstats_parses_only_selected_devices() {
+        let devices = HashSet::from(["nvme0n1".to_string()]);
+        let counters = parse_diskstats(
+            "259 0 nvme0n1 10 0 20 0 30 0 40 0 0 0 0 0 0 0 0\n\
+             259 1 nvme0n1p1 5 0 8 0 7 0 9 0 0 0 0 0 0 0 0",
+            &devices,
+        );
+
+        assert_eq!(
+            counters.get("nvme0n1"),
+            Some(&DiskCounters {
+                sectors_read: 20,
+                sectors_written: 40,
+            })
+        );
+        assert!(!counters.contains_key("nvme0n1p1"));
+    }
+
+    #[test]
+    fn test_disk_delta_aggregates_devices_and_handles_resets() {
+        let previous = HashMap::from([
+            (
+                "sda".to_string(),
+                DiskCounters {
+                    sectors_read: 10,
+                    sectors_written: 20,
+                },
+            ),
+            (
+                "sdb".to_string(),
+                DiskCounters {
+                    sectors_read: 20,
+                    sectors_written: 40,
+                },
+            ),
+        ]);
+        let current = HashMap::from([
+            (
+                "sda".to_string(),
+                DiskCounters {
+                    sectors_read: 14,
+                    sectors_written: 26,
+                },
+            ),
+            (
+                "sdb".to_string(),
+                DiskCounters {
+                    sectors_read: 1,
+                    sectors_written: 2,
+                },
+            ),
+        ]);
+
+        assert_eq!(disk_delta_bytes(&previous, &current), (4 * 512, 6 * 512));
     }
 }

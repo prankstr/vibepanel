@@ -54,6 +54,7 @@ use tracing::{debug, trace, warn};
 
 use super::callbacks::{CallbackId, Callbacks};
 use super::config_manager::ConfigManager;
+use super::sleep_watcher::SleepWatcher;
 
 const DEFAULT_POLL_INTERVAL_SECS: u32 = 3;
 
@@ -509,7 +510,7 @@ impl GpuService {
             initial_snapshot
         };
 
-        Rc::new(Self {
+        let service = Rc::new(Self {
             snapshot: RefCell::new(initial_snapshot),
             callbacks: Callbacks::new(),
             timer_source: RefCell::new(None),
@@ -521,7 +522,17 @@ impl GpuService {
             last_sample_at: Cell::new(None),
             #[cfg(debug_assertions)]
             mock,
-        })
+        });
+
+        let weak = Rc::downgrade(&service);
+        let _resume_callback_id = SleepWatcher::global().on_resume(move || {
+            if let Some(service) = weak.upgrade() {
+                service.record_history_break();
+                service.last_sample_at.set(None);
+            }
+        });
+
+        service
     }
 
     pub fn global() -> Rc<Self> {
@@ -652,15 +663,15 @@ impl GpuService {
         let now = Instant::now();
         let history_window =
             Duration::from_secs(u64::from(self.poll_interval.get()) * GPU_HISTORY_SAMPLES as u64);
-        let mut history = self.history.borrow_mut();
         if self
             .last_sample_at
             .replace(Some(now))
             .is_some_and(|previous| now.duration_since(previous) > history_window)
         {
-            history.clear();
+            self.record_history_break();
         }
 
+        let mut history = self.history.borrow_mut();
         for device in devices {
             push_history_sample(
                 history.entry(device.device_index).or_default(),

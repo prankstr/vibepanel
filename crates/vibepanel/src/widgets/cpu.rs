@@ -20,7 +20,7 @@ use crate::services::system::{SystemService, SystemSnapshot};
 use crate::services::tooltip::TooltipManager;
 use crate::styles::{class, widget};
 use crate::widgets::base::BaseWidget;
-use crate::widgets::system_popover::SystemPopoverBinding;
+use crate::widgets::system_popover::wire_system_popover;
 use crate::widgets::{
     VERTICAL_METRIC_CHARS, WidgetConfig, format_vertical_metric, warn_unknown_options,
 };
@@ -135,18 +135,18 @@ impl CpuWidget {
     /// Create a new CPU widget with the given configuration.
     pub fn new(config: CpuConfig) -> Self {
         let base = BaseWidget::new(&[widget::CPU]);
-        let popover_binding = SystemPopoverBinding::new(&base);
-        Self::build(config, base, popover_binding)
+        wire_system_popover(&base);
+        Self::build(config, base)
     }
 
     /// Create a passive CPU widget for use in a merge group.
-    pub fn new_passive(config: CpuConfig, shared_binding: SystemPopoverBinding) -> Self {
+    pub fn new_passive(config: CpuConfig) -> Self {
         let base = BaseWidget::new_passive(&[widget::CPU]);
-        Self::build(config, base, shared_binding)
+        Self::build(config, base)
     }
 
     /// Shared construction for active and passive modes.
-    fn build(config: CpuConfig, base: BaseWidget, popover_binding: SystemPopoverBinding) -> Self {
+    fn build(config: CpuConfig, base: BaseWidget) -> Self {
         base.set_tooltip("CPU: unknown");
 
         let icon_handle = base.add_icon("cpu-symbolic", &[widget::CPU_ICON]);
@@ -172,7 +172,6 @@ impl CpuWidget {
             let show_icon = config.show_icon;
             let show_percentage = config.show_percentage;
             let format = config.format.clone();
-            let popover_binding = popover_binding.clone();
 
             system_service.connect(move |snapshot: &SystemSnapshot| {
                 update_cpu_widget(
@@ -184,8 +183,6 @@ impl CpuWidget {
                     is_vertical,
                     snapshot,
                 );
-
-                popover_binding.update_if_open(snapshot);
             })
         };
 

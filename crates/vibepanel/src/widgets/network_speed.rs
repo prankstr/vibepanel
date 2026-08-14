@@ -21,7 +21,7 @@ use crate::services::system::{SystemService, SystemSnapshot, format_speed};
 use crate::services::tooltip::TooltipManager;
 use crate::styles::{class, widget};
 use crate::widgets::base::BaseWidget;
-use crate::widgets::system_popover::SystemPopoverBinding;
+use crate::widgets::system_popover::wire_system_popover;
 use crate::widgets::{WidgetConfig, warn_unknown_options};
 
 /// Default configuration values
@@ -127,22 +127,18 @@ impl NetworkSpeedWidget {
     /// Create a new Network widget with the given configuration.
     pub fn new(config: NetworkSpeedConfig) -> Self {
         let base = BaseWidget::new(&[widget::NETWORK_SPEED]);
-        let popover_binding = SystemPopoverBinding::new(&base);
-        Self::build(config, base, popover_binding)
+        wire_system_popover(&base);
+        Self::build(config, base)
     }
 
     /// Create a passive Network widget for use in a merge group.
-    pub fn new_passive(config: NetworkSpeedConfig, shared_binding: SystemPopoverBinding) -> Self {
+    pub fn new_passive(config: NetworkSpeedConfig) -> Self {
         let base = BaseWidget::new_passive(&[widget::NETWORK_SPEED]);
-        Self::build(config, base, shared_binding)
+        Self::build(config, base)
     }
 
     /// Shared construction for active and passive modes.
-    fn build(
-        config: NetworkSpeedConfig,
-        base: BaseWidget,
-        popover_binding: SystemPopoverBinding,
-    ) -> Self {
+    fn build(config: NetworkSpeedConfig, base: BaseWidget) -> Self {
         base.set_tooltip("Network: unknown");
 
         let icon_handle = base.add_icon(
@@ -196,7 +192,6 @@ impl NetworkSpeedWidget {
             let ul_arrow = ul_arrow.clone();
             let show_icon = config.show_icon;
             let format = config.format.clone();
-            let popover_binding = popover_binding.clone();
 
             system_service.connect(move |snapshot: &SystemSnapshot| {
                 update_network_widget(
@@ -210,8 +205,6 @@ impl NetworkSpeedWidget {
                     &format,
                     snapshot,
                 );
-
-                popover_binding.update_if_open(snapshot);
             })
         };
 

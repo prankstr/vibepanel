@@ -18,8 +18,8 @@ use crate::services::tooltip::TooltipManager;
 use crate::styles::{class, state, widget as style_widget};
 use crate::widgets::{
     self, BarState, CalendarWeatherPopoverBinding, ClockConfig, EdgeInteraction, MenuHandle,
-    PopoverKind, QuickSettingsConfig, RippleHandle, SystemPopoverBinding, WidgetConfig,
-    WidgetFactory, popover_kind_for, trigger_ripple_from_gesture,
+    PopoverKind, QuickSettingsConfig, RippleHandle, WidgetConfig, WidgetFactory, popover_kind_for,
+    trigger_ripple_from_gesture, wire_system_popover_for_menu,
 };
 
 /// Total bar window/content height reserved for the shell.
@@ -1198,41 +1198,43 @@ fn build_merge_group(
 
     wrapper.add_controller(gesture_click.clone());
 
-    let (binding_handle, built_widgets): (Box<dyn std::any::Any>, Vec<widgets::BuiltWidget>) =
-        match kind {
-            PopoverKind::System => {
-                let binding = SystemPopoverBinding::new_for_menu(&menu_handle);
-                let built_widgets = entries
-                    .iter()
-                    .filter_map(|entry| WidgetFactory::build_passive(entry, &binding))
-                    .collect();
-                (Box::new(binding), built_widgets)
-            }
-            PopoverKind::CalendarWeather => {
-                let Some(clock_entry) = entries.iter().find(|entry| entry.name == "clock") else {
-                    warn!("Calendar/weather merge group requires a clock widget");
-                    return 0;
-                };
-                let clock_config = ClockConfig::from_entry(clock_entry);
-                let has_weather_widget = entries.iter().any(|entry| entry.name == "weather");
-                let show_weather = has_weather_widget || clock_config.show_weather;
-                let binding = CalendarWeatherPopoverBinding::new_for_menu(
-                    &menu_handle,
-                    clock_config.show_week_numbers,
-                    show_weather,
-                    clock_config.calendar_events,
-                );
-                let built_widgets = entries
-                    .iter()
-                    .filter_map(WidgetFactory::build_calendar_weather_passive)
-                    .collect();
-                (Box::new(binding), built_widgets)
-            }
-            PopoverKind::Unmergeable => {
-                warn!("Merge group for {:?} popover not supported", kind);
+    let (binding_handle, built_widgets): (
+        Option<Box<dyn std::any::Any>>,
+        Vec<widgets::BuiltWidget>,
+    ) = match kind {
+        PopoverKind::System => {
+            wire_system_popover_for_menu(&menu_handle);
+            let built_widgets = entries
+                .iter()
+                .filter_map(WidgetFactory::build_passive)
+                .collect();
+            (None, built_widgets)
+        }
+        PopoverKind::CalendarWeather => {
+            let Some(clock_entry) = entries.iter().find(|entry| entry.name == "clock") else {
+                warn!("Calendar/weather merge group requires a clock widget");
                 return 0;
-            }
-        };
+            };
+            let clock_config = ClockConfig::from_entry(clock_entry);
+            let has_weather_widget = entries.iter().any(|entry| entry.name == "weather");
+            let show_weather = has_weather_widget || clock_config.show_weather;
+            let binding = CalendarWeatherPopoverBinding::new_for_menu(
+                &menu_handle,
+                clock_config.show_week_numbers,
+                show_weather,
+                clock_config.calendar_events,
+            );
+            let built_widgets = entries
+                .iter()
+                .filter_map(WidgetFactory::build_calendar_weather_passive)
+                .collect();
+            (Some(Box::new(binding)), built_widgets)
+        }
+        PopoverKind::Unmergeable => {
+            warn!("Merge group for {:?} popover not supported", kind);
+            return 0;
+        }
+    };
 
     // If only 0–1 widgets survived (e.g. GPU unavailable), don't wrap in a
     // merge group — return 0 so the caller rebuilds via the normal active path.
@@ -1270,7 +1272,9 @@ fn build_merge_group(
     }
 
     // Keep the menu handle, gesture, and ripple alive
-    state.add_handle(binding_handle);
+    if let Some(binding_handle) = binding_handle {
+        state.add_handle(binding_handle);
+    }
     state.add_handle(Box::new(menu_handle));
     state.add_handle(Box::new(gesture_click));
     state.add_handle(Box::new(ripple_handle));

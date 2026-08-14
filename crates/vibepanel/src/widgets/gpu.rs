@@ -17,12 +17,11 @@ use crate::services::callbacks::CallbackId;
 use crate::services::config_manager::ConfigManager;
 use crate::services::gpu::{GpuDeviceSnapshot, GpuPowerState, GpuService, GpuSnapshot};
 use crate::services::icons::IconHandle;
-use crate::services::system::{SystemService, SystemSnapshot};
 use crate::services::tooltip::TooltipManager;
 use crate::styles::{class, widget};
 use crate::widgets::base::BaseWidget;
 use crate::widgets::gpu_format;
-use crate::widgets::system_popover::SystemPopoverBinding;
+use crate::widgets::system_popover::wire_system_popover;
 use crate::widgets::{
     VERTICAL_METRIC_CHARS, WidgetConfig, format_vertical_metric, warn_unknown_options,
 };
@@ -116,26 +115,24 @@ pub struct GpuWidget {
     base: BaseWidget,
     /// Callback ID for GpuService, used to disconnect on drop.
     gpu_callback_id: CallbackId,
-    /// Callback ID for SystemService, used to disconnect on drop.
-    system_callback_id: CallbackId,
 }
 
 impl GpuWidget {
     /// Create a new GPU widget with the given configuration.
     pub fn new(config: GpuConfig) -> Self {
         let base = BaseWidget::new(&[widget::GPU]);
-        let popover_binding = SystemPopoverBinding::new(&base);
-        Self::build(config, base, popover_binding)
+        wire_system_popover(&base);
+        Self::build(config, base)
     }
 
     /// Create a passive GPU widget for use in a merge group.
-    pub fn new_passive(config: GpuConfig, shared_binding: SystemPopoverBinding) -> Self {
+    pub fn new_passive(config: GpuConfig) -> Self {
         let base = BaseWidget::new_passive(&[widget::GPU]);
-        Self::build(config, base, shared_binding)
+        Self::build(config, base)
     }
 
     /// Shared construction for active and passive modes.
-    fn build(config: GpuConfig, base: BaseWidget, popover_binding: SystemPopoverBinding) -> Self {
+    fn build(config: GpuConfig, base: BaseWidget) -> Self {
         base.set_tooltip("GPU: unknown");
 
         let icon_handle = base.add_icon("video-display-symbolic", &[widget::GPU_ICON]);
@@ -171,20 +168,9 @@ impl GpuWidget {
             })
         };
 
-        // Also subscribe to SystemService to keep the shared popover's CPU/memory data live.
-        let system_service = SystemService::global();
-        let system_callback_id = {
-            let popover_binding = popover_binding.clone();
-
-            system_service.connect(move |snapshot: &SystemSnapshot| {
-                popover_binding.update_if_open(snapshot);
-            })
-        };
-
         Self {
             base,
             gpu_callback_id,
-            system_callback_id,
         }
     }
 
@@ -230,7 +216,6 @@ impl Drop for GpuWidget {
         let gpu_service = GpuService::global();
         gpu_service.disconnect(self.gpu_callback_id);
         gpu_service.release_polling();
-        SystemService::global().disconnect(self.system_callback_id);
     }
 }
 

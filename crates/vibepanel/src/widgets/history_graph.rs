@@ -6,16 +6,16 @@ use gtk4::{DrawingArea, cairo};
 
 const INSET: f64 = 2.0;
 const LINE_WIDTH: f64 = 1.5;
+const FILL_TOP_ALPHA: f64 = 0.2;
+const FILL_BASELINE_ALPHA: f64 = 0.05;
 
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)] // Automatic scaling is part of the shared API for later graph consumers.
 pub(crate) enum HistoryScale {
     Fixed { min: f64, max: f64 },
     Automatic { min: f64, headroom: f64 },
 }
 
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)] // Dashed series are supported even though the first consumer is solid-only.
 pub(crate) enum LineStyle {
     Solid,
     Dashed,
@@ -26,6 +26,7 @@ pub(crate) struct HistorySeries {
     pub values: Vec<Option<f64>>,
     pub style: LineStyle,
     pub alpha: f64,
+    pub fill_alpha: f64,
 }
 
 impl HistorySeries {
@@ -34,6 +35,16 @@ impl HistorySeries {
             values,
             style: LineStyle::Solid,
             alpha: 1.0,
+            fill_alpha: FILL_TOP_ALPHA,
+        }
+    }
+
+    pub(crate) fn dashed(values: Vec<Option<f64>>) -> Self {
+        Self {
+            values,
+            style: LineStyle::Dashed,
+            alpha: 0.5,
+            fill_alpha: 0.0,
         }
     }
 }
@@ -173,6 +184,32 @@ fn draw_series(
         }
 
         if run.len() >= 2 {
+            if series.fill_alpha > 0.0 {
+                let baseline = INSET + plot_height;
+                let fill_baseline = baseline + LINE_WIDTH;
+                let top = run.iter().map(|&(_, y)| y).fold(baseline, f64::min);
+                cr.move_to(run[0].0, run[0].1);
+                for &(x, y) in run.iter().skip(1) {
+                    cr.line_to(x, y);
+                }
+                cr.line_to(run.last().unwrap().0, fill_baseline);
+                cr.line_to(run[0].0, fill_baseline);
+                cr.close_path();
+
+                let gradient = cairo::LinearGradient::new(0.0, top, 0.0, fill_baseline);
+                let fill_alpha = series.fill_alpha.clamp(0.0, 1.0) * color.3;
+                gradient.add_color_stop_rgba(0.0, color.0, color.1, color.2, fill_alpha);
+                gradient.add_color_stop_rgba(
+                    1.0,
+                    color.0,
+                    color.1,
+                    color.2,
+                    FILL_BASELINE_ALPHA * color.3,
+                );
+                let _ = cr.set_source(&gradient);
+                let _ = cr.fill();
+            }
+
             cr.move_to(run[0].0, run[0].1);
             for &(x, y) in run.iter().skip(1) {
                 cr.line_to(x, y);
@@ -207,6 +244,7 @@ mod tests {
                 values: vec![Some(20.0), None],
                 style: LineStyle::Dashed,
                 alpha: 0.5,
+                fill_alpha: 0.0,
             },
         ];
         assert_eq!(
@@ -219,5 +257,11 @@ mod tests {
             ),
             (0.0, 22.0)
         );
+    }
+
+    #[test]
+    fn solid_series_enables_fill_only_for_primary_line() {
+        assert_eq!(HistorySeries::solid(Vec::new()).fill_alpha, 0.2);
+        assert_eq!(HistorySeries::dashed(Vec::new()).fill_alpha, 0.0);
     }
 }
