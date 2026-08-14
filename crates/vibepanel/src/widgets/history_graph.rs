@@ -6,6 +6,8 @@ use gtk4::{DrawingArea, cairo};
 
 const INSET: f64 = 2.0;
 const LINE_WIDTH: f64 = 1.5;
+const FILL_TOP_ALPHA: f64 = 0.2;
+const FILL_BASELINE_ALPHA: f64 = 0.05;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum HistoryScale {
@@ -33,7 +35,7 @@ impl HistorySeries {
             values,
             style: LineStyle::Solid,
             alpha: 1.0,
-            fill_alpha: 0.2,
+            fill_alpha: FILL_TOP_ALPHA,
         }
     }
 
@@ -184,26 +186,26 @@ fn draw_series(
         if run.len() >= 2 {
             if series.fill_alpha > 0.0 {
                 let baseline = INSET + plot_height;
+                let fill_baseline = baseline + LINE_WIDTH;
                 let top = run.iter().map(|&(_, y)| y).fold(baseline, f64::min);
-                let average = run.iter().map(|&(_, y)| y).sum::<f64>() / run.len() as f64;
                 cr.move_to(run[0].0, run[0].1);
                 for &(x, y) in run.iter().skip(1) {
                     cr.line_to(x, y);
                 }
-                cr.line_to(run.last().unwrap().0, baseline);
-                cr.line_to(run[0].0, baseline);
+                cr.line_to(run.last().unwrap().0, fill_baseline);
+                cr.line_to(run[0].0, fill_baseline);
                 cr.close_path();
 
-                let gradient = cairo::LinearGradient::new(0.0, top, 0.0, baseline);
-                let average_offset = if baseline > top {
-                    ((average - top) / (baseline - top)).clamp(0.0, 1.0)
-                } else {
-                    0.0
-                };
+                let gradient = cairo::LinearGradient::new(0.0, top, 0.0, fill_baseline);
                 let fill_alpha = series.fill_alpha.clamp(0.0, 1.0) * color.3;
                 gradient.add_color_stop_rgba(0.0, color.0, color.1, color.2, fill_alpha);
-                gradient.add_color_stop_rgba(average_offset, color.0, color.1, color.2, fill_alpha);
-                gradient.add_color_stop_rgba(1.0, color.0, color.1, color.2, 0.02 * color.3);
+                gradient.add_color_stop_rgba(
+                    1.0,
+                    color.0,
+                    color.1,
+                    color.2,
+                    FILL_BASELINE_ALPHA * color.3,
+                );
                 let _ = cr.set_source(&gradient);
                 let _ = cr.fill();
             }
