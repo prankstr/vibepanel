@@ -5,6 +5,51 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.0](https://github.com/prankstr/vibepanel/compare/v0.15.0...v0.16.0) (2026-08-14)
+
+
+### Features
+
+* **battery:** add battery alerts ([#177](https://github.com/prankstr/vibepanel/issues/177)) ([eba4c5f](https://github.com/prankstr/vibepanel/commit/eba4c5f28f221e195ab894006bcdbbf7c3bf64c7))
+* **clock:** add DankCalendar event integration ([28b2a73](https://github.com/prankstr/vibepanel/commit/28b2a7372d768c8f2c3b705118dcb5280ee165df))
+* **clock:** add DankCalendar event support ([6eadc66](https://github.com/prankstr/vibepanel/commit/6eadc668b9d5cc66fa155f0bd86ed2fd1c3ca30c))
+* **cpu, memory, gpu:** add stable width option to reduce visual jitter ([#174](https://github.com/prankstr/vibepanel/issues/174)) ([4331264](https://github.com/prankstr/vibepanel/commit/4331264f728fe9e26afe95bd4f117663629f0d44))
+* **css:** support relative imports with hot reload ([#201](https://github.com/prankstr/vibepanel/issues/201)) ([92063a3](https://github.com/prankstr/vibepanel/commit/92063a36833ca8eda61a02485f8bfadcc73e1d43))
+* **gpu:** support multiple GPUs and improve metrics display ([c05ca43](https://github.com/prankstr/vibepanel/commit/c05ca43ff78afd219a65d0b98f459c9165e7c45c))
+* **gpu:** support multiple GPUs and improve widget and popover([#158](https://github.com/prankstr/vibepanel/issues/158)) ([c05ca43](https://github.com/prankstr/vibepanel/commit/c05ca43ff78afd219a65d0b98f459c9165e7c45c))
+* **mango:** add mango layout widget ([#202](https://github.com/prankstr/vibepanel/issues/202)) ([b331951](https://github.com/prankstr/vibepanel/commit/b331951093f4dcb10fa1320c563c9b17c4819bd3))
+* **notifications:** add unread count CLI ([#194](https://github.com/prankstr/vibepanel/issues/194)) ([60c110d](https://github.com/prankstr/vibepanel/commit/60c110d39de5fb37e56bac5d548802c0c6da85f2))
+* **quick_settings:** add per-stream audio controls ([#186](https://github.com/prankstr/vibepanel/issues/186)) ([6bf40fe](https://github.com/prankstr/vibepanel/commit/6bf40fe53af32b9b5fe2bb0b7b47da2f0ea32559))
+* **quick_settings:** remember expanded menu state ([#187](https://github.com/prankstr/vibepanel/issues/187)) ([8e0eb03](https://github.com/prankstr/vibepanel/commit/8e0eb038ae07eac7562c24cf134b29ec0a5c10e3))
+* **spacer:** fill space even when no center section ([724cf7f](https://github.com/prankstr/vibepanel/commit/724cf7f27002f68ac687506f25a25886284f1655))
+* **widgets:** automaticallty merge clock+weather group and enable popover weather ([#169](https://github.com/prankstr/vibepanel/issues/169)) ([724cf7f](https://github.com/prankstr/vibepanel/commit/724cf7f27002f68ac687506f25a25886284f1655))
+* **widgets:** system popover rework ([#206](https://github.com/prankstr/vibepanel/issues/206)) ([97c520e](https://github.com/prankstr/vibepanel/commit/97c520ef0fa11ab4960760e20a9f7f13a6798275))
+
+
+### Bug Fixes
+
+* **bar:** improve popover dismissal ([#175](https://github.com/prankstr/vibepanel/issues/175)) ([506a801](https://github.com/prankstr/vibepanel/commit/506a801647b253e5696959612cbc7853208c6f81))
+* **config:** stabilize reload fingerprints ([b53e910](https://github.com/prankstr/vibepanel/commit/b53e910187e90a760d35050df821da50e4a14717))
+* **icons:** restore Material font after Pango font map resets ([#191](https://github.com/prankstr/vibepanel/issues/191)) ([b7e0eab](https://github.com/prankstr/vibepanel/commit/b7e0eab28bd400ba6168f1d5131eaf5f7f2ae025))
+* **keyboard-layout:** refresh hyprland keyboard on mismatch ([02e9777](https://github.com/prankstr/vibepanel/commit/02e97777bf328124bf1629a896f10185b36cb229)), closes [#165](https://github.com/prankstr/vibepanel/issues/165)
+* **media:** improve browser artwork and seek handling ([#205](https://github.com/prankstr/vibepanel/issues/205)) ([2760b90](https://github.com/prankstr/vibepanel/commit/2760b904a0c295e16bd5c74cf2f72b7745473690))
+* **media:** render mpv-mpris embedded art and crisp fallback icon ([#173](https://github.com/prankstr/vibepanel/issues/173)) ([05040b4](https://github.com/prankstr/vibepanel/commit/05040b4c2e999cafb5cd80dfa1157ede024fed2d))
+* **network:** prevent crash after repeated connection failures ([#183](https://github.com/prankstr/vibepanel/issues/183)) ([ed34f9a](https://github.com/prankstr/vibepanel/commit/ed34f9af2462ab088dd0847b06bb9f158f70217b))
+* **nix:** bump flake versions, fixes [#189](https://github.com/prankstr/vibepanel/issues/189) ([51d9b30](https://github.com/prankstr/vibepanel/commit/51d9b30a43190fc14fbc2402014c2bb9111ccbba))
+* **nix:** improve NVIDIA compatibility for flake builds ([#192](https://github.com/prankstr/vibepanel/issues/192)) ([6214a3b](https://github.com/prankstr/vibepanel/commit/6214a3b4fdad477f9b82f1952989902a5b22f119))
+* **notifications:** keep toast slack without shadows ([9e3aecd](https://github.com/prankstr/vibepanel/commit/9e3aecdf871888cf310927c025920778dbc4a88b)), closes [#171](https://github.com/prankstr/vibepanel/issues/171)
+* **popover:** handle close-animation reversal ([a950b53](https://github.com/prankstr/vibepanel/commit/a950b53746134984fac011bdd4937215dab23cc5))
+* **spacer:** prevent multiple groups from expanding ([724cf7f](https://github.com/prankstr/vibepanel/commit/724cf7f27002f68ac687506f25a25886284f1655))
+* **theme:** make sure no gtk chrome leaks for sliders/bars ([#203](https://github.com/prankstr/vibepanel/issues/203)) ([1d657fd](https://github.com/prankstr/vibepanel/commit/1d657fd8615d62ed723a6a70a3930095dc2e3c94))
+* **tray:** improve icon theming and contrast ([#198](https://github.com/prankstr/vibepanel/issues/198)) ([c8ea9f5](https://github.com/prankstr/vibepanel/commit/c8ea9f5a3403d47eab7bd8b6129712a6f458b844))
+* use current config for monitor resync ([e10b081](https://github.com/prankstr/vibepanel/commit/e10b081b24ee98d8697e99bcbd125e3c52308ae2))
+
+
+### Performance Improvements
+
+* **memory:** limit glibc retention for large allocations ([#188](https://github.com/prankstr/vibepanel/issues/188)) ([876f8c9](https://github.com/prankstr/vibepanel/commit/876f8c938d097a732d0377e861913c0e792d5cde))
+* **popovers:** avoid per-frame surface resizes ([#200](https://github.com/prankstr/vibepanel/issues/200)) ([7c5c806](https://github.com/prankstr/vibepanel/commit/7c5c806a75b3664cd78dbdbd12b7f76f7d03ba83))
+
 ## [0.15.0](https://github.com/prankstr/vibepanel/compare/v0.14.1...v0.15.0) (2026-06-07)
 
 
