@@ -26,7 +26,7 @@ VibePanel is something between a simple status bar and a full desktop shell:
 
 ## Demo
 
-These examples use roughly ~10–35 lines of TOML to get completely different vibes, no CSS required.
+These examples use roughly 20–40 lines of TOML to get completely different vibes, no CSS required.
 
 https://github.com/user-attachments/assets/fba27921-0886-4e7b-850d-b51341583693
 
@@ -34,8 +34,13 @@ https://github.com/user-attachments/assets/fba27921-0886-4e7b-850d-b51341583693
 <table align="center">
   <tr>
     <td><a href="assets/screenshots/gruvbox_desktop.png"><img src="assets/screenshots/gruvbox_desktop.png" width="270"></a></td>
-    <td><a href="assets/screenshots/frosted_minimal_desktop.png"><img src="assets/screenshots/frosted_minimal_desktop.png" width="270"></a></td>
-    <td><a href="assets/screenshots/sonoma_desktop.png"><img src="assets/screenshots/sonoma_desktop.png" width="270"></a></td>
+    <td><a href="assets/screenshots/light_bottom_bar_desktop.webp"><img src="assets/screenshots/light_bottom_bar_desktop.webp" width="270"></a></td>
+    <td><a href="assets/screenshots/sunset_top_bar_desktop.webp"><img src="assets/screenshots/sunset_top_bar_desktop.webp" width="270"></a></td>
+  </tr>
+  <tr>
+    <td><a href="assets/screenshots/purple_side_bar_desktop.webp"><img src="assets/screenshots/purple_side_bar_desktop.webp" width="270"></a></td>
+    <td><a href="assets/screenshots/aurora_side_bar_desktop.webp"><img src="assets/screenshots/aurora_side_bar_desktop.webp" width="270"></a></td>
+    <td><a href="assets/screenshots/japanese_islands_desktop.webp"><img src="assets/screenshots/japanese_islands_desktop.webp" width="270"></a></td>
   </tr>
 </table>
 
