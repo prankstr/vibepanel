@@ -969,7 +969,7 @@ impl WorkspacesWidget {
 
         // Cache theme sizes at construction time. These values are derived
         // from bar.size/bar.padding, and any change to those triggers a full
-        // bar rebuild (config_structure_changed → reconfigure_all), which
+        // bar rebuild (section change → reconfigure_all), which
         // destroys and recreates this widget with fresh values.
         // Animated mode uses WorkspaceContainer; otherwise indicators go in the GtkBox.
         let ws_container: Option<WorkspaceContainer> = if animate {

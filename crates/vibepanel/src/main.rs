@@ -15,8 +15,10 @@ mod theme_vars;
 mod ui_regression_test_support;
 mod widgets;
 
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::rc::Rc;
 
 use clap::{Parser, Subcommand};
 use gtk4::Application;
@@ -30,6 +32,25 @@ use vibepanel_core::{Config, logging};
 use crate::services::bar_manager::BarManager;
 use crate::services::compositor::CompositorManager;
 use crate::services::config_manager::ConfigManager;
+
+type OsdOverlaySlot = Rc<RefCell<Option<Rc<crate::widgets::OsdOverlay>>>>;
+
+fn replace_osd_overlay(
+    app: &Application,
+    slot: &OsdOverlaySlot,
+    config: &vibepanel_core::config::OsdConfig,
+) {
+    // Drop first so the old layer-shell window and service subscriptions are gone
+    // before a replacement registers itself.
+    let old = slot.borrow_mut().take();
+    drop(old);
+    if config.enabled {
+        *slot.borrow_mut() = Some(crate::widgets::OsdOverlay::new(app, config));
+        debug!("OSD overlay configured");
+    } else {
+        debug!("OSD overlay disabled via configuration");
+    }
+}
 
 /// vibepanel - A modern Wayland status bar
 #[derive(Parser, Debug)]
@@ -776,18 +797,20 @@ fn run_gtk_app(config: Config, config_source: Option<PathBuf>) -> ExitCode {
         {
             use crate::services::ipc::{IpcListener, IpcMessage};
 
-            let osd_enabled = config_for_activate.osd.enabled;
-            let osd_overlay = if osd_enabled {
-                let overlay = crate::widgets::OsdOverlay::new(app, &config_for_activate.osd);
-                debug!("OSD overlay initialized");
-                Some(overlay)
-            } else {
-                debug!("OSD overlay disabled via configuration");
-                None
-            };
+            let osd_overlay: OsdOverlaySlot = Rc::new(RefCell::new(None));
+            replace_osd_overlay(app, &osd_overlay, &config_for_activate.osd);
+
+            let app_weak = app.downgrade();
+            let osd_for_reload = Rc::clone(&osd_overlay);
+            ConfigManager::global().on_osd_change(move |config| {
+                let Some(app) = app_weak.upgrade() else {
+                    return;
+                };
+                replace_osd_overlay(&app, &osd_for_reload, config);
+            });
 
             if let Some(listener) = IpcListener::new() {
-                let osd_for_ipc = osd_overlay.clone();
+                let osd_for_ipc = Rc::clone(&osd_overlay);
 
                 listener.borrow().connect(move |msg| {
                     match &msg {
@@ -799,7 +822,8 @@ fn run_gtk_app(config: Config, config_source: Option<PathBuf>) -> ExitCode {
                         IpcMessage::Volume { .. }
                         | IpcMessage::VolumeUnavailable
                         | IpcMessage::Brightness { .. } => {
-                            if let Some(ref overlay) = osd_for_ipc {
+                            let overlay = osd_for_ipc.borrow().clone();
+                            if let Some(overlay) = overlay {
                                 overlay.handle_ipc_message(&msg);
                             }
                         }
@@ -847,17 +871,6 @@ fn run_gtk_app(config: Config, config_source: Option<PathBuf>) -> ExitCode {
             crate::services::battery_alert::BatteryAlertController::global()
                 .configure(config_for_activate.battery_alert_config());
             debug!("Battery alert controller initialized");
-
-            // Attach OSD overlay to the application so the Rc stays alive.
-            if let Some(overlay) = osd_overlay {
-                // SAFETY: Key is unique to vibepanel; stored type matches what
-                // would be retrieved. The data keeps the Rc alive for the
-                // application's lifetime.
-                unsafe {
-                    app.set_data("vibepanel-osd-overlay", overlay);
-                }
-                debug!("OSD overlay attached to application");
-            }
         }
 
         // Start config file watcher for live reload
