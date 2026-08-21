@@ -10,12 +10,12 @@
 //! - If valid, changes are dispatched to the GTK main thread via glib::idle_add_once.
 //! - The main thread applies changes by calling `reconfigure` on each subsystem.
 //!
-//! ## Supported Live Reload
+//! ## Live Reload
 //!
-//! - `icons.*`: Switches icon backend (Material ↔ GTK themes) and weight
-//! - `theme.*`: Updates colors, palette, CSS variables
-//! - Structural changes (widget list, layout, bar size, margins) trigger a full
-//!   bar rebuild with a brief visual flicker.
+//! - Theme changes refresh styles and callbacks; animation changes also rebuild bars.
+//! - Bar, widget, and advanced changes rebuild bars with a brief visual flicker.
+//! - OSD changes recreate its application-owned surface.
+//! - Compositor backend changes are validated but require a process restart.
 
 use std::cell::{Cell, RefCell};
 use std::path::{Component, Path, PathBuf};
@@ -33,7 +33,10 @@ use tracing::{debug, error, info, warn};
 
 use vibepanel_core::{
     Config, ThemePalette, ThemeSizes,
-    config::{BarPosition, SchemePolarity},
+    config::{
+        AdvancedConfig, BarConfig, BarPosition, OsdConfig, SchemePolarity, WidgetOptions,
+        WidgetsConfig,
+    },
 };
 
 use super::callbacks::{CallbackId, Callbacks};
@@ -344,6 +347,117 @@ fn resolve_gtk_scheme_config(config: &Config) -> Config {
     resolved
 }
 
+fn bar_needs_rebuild(old: &BarConfig, new: &BarConfig) -> bool {
+    let mut probe = new.clone();
+    // Generated CSS and the bar theme callback fully apply these visual fields.
+    probe.background_color = old.background_color.clone();
+    probe.border_radius = old.border_radius;
+    probe.outline = old.outline;
+    probe.popover_offset = old.popover_offset;
+    old != &probe
+}
+
+fn widgets_need_rebuild(old: &WidgetsConfig, new: &WidgetsConfig) -> bool {
+    let mut old = old.clone();
+    let mut probe = new.clone();
+    // Generated CSS fully applies these global widget visual fields.
+    probe.background_color = old.background_color.clone();
+    probe.background_opacity = old.background_opacity;
+    probe.popover_background_opacity = old.popover_background_opacity;
+    probe.outline = old.outline;
+
+    // Battery alert policy is owned by BatteryAlertController, not bar widgets.
+    strip_battery_alert_options(&mut old);
+    strip_battery_alert_options(&mut probe);
+    old != probe
+}
+
+fn strip_battery_alert_options(config: &mut WidgetsConfig) {
+    let remove_entry = if let Some(options) = config.widget_configs.get_mut("battery") {
+        for key in ["alerts", "low_threshold", "critical_threshold"] {
+            options.options.remove(key);
+        }
+        options == &WidgetOptions::default()
+    } else {
+        false
+    };
+    if remove_entry {
+        config.widget_configs.remove("battery");
+    }
+}
+
+fn advanced_needs_rebuild(old: &AdvancedConfig, new: &AdvancedConfig) -> bool {
+    let mut probe = new.clone();
+    // Backend replacement is restart-only; rebuilding bars would reconnect them
+    // to the same active CompositorManager.
+    probe.compositor = old.compositor.clone();
+    old != &probe
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ConfigSectionChanges {
+    bar: bool,
+    widgets: bool,
+    theme: bool,
+    osd: bool,
+    audio: bool,
+    weather: bool,
+    advanced: bool,
+    compositor: bool,
+    theme_rebuild: bool,
+    bar_rebuild: bool,
+    widgets_rebuild: bool,
+    advanced_rebuild: bool,
+}
+
+impl ConfigSectionChanges {
+    fn between(old: &Config, new: &Config) -> Self {
+        // Keep this exhaustive: adding a top-level config section must also choose
+        // a reload owner below instead of silently becoming restart-only.
+        let Config {
+            bar: old_bar,
+            widgets: old_widgets,
+            theme: old_theme,
+            osd: old_osd,
+            audio: old_audio,
+            weather: old_weather,
+            advanced: old_advanced,
+        } = old;
+        let Config {
+            bar: new_bar,
+            widgets: new_widgets,
+            theme: new_theme,
+            osd: new_osd,
+            audio: new_audio,
+            weather: new_weather,
+            advanced: new_advanced,
+        } = new;
+
+        Self {
+            bar: old_bar != new_bar,
+            widgets: old_widgets != new_widgets,
+            theme: old_theme != new_theme,
+            osd: old_osd != new_osd,
+            audio: old_audio != new_audio,
+            weather: old_weather != new_weather,
+            advanced: old_advanced != new_advanced,
+            compositor: old_advanced.compositor != new_advanced.compositor,
+            theme_rebuild: old_theme.animations != new_theme.animations,
+            bar_rebuild: bar_needs_rebuild(old_bar, new_bar),
+            widgets_rebuild: widgets_need_rebuild(old_widgets, new_widgets),
+            advanced_rebuild: advanced_needs_rebuild(old_advanced, new_advanced),
+        }
+    }
+
+    fn any(&self) -> bool {
+        self != &Self::default()
+    }
+
+    fn rebuild_bars(&self) -> bool {
+        self.theme_rebuild || self.bar_rebuild || self.widgets_rebuild || self.advanced_rebuild
+    }
+}
+
 /// Manages configuration state and live reload.
 ///
 /// This is a singleton service that:
@@ -365,9 +479,10 @@ pub struct ConfigManager {
     config_path: RefCell<Option<PathBuf>>,
     /// Shutdown flag for the file watcher thread.
     shutdown_flag: Arc<AtomicBool>,
-    /// Callbacks for theme/style changes (border radius, colors, etc.)
-    /// that don't trigger a full bar rebuild.
+    /// Callbacks that refresh persistent surfaces after generated styles change.
     theme_callbacks: Callbacks<()>,
+    /// Application-owned OSD surface reload hook.
+    osd_callbacks: Callbacks<OsdConfig>,
     /// Last wallpaper path detected from wallpaper daemon (for change detection).
     wallpaper_path: RefCell<Option<String>>,
     /// Cached source color extracted from the wallpaper image. Rebuilding a
@@ -432,6 +547,7 @@ impl ConfigManager {
             config_path: RefCell::new(config_path),
             shutdown_flag: Arc::new(AtomicBool::new(false)),
             theme_callbacks: Callbacks::new(),
+            osd_callbacks: Callbacks::new(),
             wallpaper_path: RefCell::new(initial_wallpaper),
             cached_source_color: Cell::new(source_color),
             cached_luminance: Cell::new(initial_luminance),
@@ -712,6 +828,14 @@ impl ConfigManager {
 
     pub fn disconnect_theme_callback(&self, id: CallbackId) -> bool {
         self.theme_callbacks.unregister(id)
+    }
+
+    /// Register the application-owned OSD lifecycle hook.
+    pub fn on_osd_change<F>(&self, callback: F) -> CallbackId
+    where
+        F: Fn(&OsdConfig) + 'static,
+    {
+        self.osd_callbacks.register(callback)
     }
 
     /// Start watching the config file for changes and wallpaper polling.
@@ -1009,9 +1133,7 @@ impl ConfigManager {
     pub(crate) fn handle_config_message(self: &Rc<Self>, msg: ConfigMessage) {
         match msg {
             ConfigMessage::Reloaded(new_config) => {
-                AudioService::global().set_allow_overdrive(new_config.audio.allow_overdrive);
                 self.apply_config(*new_config);
-                self.apply_weather_config();
             }
             ConfigMessage::Error(err) => {
                 // Just log the error - keep using the old config
@@ -1031,6 +1153,12 @@ impl ConfigManager {
     /// all services and widgets when the config changes.
     fn apply_config(self: &Rc<Self>, new_config: Config) {
         let old_config = self.config.borrow().clone();
+        let changes = ConfigSectionChanges::between(&old_config, &new_config);
+
+        if !changes.any() {
+            debug!("Reloaded configuration is unchanged");
+            return;
+        }
 
         info!("Applying new configuration...");
 
@@ -1054,10 +1182,6 @@ impl ConfigManager {
             NetworkService::global().re_notify();
         }
 
-        // Determine what changed
-        let theme_changed = config_theme_changed(&old_config, &new_config);
-        let structure_changed = config_structure_changed(&old_config, &new_config);
-
         // Update detected wallpaper path before theme rebuild so the palette
         // can use it (e.g. when an explicit wallpaper is removed and we need
         // to fall back to auto-detection).
@@ -1070,49 +1194,49 @@ impl ConfigManager {
                 detect_wallpaper(new_config.bar.outputs.first().map(|s| s.as_str()));
         }
 
-        // Update theme/palette if theme config changed
-        if theme_changed {
-            info!("Theme configuration changed, updating styles...");
-
-            // Reuse cached source color unless the wallpaper source changed,
-            // avoiding redundant image I/O + quantization on the main thread.
-            // Rebuilding Theme from source color is cheap (pure math).
-            let material_theme = if new_config.theme.mode == "auto" {
-                let wallpaper_source_changed = old_config.theme.mode != "auto"
-                    || old_config.theme.wallpaper != new_config.theme.wallpaper;
-
-                if wallpaper_source_changed {
-                    let result = new_config
-                        .theme
-                        .wallpaper
-                        .as_deref()
-                        .or(self.wallpaper_path.borrow().as_deref())
-                        .and_then(extract_theme_from_image);
-                    let luminance = result.as_ref().map(|(_, l)| *l);
-                    let theme = result.and_then(|(t, _)| t);
-                    self.cached_source_color
-                        .set(theme.as_ref().map(|t| t.source));
-                    self.cached_luminance.set(luminance);
-                    theme
-                } else {
-                    self.cached_source_color.get().map(theme_from_source_color)
-                }
+        // Regenerate CSS conservatively for every changed config. Reuse cached
+        // wallpaper colors unless the wallpaper source itself changed.
+        let wallpaper_source_changed = old_config.theme.mode != "auto"
+            || old_config.theme.wallpaper != new_config.theme.wallpaper;
+        let material_theme = if new_config.theme.mode == "auto" {
+            if wallpaper_source_changed {
+                let result = new_config
+                    .theme
+                    .wallpaper
+                    .as_deref()
+                    .or(self.wallpaper_path.borrow().as_deref())
+                    .and_then(extract_theme_from_image);
+                let luminance = result.as_ref().map(|(_, l)| *l);
+                let theme = result.and_then(|(t, _)| t);
+                self.cached_source_color
+                    .set(theme.as_ref().map(|t| t.source));
+                self.cached_luminance.set(luminance);
+                theme
             } else {
-                None
-            };
+                self.cached_source_color.get().map(theme_from_source_color)
+            }
+        } else {
+            None
+        };
 
-            self.rebuild_theme_from_material(
-                &new_config,
-                material_theme.as_ref(),
-                self.cached_luminance.get(),
-            );
-
-            debug!("Theme styles updated");
-        }
+        self.rebuild_theme_from_material(
+            &new_config,
+            material_theme.as_ref(),
+            self.cached_luminance.get(),
+        );
+        debug!("Theme styles updated");
 
         // Store the new config AFTER theme/CSS update but BEFORE widget rebuild,
         // so widgets see the new values when notified
         *self.config.borrow_mut() = new_config.clone();
+
+        if changes.audio {
+            AudioService::global().set_allow_overdrive(new_config.audio.allow_overdrive);
+        }
+
+        // Weather enablement also depends on widget placement and clock options.
+        // configure() self-guards when its resolved input is unchanged.
+        self.apply_weather_config();
 
         if old_config.battery_alert_config() != new_config.battery_alert_config() {
             crate::services::battery_alert::BatteryAlertController::global()
@@ -1134,24 +1258,27 @@ impl ConfigManager {
             }
         }
 
-        if structure_changed {
-            // Structural changes require full bar rebuild
-            info!("Structural configuration changed, rebuilding bar...");
-            if !theme_changed {
-                // Reload CSS if we didn't already above
-                bar::load_css(&new_config);
-            }
+        if changes.compositor {
+            warn!(
+                requested = %new_config.advanced.compositor,
+                active = %crate::services::compositor::CompositorManager::global().backend_name(),
+                "advanced.compositor changed; restart vibepanel to switch compositor backend"
+            );
+        }
+
+        if changes.rebuild_bars() {
+            info!("Bar-owned configuration changed, rebuilding bars...");
             if let Some(display) = gtk4::gdk::Display::default() {
                 BarManager::global().reconfigure_all(&display, &new_config);
             }
         }
 
-        if theme_changed {
-            // Notify theme callbacks even during structural rebuild, because
-            // non-bar surfaces (e.g. media pop-out) persist across bar rebuilds
-            // and need to react to theme changes independently.
-            self.theme_callbacks.notify(&());
+        if changes.osd {
+            self.osd_callbacks.notify(&new_config.osd);
         }
+
+        // Persistent non-bar surfaces need to react independently of bar rebuilds.
+        self.theme_callbacks.notify(&());
 
         info!("Configuration applied successfully");
     }
@@ -1318,185 +1445,6 @@ impl Drop for ThemeCallbackGuard {
     fn drop(&mut self) {
         ConfigManager::global().disconnect_theme_callback(self.0);
     }
-}
-
-/// Check if per-widget style overrides have changed (triggers CSS-only reload).
-///
-/// This detects when widget-specific styling options (like `background_color`)
-/// are added, removed, or changed in `[widgets.xxx]` sections.
-fn per_widget_styles_changed(old: &Config, new: &Config) -> bool {
-    old.widgets.widget_configs != new.widgets.widget_configs
-}
-
-/// Check if theme-related config has changed.
-fn config_theme_changed(old: &Config, new: &Config) -> bool {
-    old.theme != new.theme
-        // These live outside [theme] but affect CSS variables / palette
-        || old.bar.background_color != new.bar.background_color
-        || old.bar.background_opacity != new.bar.background_opacity
-        || old.bar.border_radius != new.bar.border_radius
-        || old.bar.padding != new.bar.padding
-        || old.bar.position != new.bar.position
-        || old.bar.size != new.bar.size
-        || old.bar.outline != new.bar.outline
-        || old.widgets.background_color != new.widgets.background_color
-        || old.widgets.background_opacity != new.widgets.background_opacity
-        || old.widgets.popover_background_opacity != new.widgets.popover_background_opacity
-        || old.widgets.border_radius != new.widgets.border_radius
-        || old.widgets.outline != new.widgets.outline
-        || old.advanced.pango_font_rendering != new.advanced.pango_font_rendering
-        // Per-widget style overrides (background_color, etc.)
-        || per_widget_styles_changed(old, new)
-}
-
-/// Check if structural configuration has changed (requires bar rebuild).
-fn config_structure_changed(old: &Config, new: &Config) -> bool {
-    if old.bar.size != new.bar.size {
-        debug!("bar.size changed ({} -> {})", old.bar.size, new.bar.size);
-        return true;
-    }
-
-    if old.bar.screen_margin != new.bar.screen_margin {
-        debug!(
-            "bar.screen_margin changed ({} -> {})",
-            old.bar.screen_margin, new.bar.screen_margin
-        );
-        return true;
-    }
-
-    if old.bar.spacing != new.bar.spacing {
-        debug!(
-            "bar.spacing changed ({} -> {})",
-            old.bar.spacing, new.bar.spacing
-        );
-        return true;
-    }
-
-    if old.bar.inset != new.bar.inset {
-        debug!("bar.inset changed ({} -> {})", old.bar.inset, new.bar.inset);
-        return true;
-    }
-
-    if old.bar.background_opacity != new.bar.background_opacity {
-        debug!(
-            "bar.background_opacity changed ({} -> {})",
-            old.bar.background_opacity, new.bar.background_opacity
-        );
-        return true;
-    }
-
-    if old.bar.padding != new.bar.padding {
-        debug!(
-            "bar.padding changed ({} -> {})",
-            old.bar.padding, new.bar.padding
-        );
-        return true;
-    }
-
-    if old.bar.position != new.bar.position {
-        debug!(
-            "bar.position changed ({} -> {})",
-            old.bar.position, new.bar.position
-        );
-        return true;
-    }
-
-    // Widget list changes
-    let old_widgets = widget_names(old);
-    let new_widgets = widget_names(new);
-    if old_widgets != new_widgets {
-        debug!("Widget configuration changed");
-        debug!("Old widgets: {:?}", old_widgets);
-        debug!("New widgets: {:?}", new_widgets);
-        return true;
-    }
-
-    // Compositor changes
-    if old.advanced.compositor != new.advanced.compositor {
-        debug!(
-            "advanced.compositor changed ({} -> {})",
-            old.advanced.compositor, new.advanced.compositor
-        );
-        return true;
-    }
-
-    false
-}
-
-/// Get a summary of widget names and options for comparison.
-fn widget_names(config: &Config) -> Vec<String> {
-    use vibepanel_core::config::WidgetPlacement;
-
-    let mut names = Vec::new();
-
-    fn format_item(prefix: &str, item: &WidgetPlacement) -> Vec<String> {
-        match item {
-            WidgetPlacement::Single(name) => {
-                vec![format!("{}:{}", prefix, name)]
-            }
-            WidgetPlacement::Group { group } => {
-                vec![format!("{}:group:[{}]", prefix, group.join(", "))]
-            }
-        }
-    }
-
-    for w in &config.widgets.left {
-        names.extend(format_item("left", w));
-    }
-    for w in &config.widgets.center {
-        names.extend(format_item("center", w));
-    }
-    for w in &config.widgets.right {
-        names.extend(format_item("right", w));
-    }
-
-    // Also include per-widget configs for comparison. Keep this stable across
-    // reloads: HashMap iteration order can differ even when config is identical.
-    let mut widget_configs: Vec<_> = config.widgets.widget_configs.iter().collect();
-    widget_configs.sort_by_key(|(name, _)| *name);
-    for (name, opts) in widget_configs {
-        if let Some(fingerprint) = widget_config_fingerprint(name, opts) {
-            names.push(fingerprint);
-        }
-    }
-
-    names
-}
-
-fn widget_config_fingerprint(
-    name: &str,
-    opts: &vibepanel_core::config::WidgetOptions,
-) -> Option<String> {
-    let mut options = opts.options.clone();
-    if name == "battery" {
-        options.remove("alerts");
-        options.remove("low_threshold");
-        options.remove("critical_threshold");
-
-        if !opts.disabled
-            && opts.on_click_right.is_none()
-            && opts.on_click_middle.is_none()
-            && opts.show_if.is_none()
-            && opts.show_if_interval.is_none()
-            && options.is_empty()
-        {
-            return None;
-        }
-    }
-
-    let mut option_items: Vec<_> = options.iter().collect();
-    option_items.sort_by_key(|(name, _)| *name);
-
-    Some(format!(
-        "config:{}:disabled={},click_r={:?},click_m={:?},show_if={:?},show_if_interval={:?},{:?}",
-        name,
-        opts.disabled,
-        opts.on_click_right,
-        opts.on_click_middle,
-        opts.show_if,
-        opts.show_if_interval,
-        option_items
-    ))
 }
 
 #[cfg(test)]
@@ -1812,15 +1760,27 @@ mod tests {
     }
 
     #[test]
-    fn test_config_theme_changed_detects_theme_struct() {
+    fn config_sections_detect_theme_only_change() {
         let old = Config::default();
         let new = Config::default();
-        assert!(!config_theme_changed(&old, &new));
+        assert!(!ConfigSectionChanges::between(&old, &new).any());
 
-        // Any ThemeConfig field change is detected via PartialEq
         let mut new = old.clone();
         new.theme.popover = Some("light".to_string());
-        assert!(config_theme_changed(&old, &new));
+        let changes = ConfigSectionChanges::between(&old, &new);
+        assert!(changes.theme);
+        assert!(!changes.rebuild_bars());
+    }
+
+    #[test]
+    fn config_sections_route_theme_animations_to_bar_rebuild() {
+        let old = Config::default();
+        let mut new = old.clone();
+        new.theme.animations = !old.theme.animations;
+
+        let changes = ConfigSectionChanges::between(&old, &new);
+        assert!(changes.theme);
+        assert!(changes.rebuild_bars());
     }
 
     #[test]
@@ -1849,212 +1809,125 @@ mod tests {
     }
 
     #[test]
-    fn test_config_theme_changed_non_theme_css_fields() {
-        // Fields outside [theme] that still affect CSS
+    fn config_sections_route_output_changes_to_bar_rebuild() {
         let old = Config::default();
-
         let mut new = old.clone();
-        new.bar.background_opacity = 0.5;
-        assert!(config_theme_changed(&old, &new));
+        new.bar.outputs.push("DP-1".to_string());
 
-        let mut new = old.clone();
-        new.widgets.popover_background_opacity = Some(0.9);
-        assert!(config_theme_changed(&old, &new));
-
-        let mut new = old.clone();
-        new.bar.position = "right".to_string();
-        assert!(config_theme_changed(&old, &new));
-
-        let mut new = old.clone();
-        new.bar.padding = old.bar.padding + 1;
-        assert!(config_theme_changed(&old, &new));
+        let changes = ConfigSectionChanges::between(&old, &new);
+        assert!(changes.bar);
+        assert!(changes.rebuild_bars());
     }
 
     #[test]
-    fn test_config_theme_changed_detects_bar_outline_override() {
-        // bar.outline = Option<bool> override; toggling it must trigger a
-        // theme reload so the bar's --bar-outline-width updates live.
+    fn config_sections_route_osd_without_bar_rebuild() {
         let old = Config::default();
-
         let mut new = old.clone();
-        new.bar.outline = Some(true);
-        assert!(config_theme_changed(&old, &new));
+        new.osd.timeout_ms += 1;
 
-        let mut new = old.clone();
-        new.bar.outline = Some(false);
-        assert!(config_theme_changed(&old, &new));
+        let changes = ConfigSectionChanges::between(&old, &new);
+        assert!(changes.osd);
+        assert!(!changes.rebuild_bars());
     }
 
     #[test]
-    fn test_config_theme_changed_detects_bar_padding_tokens() {
-        // bar.padding feeds the cached ThemePalette's internal bar padding tokens.
-        // Without a theme reload, a structural rebuild can resize the layer-shell
-        // window while CSS still applies the old screen-edge padding until restart.
+    fn config_sections_mark_compositor_restart_without_bar_rebuild() {
         let old = Config::default();
-
         let mut new = old.clone();
-        new.bar.padding = old.bar.padding + 1;
-        assert!(config_theme_changed(&old, &new));
+        new.advanced.compositor = "niri".to_string();
+
+        let changes = ConfigSectionChanges::between(&old, &new);
+        assert!(changes.advanced);
+        assert!(changes.compositor);
+        assert!(changes.any());
+        assert!(!changes.rebuild_bars());
     }
 
     #[test]
-    fn test_config_theme_changed_detects_bar_position_padding_side() {
-        // bar.position swaps which CSS token is screen-adjacent vs center-adjacent.
+    fn config_sections_detect_widget_options_without_fingerprints() {
         let old = Config::default();
-
         let mut new = old.clone();
-        new.bar.position = "bottom".to_string();
-        assert!(config_theme_changed(&old, &new));
-    }
-
-    #[test]
-    fn test_config_theme_changed_detects_widgets_outline_override() {
-        let old = Config::default();
-
-        let mut new = old.clone();
-        new.widgets.outline = Some(true);
-        assert!(config_theme_changed(&old, &new));
-
-        let mut new = old.clone();
-        new.widgets.outline = Some(false);
-        assert!(config_theme_changed(&old, &new));
-    }
-
-    #[test]
-    fn test_widget_names() {
-        use vibepanel_core::config::WidgetPlacement;
-
-        let mut config = Config::default();
-        config
-            .widgets
-            .left
-            .push(WidgetPlacement::Single("workspaces".to_string()));
-        config
-            .widgets
-            .right
-            .push(WidgetPlacement::Single("clock".to_string()));
-
-        let names = widget_names(&config);
-        assert!(names.iter().any(|n| n == "left:workspaces"));
-        assert!(names.iter().any(|n| n == "right:clock"));
-    }
-
-    #[test]
-    fn test_widget_names_includes_show_if_fields() {
-        use vibepanel_core::config::{WidgetOptions, WidgetPlacement};
-
-        let mut config = Config::default();
-        config
-            .widgets
-            .right
-            .push(WidgetPlacement::Single("clock".to_string()));
-
-        let names_before = widget_names(&config);
-
-        // Adding show_if should change the fingerprint
-        config.widgets.widget_configs.insert(
+        new.widgets.widget_configs.insert(
             "clock".to_string(),
             WidgetOptions {
                 show_if: Some("true".to_string()),
                 ..Default::default()
             },
         );
-        let names_with_show_if = widget_names(&config);
-        assert_ne!(names_before, names_with_show_if);
 
-        // Changing show_if_interval should also change the fingerprint
-        config
-            .widgets
-            .widget_configs
-            .get_mut("clock")
-            .unwrap()
-            .show_if_interval = Some(30);
-        let names_with_interval = widget_names(&config);
-        assert_ne!(names_with_show_if, names_with_interval);
+        let changes = ConfigSectionChanges::between(&old, &new);
+        assert!(changes.widgets);
+        assert!(changes.rebuild_bars());
     }
 
     #[test]
-    fn test_widget_fingerprint_is_stable_for_equivalent_configs() {
-        let first_nested: toml::value::Table = [
-            ("a".to_string(), toml::Value::Integer(1)),
-            ("b".to_string(), toml::Value::Integer(2)),
-        ]
-        .into_iter()
-        .collect();
-        let second_nested: toml::value::Table = [
-            ("b".to_string(), toml::Value::Integer(2)),
-            ("a".to_string(), toml::Value::Integer(1)),
-        ]
-        .into_iter()
-        .collect();
+    fn bar_visual_fields_refresh_without_bar_rebuild() {
+        let edits: [fn(&mut Config); 4] = [
+            |config| config.bar.background_color = Some("#123456".to_string()),
+            |config| config.bar.border_radius += 1,
+            |config| config.bar.outline = Some(true),
+            |config| config.bar.popover_offset += 1,
+        ];
 
-        let mut first = Config::default();
-        first.widgets.widget_configs.insert(
-            "clock".to_string(),
-            WidgetOptions {
-                options: [
-                    (
-                        "format".to_string(),
-                        toml::Value::String("%H:%M".to_string()),
-                    ),
-                    ("show_icon".to_string(), toml::Value::Boolean(true)),
-                    ("nested".to_string(), toml::Value::Table(first_nested)),
-                ]
-                .into_iter()
-                .collect(),
-                ..Default::default()
-            },
-        );
-        first.widgets.widget_configs.insert(
-            "battery".to_string(),
-            WidgetOptions {
-                options: [("show_icon".to_string(), toml::Value::Boolean(true))]
-                    .into_iter()
-                    .collect(),
-                ..Default::default()
-            },
-        );
+        for edit in edits {
+            let old = Config::default();
+            let mut new = old.clone();
+            edit(&mut new);
 
-        let mut second = Config::default();
-        second.widgets.widget_configs.insert(
-            "battery".to_string(),
-            WidgetOptions {
-                options: [("show_icon".to_string(), toml::Value::Boolean(true))]
-                    .into_iter()
-                    .collect(),
-                ..Default::default()
-            },
-        );
-        second.widgets.widget_configs.insert(
-            "clock".to_string(),
-            WidgetOptions {
-                options: [
-                    ("show_icon".to_string(), toml::Value::Boolean(true)),
-                    (
-                        "format".to_string(),
-                        toml::Value::String("%H:%M".to_string()),
-                    ),
-                    ("nested".to_string(), toml::Value::Table(second_nested)),
-                ]
-                .into_iter()
-                .collect(),
-                ..Default::default()
-            },
-        );
-
-        assert_eq!(widget_names(&first), widget_names(&second));
-        assert!(!config_structure_changed(&first, &second));
+            let changes = ConfigSectionChanges::between(&old, &new);
+            assert!(changes.bar);
+            assert!(changes.any());
+            assert!(!changes.rebuild_bars());
+        }
     }
 
     #[test]
-    fn test_battery_alert_options_do_not_trigger_structural_change() {
-        use vibepanel_core::config::WidgetPlacement;
+    fn widget_visual_fields_refresh_without_bar_rebuild() {
+        let edits: [fn(&mut Config); 4] = [
+            |config| config.widgets.background_color = Some("#123456".to_string()),
+            |config| config.widgets.background_opacity = 0.5,
+            |config| config.widgets.popover_background_opacity = Some(0.5),
+            |config| config.widgets.outline = Some(true),
+        ];
 
+        for edit in edits {
+            let old = Config::default();
+            let mut new = old.clone();
+            edit(&mut new);
+
+            let changes = ConfigSectionChanges::between(&old, &new);
+            assert!(changes.widgets);
+            assert!(changes.any());
+            assert!(!changes.rebuild_bars());
+        }
+    }
+
+    #[test]
+    fn visual_exemptions_do_not_mask_structural_changes() {
+        let old = Config::default();
+
+        let mut bar = old.clone();
+        bar.bar.background_color = Some("#123456".to_string());
+        bar.bar.background_opacity = 0.5;
+        assert!(ConfigSectionChanges::between(&old, &bar).rebuild_bars());
+
+        let mut widgets = old.clone();
+        widgets.widgets.background_color = Some("#123456".to_string());
+        widgets.widgets.border_radius += 1;
+        assert!(ConfigSectionChanges::between(&old, &widgets).rebuild_bars());
+
+        let mut advanced = old.clone();
+        advanced.advanced.compositor = "niri".to_string();
+        advanced.advanced.pango_font_rendering = true;
+        assert!(ConfigSectionChanges::between(&old, &advanced).rebuild_bars());
+    }
+
+    #[test]
+    fn battery_alert_policy_refreshes_without_bar_rebuild() {
         let mut old = Config::default();
         old.widgets
             .right
             .push(WidgetPlacement::Single("battery".to_string()));
-
         let mut new = old.clone();
         new.widgets.widget_configs.insert(
             "battery".to_string(),
@@ -2070,61 +1943,17 @@ mod tests {
             },
         );
 
-        assert!(!config_structure_changed(&old, &new));
-    }
+        let changes = ConfigSectionChanges::between(&old, &new);
+        assert!(changes.widgets);
+        assert!(changes.any());
+        assert!(!changes.rebuild_bars());
 
-    #[test]
-    fn test_battery_alert_options_do_not_trigger_structural_change_with_other_options() {
-        use vibepanel_core::config::WidgetPlacement;
-
-        let mut old = Config::default();
-        old.widgets
-            .right
-            .push(WidgetPlacement::Single("battery".to_string()));
-        old.widgets.widget_configs.insert(
-            "battery".to_string(),
-            WidgetOptions {
-                options: [
-                    ("show_icon".to_string(), toml::Value::Boolean(true)),
-                    ("low_threshold".to_string(), toml::Value::Integer(20)),
-                ]
-                .into_iter()
-                .collect(),
-                ..Default::default()
-            },
-        );
-
-        let mut new = old.clone();
         new.widgets
             .widget_configs
             .get_mut("battery")
             .unwrap()
             .options
-            .insert("low_threshold".to_string(), toml::Value::Integer(30));
-
-        assert!(!config_structure_changed(&old, &new));
-    }
-
-    #[test]
-    fn test_battery_non_alert_options_still_trigger_structural_change() {
-        use vibepanel_core::config::WidgetPlacement;
-
-        let mut old = Config::default();
-        old.widgets
-            .right
-            .push(WidgetPlacement::Single("battery".to_string()));
-
-        let mut new = old.clone();
-        new.widgets.widget_configs.insert(
-            "battery".to_string(),
-            WidgetOptions {
-                options: [("show_icon".to_string(), toml::Value::Boolean(false))]
-                    .into_iter()
-                    .collect(),
-                ..Default::default()
-            },
-        );
-
-        assert!(config_structure_changed(&old, &new));
+            .insert("show_icon".to_string(), toml::Value::Boolean(false));
+        assert!(ConfigSectionChanges::between(&old, &new).rebuild_bars());
     }
 }

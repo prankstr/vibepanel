@@ -725,8 +725,8 @@ pub fn create_bar_window(
     // Hot-reload: re-apply or remove bar blur when the theme config changes
     // (e.g. user toggles `theme.blur` or changes `bar.border_radius`).
     //
-    // Note: `background_opacity` changes trigger a structural rebuild
-    // (config_structure_changed), so this callback only needs to handle
+    // Note: `background_opacity` changes rebuild the bar through section-level
+    // config routing, so this callback only needs to handle
     // toggling blur on/off within the current mode (opaque or island).
     {
         let win_weak = window.downgrade();

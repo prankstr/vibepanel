@@ -118,7 +118,7 @@ pub struct ConfigLoadResult {
 }
 
 /// Root configuration structure.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 #[derive(Default)]
 pub struct Config {
@@ -796,7 +796,7 @@ impl BarPosition {
 }
 
 /// Bar-level configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct BarConfig {
     /// Bar position on screen: "top", "bottom", "left", or "right".
@@ -907,7 +907,7 @@ impl BarConfig {
 /// [widgets.battery]
 /// disabled = true
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WidgetsConfig {
     /// Widgets in the left section.
@@ -1270,7 +1270,7 @@ impl Config {
 ///   { group = ["battery", "volume"] },    # grouped widgets sharing one island
 /// ]
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum WidgetPlacement {
     /// A group of widgets sharing one island.
@@ -1647,7 +1647,7 @@ impl Default for ThemeTypography {
 }
 
 /// On-screen display configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct OsdConfig {
     /// Whether OSD is enabled.
@@ -1675,7 +1675,7 @@ impl Default for OsdConfig {
 }
 
 /// Audio configuration.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AudioConfig {
     /// Allow output and microphone volume above 100%, capped at PulseAudio's recommended UI maximum.
@@ -1702,7 +1702,7 @@ pub enum WeatherWindUnits {
 }
 
 /// Shared weather data configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct WeatherConfig {
     /// Resolve location automatically when no explicit location is configured.
@@ -1749,7 +1749,7 @@ impl Default for WeatherConfig {
 ///
 /// These settings are for power users and workarounds for specific
 /// environments. Most users should not need to change these.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AdvancedConfig {
     /// Compositor to connect to: "auto", "mango", "hyprland", "niri", "sway".

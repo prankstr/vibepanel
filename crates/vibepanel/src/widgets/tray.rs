@@ -611,7 +611,7 @@ fn argb_to_rgba(data: &glib::Bytes, width: i32, height: i32) -> Option<Vec<u8>> 
         .checked_mul(4)?;
     let mut result = data.as_ref().get(..byte_count)?.to_vec();
 
-    for pixel in result.chunks_exact_mut(4) {
+    for pixel in result.as_chunks_mut::<4>().0 {
         pixel.rotate_left(1);
     }
 
@@ -640,7 +640,7 @@ fn analyze_visible_pixels(pixels: &[u8]) -> Option<IconAnalysis> {
     // and rare bright outliers should not collapse the correction.
     const ALPHA_THRESHOLD: u8 = 128;
 
-    for pixel in pixels.chunks_exact(4) {
+    for pixel in pixels.as_chunks::<4>().0 {
         let [r, g, b, a] = [pixel[0], pixel[1], pixel[2], pixel[3]];
         if a < ALPHA_THRESHOLD {
             continue;
@@ -680,7 +680,7 @@ fn adjust_grayscale_icon(rgba_data: &mut [u8], target: [u8; 3], source_anchor: u
     // All-black icons have no brightness structure to scale.
     let scale = (source_anchor != 0).then(|| target.map(|c| c as f32 / source_anchor as f32));
 
-    for pixel in rgba_data.chunks_exact_mut(4) {
+    for pixel in rgba_data.as_chunks_mut::<4>().0 {
         let [r, g, b, a] = [pixel[0], pixel[1], pixel[2], pixel[3]];
 
         // Include low-alpha antialiased edges excluded from peak analysis.
@@ -1252,8 +1252,10 @@ mod tests {
 
         assert!(
             pixels
-                .chunks_exact(4)
-                .all(|pixel| pixel == [235, 235, 235, 255])
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|pixel| pixel == &[235, 235, 235, 255])
         );
     }
 

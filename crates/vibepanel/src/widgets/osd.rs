@@ -577,6 +577,9 @@ mod tests;
 
 impl Drop for OsdOverlay {
     fn drop(&mut self) {
+        if let Some(source) = self.hide_source.borrow_mut().take() {
+            source.remove();
+        }
         if let Some(id) = self.brightness_callback_id.take() {
             BrightnessService::global().disconnect(id);
         }
@@ -585,5 +588,6 @@ impl Drop for OsdOverlay {
         }
         // ThemeCallbackGuard handles disconnect_theme_callback on drop.
         drop(self.theme_callback_guard.borrow_mut().take());
+        self.window.destroy();
     }
 }
