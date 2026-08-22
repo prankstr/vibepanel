@@ -23,6 +23,7 @@
 //! - **sleep_watcher**: Shared resume-from-sleep notifications via logind
 //! - **weather**: Open-Meteo-backed weather and forecast data
 
+pub mod activation;
 pub mod audio;
 pub mod background_effect;
 pub mod bar_manager;
