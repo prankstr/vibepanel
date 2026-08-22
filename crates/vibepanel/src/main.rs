@@ -88,7 +88,7 @@ enum Command {
         #[command(subcommand)]
         action: VolumeAction,
     },
-    /// Control idle/sleep inhibitor
+    /// Control idle inhibitor
     Inhibit {
         #[command(subcommand)]
         action: InhibitAction,
@@ -184,7 +184,7 @@ enum MediaAction {
 
 #[derive(Subcommand, Debug)]
 enum InhibitAction {
-    /// Toggle idle/sleep inhibitor on the running panel
+    /// Toggle idle inhibitor on the running panel
     Toggle,
 }
 

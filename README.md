@@ -52,7 +52,7 @@ https://github.com/user-attachments/assets/fba27921-0886-4e7b-850d-b51341583693
   - **Bluetooth** - Manage and pair devices
   - **Wi-Fi** - Connect to and manage networks
   - **VPN** - Connect to NetworkManager-managed VPN connections
-  - **Idle Inhibitor** - Toggle idle inhibitor to prevent sleep
+  - **Idle Inhibitor** - Pause automatic idle actions
 - **Workspaces** - clickable indicators with tooltips
 - **Window title** - active window with app icon
 - **Keyboard layout** - layout indicator with click to cycle
