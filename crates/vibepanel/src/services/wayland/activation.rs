@@ -18,23 +18,23 @@
 //! way `background_effect.rs` does.
 
 use std::cell::RefCell;
-use std::os::fd::{AsFd, AsRawFd};
 use std::rc::Rc;
 
-use gtk4::glib;
-use gtk4::prelude::Cast;
+use gtk4::prelude::{Cast, SurfaceExt};
 use tracing::{debug, warn};
+use wayland_client::backend::ObjectId;
 use wayland_client::protocol::wl_keyboard::{self, WlKeyboard};
 use wayland_client::protocol::wl_pointer::{self, WlPointer};
 use wayland_client::protocol::wl_registry;
 use wayland_client::protocol::wl_seat::{self, Capability as SeatCapability, WlSeat};
-use wayland_client::protocol::wl_surface::WlSurface;
 use wayland_client::protocol::wl_touch::{self, WlTouch};
 use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum};
 use wayland_protocols::xdg::activation::v1::client::{
     xdg_activation_token_v1::{self, XdgActivationTokenV1},
     xdg_activation_v1::XdgActivationV1,
 };
+
+use super::{SurfaceInfo, connection_from_gdk_display, install_event_dispatch};
 
 /// Internal wayland-client dispatch state.
 struct ActivationState {
@@ -44,11 +44,11 @@ struct ActivationState {
     pointer: Option<WlPointer>,
     keyboard: Option<WlKeyboard>,
     touch: Option<WlTouch>,
-    /// Surface currently under the pointer / holding keyboard focus (ours only).
-    pointer_surface: Option<WlSurface>,
-    keyboard_surface: Option<WlSurface>,
-    /// Serial + surface of the most recent input event that carried a serial.
-    last_input: Option<(u32, WlSurface)>,
+    /// Identity of the surface under the pointer / holding keyboard focus.
+    pointer_surface: Option<ObjectId>,
+    keyboard_surface: Option<ObjectId>,
+    /// Serial + surface identity of the most recent actionable input event.
+    last_input: Option<(u32, ObjectId)>,
     /// Token string delivered by the compositor for an in-flight request.
     pending_token: Option<String>,
 }
@@ -68,21 +68,32 @@ impl ActivationState {
         }
     }
 
-    fn record_input(&mut self, serial: u32, surface: Option<&WlSurface>) {
-        if let Some(surface) = surface {
-            self.last_input = Some((serial, surface.clone()));
+    fn record_input(&mut self, serial: u32, surface_id: Option<ObjectId>) {
+        if let Some(surface_id) = surface_id {
+            self.last_input = Some((serial, surface_id));
         }
     }
 
-    fn forget_surface(&mut self, surface: &WlSurface) {
+    fn forget_surface(&mut self, surface_id: &ObjectId) {
         if self
             .last_input
             .as_ref()
-            .is_some_and(|(_, remembered)| remembered == surface)
+            .is_some_and(|(_, remembered)| remembered == surface_id)
         {
             self.last_input = None;
         }
     }
+}
+
+// GDK-owned foreign proxies do not provide reliable wayland-client liveness
+// tracking. Keep only their ObjectId in state, then resolve a fresh proxy from
+// a live GDK toplevel immediately before issuing the activation request.
+fn live_surface(surface_id: &ObjectId) -> Option<SurfaceInfo> {
+    gtk4::Window::list_toplevels()
+        .into_iter()
+        .filter_map(|widget| SurfaceInfo::from_widget(&widget))
+        .filter(|surface| !surface.wayland_surface.is_destroyed())
+        .find(|surface| surface.surface_id.eq(surface_id))
 }
 
 impl Dispatch<wl_registry::WlRegistry, ()> for ActivationState {
@@ -161,8 +172,8 @@ impl Dispatch<WlSeat, ()> for ActivationState {
                 }
             } else if let Some(pointer) = state.pointer.take() {
                 pointer.release();
-                if let Some(surface) = state.pointer_surface.take() {
-                    state.forget_surface(&surface);
+                if let Some(surface_id) = state.pointer_surface.take() {
+                    state.forget_surface(&surface_id);
                 }
             }
             if caps.contains(SeatCapability::Keyboard) {
@@ -171,8 +182,8 @@ impl Dispatch<WlSeat, ()> for ActivationState {
                 }
             } else if let Some(keyboard) = state.keyboard.take() {
                 keyboard.release();
-                if let Some(surface) = state.keyboard_surface.take() {
-                    state.forget_surface(&surface);
+                if let Some(surface_id) = state.keyboard_surface.take() {
+                    state.forget_surface(&surface_id);
                 }
             }
             if caps.contains(SeatCapability::Touch) {
@@ -197,15 +208,14 @@ impl Dispatch<WlPointer, ()> for ActivationState {
     ) {
         match event {
             wl_pointer::Event::Enter { surface, .. } => {
-                state.pointer_surface = Some(surface);
+                state.pointer_surface = Some(surface.id());
             }
             wl_pointer::Event::Leave { surface, .. } => {
-                state.forget_surface(&surface);
+                state.forget_surface(&surface.id());
                 state.pointer_surface = None;
             }
             wl_pointer::Event::Button { serial, .. } => {
-                let surface = state.pointer_surface.clone();
-                state.record_input(serial, surface.as_ref());
+                state.record_input(serial, state.pointer_surface.clone());
             }
             _ => {}
         }
@@ -223,15 +233,14 @@ impl Dispatch<WlKeyboard, ()> for ActivationState {
     ) {
         match event {
             wl_keyboard::Event::Enter { surface, .. } => {
-                state.keyboard_surface = Some(surface);
+                state.keyboard_surface = Some(surface.id());
             }
             wl_keyboard::Event::Leave { surface, .. } => {
-                state.forget_surface(&surface);
+                state.forget_surface(&surface.id());
                 state.keyboard_surface = None;
             }
             wl_keyboard::Event::Key { serial, .. } => {
-                let surface = state.keyboard_surface.clone();
-                state.record_input(serial, surface.as_ref());
+                state.record_input(serial, state.keyboard_surface.clone());
             }
             _ => {}
         }
@@ -251,7 +260,7 @@ impl Dispatch<WlTouch, ()> for ActivationState {
             serial, surface, ..
         } = event
         {
-            state.record_input(serial, Some(&surface));
+            state.record_input(serial, Some(surface.id()));
         }
     }
 }
@@ -264,15 +273,17 @@ thread_local! {
 
 /// Creates xdg-activation tokens bound to the last input event on our surfaces.
 pub struct ActivationService {
-    state: RefCell<ActivationState>,
-    event_queue: RefCell<EventQueue<ActivationState>>,
+    state: Rc<RefCell<ActivationState>>,
+    event_queue: Rc<RefCell<EventQueue<ActivationState>>>,
     qh: QueueHandle<ActivationState>,
 }
 
 impl ActivationService {
     /// Initialize the global singleton.
     ///
-    /// Must be called on the main thread after the GDK display exists. If the
+    /// Must be called on the main thread after the GDK display exists.
+    /// Initializing before notification UI is shown ensures the private seat
+    /// binding observes the relevant surface focus and input events. If the
     /// compositor lacks `xdg_activation_v1` the singleton stays `None`.
     pub fn init_global() {
         INSTANCE.with(|cell| {
@@ -300,11 +311,7 @@ impl ActivationService {
             return None;
         }
 
-        // Reuse GDK's connection; see BackgroundEffectManager for why a
-        // separate Backend must not be created.
-        let wl_display = wayland_display.wl_display()?;
-        let backend = wl_display.backend().upgrade()?;
-        let connection = Connection::from_backend(backend);
+        let connection = connection_from_gdk_display(&wayland_display)?;
 
         let mut event_queue: EventQueue<ActivationState> = connection.new_event_queue();
         let qh = event_queue.handle();
@@ -330,64 +337,23 @@ impl ActivationService {
         debug!("Activation token service initialized");
 
         let svc = Self {
-            state: RefCell::new(state),
-            event_queue: RefCell::new(event_queue),
+            state: Rc::new(RefCell::new(state)),
+            event_queue: Rc::new(RefCell::new(event_queue)),
             qh,
         };
-        svc.install_event_dispatch();
+        install_event_dispatch(&svc.event_queue, &svc.state, "Activation");
         Some(svc)
-    }
-
-    /// Install a glib fd watcher to dispatch wayland events for our queue.
-    ///
-    /// Input events mirrored to our seat binding land in this queue whenever
-    /// the socket is read; draining them keeps the serial fresh and the buffer
-    /// bounded.
-    fn install_event_dispatch(&self) {
-        let raw_fd = self.event_queue.borrow().as_fd().as_raw_fd();
-
-        glib::unix_fd_add_local(raw_fd, glib::IOCondition::IN, move |_fd, _cond| {
-            INSTANCE.with(|cell| {
-                let borrow = cell.borrow();
-                let Some(svc) = borrow.as_ref() else {
-                    return glib::ControlFlow::Break;
-                };
-
-                let mut eq = svc.event_queue.borrow_mut();
-                let mut st = svc.state.borrow_mut();
-
-                if let Err(e) = eq.dispatch_pending(&mut *st) {
-                    warn!("Activation event dispatch error: {e}");
-                    return glib::ControlFlow::Continue;
-                }
-
-                if let Some(guard) = eq.prepare_read() {
-                    match guard.read() {
-                        Ok(_) => {
-                            let _ = eq.dispatch_pending(&mut *st);
-                        }
-                        Err(wayland_client::backend::WaylandError::Io(io_err))
-                            if io_err.kind() == std::io::ErrorKind::WouldBlock => {}
-                        Err(e) => {
-                            warn!("Activation wayland read error: {e}");
-                        }
-                    }
-                }
-
-                let _ = eq.flush();
-                glib::ControlFlow::Continue
-            })
-        });
     }
 
     /// Create an activation token tied to the most recent actionable input
     /// event on one of our surfaces (the notification click that got us here).
     ///
-    /// Returns `None` if no input has been observed yet or the compositor
-    /// never answers.
+    /// Returns `None` if no input has been observed or the compositor completes
+    /// the request without providing a token.
     ///
-    /// This must be called synchronously from a handler for real user input.
-    /// GDK owns the recorded surfaces, so their liveness cannot be validated.
+    /// This must be called synchronously from a handler for real user input. It
+    /// performs a Wayland roundtrip without a timeout and may block the GTK
+    /// thread if the compositor stops responding.
     pub fn create_token(&self) -> Option<String> {
         let mut eq = self.event_queue.borrow_mut();
         let mut state = self.state.borrow_mut();
@@ -399,24 +365,17 @@ impl ActivationService {
 
         let activation = state.activation.clone()?;
         let seat = state.seat.clone()?;
-        let (serial, surface) = state.last_input.take()?;
+        let (serial, surface_id) = state.last_input.take()?;
+        let surface = live_surface(&surface_id)?;
 
         state.pending_token = None;
         let token = activation.get_activation_token(&self.qh, ());
         token.set_serial(serial, &seat);
-        token.set_surface(&surface);
+        token.set_surface(&surface.wl_surface);
         token.commit();
 
-        // One roundtrip normally suffices; the compositor sends `done` while
-        // processing the commit. Cap at 2 to stay bounded.
-        for _ in 0..2 {
-            if let Err(e) = eq.roundtrip(&mut *state) {
-                warn!("Activation token roundtrip failed: {e}");
-                break;
-            }
-            if state.pending_token.is_some() {
-                break;
-            }
+        if let Err(e) = eq.roundtrip(&mut *state) {
+            warn!("Activation token roundtrip failed: {e}");
         }
         token.destroy();
 

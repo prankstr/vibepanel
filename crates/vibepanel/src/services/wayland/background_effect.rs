@@ -83,7 +83,6 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::os::fd::{AsFd, AsRawFd};
 use std::rc::Rc;
 
 use gdk4_wayland::prelude::*;
@@ -97,6 +96,8 @@ use wayland_protocols::ext::background_effect::v1::client::{
     ext_background_effect_manager_v1::{self, Capability, ExtBackgroundEffectManagerV1},
     ext_background_effect_surface_v1::{self, ExtBackgroundEffectSurfaceV1},
 };
+
+use super::{SurfaceInfo, connection_from_gdk_display, install_event_dispatch};
 
 const BLUR_SURFACE_RESIZE_WATCHED_KEY: &str = "vibepanel-blur-surface-watched";
 const BLUR_SURFACE_ACTIVE_KEY: &str = "vibepanel-blur-surface-active";
@@ -413,37 +414,7 @@ fn add_rounded_rect_to_region_with_outline(
 
 // ── Surface info helper ─────────────────────────────────────────────────────
 
-/// Resolved Wayland surface info for a GTK widget.
-///
-/// Extracts the `wl_surface`, GDK `WaylandSurface`, and a stable `ObjectId`
-/// for use as a cache key.  Avoids duplicating the same 15-line lookup
-/// boilerplate across every method that needs to interact with a surface.
-struct SurfaceInfo {
-    wl_surface: wayland_client::protocol::wl_surface::WlSurface,
-    wayland_surface: gdk4_wayland::WaylandSurface,
-    surface_id: wayland_client::backend::ObjectId,
-}
-
 impl SurfaceInfo {
-    /// Resolve surface info from any widget that has a native surface.
-    fn from_widget(widget: &impl gtk4::prelude::IsA<gtk4::Widget>) -> Option<Self> {
-        let native = widget.as_ref().native()?;
-        let gdk_surface = native.surface()?;
-        let wayland_surface = gdk_surface
-            .downcast::<gdk4_wayland::WaylandSurface>()
-            .ok()?;
-        let wl_surface = wayland_surface.wl_surface()?;
-        let surface_id =
-            <wayland_client::protocol::wl_surface::WlSurface as wayland_client::Proxy>::id(
-                &wl_surface,
-            );
-        Some(Self {
-            wl_surface,
-            wayland_surface,
-            surface_id,
-        })
-    }
-
     /// Surface width in logical pixels.
     fn width(&self) -> i32 {
         self.wayland_surface.width()
@@ -463,8 +434,8 @@ thread_local! {
 
 /// Manages `ext-background-effect-v1` blur region hints for all vibepanel surfaces.
 pub struct BackgroundEffectManager {
-    state: RefCell<BlurState>,
-    event_queue: RefCell<EventQueue<BlurState>>,
+    state: Rc<RefCell<BlurState>>,
+    event_queue: Rc<RefCell<EventQueue<BlurState>>>,
     qh: QueueHandle<BlurState>,
 }
 
@@ -490,30 +461,6 @@ impl BackgroundEffectManager {
         INSTANCE.with(|cell| cell.borrow().clone())
     }
 
-    /// Get the `wayland_client::Connection` that GDK uses internally.
-    ///
-    /// `gdk4_wayland::WaylandDisplay::connection()` is `pub(crate)` so we can't call
-    /// it directly. Instead we call `wl_display()` which internally creates and
-    /// caches the Connection in GObject qdata, then extract the Backend from the
-    /// returned proxy to reconstruct the *same* Connection.
-    ///
-    /// This is critical: creating a second `Backend::from_foreign_display()` would
-    /// allocate a separate libwayland event queue, and roundtrips on it can consume
-    /// events from the shared fd that GDK expects to read, causing missed
-    /// layer-shell configure events (bar appears in middle of screen).
-    fn connection_from_gdk_display(
-        wayland_display: &gdk4_wayland::WaylandDisplay,
-    ) -> Option<Connection> {
-        use wayland_client::Proxy;
-
-        // wl_display() internally calls the private connection() which creates
-        // and caches the Connection. The returned WlDisplay proxy holds a
-        // WeakBackend reference to that same Connection's backend.
-        let wl_display = wayland_display.wl_display()?;
-        let backend = wl_display.backend().upgrade()?;
-        Some(Connection::from_backend(backend))
-    }
-
     /// Attempt to initialize.
     fn try_init() -> Option<Self> {
         // Check we're on a Wayland display.
@@ -533,7 +480,7 @@ impl BackgroundEffectManager {
         debug!("ext_background_effect_manager_v1 found in registry, initializing blur service");
 
         // Build a wayland-client Connection from GDK's foreign wl_display.
-        let connection = Self::connection_from_gdk_display(&wayland_display)?;
+        let connection = connection_from_gdk_display(&wayland_display)?;
 
         // Create our own event queue on GDK's connection.
         let mut event_queue: EventQueue<BlurState> = connection.new_event_queue();
@@ -578,58 +525,15 @@ impl BackgroundEffectManager {
         );
 
         let mgr = Self {
-            state: RefCell::new(state),
-            event_queue: RefCell::new(event_queue),
+            state: Rc::new(RefCell::new(state)),
+            event_queue: Rc::new(RefCell::new(event_queue)),
             qh,
         };
 
         // Install fd watcher to dispatch incoming protocol events.
-        mgr.install_event_dispatch();
+        install_event_dispatch(&mgr.event_queue, &mgr.state, "Blur");
 
         Some(mgr)
-    }
-
-    /// Install a glib fd watcher to dispatch wayland events for our queue.
-    fn install_event_dispatch(&self) {
-        // We need a raw fd for glib::unix_fd_add_local.
-        // The fd is borrowed from the event queue which lives as long as Self (thread-local singleton).
-        let eq_ref = self.event_queue.borrow().as_fd().as_raw_fd();
-
-        // Use the global accessor from inside the callback to avoid lifetime issues.
-        glib::unix_fd_add_local(eq_ref, glib::IOCondition::IN, move |_fd, _cond| {
-            INSTANCE.with(|cell| {
-                let borrow = cell.borrow();
-                let Some(mgr) = borrow.as_ref() else {
-                    return glib::ControlFlow::Break;
-                };
-
-                let mut eq = mgr.event_queue.borrow_mut();
-                let mut st = mgr.state.borrow_mut();
-
-                if let Err(e) = eq.dispatch_pending(&mut *st) {
-                    warn!("Blur event dispatch error: {e}");
-                    // Continue: blur is cosmetic, protocol failures must not
-                    // destabilise the panel.
-                    return glib::ControlFlow::Continue;
-                }
-
-                if let Some(guard) = eq.prepare_read() {
-                    match guard.read() {
-                        Ok(_) => {
-                            let _ = eq.dispatch_pending(&mut *st);
-                        }
-                        Err(wayland_client::backend::WaylandError::Io(io_err))
-                            if io_err.kind() == std::io::ErrorKind::WouldBlock => {}
-                        Err(e) => {
-                            warn!("Blur wayland read error: {e}");
-                        }
-                    }
-                }
-
-                let _ = eq.flush();
-                glib::ControlFlow::Continue
-            })
-        });
     }
 
     /// Get or create the per-surface effect object and return it alongside
@@ -832,15 +736,17 @@ impl BackgroundEffectManager {
     /// `SurfaceInfo::from_widget()` can resolve the `wl_surface`.  If
     /// called from a late `Drop` after the surface is already unmapped or
     /// destroyed, this silently no-ops and the stale `effects` HashMap
-    /// entry persists.  This is intentional and benign: primary cleanup
-    /// always happens from mapped-surface paths (`connect_destroy`,
+    /// entry persists. Primary cleanup always happens from mapped-surface
+    /// paths (`connect_destroy`,
     /// `connect_closed`, fade-start removal, or `connect_map` stale
     /// cleanup on next show), so the `Drop` safety nets in consumers are
     /// defence-in-depth only.  Stale entries are small and bounded by the
     /// number of surfaces torn down without prior cleanup (typically zero
-    /// during normal operation).  `ObjectId` equality is instance-based, not
-    /// wire-integer based, so stale entries never alias new surfaces even if
-    /// wire IDs are reused.
+    /// during normal operation). For GDK-owned foreign proxies, `ObjectId`
+    /// equality compares the proxy address, wire ID, and interface. A stale
+    /// entry could therefore alias a new surface if both its address and wire
+    /// ID were reused, but the primary cleanup paths make that exceptionally
+    /// unlikely.
     pub fn remove_blur_region(&self, window: &impl gtk4::prelude::IsA<gtk4::Widget>) {
         let Some(info) = SurfaceInfo::from_widget(window) else {
             return;
