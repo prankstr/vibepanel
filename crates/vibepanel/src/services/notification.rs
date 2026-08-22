@@ -57,6 +57,10 @@ const NOTIFICATIONS_XML: &str = r#"
       <arg name="id" type="u"/>
       <arg name="action_key" type="s"/>
     </signal>
+    <signal name="ActivationToken">
+      <arg name="id" type="u"/>
+      <arg name="activation_token" type="s"/>
+    </signal>
   </interface>
   <interface name="io.github.vibepanel.Notifications1">
     <method name="GetUnreadCount">
@@ -249,6 +253,9 @@ impl NotificationService {
             ready: Cell::new(false),
         });
 
+        // Initialize the xdg-activation token service used by the
+        // notifications ActivationToken D-Bus signal.
+        super::activation::ActivationService::init_global();
         Self::init_dbus(&service);
         service
     }
@@ -463,6 +470,10 @@ impl NotificationService {
         );
         if !self.notifications.borrow().contains_key(&id) {
             return;
+        }
+
+        if let Some(token) = Self::create_activation_token() {
+            self.emit_activation_token(id, &token);
         }
 
         self.emit_action_invoked(id, action_key);
@@ -880,7 +891,7 @@ impl NotificationService {
                 "vibepanel", // name
                 "vibepanel", // vendor
                 "1.0",       // version
-                "1.2",       // spec version
+                "1.2",       // Desktop Notifications spec version
             )
                 .to_variant(),
         ));
@@ -943,6 +954,26 @@ impl NotificationService {
                 "NotificationService: failed to emit NotificationClosed: {}",
                 e
             );
+        }
+    }
+
+    fn create_activation_token() -> Option<String> {
+        super::activation::ActivationService::global()?.create_token()
+    }
+
+    fn emit_activation_token(&self, id: u32, token: &str) {
+        let Some(ref bus) = *self.bus.borrow() else {
+            return;
+        };
+
+        if let Err(e) = bus.emit_signal(
+            None::<&str>,
+            NOTIFICATIONS_PATH,
+            NOTIFICATIONS_NAME,
+            "ActivationToken",
+            Some(&(id, token).to_variant()),
+        ) {
+            error!("NotificationService: failed to emit ActivationToken: {}", e);
         }
     }
 
@@ -1120,6 +1151,13 @@ mod tests {
             .lookup_interface(VIBEPANEL_NOTIFICATIONS_INTERFACE)
             .unwrap();
         assert!(interface.lookup_method(UNREAD_METHOD).is_some());
+    }
+
+    #[test]
+    fn activation_token_signal_is_exposed() {
+        let node_info = gio::DBusNodeInfo::for_xml(NOTIFICATIONS_XML).unwrap();
+        let interface = node_info.lookup_interface(NOTIFICATIONS_NAME).unwrap();
+        assert!(interface.lookup_signal("ActivationToken").is_some());
     }
 
     /// Mirror of the post-insert tail in handle_notify, which we can't call

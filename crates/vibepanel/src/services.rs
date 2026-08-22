@@ -23,8 +23,10 @@
 //! - **sleep_watcher**: Shared resume-from-sleep notifications via logind
 //! - **weather**: Open-Meteo-backed weather and forecast data
 
+mod wayland;
+pub use wayland::{activation, background_effect};
+
 pub mod audio;
-pub mod background_effect;
 pub mod bar_manager;
 pub mod battery;
 pub mod battery_alert;
