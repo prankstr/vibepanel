@@ -1,15 +1,15 @@
-//! IdleInhibitorService - Prevents system idle/sleep using systemd-logind.
+//! IdleInhibitorService - Prevents system idle using systemd-logind.
 //!
 //! This service uses the `org.freedesktop.login1.Manager.Inhibit` D-Bus API
 //! on the system bus to acquire an fd-based inhibit lock. Holding the fd
-//! prevents idle and sleep; dropping it releases the lock. This is the same
-//! mechanism used by systemd-inhibit(1) and is supported by all systemd-based
-//! systems regardless of which idle daemon is running (hypridle, swayidle, etc.).
+//! prevents automatic idle actions; dropping it releases the lock. This is the
+//! same mechanism used by systemd-inhibit(1) and idle managers that honor
+//! systemd idle inhibitors.
 //!
 //! ## Usage
 //!
 //! The service is a singleton that can be toggled on/off. When active,
-//! it prevents the system from going idle or suspending.
+//! it prevents automatic idle actions without blocking explicit suspend.
 
 use std::cell::RefCell;
 use std::os::unix::io::OwnedFd;
@@ -34,8 +34,8 @@ pub struct IdleInhibitorSnapshot {
 /// Shared, process-wide idle inhibitor service.
 ///
 /// Uses `org.freedesktop.login1.Manager.Inhibit` on the system bus to acquire
-/// an fd-based inhibit lock. The lock prevents idle and sleep while the fd is
-/// open. Dropping the fd releases the lock — the kernel guarantees cleanup
+/// an fd-based inhibit lock. The lock prevents automatic idle actions while the
+/// fd is open. Dropping the fd releases the lock — the kernel guarantees cleanup
 /// even on SIGKILL.
 pub struct IdleInhibitorService {
     /// Current snapshot of inhibitor state.
@@ -155,7 +155,7 @@ impl IdleInhibitorService {
 
         // Call org.freedesktop.login1.Manager.Inhibit(what, who, why, mode)
         let args = (
-            "idle:sleep",                     // what
+            "idle",                           // what
             "vibepanel",                      // who
             "User requested idle inhibition", // why
             "block",                          // mode

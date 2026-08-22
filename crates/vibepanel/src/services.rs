@@ -15,7 +15,7 @@
 //! - **window_title**: Focused window title monitoring
 //! - **tray**: StatusNotifierItem host for system tray icons
 //! - **vpn**: VPN connection management via NetworkManager
-//! - **idle_inhibitor**: System idle/sleep prevention
+//! - **idle_inhibitor**: System idle prevention
 //! - **state**: Persistent state storage (DND, VPN last used, notification history)
 //! - **system**: CPU, memory, and system resource monitoring
 //! - **gpu**: GPU utilization and VRAM monitoring (AMD sysfs, NVIDIA NVML)
