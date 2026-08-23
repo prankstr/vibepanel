@@ -6,7 +6,10 @@
 
 use gtk4::glib::{self, SourceId};
 use gtk4::prelude::*;
-use gtk4::{Align, Application, Box as GtkBox, Button, Image, Label, Orientation, Window, gdk};
+use gtk4::{
+    Align, Application, Box as GtkBox, Button, EventControllerMotion, Image, Label, Orientation,
+    Window, gdk,
+};
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -28,9 +31,18 @@ use crate::styles::{button, color, notification as notif};
 
 use super::notifications_common::{
     POPOVER_WIDTH, SURFACE_SHADOW_MARGIN, TOAST_EDGE_MARGIN, TOAST_ESTIMATED_HEIGHT, TOAST_GAP,
-    TOAST_SIDE_MARGIN, TOAST_TIMEOUT_CRITICAL_MS, TOAST_TIMEOUT_MS,
-    create_notification_image_widget, sanitize_body_markup,
+    TOAST_SIDE_MARGIN, TOAST_TIMEOUT_CRITICAL_MS, TOAST_TIMEOUT_MS, create_notification_body,
+    create_notification_image_widget,
 };
+
+const TOAST_BODY_FALLBACK_MAX_HEIGHT: i32 = 500;
+
+fn max_toast_body_height(monitor_height: Option<i32>) -> i32 {
+    monitor_height
+        .filter(|height| *height > 0)
+        .map(|height| height * 2 / 3)
+        .unwrap_or(TOAST_BODY_FALLBACK_MAX_HEIGHT)
+}
 
 fn toast_surface_margin() -> i32 {
     SURFACE_SHADOW_MARGIN
@@ -123,11 +135,16 @@ pub(super) struct NotificationToast {
     /// Runs from `Drop` so each visible toast copy is unregistered once.
     on_hidden: ToastCallback,
     timeout_source: RefCell<Option<SourceId>>,
+    /// Auto-dismiss duration; 0 means the toast never times out.
+    timeout_ms: Cell<u32>,
+    on_timeout: ToastCallback,
+    pointer_hovered: Cell<bool>,
     current_bar_margin: Cell<i32>,
     animation_source: RefCell<Option<SourceId>>,
     bar_edge: Edge,
-    /// Actual rendered height, measured after window is mapped
+    /// Actual rendered height, updated when the surface size changes.
     height: Cell<i32>,
+    max_body_height: i32,
     /// Theme-change callback guard; disconnected automatically on `Drop`.
     theme_callback_guard: RefCell<Option<ThemeCallbackGuard>>,
 }
@@ -189,13 +206,19 @@ impl NotificationToast {
             notification_id,
             on_hidden,
             timeout_source: RefCell::new(None),
+            timeout_ms: Cell::new(0),
+            on_timeout: Rc::clone(&on_remove),
+            pointer_hovered: Cell::new(false),
             current_bar_margin: Cell::new(layout.initial_margin),
             animation_source: RefCell::new(None),
             bar_edge: vertical_edge,
             height: Cell::new(TOAST_ESTIMATED_HEIGHT),
+            max_body_height: max_toast_body_height(context.monitor.map(|m| m.geometry().height())),
             theme_callback_guard: RefCell::new(None),
         });
-        toast.build_content(notification, Rc::clone(&on_remove), on_action);
+        toast.install_timeout_hover_controller();
+        toast.install_height_watcher(on_height_measured);
+        toast.build_content(notification, Rc::clone(&toast.on_timeout), on_action);
         // Route GTK close requests through normal removal. This ensures manager
         // teardown also removes transient service entries, while external GTK
         // closes release map-owned toasts and balance active-toast accounting.
@@ -208,26 +231,7 @@ impl NotificationToast {
             on_window_close(notification_id);
             glib::Propagation::Proceed
         });
-        toast.schedule_timeout(notification, on_remove);
-
-        // Measure actual height after window is mapped and laid out.
-        // We use idle_add to defer measurement until after GTK has completed layout.
-        let toast_weak = Rc::downgrade(&toast);
-        let notification_id = notification.id;
-        toast.window.connect_map(move |win| {
-            let win_clone = win.clone();
-            let toast_weak = toast_weak.clone();
-            let on_height_measured = on_height_measured.clone();
-            glib::idle_add_local_once(move || {
-                let height = win_clone.height();
-                if let Some(toast) = toast_weak.upgrade()
-                    && height > 0
-                {
-                    toast.height.set(height);
-                    on_height_measured(notification_id);
-                }
-            });
-        });
+        toast.schedule_timeout(notification);
 
         let theme_callback_guard = attach_blur_surface_lifecycle(
             &toast.window,
@@ -246,39 +250,34 @@ impl NotificationToast {
     /// notification that was replaced via `replaces_id`. The on-screen position
     /// is preserved; height is re-measured after layout so neighbour toasts can
     /// reposition if the new content is a different size.
-    pub fn update(
-        self: &Rc<Self>,
-        notification: &Notification,
-        on_remove: ToastCallback,
-        on_action: ToastActionCallback,
-        on_height_measured: ToastCallback,
-    ) {
-        // Drop the existing timeout before scheduling a fresh one - replacement
-        // resets the auto-dismiss countdown.
-        if let Some(source_id) = self.timeout_source.borrow_mut().take() {
-            source_id.remove();
-        }
+    pub fn update(self: &Rc<Self>, notification: &Notification, on_action: ToastActionCallback) {
+        self.build_content(notification, Rc::clone(&self.on_timeout), on_action);
+        self.schedule_timeout(notification);
+    }
 
-        self.build_content(notification, Rc::clone(&on_remove), on_action);
-        self.schedule_timeout(notification, on_remove);
-
-        // The window is already mapped, so connect_map won't fire again. Defer a
-        // re-measurement to the next idle so GTK has time to lay out the new
-        // child; if the height changed, the manager repositions the stack.
+    fn install_height_watcher(self: &Rc<Self>, on_height_measured: ToastCallback) {
         let toast_weak = Rc::downgrade(self);
-        let notification_id = notification.id;
-        glib::idle_add_local_once(move || {
-            if let Some(toast) = toast_weak.upgrade() {
-                let height = toast.window.height();
+        self.window.connect_realize(move |window| {
+            let Some(surface) = window.surface() else {
+                return;
+            };
+
+            let toast_weak = toast_weak.clone();
+            let on_height_measured = Rc::clone(&on_height_measured);
+            surface.connect_notify_local(Some("height"), move |surface, _| {
+                let Some(toast) = toast_weak.upgrade() else {
+                    return;
+                };
+                let height = surface.height();
                 if height > 0 && height != toast.height.get() {
                     toast.height.set(height);
-                    on_height_measured(notification_id);
+                    on_height_measured(toast.notification_id);
                 }
-            }
+            });
         });
     }
 
-    fn schedule_timeout(self: &Rc<Self>, notification: &Notification, on_timeout: ToastCallback) {
+    fn schedule_timeout(self: &Rc<Self>, notification: &Notification) {
         let timeout_ms = if notification.urgency == URGENCY_CRITICAL {
             TOAST_TIMEOUT_CRITICAL_MS
         } else if notification.expire_timeout > 0 {
@@ -292,12 +291,33 @@ impl NotificationToast {
             notification.id, timeout_ms, notification.urgency, notification.expire_timeout
         );
 
+        self.timeout_ms.set(timeout_ms);
+
+        // A toast replaced under the pointer waits for the pointer to leave.
+        if self.pointer_hovered.get() {
+            self.pause_timeout();
+        } else {
+            self.restart_timeout();
+        }
+    }
+
+    fn pause_timeout(&self) {
+        if let Some(source_id) = self.timeout_source.borrow_mut().take() {
+            source_id.remove();
+        }
+    }
+
+    fn restart_timeout(self: &Rc<Self>) {
+        self.pause_timeout();
+
+        let timeout_ms = self.timeout_ms.get();
         if timeout_ms == 0 {
             return;
         }
 
         let toast_weak = Rc::downgrade(self);
-        let notification_id = notification.id;
+        let notification_id = self.notification_id;
+        let on_timeout = Rc::clone(&self.on_timeout);
         let source_id = glib::timeout_add_local_once(
             std::time::Duration::from_millis(timeout_ms as u64),
             move || {
@@ -325,13 +345,39 @@ impl NotificationToast {
         *self.timeout_source.borrow_mut() = Some(source_id);
     }
 
+    /// Hovering pauses the dismiss timer; leaving restarts it in full.
+    fn install_timeout_hover_controller(self: &Rc<Self>) {
+        let toast_for_enter = Rc::downgrade(self);
+        let toast_for_leave = Rc::downgrade(self);
+        let motion = EventControllerMotion::new();
+        motion.connect_enter(move |_, _, _| {
+            if let Some(toast) = toast_for_enter.upgrade() {
+                toast.pointer_hovered.set(true);
+                toast.pause_timeout();
+            }
+        });
+        motion.connect_leave(move |_| {
+            if let Some(toast) = toast_for_leave.upgrade() {
+                toast.pointer_hovered.set(false);
+                toast.restart_timeout();
+            }
+        });
+        self.window.add_controller(motion);
+    }
+
     fn build_content(
-        &self,
+        self: &Rc<Self>,
         notification: &Notification,
         on_dismiss: ToastCallback,
         on_action: ToastActionCallback,
     ) {
-        let outer = build_toast_content(notification, on_dismiss, on_action, &self.window);
+        let outer = build_toast_content(
+            notification,
+            on_dismiss,
+            on_action,
+            &self.window,
+            self.max_body_height,
+        );
         self.window.set_child(Some(&outer));
     }
 
@@ -404,6 +450,7 @@ fn build_toast_content(
     on_dismiss: ToastCallback,
     on_action: ToastActionCallback,
     close_window: &Window,
+    max_body_height: i32,
 ) -> GtkBox {
     let outer = GtkBox::new(Orientation::Vertical, 0);
     outer.add_css_class(notif::TOAST_CONTAINER);
@@ -428,7 +475,7 @@ fn build_toast_content(
 
     let has_default_action = notification.actions.iter().any(|(id, _)| id == "default");
 
-    let main_row = GtkBox::new(Orientation::Horizontal, 10);
+    let main_row = GtkBox::new(Orientation::Horizontal, 8);
 
     // App icon / avatar in a centered column
     let icon_container = GtkBox::new(Orientation::Vertical, 0);
@@ -452,7 +499,6 @@ fn build_toast_content(
     app_label.add_css_class(color::MUTED);
     app_label.set_xalign(0.0);
     app_label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
-    app_label.set_margin_bottom(4);
     content.append(&app_label);
 
     if !notification.summary.is_empty() {
@@ -464,18 +510,16 @@ fn build_toast_content(
         content.append(&summary_label);
     }
 
+    let mut body_expand_button = None;
     if !notification.body.is_empty() {
-        let body_markup = sanitize_body_markup(&notification.body);
-        let body_label = Label::new(None);
-        body_label.set_markup(&body_markup);
-        body_label.add_css_class(notif::TOAST_BODY);
-        body_label.add_css_class(color::MUTED);
-        body_label.set_xalign(0.0);
-        body_label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
-        body_label.set_lines(2);
-        body_label.set_wrap(true);
-        body_label.set_wrap_mode(gtk4::pango::WrapMode::WordChar);
-        content.append(&body_label);
+        let body = create_notification_body(
+            &notification.body,
+            notif::TOAST_BODY,
+            Some(max_body_height),
+            || {},
+        );
+        content.append(&body.root);
+        body_expand_button = Some(body.expand_button);
     }
 
     main_row.append(&content);
@@ -536,13 +580,35 @@ fn build_toast_content(
         .filter(|(id, _)| id != "default")
         .collect();
 
-    if !non_default_actions.is_empty() {
+    let has_expand = body_expand_button.is_some();
+
+    if has_expand || !non_default_actions.is_empty() {
         let actions_box = GtkBox::new(Orientation::Horizontal, 8);
+        actions_box.add_css_class(notif::ACTIONS);
         actions_box.add_css_class(notif::TOAST_ACTIONS);
-        actions_box.set_halign(Align::End);
+
+        if let Some(expand_btn) = body_expand_button {
+            expand_btn.add_css_class(notif::TOAST_ACTION);
+            expand_btn.set_focusable(false);
+            actions_box.append(&expand_btn);
+
+            if !non_default_actions.is_empty() {
+                let spacer = GtkBox::new(Orientation::Horizontal, 0);
+                spacer.set_hexpand(true);
+                actions_box.append(&spacer);
+            } else {
+                expand_btn
+                    .bind_property("visible", &actions_box, "visible")
+                    .sync_create()
+                    .build();
+            }
+        } else {
+            actions_box.set_halign(Align::End);
+        }
 
         for (action_id, action_label) in non_default_actions {
             let action_btn = crate::widgets::base::vp_button_with_label(action_label);
+            action_btn.add_css_class(notif::ACTION_BTN);
             action_btn.add_css_class(notif::TOAST_ACTION);
             action_btn.add_css_class(button::GHOST);
             action_btn.set_focusable(false);
@@ -618,6 +684,14 @@ impl NotificationToastManager {
         monitor: Option<&gdk::Monitor>,
         notification: &Notification,
     ) {
+        let existing = self.toasts.borrow().get(&notification.id).cloned();
+        if let Some(toast) = existing {
+            // A replaces_id update mutates the existing toast instead of stacking
+            // a second toast for the same notification.
+            toast.update(notification, Rc::clone(&self.on_action));
+            return;
+        }
+
         // Transient notifications are toast-only, so remove the service entry when the toast goes away.
         let manager = Rc::downgrade(self);
         let service = Rc::clone(&self.service);
@@ -636,19 +710,6 @@ impl NotificationToastManager {
                 manager.reposition_toasts();
             }
         });
-
-        let existing = self.toasts.borrow().get(&notification.id).cloned();
-        if let Some(toast) = existing {
-            // A replaces_id update mutates the existing toast instead of stacking
-            // a second toast for the same notification.
-            toast.update(
-                notification,
-                Rc::clone(&on_remove),
-                Rc::clone(&self.on_action),
-                on_height_measured,
-            );
-            return;
-        }
 
         // Calculate initial margin from existing toasts.
         // Each toast window includes shadow margins (sm on each side), making

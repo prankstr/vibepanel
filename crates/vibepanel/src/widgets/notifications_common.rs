@@ -6,12 +6,15 @@
 use gtk4::gdk;
 use gtk4::gdk_pixbuf::Pixbuf;
 use gtk4::prelude::*;
-use gtk4::{Image, Widget};
+use gtk4::{
+    Box as GtkBox, Button, Image, Label, Orientation, PolicyType, ScrolledWindow, Widget, pango,
+};
 
 use crate::services::battery::normalize_battery_icon_name;
 use crate::services::icons::{IconsService, get_app_icon_name};
 use crate::services::notification::{Notification, NotificationImage};
-use crate::styles::notification as notif;
+use crate::styles::{button, color, notification as notif};
+use std::cell::Cell;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Toast display duration in ms
@@ -33,9 +36,219 @@ pub const POPOVER_WIDTH: i32 = 400;
 /// at the layer-shell surface boundary.
 pub const SURFACE_SHADOW_MARGIN: i32 = 8;
 
-/// Threshold for body text length before we show the expand button.
-/// Bodies shorter than this are shown in full without expand/collapse UI.
-pub const BODY_TRUNCATE_THRESHOLD: usize = 80;
+const PREVIEW_LINES: usize = 2;
+
+/// Split sanitized markup into standalone physical lines. Pango applies label
+/// line limits per paragraph, so separate labels enforce one shared preview limit.
+fn split_markup_lines(markup: &str) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    // (tag name, opening tag with attributes)
+    let mut open: Vec<(String, String)> = Vec::new();
+    let mut idx = 0;
+
+    while let Some(ch) = markup[idx..].chars().next() {
+        match ch {
+            '\n' => {
+                for (name, _) in open.iter().rev() {
+                    current.push_str(&format!("</{}>", name));
+                }
+                lines.push(std::mem::take(&mut current));
+                for (_, opening) in &open {
+                    current.push_str(opening);
+                }
+                idx += ch.len_utf8();
+            }
+            '<' => {
+                let rest = &markup[idx..];
+                let Some(end) = rest.find('>') else {
+                    current.push(ch);
+                    idx += ch.len_utf8();
+                    continue;
+                };
+                let tag = &rest[..=end];
+                let inner = &rest[1..end];
+
+                if let Some(name) = inner.strip_prefix('/') {
+                    let name = name.trim().to_ascii_lowercase();
+                    if let Some(pos) = open.iter().rposition(|(open_name, _)| *open_name == name) {
+                        open.remove(pos);
+                    }
+                } else {
+                    let name_end = inner
+                        .find(|c: char| !c.is_ascii_alphabetic())
+                        .unwrap_or(inner.len());
+                    open.push((inner[..name_end].to_ascii_lowercase(), tag.to_string()));
+                }
+
+                current.push_str(tag);
+                idx += end + 1;
+            }
+            _ => {
+                current.push(ch);
+                idx += ch.len_utf8();
+            }
+        }
+    }
+
+    lines.push(current);
+    lines
+}
+
+pub struct NotificationBody {
+    pub root: GtkBox,
+    /// Visible when structural or measured layout overflow requires expansion.
+    pub expand_button: Button,
+}
+
+/// Open label links without GTK's default URI launcher, which can violate
+/// layer-shell focus constraints on Wayland.
+fn connect_notification_link(label: &Label, after_open: impl Fn() + 'static) {
+    label.connect_activate_link(move |_, uri| {
+        let command = format!("xdg-open '{}'", uri.replace("'", "'\\''"));
+        let _ = gtk4::glib::spawn_command_line_async(&command);
+        after_open();
+        gtk4::glib::Propagation::Stop
+    });
+}
+
+fn body_label(css_class: &str) -> Label {
+    let label = Label::new(None);
+    label.add_css_class(css_class);
+    label.add_css_class(color::MUTED);
+    label.set_xalign(0.0);
+    label
+}
+
+/// Build a notification body showing its first two lines until expanded.
+///
+/// The preview preserves text, formatting, and links. With
+/// `expanded_max_height`, the expanded body scrolls beyond that height instead
+/// of growing.
+pub fn create_notification_body(
+    body: &str,
+    label_css_class: &str,
+    expanded_max_height: Option<i32>,
+    after_link_open: impl Fn() + Clone + 'static,
+) -> NotificationBody {
+    let markup = sanitize_body_markup(body);
+
+    let root = GtkBox::new(Orientation::Vertical, 0);
+    root.add_css_class(notif::BODY_CONTAINER);
+
+    let full_label = body_label(label_css_class);
+    full_label.set_markup(&markup);
+    full_label.set_wrap(true);
+    full_label.set_wrap_mode(pango::WrapMode::WordChar);
+    connect_notification_link(&full_label, after_link_open.clone());
+
+    let preview = GtkBox::new(Orientation::Vertical, 0);
+    let lines = split_markup_lines(markup.trim_end());
+    let structural_overflow = lines.len() > PREVIEW_LINES;
+    let mut preview_labels = Vec::new();
+
+    for (index, line) in lines.iter().take(PREVIEW_LINES).enumerate() {
+        let line_label = body_label(label_css_class);
+        line_label.set_markup(if line.is_empty() { "\u{2060}" } else { line });
+        line_label.set_ellipsize(pango::EllipsizeMode::End);
+
+        if index == 0 && !line.is_empty() {
+            line_label.set_wrap(true);
+            line_label.set_wrap_mode(pango::WrapMode::WordChar);
+            line_label.set_lines(PREVIEW_LINES as i32);
+        } else {
+            line_label.set_single_line_mode(true);
+        }
+        connect_notification_link(&line_label, after_link_open.clone());
+
+        preview.append(&line_label);
+        preview_labels.push(line_label);
+    }
+
+    let mut scroll_limit = None;
+    let expanded: Widget = match expanded_max_height {
+        Some(max_height) => {
+            // Keep short expanded bodies outside the scroller. GTK can allocate
+            // max-content dead space for wrapped labels, pushing actions down.
+            let container = GtkBox::new(Orientation::Vertical, 0);
+            container.append(&full_label);
+
+            let scroll = ScrolledWindow::new();
+            scroll.set_policy(PolicyType::Never, PolicyType::Automatic);
+            scroll.set_propagate_natural_height(false);
+            scroll.add_css_class(notif::SCROLL);
+            scroll.set_height_request(max_height);
+            scroll_limit = Some((container.clone(), scroll, full_label.clone(), max_height));
+            container.upcast()
+        }
+        None => full_label.clone().upcast(),
+    };
+    expanded.set_visible(false);
+
+    root.append(&preview);
+    root.append(&expanded);
+
+    let expand_button = crate::widgets::base::vp_button_with_label("Show more");
+    expand_button.add_css_class(notif::ACTION_BTN);
+    expand_button.add_css_class(button::GHOST);
+    expand_button.set_visible(structural_overflow);
+
+    let mapped_labels = preview_labels.clone();
+    let mapped_button = expand_button.downgrade();
+    preview.connect_map(move |_| {
+        let labels = mapped_labels.clone();
+        let button = mapped_button.clone();
+        gtk4::glib::idle_add_local_once(move || {
+            let first_uses_budget =
+                labels.len() > 1 && labels[0].layout().line_count() >= PREVIEW_LINES as i32;
+            if first_uses_budget && let Some(second) = labels.get(1) {
+                second.set_visible(false);
+            }
+            if (first_uses_budget || labels.iter().any(|label| label.layout().is_ellipsized()))
+                && let Some(button) = button.upgrade()
+            {
+                button.set_visible(true);
+            }
+        });
+    });
+
+    let is_expanded = Cell::new(false);
+    expand_button.connect_clicked(move |btn| {
+        let expanded_now = !is_expanded.get();
+        is_expanded.set(expanded_now);
+
+        if let Some((container, scroll, label, max_height)) = &scroll_limit {
+            if expanded_now && scroll.child().is_none() {
+                // The unconstrained label layout does not include wrapping at the
+                // toast width, so measure it using the allocated preview width.
+                let layout = label.layout().copy();
+                layout.set_width(preview.width() * pango::SCALE);
+                let (_, height) = layout.pixel_size();
+
+                if height > *max_height {
+                    container.remove(label);
+                    scroll.set_child(Some(label));
+                    container.append(scroll);
+                }
+            } else if !expanded_now && scroll.child().is_some() {
+                scroll.vadjustment().set_value(0.0);
+            }
+        }
+
+        preview.set_visible(!expanded_now);
+        expanded.set_visible(expanded_now);
+        btn.set_label(if expanded_now {
+            "Show less"
+        } else {
+            "Show more"
+        });
+    });
+
+    NotificationBody {
+        root,
+        expand_button,
+    }
+}
 
 /// Format a timestamp as a human-readable relative time.
 pub fn format_timestamp(timestamp: f64) -> String {
@@ -68,7 +281,7 @@ enum TagBalance {
 
 /// Sanitize notification body text for Pango markup rendering.
 /// Returns markup safe for use with `Label::set_markup()`.
-pub fn sanitize_body_markup(body: &str) -> String {
+fn sanitize_body_markup(body: &str) -> String {
     let mut result = String::with_capacity(body.len());
     let mut chars = body.char_indices().peekable();
     let mut open_tags: Vec<String> = Vec::new();
@@ -78,7 +291,11 @@ pub fn sanitize_body_markup(body: &str) -> String {
             '&' => {
                 // Check if this is an existing XML entity - preserve it
                 if let Some(entity) = try_parse_entity(&body[i..]) {
-                    result.push_str(entity);
+                    if let Some(separator) = numeric_line_separator(entity) {
+                        result.push(separator);
+                    } else {
+                        result.push_str(entity);
+                    }
                     // Skip past the entity
                     for _ in 0..entity.len() - 1 {
                         chars.next();
@@ -147,6 +364,8 @@ pub fn sanitize_body_markup(body: &str) -> String {
     }
 
     result
+        .replace("\r\n", "\n")
+        .replace(['\r', '\u{2028}', '\u{2029}'], "\n")
 }
 
 /// Try to parse an XML entity at the start of `s`.
@@ -176,6 +395,19 @@ fn try_parse_entity(s: &str) -> Option<&str> {
                     && name[2..].chars().all(|c| c.is_ascii_hexdigit()))));
 
     if valid { Some(entity) } else { None }
+}
+
+fn numeric_line_separator(entity: &str) -> Option<char> {
+    let value = entity.strip_prefix("&#")?.strip_suffix(';')?;
+    let value = if let Some(hex) = value.strip_prefix('x') {
+        u32::from_str_radix(hex, 16).ok()
+    } else {
+        value.parse::<u32>().ok()
+    }?;
+
+    matches!(value, 0x0a | 0x0d | 0x2028 | 0x2029)
+        .then(|| char::from_u32(value))
+        .flatten()
 }
 
 /// Try to parse an allowed HTML tag at the start of `s`.
@@ -236,10 +468,7 @@ fn try_parse_tag(s: &str) -> Option<(String, usize, TagBalance)> {
                 ))
             }
         }
-        "br" => {
-            // Convert <br> to space
-            Some((" ".to_string(), full_len, TagBalance::None))
-        }
+        "br" => Some(("\n".to_string(), full_len, TagBalance::None)),
         "img" => {
             // Strip <img> tags entirely
             Some((String::new(), full_len, TagBalance::None))
@@ -417,6 +646,27 @@ mod tests {
     }
 
     #[test]
+    fn split_markup_lines_keeps_blank_lines_and_tag_contents() {
+        assert_eq!(split_markup_lines("a\n\nb"), ["a", "", "b"]);
+        assert_eq!(split_markup_lines("a\nb\n".trim_end()), ["a", "b"]);
+        assert_eq!(
+            split_markup_lines("<a\n href=\"https://example.com\">link</a>"),
+            ["<a\n href=\"https://example.com\">link</a>"]
+        );
+    }
+
+    #[test]
+    fn split_markup_lines_reopens_formatting_and_links() {
+        assert_eq!(
+            split_markup_lines("<a href=\"https://x.test\">link\ntext</a>"),
+            [
+                "<a href=\"https://x.test\">link</a>",
+                "<a href=\"https://x.test\">text</a>"
+            ]
+        );
+    }
+
+    #[test]
     fn test_notification_battery_icon_normalization() {
         assert_eq!(
             notification_logical_icon_name("battery-low-symbolic"),
@@ -458,9 +708,20 @@ mod tests {
 
     #[test]
     fn test_sanitize_br() {
-        assert_eq!(sanitize_body_markup("Line 1<br>Line 2"), "Line 1 Line 2");
-        assert_eq!(sanitize_body_markup("Line 1<br/>Line 2"), "Line 1 Line 2");
-        assert_eq!(sanitize_body_markup("Line 1<br />Line 2"), "Line 1 Line 2");
+        assert_eq!(sanitize_body_markup("Line 1<br>Line 2"), "Line 1\nLine 2");
+        assert_eq!(sanitize_body_markup("Line 1<br/>Line 2"), "Line 1\nLine 2");
+        assert_eq!(sanitize_body_markup("Line 1<br />Line 2"), "Line 1\nLine 2");
+    }
+
+    #[test]
+    fn test_sanitize_line_boundaries() {
+        let markup =
+            sanitize_body_markup("one\r\ntwo\rthree\u{2028}four\u{2029}five&#10;six&#xA;seven");
+        assert_eq!(markup, "one\ntwo\nthree\nfour\nfive\nsix\nseven");
+        assert_eq!(
+            split_markup_lines(&sanitize_body_markup("one&#10;two&#10;three")),
+            ["one", "two", "three"]
+        );
     }
 
     #[test]
@@ -506,7 +767,7 @@ mod tests {
     #[test]
     fn test_case_insensitive_tags() {
         assert_eq!(sanitize_body_markup("<B>BOLD</B>"), "<b>BOLD</b>");
-        assert_eq!(sanitize_body_markup("<BR>"), " ");
+        assert_eq!(sanitize_body_markup("<BR>"), "\n");
     }
 
     #[test]
