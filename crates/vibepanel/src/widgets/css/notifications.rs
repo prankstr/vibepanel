@@ -76,10 +76,13 @@ pub fn css(animations: bool) -> String {
     font-weight: 500;
 }}
 
+.notification-body-container {{
+    margin-top: 2px;
+}}
+
 .notification-body,
 .notification-toast-body {{
     font-size: var(--font-size-sm);
-    margin-top: 2px;
 }}
 
 /* Shared dismiss button styling (row + toast) */
@@ -212,20 +215,13 @@ window.notification-toast-wrapper,
     min-width: 300px;
 }}
 
-.notification-toast-actions {{
-    margin-top: 10px;
-    padding-top: 8px;
+.notification-toast-content .notification-body-container {{
+    min-width: 26px;
+    margin-right: -26px;
 }}
 
-button.notification-toast-action {{
-    min-height: 0;
-    border-radius: var(--radius-widget);
-    color: var(--color-accent-primary);
-}}
-
-button.notification-toast-action label {{
-    font-size: var(--font-size-sm);
-    padding: 4px 8px;
+.notification-toast-content .notification-body-container .notification-toast-body {{
+    margin-right: 26px;
 }}
 "#
     )

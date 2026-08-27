@@ -96,7 +96,7 @@ impl HyprlandBackend {
         true
     }
 
-    /// Disable Hyprland's compositor-level layer animations for our popover surfaces.
+    /// Disable Hyprland's compositor-level layer animations for popovers and toasts.
     ///
     /// Hyprland animates layer surface resize/move by default which clashes
     /// with GTK4 animations and causes a visible content-shift glitch.
@@ -104,9 +104,9 @@ impl HyprlandBackend {
     /// Session-scoped, only set on startup and not persisted anywhere
     fn apply_layer_rules(&self) {
         let cmd = if self.supports_lua_dispatch.load(Ordering::Relaxed) {
-            "eval hl.layer_rule({ match = { namespace = \"^vibepanel-.*-popover$\" }, no_anim = true })"
+            "eval hl.layer_rule({ match = { namespace = \"^vibepanel-(.*-popover|toast)$\" }, no_anim = true })"
         } else {
-            "keyword layerrule no_anim on, match:namespace ^vibepanel-.*-popover$"
+            "keyword layerrule no_anim on, match:namespace ^vibepanel-(.*-popover|toast)$"
         };
         match self.send_command(cmd) {
             Some(response) if Self::response_is_ok(&response) => {

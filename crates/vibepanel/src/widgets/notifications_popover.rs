@@ -24,8 +24,7 @@ use crate::styles::{button, card, color, notification as notif, surface};
 use super::css::DISMISS_ANIMATION_MS;
 use super::layer_shell_popover::{calculate_bar_exclusive_zone, calculate_popover_bar_margin};
 use super::notifications_common::{
-    BODY_TRUNCATE_THRESHOLD, POPOVER_WIDTH, create_notification_image_widget, format_timestamp,
-    sanitize_body_markup,
+    POPOVER_WIDTH, create_notification_body, create_notification_image_widget, format_timestamp,
 };
 
 /// Callback type for closing the popover from within the content.
@@ -103,7 +102,13 @@ pub(super) fn build_popover_content(
     let notification_list = GtkBox::new(Orientation::Vertical, 4);
     notification_list.add_css_class(notif::LIST);
 
-    populate_notification_list(&notification_list, on_close, &suppress_rebuild);
+    let last_scroll = Rc::new(Cell::new(0));
+    populate_notification_list(
+        &notification_list,
+        on_close,
+        &suppress_rebuild,
+        &last_scroll,
+    );
 
     let max_height = compute_max_scroll_height(monitor);
 
@@ -112,6 +117,10 @@ pub(super) fn build_popover_content(
     scrolled.set_propagate_natural_height(true);
     scrolled.set_max_content_height(max_height);
     scrolled.add_css_class(notif::SCROLL);
+    let last_scroll_for_adjustment = Rc::clone(&last_scroll);
+    scrolled.vadjustment().connect_value_changed(move |_| {
+        last_scroll_for_adjustment.set(glib::monotonic_time());
+    });
 
     scrolled.set_child(Some(&notification_list));
     root.append(&scrolled);
@@ -230,6 +239,7 @@ fn populate_notification_list(
     list: &GtkBox,
     on_close: Option<ClosePopoverCallback>,
     suppress_rebuild: &Rc<Cell<bool>>,
+    last_scroll: &Rc<Cell<i64>>,
 ) {
     let service = NotificationService::global();
 
@@ -270,6 +280,7 @@ fn populate_notification_list(
             list,
             &revealer,
             suppress_rebuild,
+            last_scroll,
         );
         revealer.set_child(Some(&row));
         list.append(&revealer);
@@ -309,6 +320,7 @@ fn build_notification_row(
     list: &GtkBox,
     revealer: &Revealer,
     suppress_rebuild: &Rc<Cell<bool>>,
+    last_scroll: &Rc<Cell<i64>>,
 ) -> GtkBox {
     let card = GtkBox::new(Orientation::Vertical, 0);
     card.add_css_class(notif::ROW);
@@ -371,56 +383,27 @@ fn build_notification_row(
         content.append(&summary_label);
     }
 
-    // Body with expandable support for long text
-    // Use a single label with dynamic line limiting to avoid breaking markup tags
-    let mut body_label_opt: Option<Label> = None;
+    let mut body_expand_button = None;
 
     if !notification.body.is_empty() {
-        // Sanitize markup and clean up for display
-        let body_markup = sanitize_body_markup(&notification.body);
-        let body_clean = body_markup.trim();
-        let needs_expansion = body_clean.chars().count() > BODY_TRUNCATE_THRESHOLD;
-
-        let body_label = Label::new(None);
-        body_label.set_markup(body_clean);
-        body_label.add_css_class(notif::BODY);
-        body_label.add_css_class(color::MUTED);
-        body_label.set_xalign(0.0);
-        body_label.set_wrap(true);
-        body_label.set_wrap_mode(gtk4::pango::WrapMode::WordChar);
-
-        if needs_expansion {
-            // Start collapsed: limit to 2 lines with ellipsis
-            body_label.set_lines(2);
-            body_label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
-            body_label.set_vexpand(false);
-            body_label_opt = Some(body_label.clone());
-        } else {
-            // Short body - no line limit
-            body_label.set_lines(-1);
-            body_label.set_ellipsize(gtk4::pango::EllipsizeMode::None);
-        }
-
-        // Handle link activation manually to avoid Wayland protocol errors.
-        // Protocol error 71 often occurs when gtk_show_uri triggers a focus switch or
-        // interaction that conflicts with the layer shell surface state.
         let on_close_link = on_close.clone();
-        body_label.connect_activate_link(move |_, uri| {
-            // Use xdg-open via spawn_command_line_async for a detached process
-            let cmd = format!("xdg-open '{}'", uri.replace("'", "'\\''"));
-            // We ignore the result here because this is a fire-and-forget operation
-            // and we can't do much if xdg-open fails to launch from here anyway.
-            let _ = glib::spawn_command_line_async(&cmd);
+        let body = create_notification_body(
+            &notification.body,
+            notif::BODY,
+            None,
+            Some(Rc::clone(last_scroll)),
+            move || {
+                if let Some(ref close_cb) = on_close_link {
+                    close_cb();
+                }
+            },
+        );
 
-            // Close popover when user navigates away via link
-            if let Some(ref close_cb) = on_close_link {
-                close_cb();
-            }
-
-            glib::Propagation::Stop // Stop propagation to default handler
-        });
-
-        content.append(&body_label);
+        content.append(&body.root);
+        if let Some(controller) = body.prewarm_controller {
+            card.add_controller(controller);
+        }
+        body_expand_button = Some(body.expand_button);
     }
 
     main_row.append(&content);
@@ -485,7 +468,7 @@ fn build_notification_row(
         .filter(|(id, _)| id != "default")
         .collect();
 
-    let has_expand = body_label_opt.is_some();
+    let has_expand = body_expand_button.is_some();
 
     // Determine primary action (default or explicit "Open")
     let mut default_action: Option<String> = None;
@@ -500,47 +483,25 @@ fn build_notification_row(
     }
 
     let primary_action = default_action.clone().or(open_action.clone());
+    let has_other_actions = !non_default_actions.is_empty() || primary_action.is_some();
 
     if !non_default_actions.is_empty() || has_expand || primary_action.is_some() {
         let actions_row = GtkBox::new(Orientation::Horizontal, 8);
         actions_row.add_css_class(notif::ACTIONS);
 
-        // Optional expand button on the left
-        if let Some(body_label) = body_label_opt {
-            let expand_btn = crate::widgets::base::vp_button_with_label("Show more");
-            expand_btn.add_css_class(notif::ACTION_BTN);
-            expand_btn.add_css_class(button::GHOST);
-
-            // Store expanded state in a Cell
-            let is_expanded = Rc::new(Cell::new(false));
-            let is_expanded_clone = Rc::clone(&is_expanded);
-
-            expand_btn.connect_clicked(move |btn| {
-                let expanded = is_expanded_clone.get();
-                let new_state = !expanded;
-                is_expanded_clone.set(new_state);
-
-                if new_state {
-                    // Expanded: remove line limit and ellipsis
-                    body_label.set_lines(-1);
-                    body_label.set_ellipsize(gtk4::pango::EllipsizeMode::None);
-                    // Ensure the label can expand vertically in the container
-                    body_label.set_vexpand(true);
-                    btn.set_label("Show less");
-                } else {
-                    // Collapsed: limit to 2 lines with ellipsis
-                    body_label.set_lines(2);
-                    body_label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
-                    body_label.set_vexpand(false);
-                    btn.set_label("Show more");
-                }
-            });
-
+        if let Some(expand_btn) = body_expand_button {
             actions_row.append(&expand_btn);
+
+            if !has_other_actions {
+                expand_btn
+                    .bind_property("visible", &actions_row, "visible")
+                    .sync_create()
+                    .build();
+            }
         }
 
         // Spacer between expand button and actions
-        if has_expand && (!non_default_actions.is_empty() || primary_action.is_some()) {
+        if has_expand && has_other_actions {
             let spacer = GtkBox::new(Orientation::Horizontal, 0);
             spacer.set_hexpand(true);
             actions_row.append(&spacer);

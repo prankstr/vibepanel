@@ -12,6 +12,24 @@ fn test_app() -> Application {
     registered_test_app("dev.vibepanel.toast-ui-regression")
 }
 
+fn mapped_body_labels(root: &gtk4::Widget, css_class: &str) -> Vec<Label> {
+    let mut labels = Vec::new();
+    if root.has_css_class(css_class)
+        && root.is_mapped()
+        && let Some(label) = root.downcast_ref::<Label>()
+    {
+        labels.push(label.clone());
+    }
+
+    let mut child = root.first_child();
+    while let Some(widget) = child {
+        labels.extend(mapped_body_labels(&widget, css_class));
+        child = widget.next_sibling();
+    }
+
+    labels
+}
+
 fn test_notification(urgency: u8) -> Notification {
     Notification {
         id: u32::from(urgency) + 1,
@@ -145,6 +163,16 @@ fn test_toast_horizontal_layout_contract() {
 }
 
 #[test]
+fn test_max_toast_body_height_uses_two_thirds_monitor() {
+    assert_eq!(max_toast_body_height(Some(1080)), 720);
+    assert_eq!(
+        max_toast_body_height(Some(0)),
+        TOAST_BODY_FALLBACK_MAX_HEIGHT
+    );
+    assert_eq!(max_toast_body_height(None), TOAST_BODY_FALLBACK_MAX_HEIGHT);
+}
+
+#[test]
 fn test_toast_surface_margin_independent_of_shadow_setting() {
     let mut config = Config::default();
     config.theme.shadows = false;
@@ -194,6 +222,7 @@ fn run_test_notification_toast_structure() {
 
     let mut config = Config::default();
     config.theme.mode = "dark".to_string();
+    config.theme.animations = false;
     ConfigManager::replace_global_for_test(config.clone());
     let _css_provider =
         CssProviderGuard::for_config(&config, gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION);
@@ -208,10 +237,18 @@ fn run_test_notification_toast_structure() {
         .default_width(220)
         .default_height(120)
         .build();
-    let notification = test_notification(URGENCY_CRITICAL);
+    let mut notification = test_notification(URGENCY_CRITICAL);
+    notification.body =
+        "First\n<a href=\"https://example.com\">linked preview</a>\nThird".to_string();
     let noop_dismiss: ToastCallback = Rc::new(|_| {});
     let noop_action: ToastActionCallback = Rc::new(|_, _| {});
-    let surface = build_toast_content(&notification, noop_dismiss, noop_action, &window);
+    let surface = build_toast_content(
+        &notification,
+        noop_dismiss,
+        noop_action,
+        &window,
+        TOAST_BODY_FALLBACK_MAX_HEIGHT,
+    );
     surface.set_size_request(180, 80);
     window.set_child(Some(&surface));
     window.present();
@@ -234,12 +271,152 @@ fn run_test_notification_toast_structure() {
         label_with_text(&child, "Toast summary"),
         "toast should render the notification summary"
     );
-    assert!(
-        label_with_text(&child, "Toast body"),
-        "toast should render the notification body"
+    let preview_labels = mapped_body_labels(&child, notif::TOAST_BODY);
+    assert_eq!(
+        preview_labels
+            .iter()
+            .map(|label| label.text().to_string())
+            .collect::<Vec<_>>(),
+        ["First", "linked preview"],
+        "collapsed body should preserve the first two physical lines"
+    );
+    assert!(preview_labels[1].label().contains("<a href="));
+
+    let expand_button = find_descendant_with_class(&child, notif::ACTION_BTN)
+        .expect("a body longer than two lines should offer an expand action")
+        .downcast::<Button>()
+        .expect("expand action should be a button");
+
+    expand_button.emit_clicked();
+    flush_gtk();
+
+    assert!(label_with_text(&child, "Show less"));
+    assert_eq!(
+        mapped_body_labels(&child, notif::TOAST_BODY)[0].text(),
+        "First\nlinked preview\nThird",
+        "expanded body should render the complete body text"
+    );
+
+    expand_button.emit_clicked();
+    flush_gtk();
+
+    assert_eq!(
+        mapped_body_labels(&child, notif::TOAST_BODY)
+            .iter()
+            .map(|label| label.text().to_string())
+            .collect::<Vec<_>>(),
+        ["First", "linked preview"],
+        "collapsing should restore the two-line preview"
     );
 
     window.close();
+    flush_gtk();
+
+    let blank_line_window = gtk4::Window::new();
+    let blank_line_body = create_notification_body("a\n\nb", notif::TOAST_BODY, None, None, || {});
+    blank_line_window.set_child(Some(&blank_line_body.root));
+    blank_line_window.present();
+    flush_gtk();
+
+    let blank_line_labels = mapped_body_labels(
+        &blank_line_window
+            .child()
+            .expect("blank-line preview should be attached"),
+        notif::TOAST_BODY,
+    );
+    assert_eq!(blank_line_labels.len(), 2);
+    assert_eq!(blank_line_labels[0].text(), "a");
+    assert_eq!(blank_line_labels[1].text(), "\u{2060}");
+    assert!(blank_line_labels[1].height() > 0);
+
+    blank_line_window.close();
+    flush_gtk();
+
+    let wrapped_window = gtk4::Window::builder()
+        .default_width(220)
+        .resizable(false)
+        .build();
+    let wrapped_body = create_notification_body(
+        "Alertmanager notification could not be sent: message length exceeds Telegram limits.\n   Please check the template used for producing the message content.",
+        notif::TOAST_BODY,
+        None,
+        None,
+        || {},
+    );
+    wrapped_window.set_child(Some(&wrapped_body.root));
+    wrapped_window.present();
+    flush_gtk();
+
+    let wrapped_labels = mapped_body_labels(
+        &wrapped_window
+            .child()
+            .expect("wrapped preview should be attached"),
+        notif::TOAST_BODY,
+    );
+    assert_eq!(wrapped_labels.len(), 1);
+    assert_eq!(wrapped_labels[0].layout().line_count(), 2);
+    assert!(wrapped_labels[0].layout().is_ellipsized());
+    assert!(wrapped_body.expand_button.is_visible());
+
+    wrapped_window.close();
+    flush_gtk();
+
+    let exact_window = gtk4::Window::builder()
+        .default_width(220)
+        .resizable(false)
+        .build();
+    let exact_body = create_notification_body(
+        "This notification wraps across exactly two displayed lines.",
+        notif::TOAST_BODY,
+        None,
+        None,
+        || {},
+    );
+    exact_window.set_child(Some(&exact_body.root));
+    exact_window.present();
+    flush_gtk();
+
+    let exact_labels = mapped_body_labels(
+        &exact_window
+            .child()
+            .expect("exact two-line preview should be attached"),
+        notif::TOAST_BODY,
+    );
+    assert_eq!(exact_labels.len(), 1);
+    assert_eq!(exact_labels[0].layout().line_count(), 2);
+    assert!(!exact_labels[0].layout().is_ellipsized());
+    assert!(!exact_body.expand_button.is_visible());
+
+    exact_window.close();
+    flush_gtk();
+
+    let linked_window = gtk4::Window::builder()
+        .default_width(POPOVER_WIDTH)
+        .resizable(false)
+        .build();
+    let mut linked_notification = test_notification(URGENCY_CRITICAL);
+    linked_notification.body = "<a href=\"https://example.com\">the full report with enough additional text to exceed the notification preview threshold and require expansion</a>".to_string();
+    let linked_surface = build_toast_content(
+        &linked_notification,
+        Rc::new(|_| {}),
+        Rc::new(|_, _| {}),
+        &linked_window,
+        TOAST_BODY_FALLBACK_MAX_HEIGHT,
+    );
+    linked_window.set_child(Some(&linked_surface));
+    linked_window.present();
+    flush_gtk();
+
+    let linked_child = linked_window
+        .child()
+        .expect("linked toast should be attached");
+    let linked_labels = mapped_body_labels(&linked_child, notif::TOAST_BODY);
+    assert!(linked_labels[0].layout().is_ellipsized());
+    let linked_expand = find_descendant_with_class(&linked_child, notif::ACTION_BTN)
+        .expect("ellipsized linked body should offer an expand action");
+    assert!(linked_expand.is_visible());
+
+    linked_window.close();
     flush_gtk();
 }
 
@@ -292,7 +469,13 @@ fn toast_surface_fixture(
     let notification = blank_notification();
     let noop_dismiss: ToastCallback = Rc::new(|_| {});
     let noop_action: ToastActionCallback = Rc::new(|_, _| {});
-    let surface = build_toast_content(&notification, noop_dismiss, noop_action, &window);
+    let surface = build_toast_content(
+        &notification,
+        noop_dismiss,
+        noop_action,
+        &window,
+        TOAST_BODY_FALLBACK_MAX_HEIGHT,
+    );
     surface.set_size_request(180, 80);
     window.set_child(Some(&surface));
     window.present();
