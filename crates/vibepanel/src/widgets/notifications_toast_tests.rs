@@ -222,6 +222,7 @@ fn run_test_notification_toast_structure() {
 
     let mut config = Config::default();
     config.theme.mode = "dark".to_string();
+    config.theme.animations = false;
     ConfigManager::replace_global_for_test(config.clone());
     let _css_provider =
         CssProviderGuard::for_config(&config, gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION);
@@ -312,7 +313,7 @@ fn run_test_notification_toast_structure() {
     flush_gtk();
 
     let blank_line_window = gtk4::Window::new();
-    let blank_line_body = create_notification_body("a\n\nb", notif::TOAST_BODY, None, || {});
+    let blank_line_body = create_notification_body("a\n\nb", notif::TOAST_BODY, None, None, || {});
     blank_line_window.set_child(Some(&blank_line_body.root));
     blank_line_window.present();
     flush_gtk();
@@ -338,6 +339,7 @@ fn run_test_notification_toast_structure() {
     let wrapped_body = create_notification_body(
         "Alertmanager notification could not be sent: message length exceeds Telegram limits.\n   Please check the template used for producing the message content.",
         notif::TOAST_BODY,
+        None,
         None,
         || {},
     );
@@ -366,6 +368,7 @@ fn run_test_notification_toast_structure() {
     let exact_body = create_notification_body(
         "This notification wraps across exactly two displayed lines.",
         notif::TOAST_BODY,
+        None,
         None,
         || {},
     );

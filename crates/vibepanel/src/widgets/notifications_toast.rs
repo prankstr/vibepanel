@@ -399,9 +399,13 @@ impl NotificationToast {
     pub fn update_bar_margin(self: &Rc<Self>, target_margin: i32, animate: bool) {
         let current = self.current_bar_margin.get();
 
-        if !animate || current == target_margin {
+        if !animate {
+            self.cancel_animation();
             self.current_bar_margin.set(target_margin);
             self.window.set_margin(self.bar_edge, target_margin);
+            return;
+        }
+        if current == target_margin {
             return;
         }
 
@@ -516,6 +520,7 @@ fn build_toast_content(
             &notification.body,
             notif::TOAST_BODY,
             Some(max_body_height),
+            None,
             || {},
         );
         content.append(&body.root);
@@ -707,7 +712,9 @@ impl NotificationToastManager {
         let manager_for_height = Rc::downgrade(self);
         let on_height_measured: Rc<dyn Fn(u32)> = Rc::new(move |_id| {
             if let Some(manager) = manager_for_height.upgrade() {
-                manager.reposition_toasts();
+                // Height is already animated by the body Revealer. Track it
+                // directly instead of adding a second, lagging margin animation.
+                manager.reposition_toasts(false);
             }
         });
 
@@ -764,7 +771,7 @@ impl NotificationToastManager {
         self.toast_order
             .borrow_mut()
             .retain(|&id| id != notification_id);
-        self.reposition_toasts();
+        self.reposition_toasts(true);
     }
 
     pub fn close_toast(&self, notification_id: u32) {
@@ -776,17 +783,20 @@ impl NotificationToastManager {
         self.toast_order
             .borrow_mut()
             .retain(|&id| id != notification_id);
-        self.reposition_toasts();
+        self.reposition_toasts(true);
     }
 
-    fn reposition_toasts(&self) {
+    fn reposition_toasts(&self, animate: bool) {
         let order = self.toast_order.borrow();
         let toasts = self.toasts.borrow();
         let sm = toast_surface_margin();
         let mut y_offset = (TOAST_EDGE_MARGIN - sm).max(0);
         for &id in order.iter() {
             if let Some(toast) = toasts.get(&id) {
-                toast.update_bar_margin(y_offset, ConfigManager::global().animations_enabled());
+                toast.update_bar_margin(
+                    y_offset,
+                    animate && ConfigManager::global().animations_enabled(),
+                );
                 y_offset += (toast.height() - 2 * sm).max(0) + TOAST_GAP;
             }
         }

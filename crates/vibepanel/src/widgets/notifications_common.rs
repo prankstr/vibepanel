@@ -7,15 +7,18 @@ use gtk4::gdk;
 use gtk4::gdk_pixbuf::Pixbuf;
 use gtk4::prelude::*;
 use gtk4::{
-    Box as GtkBox, Button, Image, Label, Orientation, PolicyType, ScrolledWindow, Widget, pango,
+    Align, Box as GtkBox, Button, EventControllerMotion, Image, Label, Orientation, Overflow,
+    Overlay, PolicyType, Revealer, RevealerTransitionType, ScrolledWindow, Widget, pango,
 };
 
 use crate::services::battery::normalize_battery_icon_name;
+use crate::services::config_manager::ConfigManager;
 use crate::services::icons::{IconsService, get_app_icon_name};
 use crate::services::notification::{Notification, NotificationImage};
 use crate::styles::{button, color, notification as notif};
 use std::cell::Cell;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::rc::Rc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Toast display duration in ms
 pub const TOAST_TIMEOUT_MS: u32 = 5000;
@@ -37,6 +40,13 @@ pub const POPOVER_WIDTH: i32 = 400;
 pub const SURFACE_SHADOW_MARGIN: i32 = 8;
 
 const PREVIEW_LINES: usize = 2;
+const BODY_ANIMATION_MS: u32 = 200;
+const PREWARM_HOVER_DELAY: Duration = Duration::from_millis(150);
+const PREWARM_SCROLL_QUIET_US: i64 = 150_000;
+
+fn scroll_is_quiet(last_scroll: i64, now: i64) -> bool {
+    now.saturating_sub(last_scroll) >= PREWARM_SCROLL_QUIET_US
+}
 
 /// Split sanitized markup into standalone physical lines. Pango applies label
 /// line limits per paragraph, so separate labels enforce one shared preview limit.
@@ -99,6 +109,8 @@ pub struct NotificationBody {
     pub root: GtkBox,
     /// Visible when structural or measured layout overflow requires expansion.
     pub expand_button: Button,
+    /// Attach to the popover card so deliberate card hover can prepare expansion.
+    pub prewarm_controller: Option<EventControllerMotion>,
 }
 
 /// Open label links without GTK's default URI launcher, which can violate
@@ -129,21 +141,24 @@ pub fn create_notification_body(
     body: &str,
     label_css_class: &str,
     expanded_max_height: Option<i32>,
+    last_scroll: Option<Rc<Cell<i64>>>,
     after_link_open: impl Fn() + Clone + 'static,
 ) -> NotificationBody {
+    let stage_first_expand = last_scroll.is_some();
     let markup = sanitize_body_markup(body);
+    let markup = markup.trim_end_matches('\n');
 
     let root = GtkBox::new(Orientation::Vertical, 0);
     root.add_css_class(notif::BODY_CONTAINER);
 
     let full_label = body_label(label_css_class);
-    full_label.set_markup(&markup);
+    full_label.set_markup(markup);
     full_label.set_wrap(true);
     full_label.set_wrap_mode(pango::WrapMode::WordChar);
     connect_notification_link(&full_label, after_link_open.clone());
 
     let preview = GtkBox::new(Orientation::Vertical, 0);
-    let lines = split_markup_lines(markup.trim_end());
+    let lines = split_markup_lines(markup);
     let structural_overflow = lines.len() > PREVIEW_LINES;
     let mut preview_labels = Vec::new();
 
@@ -183,15 +198,76 @@ pub fn create_notification_body(
         }
         None => full_label.clone().upcast(),
     };
-    expanded.set_visible(false);
+    // Overlay children do not affect layout: the preview/spacer supplies the
+    // collapsed height while the Revealer animates only the extra body height.
+    let extra_height = GtkBox::new(Orientation::Vertical, 0);
+    let collapsed_spacer = GtkBox::new(Orientation::Vertical, 0);
+    collapsed_spacer.set_visible(false);
+    let height_revealer = Revealer::new();
+    height_revealer.set_transition_type(RevealerTransitionType::SlideDown);
+    height_revealer
+        .set_transition_duration(ConfigManager::global().animation_duration(BODY_ANIMATION_MS));
+    height_revealer.set_child(Some(&extra_height));
 
-    root.append(&preview);
-    root.append(&expanded);
+    let sizing_box = GtkBox::new(Orientation::Vertical, 0);
+    sizing_box.append(&preview);
+    sizing_box.append(&collapsed_spacer);
+    sizing_box.append(&height_revealer);
+
+    let body_overlay = Overlay::new();
+    body_overlay.set_overflow(Overflow::Hidden);
+    body_overlay.set_child(Some(&sizing_box));
+    expanded.set_halign(Align::Fill);
+    expanded.set_valign(Align::Start);
+    expanded.set_visible(false);
+    body_overlay.add_overlay(&expanded);
+    preview.set_halign(Align::Fill);
+    preview.set_valign(Align::Start);
+    root.append(&body_overlay);
 
     let expand_button = crate::widgets::base::vp_button_with_label("Show more");
     expand_button.add_css_class(notif::ACTION_BTN);
     expand_button.add_css_class(button::GHOST);
     expand_button.set_visible(structural_overflow);
+
+    let prewarm_controller = last_scroll.map(|last_scroll| {
+        let motion = EventControllerMotion::new();
+        let pending = Rc::new(Cell::new(false));
+        let label = full_label.clone();
+        let expanded = expanded.clone();
+        let button = expand_button.clone();
+        let schedule: Rc<dyn Fn(&EventControllerMotion)> = Rc::new(move |motion| {
+            if label.width() != 0 || !button.is_visible() || pending.replace(true) {
+                return;
+            }
+
+            let motion = motion.downgrade();
+            let pending = Rc::clone(&pending);
+            let label = label.clone();
+            let expanded = expanded.clone();
+            let button = button.clone();
+            let last_scroll = Rc::clone(&last_scroll);
+            gtk4::glib::timeout_add_local_once(PREWARM_HOVER_DELAY, move || {
+                pending.set(false);
+                let Some(motion) = motion.upgrade() else {
+                    return;
+                };
+                if motion.contains_pointer()
+                    && button.is_visible()
+                    && label.width() == 0
+                    && scroll_is_quiet(last_scroll.get(), gtk4::glib::monotonic_time())
+                {
+                    expanded.set_opacity(0.0);
+                    expanded.set_can_target(false);
+                    expanded.set_visible(true);
+                }
+            });
+        });
+        let schedule_enter = Rc::clone(&schedule);
+        motion.connect_enter(move |motion, _, _| schedule_enter(motion));
+        motion.connect_motion(move |motion, _, _| schedule(motion));
+        motion
+    });
 
     let mapped_labels = preview_labels.clone();
     let mapped_button = expand_button.downgrade();
@@ -213,19 +289,28 @@ pub fn create_notification_body(
     });
 
     let is_expanded = Cell::new(false);
+    let preview_for_reveal = preview.clone();
+    let expanded_for_reveal = expanded.clone();
+    let button_for_reveal = expand_button.downgrade();
+    height_revealer.connect_child_revealed_notify(move |revealer| {
+        if !revealer.is_child_revealed() {
+            expanded_for_reveal.set_visible(false);
+            preview_for_reveal.set_visible(true);
+        }
+        if let Some(button) = button_for_reveal.upgrade() {
+            button.set_sensitive(true);
+        }
+    });
+
+    let preview_in_sizing_box = Cell::new(true);
+    let first_expand = Cell::new(true);
     expand_button.connect_clicked(move |btn| {
         let expanded_now = !is_expanded.get();
         is_expanded.set(expanded_now);
 
         if let Some((container, scroll, label, max_height)) = &scroll_limit {
             if expanded_now && scroll.child().is_none() {
-                // The unconstrained label layout does not include wrapping at the
-                // toast width, so measure it using the allocated preview width.
-                let layout = label.layout().copy();
-                layout.set_width(preview.width() * pango::SCALE);
-                let (_, height) = layout.pixel_size();
-
-                if height > *max_height {
+                if label.measure(Orientation::Vertical, preview.width()).1 > *max_height {
                     container.remove(label);
                     scroll.set_child(Some(label));
                     container.append(scroll);
@@ -235,8 +320,52 @@ pub fn create_notification_body(
             }
         }
 
-        preview.set_visible(!expanded_now);
-        expanded.set_visible(expanded_now);
+        btn.set_sensitive(false);
+        if expanded_now {
+            let preview_width = preview.width();
+            let preview_height = preview.height();
+            collapsed_spacer.set_height_request(preview_height);
+            if preview_in_sizing_box.replace(false) {
+                collapsed_spacer.set_visible(true);
+                sizing_box.remove(&preview);
+                body_overlay.add_overlay(&preview);
+            }
+            // Cold allocation of a long label can consume the whole animation.
+            // Keep the preview stable until allocation completes, then reveal.
+            if stage_first_expand && first_expand.replace(false) && full_label.width() == 0 {
+                expanded.set_opacity(0.0);
+                expanded.set_can_target(false);
+                expanded.set_visible(true);
+
+                let label = full_label.clone();
+                let expanded = expanded.clone();
+                let extra_height = extra_height.clone();
+                let preview = preview.clone();
+                height_revealer.add_tick_callback(move |revealer, _| {
+                    if label.width() == 0 {
+                        return gtk4::glib::ControlFlow::Continue;
+                    }
+                    extra_height.set_height_request((expanded.height() - preview_height).max(0));
+                    expanded.set_opacity(1.0);
+                    expanded.set_can_target(true);
+                    preview.set_visible(false);
+                    crate::widgets::layer_shell_popover::animate_reveal(revealer, true);
+                    gtk4::glib::ControlFlow::Break
+                });
+            } else {
+                preview.set_visible(false);
+                expanded.set_opacity(1.0);
+                expanded.set_can_target(true);
+                expanded.set_visible(true);
+                extra_height.set_height_request(
+                    (expanded.measure(Orientation::Vertical, preview_width).1 - preview_height)
+                        .max(0),
+                );
+                crate::widgets::layer_shell_popover::animate_reveal(&height_revealer, true);
+            }
+        } else {
+            crate::widgets::layer_shell_popover::animate_reveal(&height_revealer, false);
+        }
         btn.set_label(if expanded_now {
             "Show less"
         } else {
@@ -247,6 +376,7 @@ pub fn create_notification_body(
     NotificationBody {
         root,
         expand_button,
+        prewarm_controller,
     }
 }
 
@@ -639,6 +769,12 @@ fn notification_logical_icon_name(icon_name: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prewarm_waits_for_scroll_quiet_period() {
+        assert!(!scroll_is_quiet(1_000_000, 1_149_999));
+        assert!(scroll_is_quiet(1_000_000, 1_150_000));
+    }
 
     #[test]
     fn test_sanitize_plain_text() {

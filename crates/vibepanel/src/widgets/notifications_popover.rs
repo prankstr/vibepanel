@@ -102,7 +102,13 @@ pub(super) fn build_popover_content(
     let notification_list = GtkBox::new(Orientation::Vertical, 4);
     notification_list.add_css_class(notif::LIST);
 
-    populate_notification_list(&notification_list, on_close, &suppress_rebuild);
+    let last_scroll = Rc::new(Cell::new(0));
+    populate_notification_list(
+        &notification_list,
+        on_close,
+        &suppress_rebuild,
+        &last_scroll,
+    );
 
     let max_height = compute_max_scroll_height(monitor);
 
@@ -111,6 +117,10 @@ pub(super) fn build_popover_content(
     scrolled.set_propagate_natural_height(true);
     scrolled.set_max_content_height(max_height);
     scrolled.add_css_class(notif::SCROLL);
+    let last_scroll_for_adjustment = Rc::clone(&last_scroll);
+    scrolled.vadjustment().connect_value_changed(move |_| {
+        last_scroll_for_adjustment.set(glib::monotonic_time());
+    });
 
     scrolled.set_child(Some(&notification_list));
     root.append(&scrolled);
@@ -229,6 +239,7 @@ fn populate_notification_list(
     list: &GtkBox,
     on_close: Option<ClosePopoverCallback>,
     suppress_rebuild: &Rc<Cell<bool>>,
+    last_scroll: &Rc<Cell<i64>>,
 ) {
     let service = NotificationService::global();
 
@@ -269,6 +280,7 @@ fn populate_notification_list(
             list,
             &revealer,
             suppress_rebuild,
+            last_scroll,
         );
         revealer.set_child(Some(&row));
         list.append(&revealer);
@@ -308,6 +320,7 @@ fn build_notification_row(
     list: &GtkBox,
     revealer: &Revealer,
     suppress_rebuild: &Rc<Cell<bool>>,
+    last_scroll: &Rc<Cell<i64>>,
 ) -> GtkBox {
     let card = GtkBox::new(Orientation::Vertical, 0);
     card.add_css_class(notif::ROW);
@@ -374,13 +387,22 @@ fn build_notification_row(
 
     if !notification.body.is_empty() {
         let on_close_link = on_close.clone();
-        let body = create_notification_body(&notification.body, notif::BODY, None, move || {
-            if let Some(ref close_cb) = on_close_link {
-                close_cb();
-            }
-        });
+        let body = create_notification_body(
+            &notification.body,
+            notif::BODY,
+            None,
+            Some(Rc::clone(last_scroll)),
+            move || {
+                if let Some(ref close_cb) = on_close_link {
+                    close_cb();
+                }
+            },
+        );
 
         content.append(&body.root);
+        if let Some(controller) = body.prewarm_controller {
+            card.add_controller(controller);
+        }
         body_expand_button = Some(body.expand_button);
     }
 

@@ -215,12 +215,12 @@ window.notification-toast-wrapper,
     min-width: 300px;
 }}
 
-/* Let overflowing body scrollbars use the dismiss column instead of covering text. */
-.notification-toast-content .notification-scroll {{
+.notification-toast-content .notification-body-container {{
+    min-width: 26px;
     margin-right: -26px;
 }}
 
-.notification-toast-content .notification-scroll .notification-toast-body {{
+.notification-toast-content .notification-body-container .notification-toast-body {{
     margin-right: 26px;
 }}
 "#
