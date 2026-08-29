@@ -1344,7 +1344,7 @@ fn create_network_action_widget(net: &WifiNetwork, can_share: bool) -> gtk4::Wid
         if can_share {
             let ssid = ssid_for_actions.clone();
             let popover_weak = popover.downgrade();
-            let action = create_row_menu_action("Show QR code", move || {
+            let action = create_row_menu_action("Share", move || {
                 if let Some(popover) = popover_weak.upgrade() {
                     close_row_menu_popover(&popover);
                 }

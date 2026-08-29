@@ -22,6 +22,7 @@ use crate::widgets::rounded_picture::RoundedPicture;
 
 const QR_MAX_IMAGE_SIZE: usize = 280;
 const QR_QUIET_ZONE_MODULES: usize = 4;
+const QR_SHADOW_MARGIN: i32 = 8;
 
 pub struct WifiQrWindow {
     window: ApplicationWindow,
@@ -61,12 +62,14 @@ impl WifiQrWindow {
         title.add_css_class(color::PRIMARY);
         title.set_hexpand(true);
         title.set_xalign(0.0);
+        title.set_valign(Align::Start);
         header.append(&title);
 
         let close = Button::new();
         close.add_css_class(surface::POPOVER_ICON_BTN);
         close.set_has_frame(false);
         close.set_tooltip_text(Some("Close"));
+        close.set_valign(Align::Start);
         close.set_child(Some(&Image::from_icon_name("window-close-symbolic")));
         header.append(&close);
         card.append(&header);
@@ -76,21 +79,33 @@ impl WifiQrWindow {
         ssid_label.add_css_class(qs::WIFI_QR_SSID);
         ssid_label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
         ssid_label.set_max_width_chars(38);
-        card.append(&ssid_label);
+
+        let credentials = GtkBox::new(Orientation::Vertical, 6);
+        credentials.append(&ssid_label);
 
         let password_controls = GtkBox::new(Orientation::Vertical, 6);
         password_controls.set_halign(Align::Center);
         password_controls.set_visible(false);
-        card.append(&password_controls);
+        credentials.append(&password_controls);
+        card.append(&credentials);
 
         let body = GtkBox::new(Orientation::Vertical, 12);
         body.set_halign(Align::Center);
         card.append(&body);
-        window.set_child(Some(&card));
 
+        let wrapper = GtkBox::new(Orientation::Vertical, 0);
+        wrapper.add_css_class(surface::POPOVER_WRAPPER);
+        wrapper.set_margin_top(QR_SHADOW_MARGIN);
+        wrapper.set_margin_bottom(QR_SHADOW_MARGIN);
+        wrapper.set_margin_start(QR_SHADOW_MARGIN);
+        wrapper.set_margin_end(QR_SHADOW_MARGIN);
+        wrapper.append(&card);
+        window.set_child(Some(&wrapper));
+
+        let card_for_blur = card.clone();
         let theme_callback_guard = attach_blur_surface_lifecycle(
             &window,
-            |win: &ApplicationWindow| win.child(),
+            move |_: &ApplicationWindow| Some(card_for_blur.clone().upcast()),
             || ConfigManager::global().surface_border_radius() as i32,
         );
 
@@ -207,7 +222,7 @@ impl WifiQrWindow {
                 let picture = RoundedPicture::new();
                 picture.set_pixel_size(image_size as i32);
                 picture.set_corner_radius(radius as f32);
-                picture.set_margin_bottom(52);
+                picture.set_margin_bottom(42);
                 picture.set_paintable(Some(&texture));
                 picture.set_tooltip_text(Some(&format!("QR code for Wi-Fi network {ssid}")));
                 self.body.append(&picture);
@@ -233,24 +248,24 @@ impl WifiQrWindow {
 
         let reveal = Button::with_label("Show password");
         reveal.add_css_class(button::LINK);
+        reveal.set_halign(Align::Center);
         self.password_controls.append(&reveal);
 
-        let password_label = Label::new(None);
+        let password_label = Label::new(Some(" "));
         password_label.set_justify(gtk4::Justification::Center);
-        password_label.set_selectable(true);
-        password_label.set_visible(false);
         self.password_controls.append(&password_label);
 
+        let revealed = Cell::new(false);
         reveal.connect_clicked(move |button| {
-            if password_label.is_visible() {
-                password_label.set_label("");
-                password_label.set_visible(false);
+            if revealed.get() {
+                password_label.set_label(" ");
                 button.set_label("Show password");
             } else {
                 password_label.set_label(&password);
-                password_label.set_visible(true);
                 button.set_label("Hide password");
             }
+            password_label.set_selectable(!revealed.get());
+            revealed.set(!revealed.get());
         });
 
         SurfaceStyleManager::global().apply_pango_attrs_all(&self.password_controls);
