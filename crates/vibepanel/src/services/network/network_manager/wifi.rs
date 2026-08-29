@@ -8,16 +8,125 @@ use std::thread;
 use std::time::Instant;
 
 use gtk4::gio::{self, prelude::*};
-use gtk4::glib::{Variant, VariantTy};
+use gtk4::glib::{self, Variant, VariantTy};
 use tracing::{debug, error, warn};
 
 use super::{
     IFACE_AP, IFACE_DEV, IFACE_WIFI, NM_IFACE, NM_SERVICE, NmService, NmUpdate, send_nm_update,
     system_dbus_proxy_sync,
 };
-use crate::services::network::{SecurityType, WifiNetwork, objpath_to_string};
+use crate::services::network::{
+    SecurityType, WifiAuthentication, WifiCredentials, WifiNetwork, objpath_to_string,
+};
 
 impl NmService {
+    pub fn request_active_wifi_credentials<F>(&self, callback: F)
+    where
+        F: FnOnce(Result<WifiCredentials, String>) + 'static,
+    {
+        let active_connection = self
+            .wifi
+            .device_proxy
+            .borrow()
+            .as_ref()
+            .and_then(|proxy| proxy.cached_property("ActiveConnection"))
+            .and_then(|value| objpath_to_string(&value))
+            .filter(|path| path != "/");
+
+        let Some(active_connection) = active_connection else {
+            callback(Err("No active Wi-Fi connection".to_string()));
+            return;
+        };
+
+        let (sender, receiver) = async_channel::bounded(1);
+        thread::spawn(move || {
+            let _ = sender.send_blocking(Self::get_wifi_credentials_sync(&active_connection));
+        });
+        glib::spawn_future_local(async move {
+            let result = receiver
+                .recv()
+                .await
+                .unwrap_or_else(|_| Err("Wi-Fi credential lookup failed".to_string()));
+            callback(result);
+        });
+    }
+
+    fn get_wifi_credentials_sync(active_connection: &str) -> Result<WifiCredentials, String> {
+        let active_proxy =
+            system_dbus_proxy_sync(NM_SERVICE, active_connection, super::IFACE_ACTIVE_CONN)
+                .map_err(|e| format!("Failed to open active connection: {e}"))?;
+        let connection_path = active_proxy
+            .cached_property("Connection")
+            .and_then(|value| objpath_to_string(&value))
+            .ok_or_else(|| "Active Wi-Fi profile is unavailable".to_string())?;
+        let profile_proxy =
+            system_dbus_proxy_sync(NM_SERVICE, &connection_path, super::IFACE_SETTINGS_CONN)
+                .map_err(|e| format!("Failed to open Wi-Fi profile: {e}"))?;
+
+        let settings = profile_proxy
+            .call_sync(
+                "GetSettings",
+                None,
+                gio::DBusCallFlags::NONE,
+                5000,
+                None::<&gio::Cancellable>,
+            )
+            .map_err(|e| format!("Failed to read Wi-Fi profile: {e}"))?;
+        let wifi = Self::settings_section(&settings, "802-11-wireless")
+            .ok_or_else(|| "Active connection is not Wi-Fi".to_string())?;
+        let ssid = Self::get_prop_variant(&wifi, "ssid")
+            .map(|value| value.iter().filter_map(|byte| byte.get::<u8>()).collect())
+            .and_then(|bytes: Vec<u8>| String::from_utf8(bytes).ok())
+            .filter(|ssid| !ssid.is_empty())
+            .ok_or_else(|| "Wi-Fi profile has no valid SSID".to_string())?;
+        let hidden = Self::get_prop_variant(&wifi, "hidden")
+            .and_then(|value| value.get::<bool>())
+            .unwrap_or(false);
+
+        let Some(security) = Self::settings_section(&settings, "802-11-wireless-security") else {
+            return Ok(WifiCredentials {
+                ssid,
+                password: None,
+                hidden,
+                authentication: WifiAuthentication::Open,
+            });
+        };
+        let key_mgmt = Self::get_prop_variant(&security, "key-mgmt")
+            .and_then(|value| value.get::<String>())
+            .unwrap_or_default();
+        let authentication = match key_mgmt.as_str() {
+            "wpa-psk" => WifiAuthentication::Wpa,
+            "sae" => WifiAuthentication::Sae,
+            _ => return Err(format!("Unsupported Wi-Fi security: {key_mgmt}")),
+        };
+
+        let secrets = profile_proxy
+            .call_sync(
+                "GetSecrets",
+                Some(&("802-11-wireless-security",).to_variant()),
+                gio::DBusCallFlags::NONE,
+                5000,
+                None::<&gio::Cancellable>,
+            )
+            .map_err(|e| format!("Saved Wi-Fi password is unavailable: {e}"))?;
+        let password = Self::settings_section(&secrets, "802-11-wireless-security")
+            .and_then(|section| Self::get_prop_variant(&section, "psk"))
+            .and_then(|value| value.get::<String>())
+            .filter(|password| !password.is_empty())
+            .ok_or_else(|| "Saved Wi-Fi password is unavailable".to_string())?;
+
+        Ok(WifiCredentials {
+            ssid,
+            password: Some(password),
+            hidden,
+            authentication,
+        })
+    }
+
+    fn settings_section(settings: &glib::Variant, name: &str) -> Option<glib::Variant> {
+        Self::get_variant_map_entry(&settings.child_value(0), name)
+    }
+
     /// Create wifi proxy - called from apply_update on main thread.
     pub(super) fn create_wifi_proxy_from_self(&self, path: &str) {
         // Get a strong Rc to self for the callback.
@@ -669,5 +778,33 @@ impl NmService {
             // Request refresh.
             send_nm_update(NmUpdate::RefreshNetworks);
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_networkmanager_settings_variants() {
+        let wifi = HashMap::from([
+            ("ssid".to_string(), b"test-network".to_vec().to_variant()),
+            ("hidden".to_string(), true.to_variant()),
+        ]);
+        let settings = (HashMap::from([("802-11-wireless".to_string(), wifi)]),).to_variant();
+
+        let section = NmService::settings_section(&settings, "802-11-wireless").unwrap();
+        let ssid: Vec<u8> = NmService::get_prop_variant(&section, "ssid")
+            .unwrap()
+            .iter()
+            .filter_map(|byte| byte.get::<u8>())
+            .collect();
+
+        assert_eq!(ssid, b"test-network");
+        assert_eq!(
+            NmService::get_prop_variant(&section, "hidden").and_then(|value| value.get::<bool>()),
+            Some(true)
+        );
+        assert!(NmService::settings_section(&settings, "missing").is_none());
     }
 }

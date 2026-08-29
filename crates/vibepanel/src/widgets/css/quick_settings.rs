@@ -16,6 +16,19 @@ window.quick-settings-window {{
     background: transparent;
 }}
 
+window.qs-wifi-qr-window {{
+    background: transparent;
+}}
+
+.qs-wifi-qr-card {{
+    padding: 20px;
+}}
+
+.qs-wifi-qr-ssid {{
+    font-size: 1.25em;
+    font-weight: 700;
+}}
+
 /* Click catcher overlay */
 .vp-click-catcher {{
     background: var(--color-click-catcher-overlay);

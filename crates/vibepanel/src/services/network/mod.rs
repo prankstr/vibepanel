@@ -25,6 +25,20 @@ pub enum SecurityType {
     Secured,
 }
 
+pub struct WifiCredentials {
+    pub ssid: String,
+    pub password: Option<String>,
+    pub hidden: bool,
+    pub authentication: WifiAuthentication,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WifiAuthentication {
+    Open,
+    Wpa,
+    Sae,
+}
+
 impl SecurityType {
     pub fn is_secured(self) -> bool {
         self == Self::Secured
@@ -508,6 +522,20 @@ impl NetworkService {
         }
     }
 
+    pub fn request_active_wifi_credentials<F>(&self, callback: F)
+    where
+        F: FnOnce(Result<WifiCredentials, String>) + 'static,
+    {
+        match &self.backend {
+            NetworkBackend::NetworkManager(inner) => {
+                inner.request_active_wifi_credentials(callback)
+            }
+            NetworkBackend::Iwd(inner) => {
+                callback(active_open_wifi_credentials(&inner.snapshot().networks))
+            }
+        }
+    }
+
     pub fn set_wifi_enabled(&self, enabled: bool) {
         match &self.backend {
             NetworkBackend::NetworkManager(inner) => inner.set_wifi_enabled(enabled),
@@ -574,6 +602,23 @@ impl NetworkService {
     }
 }
 
+fn active_open_wifi_credentials(networks: &[WifiNetwork]) -> Result<WifiCredentials, String> {
+    let network = networks
+        .iter()
+        .find(|network| network.active)
+        .ok_or_else(|| "No active Wi-Fi connection".to_string())?;
+    if network.security.is_secured() {
+        return Err("Saved Wi-Fi passwords are unavailable through IWD".to_string());
+    }
+
+    Ok(WifiCredentials {
+        ssid: network.ssid.clone(),
+        password: None,
+        hidden: false,
+        authentication: WifiAuthentication::Open,
+    })
+}
+
 /// Detect which Wi-Fi backend is available (NM preferred, then IWD).
 ///
 /// If neither is running, defaults to NM — its `init_dbus()` handler fires
@@ -626,4 +671,29 @@ fn detect_backend() -> NetworkBackend {
 pub(super) fn objpath_to_string(v: &glib::Variant) -> Option<String> {
     v.get::<glib::variant::ObjectPath>()
         .map(|p| p.as_str().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn synthesizes_only_active_open_wifi_credentials() {
+        let network = |security| WifiNetwork {
+            ssid: "test-network".to_string(),
+            strength: 100,
+            security,
+            active: true,
+            known: true,
+            known_network_path: None,
+            path: None,
+        };
+
+        let credentials = active_open_wifi_credentials(&[network(SecurityType::Open)]).unwrap();
+        assert_eq!(credentials.ssid, "test-network");
+        assert!(credentials.password.is_none());
+        assert_eq!(credentials.authentication, WifiAuthentication::Open);
+        assert!(active_open_wifi_credentials(&[network(SecurityType::Secured)]).is_err());
+        assert!(active_open_wifi_credentials(&[]).is_err());
+    }
 }

@@ -65,6 +65,7 @@ minreq = { version = "2.14", default-features = false, features = ["https-rustls
 # Color extraction
 material-colors = { version = "0.4.2" }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+qrcode = { version = "0.14", default-features = false }
 
 # Internal crates
 vibepanel-core = { path = "crates/vibepanel-core" }

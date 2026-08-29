@@ -1080,6 +1080,7 @@ pub fn populate_wifi_list(
     let connecting_ssid = snapshot.connecting_ssid();
     let failed_ssid = snapshot.failed_ssid();
     let failed_reason = snapshot.failed_reason();
+    let can_read_wifi_password = matches!(snapshot, NetworkSnapshot::NetworkManager(_));
     let mut inserted_password_row = false;
 
     for net in snapshot.networks() {
@@ -1159,7 +1160,8 @@ pub fn populate_wifi_list(
             connecting_label.add_css_class(color::MUTED);
             connecting_label.upcast::<gtk4::Widget>()
         } else {
-            create_network_action_widget(net)
+            let can_share = net.active && (!net.security.is_secured() || can_read_wifi_password);
+            create_network_action_widget(net, can_share)
         };
 
         // Check if this network has a non-password failure to show inline
@@ -1250,7 +1252,7 @@ pub fn populate_wifi_list(
 }
 
 /// Create the action widget for a network row.
-fn create_network_action_widget(net: &WifiNetwork) -> gtk4::Widget {
+fn create_network_action_widget(net: &WifiNetwork, can_share: bool) -> gtk4::Widget {
     let ssid = net.ssid.clone();
     let is_active = net.active;
     let is_known = net.known;
@@ -1335,6 +1337,21 @@ fn create_network_action_widget(net: &WifiNetwork) -> gtk4::Widget {
                 debug!("wifi_connect_from_menu ssid={}", ssid_clone);
                 // Known networks connect without password prompt
                 network.connect_to_network(&ssid_clone, None, path_clone.as_deref());
+            });
+            content_box.append(&action);
+        }
+
+        if can_share {
+            let ssid = ssid_for_actions.clone();
+            let popover_weak = popover.downgrade();
+            let action = create_row_menu_action("Show QR code", move || {
+                if let Some(popover) = popover_weak.upgrade() {
+                    close_row_menu_popover(&popover);
+                }
+
+                if let Some(qs) = current_quick_settings_window() {
+                    qs.show_wifi_qr_code(&ssid);
+                }
             });
             content_box.append(&action);
         }

@@ -319,6 +319,15 @@ pub mod qs {
     /// Window container (`.qs-window-container`).
     pub const WINDOW_CONTAINER: &str = "qs-window-container";
 
+    /// Centered Wi-Fi QR modal window (`.qs-wifi-qr-window`).
+    pub const WIFI_QR_WINDOW: &str = "qs-wifi-qr-window";
+
+    /// Wi-Fi QR modal card (`.qs-wifi-qr-card`).
+    pub const WIFI_QR_CARD: &str = "qs-wifi-qr-card";
+
+    /// Wi-Fi QR network name (`.qs-wifi-qr-ssid`).
+    pub const WIFI_QR_SSID: &str = "qs-wifi-qr-ssid";
+
     /// Control center content (`.qs-control-center`).
     pub const CONTROL_CENTER: &str = "qs-control-center";
 
