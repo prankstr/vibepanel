@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.1](https://github.com/prankstr/vibepanel/compare/v0.16.0...v0.16.1) (2026-08-27)
+
+
+### Bug Fixes
+
+* **config:** simplify hot reload handling ([#210](https://github.com/prankstr/vibepanel/issues/210)) ([ecc6e96](https://github.com/prankstr/vibepanel/commit/ecc6e961f32b09fb32411e800aad9e4286fa540b))
+* **notifications:** pass activationToken so windows focus when clicking ([556da0a](https://github.com/prankstr/vibepanel/commit/556da0ab7c6c0db3bef38d15a2c78e69a0af430b))
+* **notifications:** truncate and add show more to toasts ([#217](https://github.com/prankstr/vibepanel/issues/217)) ([738373f](https://github.com/prankstr/vibepanel/commit/738373f8e518aa12a0b8acb36b646adf78ac7348))
+* **quick_settings:** idle inhibitor no longer prevents sleep ([#216](https://github.com/prankstr/vibepanel/issues/216)) ([581be81](https://github.com/prankstr/vibepanel/commit/581be81925943d45526e79eaae8f531414b7bfaa))
+
 ## [0.16.0](https://github.com/prankstr/vibepanel/compare/v0.15.0...v0.16.0) (2026-08-14)
 
 
