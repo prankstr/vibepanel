@@ -398,6 +398,8 @@ impl NmService {
             .args([
                 "-g",
                 "802-11-wireless.ssid",
+                "--escape",
+                "no",
                 "connection",
                 "show",
                 "uuid",
