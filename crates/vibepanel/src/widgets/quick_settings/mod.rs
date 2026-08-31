@@ -27,6 +27,7 @@ pub mod power_card;
 pub mod ui_helpers;
 pub mod updates_card;
 pub mod vpn_card;
+mod wifi_qr_window;
 pub mod window;
 
 pub use bar_widget::{QuickSettingsConfig, QuickSettingsWidget};

@@ -57,6 +57,7 @@ use super::power_card::{self, PowerCardBuildResult, PowerCardExpanderState};
 use super::ui_helpers::{AccordionManager, ExpandableCard, collapse_revealer_instant};
 use super::updates_card::{self, UpdatesCardState, build_updates_card};
 use super::vpn_card::{self, VpnCardState, build_vpn_details, vpn_icon_name};
+use super::wifi_qr_window::WifiQrWindow;
 
 thread_local! {
     static CURRENT_QS_WINDOW: RefCell<Option<Weak<QuickSettingsWindow>>> = const { RefCell::new(None) };
@@ -182,6 +183,7 @@ pub struct QuickSettingsWindow {
     pub mic: Rc<MicCardState>,
     pub brightness: Rc<BrightnessCardState>,
     pub updates: Rc<UpdatesCardState>,
+    wifi_qr_window: RefCell<Option<Rc<WifiQrWindow>>>,
     /// Power card state (expander variant only). Stored here so
     /// `reset_ui_state()` can collapse it without walking the widget tree.
     pub power: RefCell<Option<Rc<PowerCardExpanderState>>>,
@@ -272,6 +274,7 @@ impl QuickSettingsWindow {
             mic: Rc::new(MicCardState::new()),
             brightness: Rc::new(BrightnessCardState::new()),
             updates: Rc::new(UpdatesCardState::new()),
+            wifi_qr_window: RefCell::new(None),
             power: RefCell::new(None),
             deferred_kbd_controller: RefCell::new(None),
         });
@@ -1219,6 +1222,22 @@ impl QuickSettingsWindow {
     /// Show inline Wi-Fi password dialog for the given SSID.
     pub fn show_wifi_password_dialog(&self, ssid: &str) {
         network_card::show_password_dialog(&self.network, ssid);
+    }
+
+    pub fn show_wifi_qr_code(self: &Rc<Self>, ssid: &str) {
+        let modal = if let Some(modal) = self.wifi_qr_window.borrow().as_ref() {
+            Rc::clone(modal)
+        } else {
+            let Some(app) = self.window.application() else {
+                return;
+            };
+            let modal = WifiQrWindow::new(&app);
+            *self.wifi_qr_window.borrow_mut() = Some(Rc::clone(&modal));
+            modal
+        };
+        let monitor = self.anchor_monitor.borrow().clone();
+        self.hide_panel();
+        modal.show(ssid, monitor.as_ref());
     }
 
     /// Update all revealer transition durations based on the current

@@ -165,15 +165,8 @@ impl NmService {
 
     /// Extract a property from the "connection" section of a D-Bus settings variant.
     fn parse_connection_prop(settings: &Variant, key: &str) -> Option<String> {
-        let root = settings.child_value(0);
-        for i in 0..root.n_children() {
-            let section = root.child_value(i);
-            if section.child_value(0).str() == Some("connection") {
-                let props = section.child_value(1);
-                return Self::get_string_prop(&props, key);
-            }
-        }
-        None
+        Self::get_variant_map_entry(&settings.child_value(0), "connection")
+            .and_then(|props| Self::get_string_prop(&props, key))
     }
 
     /// Find the first GSM/CDMA connection profile name via NetworkManager's Settings interface.
@@ -230,7 +223,7 @@ impl NmService {
             let object_entry = objects.child_value(i);
             let interfaces = object_entry.child_value(1);
 
-            let Some(modem_props) = Self::get_interface_props(&interfaces, MM_MODEM_IFACE) else {
+            let Some(modem_props) = Self::get_variant_map_entry(&interfaces, MM_MODEM_IFACE) else {
                 continue;
             };
 
@@ -248,7 +241,7 @@ impl NmService {
                 .filter(|s| !s.is_empty())
                 .map(ToString::to_string);
 
-            let operator_name = Self::get_interface_props(&interfaces, MM_MODEM_3GPP_IFACE)
+            let operator_name = Self::get_variant_map_entry(&interfaces, MM_MODEM_3GPP_IFACE)
                 .and_then(|props| Self::get_string_prop(&props, "OperatorName"))
                 .filter(|name| !name.trim().is_empty());
 
@@ -270,17 +263,17 @@ impl NmService {
         })
     }
 
-    fn get_interface_props(interfaces: &Variant, iface_name: &str) -> Option<Variant> {
-        for i in 0..interfaces.n_children() {
-            let iface_entry = interfaces.child_value(i);
-            if iface_entry.child_value(0).str() == Some(iface_name) {
-                return Some(iface_entry.child_value(1));
+    pub(super) fn get_variant_map_entry(map: &Variant, key: &str) -> Option<Variant> {
+        for i in 0..map.n_children() {
+            let entry = map.child_value(i);
+            if entry.child_value(0).str() == Some(key) {
+                return Some(entry.child_value(1));
             }
         }
         None
     }
 
-    fn get_prop_variant(props: &Variant, key: &str) -> Option<Variant> {
+    pub(super) fn get_prop_variant(props: &Variant, key: &str) -> Option<Variant> {
         for i in 0..props.n_children() {
             let prop_entry = props.child_value(i);
             if prop_entry.child_value(0).str() == Some(key) {

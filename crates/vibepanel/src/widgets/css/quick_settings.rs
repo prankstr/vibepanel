@@ -16,6 +16,30 @@ window.quick-settings-window {{
     background: transparent;
 }}
 
+window.qs-wifi-qr-window {{
+    background: transparent;
+}}
+
+.qs-wifi-qr-card .vp-popover-icon-btn {{
+    margin-top: -6px;
+    margin-right: -6px;
+}}
+
+.qs-wifi-qr-card .vp-btn-link {{
+    padding: 2px 6px;
+    border-radius: calc(var(--radius-widget) * 0.75);
+}}
+
+.qs-wifi-qr-card .vp-btn-link:hover {{
+    background: var(--color-card-overlay-hover);
+    text-decoration: none;
+}}
+
+.qs-wifi-qr-ssid {{
+    font-size: 1.25em;
+    font-weight: 700;
+}}
+
 /* Click catcher overlay */
 .vp-click-catcher {{
     background: var(--color-click-catcher-overlay);
