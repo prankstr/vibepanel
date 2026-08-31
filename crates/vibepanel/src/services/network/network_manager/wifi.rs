@@ -365,6 +365,66 @@ impl NmService {
         *last_refresh.lock().unwrap_or_else(|e| e.into_inner()) = Some(now);
     }
 
+    /// List all UUIDs of every saved Wi-Fi connection profile.
+    fn saved_wifi_uuids() -> Result<HashSet<String>, String> {
+        let output = Command::new("nmcli")
+            .args(["-t", "-f", "UUID,TYPE", "connection", "show"])
+            .output()
+            .map_err(|e| format!("Failed to fetch known Wi-Fi connections: {e}"))?;
+
+        if !output.status.success() {
+            return Err(format!(
+                "nmcli exited with {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+
+        let stdout = String::from_utf8(output.stdout)
+            .map_err(|e| format!("nmcli output was not valid UTF-8: {e}"))?;
+
+        Ok(stdout
+            .lines()
+            .filter_map(|line| {
+                let (uuid, ctype) = line.split_once(':')?;
+                (ctype.contains("wifi") || ctype.contains("wireless")).then(|| uuid.to_string())
+            })
+            .collect())
+    }
+
+    /// Get the SSID of a connection by UUID.
+    fn profile_ssid(uuid: &str) -> Result<String, String> {
+        let output = Command::new("nmcli")
+            .args([
+                "-g",
+                "802-11-wireless.ssid",
+                "--escape",
+                "no",
+                "connection",
+                "show",
+                "uuid",
+                uuid,
+            ])
+            .output()
+            .map_err(|e| format!("Failed to fetch profile SSID: {e}"))?;
+
+        if !output.status.success() {
+            return Err(format!(
+                "nmcli exited with {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+
+        if output.stdout.is_empty() {
+            return Err(format!("no ssid found for connection {}", uuid));
+        }
+
+        String::from_utf8(output.stdout)
+            .map(|stdout| stdout.trim().to_string())
+            .map_err(|e| format!("nmcli output was not valid UTF-8: {e}"))
+    }
+
     fn dedupe_networks(networks: Vec<WifiNetwork>) -> Vec<WifiNetwork> {
         let mut merged: HashMap<(String, SecurityType), WifiNetwork> = HashMap::new();
 
@@ -507,6 +567,8 @@ impl NmService {
         let password = password.map(|s| s.to_string());
 
         thread::spawn(move || {
+            let saved_before = Self::saved_wifi_uuids();
+
             let mut cmd = Command::new("nmcli");
             cmd.args(["device", "wifi", "connect", &ssid]);
 
@@ -524,9 +586,29 @@ impl NmService {
 
                         // Delete the failed connection profile that nmcli created.
                         // This prevents showing "Saved" for a network that never connected.
-                        let _ = Command::new("nmcli")
-                            .args(["connection", "delete", "id", &ssid])
-                            .output();
+                        let saved_after = Self::saved_wifi_uuids();
+                        match (&saved_before, &saved_after) {
+                            (Ok(before), Ok(after)) => {
+                                for uuid in after.difference(before) {
+                                    match Self::profile_ssid(uuid) {
+                                        Ok(profile_ssid) => {
+                                            if profile_ssid == ssid {
+                                                debug!("removing profile {} for '{}'", uuid, ssid);
+                                                let _ = Command::new("nmcli")
+                                                    .args(["connection", "delete", "uuid", uuid])
+                                                    .output();
+                                            }
+                                        }
+                                        Err(e) => {
+                                            warn!("skipping cleanup of profile {}: {}", uuid, e);
+                                        }
+                                    }
+                                }
+                            }
+                            (Err(e), _) | (_, Err(e)) => {
+                                warn!("skipping profile cleanup for '{}': {}", ssid, e);
+                            }
+                        }
 
                         false
                     }
