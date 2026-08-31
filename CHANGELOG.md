@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.0](https://github.com/prankstr/vibepanel/compare/v0.16.1...v0.17.0) (2026-08-31)
+
+
+### Features
+
+* **quick_settings:** add QR code sharing for active Wi-Fi networks ([#222](https://github.com/prankstr/vibepanel/issues/222)) ([67d31d2](https://github.com/prankstr/vibepanel/commit/67d31d24ac02f5303059914c4ed0d21c19498804))
+
+
+### Bug Fixes
+
+* **network:** don't delete known wifi profiles on failed connection attempt ([#220](https://github.com/prankstr/vibepanel/issues/220)) ([2c1f77b](https://github.com/prankstr/vibepanel/commit/2c1f77b3a59781dce4ec383227ccf05366722611))
+
 ## [0.16.1](https://github.com/prankstr/vibepanel/compare/v0.16.0...v0.16.1) (2026-08-27)
 
 
