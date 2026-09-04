@@ -111,9 +111,10 @@ use gtk4::pango::EllipsizeMode;
 use gtk4::prelude::*;
 use gtk4::subclass::prelude::*;
 use gtk4::{
-    Align, Box as GtkBox, CssProvider, EventControllerScroll, EventControllerScrollFlags,
-    GestureClick, Label, Overlay, Widget,
+    Align, ApplicationWindow, Box as GtkBox, CssProvider, EventControllerScroll,
+    EventControllerScrollFlags, GestureClick, Label, Overlay, Widget,
 };
+use gtk4_layer_shell::{KeyboardMode, LayerShell};
 use tracing::{debug, trace, warn};
 use vibepanel_core::config::WidgetEntry;
 
@@ -124,6 +125,7 @@ use crate::services::workspace::{Workspace, WorkspaceService, WorkspaceServiceSn
 use crate::styles::{state, widget};
 use crate::widgets::WidgetConfig;
 use crate::widgets::base::BaseWidget;
+use crate::widgets::layer_shell_popover::popover_keyboard_mode;
 use crate::widgets::ripple::{trigger_ripple_from_gesture, wrap_with_ripple};
 use crate::widgets::warn_unknown_options;
 
@@ -944,6 +946,8 @@ pub struct WorkspacesWidget {
     workspace_callback_id: CallbackId,
 }
 
+const SCROLL_FOCUS_RELEASE_DELAY_MS: u64 = 250;
+
 impl WorkspacesWidget {
     /// Create a new workspaces widget with the given configuration.
     ///
@@ -998,6 +1002,7 @@ impl WorkspacesWidget {
         let scroll = EventControllerScroll::new(EventControllerScrollFlags::VERTICAL);
         scroll.set_propagation_phase(gtk4::PropagationPhase::Capture);
         let accumulated = Cell::new(0.0f64);
+        let focus_release = Rc::new(RefCell::new(None::<glib::SourceId>));
         let current_ids_for_scroll = Rc::clone(&current_ids);
         let scroll_active_id_for_scroll = Rc::clone(&scroll_active_id);
         scroll.connect_scroll(move |controller, _dx, dy| {
@@ -1018,7 +1023,49 @@ impl WorkspacesWidget {
                     scroll_active_id_for_scroll.set(Some(workspace_id));
                     TooltipManager::global().cancel_and_hide();
                     debug!("Switching to workspace {} by scrolling", workspace_id);
-                    WorkspaceService::global().switch_workspace(workspace_id);
+
+                    let window = controller
+                        .widget()
+                        .and_then(|widget| widget.root())
+                        .and_then(|root| root.downcast::<ApplicationWindow>().ok());
+                    let popover_has_focus = window.as_ref().is_some_and(|window| {
+                        window
+                            .application()
+                            .and_then(|app| app.active_window())
+                            .is_some_and(|active| {
+                                active != window.clone().upcast::<gtk4::Window>()
+                                    && active.is_active()
+                            })
+                    });
+
+                    if let Some(window) = window.filter(|_| !popover_has_focus) {
+                        if focus_release.borrow().is_none() {
+                            // Prevent compositors from warping the pointer after switching.
+                            window.set_keyboard_mode(popover_keyboard_mode());
+                            window.present();
+                            // Ensure the compositor sees focus before workspace-switch IPC.
+                            WidgetExt::display(&window).sync();
+                        }
+                        WorkspaceService::global().switch_workspace(workspace_id);
+
+                        if let Some(id) = focus_release.borrow_mut().take() {
+                            id.remove();
+                        }
+                        let release_slot = Rc::clone(&focus_release);
+                        let window = window.downgrade();
+                        let id = glib::timeout_add_local_once(
+                            std::time::Duration::from_millis(SCROLL_FOCUS_RELEASE_DELAY_MS),
+                            move || {
+                                release_slot.borrow_mut().take();
+                                if let Some(window) = window.upgrade() {
+                                    window.set_keyboard_mode(KeyboardMode::None);
+                                }
+                            },
+                        );
+                        focus_release.borrow_mut().replace(id);
+                    } else {
+                        WorkspaceService::global().switch_workspace(workspace_id);
+                    }
                 }
                 acc -= acc.signum();
             }
