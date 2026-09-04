@@ -110,7 +110,10 @@ use gtk4::glib;
 use gtk4::pango::EllipsizeMode;
 use gtk4::prelude::*;
 use gtk4::subclass::prelude::*;
-use gtk4::{Align, Box as GtkBox, CssProvider, GestureClick, Label, Overlay, Widget};
+use gtk4::{
+    Align, Box as GtkBox, CssProvider, EventControllerScroll, EventControllerScrollFlags,
+    GestureClick, Label, Overlay, Widget,
+};
 use tracing::{debug, trace, warn};
 use vibepanel_core::config::WidgetEntry;
 
@@ -989,7 +992,41 @@ impl WorkspacesWidget {
         let workspace_labels: Rc<RefCell<HashMap<i32, Widget>>> =
             Rc::new(RefCell::new(HashMap::new()));
         let current_ids = Rc::new(RefCell::new(Vec::new()));
+        let scroll_active_id = Rc::new(Cell::new(None));
         let separator = config.separator;
+
+        let scroll = EventControllerScroll::new(EventControllerScrollFlags::VERTICAL);
+        scroll.set_propagation_phase(gtk4::PropagationPhase::Capture);
+        let accumulated = Cell::new(0.0f64);
+        let current_ids_for_scroll = Rc::clone(&current_ids);
+        let scroll_active_id_for_scroll = Rc::clone(&scroll_active_id);
+        scroll.connect_scroll(move |controller, _dx, dy| {
+            let delta = workspace_scroll_delta(controller.unit(), dy);
+            let mut acc = accumulated.get();
+            if (acc > 0.0 && delta < 0.0) || (acc < 0.0 && delta > 0.0) {
+                acc = 0.0;
+            }
+            acc += delta;
+
+            while acc.abs() >= 1.0 {
+                let next = adjacent_workspace_id(
+                    &current_ids_for_scroll.borrow(),
+                    scroll_active_id_for_scroll.get(),
+                    acc > 0.0,
+                );
+                if let Some(workspace_id) = next {
+                    scroll_active_id_for_scroll.set(Some(workspace_id));
+                    TooltipManager::global().cancel_and_hide();
+                    debug!("Switching to workspace {} by scrolling", workspace_id);
+                    WorkspaceService::global().switch_workspace(workspace_id);
+                }
+                acc -= acc.signum();
+            }
+
+            accumulated.set(acc);
+            glib::Propagation::Stop
+        });
+        base.widget().add_controller(scroll);
 
         let output_id_debug = output_id.clone();
 
@@ -1010,6 +1047,13 @@ impl WorkspacesWidget {
                     None
                 },
             );
+
+            let labels = workspace_labels.borrow();
+            scroll_active_id.set(current_ids.borrow().iter().copied().find(|id| {
+                labels
+                    .get(id)
+                    .is_some_and(|indicator| indicator.has_css_class(widget::ACTIVE))
+            }));
         });
 
         debug!(
@@ -1032,6 +1076,25 @@ impl Drop for WorkspacesWidget {
     fn drop(&mut self) {
         WorkspaceService::global().disconnect(self.workspace_callback_id);
     }
+}
+
+const SURFACE_SCROLL_PIXELS_PER_WORKSPACE: f64 = 25.0;
+
+fn workspace_scroll_delta(unit: gtk4::gdk::ScrollUnit, delta: f64) -> f64 {
+    match unit {
+        gtk4::gdk::ScrollUnit::Surface => delta / SURFACE_SCROLL_PIXELS_PER_WORKSPACE,
+        _ => delta,
+    }
+}
+
+fn adjacent_workspace_id(ids: &[i32], active_id: Option<i32>, forward: bool) -> Option<i32> {
+    let active_index = ids.iter().position(|id| Some(*id) == active_id)?;
+    let next_index = if forward {
+        active_index.checked_add(1)
+    } else {
+        active_index.checked_sub(1)
+    }?;
+    ids.get(next_index).copied()
 }
 
 /// Icon glyphs for workspace indicators.
@@ -1831,6 +1894,29 @@ mod tests {
             name: name.to_string(),
             options,
         }
+    }
+
+    #[test]
+    fn test_adjacent_workspace_id() {
+        let ids = [1, 2, 3];
+
+        assert_eq!(adjacent_workspace_id(&ids, Some(2), false), Some(1));
+        assert_eq!(adjacent_workspace_id(&ids, Some(2), true), Some(3));
+        assert_eq!(adjacent_workspace_id(&ids, Some(1), false), None);
+        assert_eq!(adjacent_workspace_id(&ids, Some(3), true), None);
+        assert_eq!(adjacent_workspace_id(&ids, None, true), None);
+    }
+
+    #[test]
+    fn test_workspace_scroll_delta_uses_scroll_units() {
+        assert_eq!(
+            workspace_scroll_delta(gtk4::gdk::ScrollUnit::Wheel, 1.0),
+            1.0
+        );
+        assert_eq!(
+            workspace_scroll_delta(gtk4::gdk::ScrollUnit::Surface, 25.0),
+            1.0
+        );
     }
 
     #[test]
