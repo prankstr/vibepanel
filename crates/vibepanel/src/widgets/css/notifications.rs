@@ -88,6 +88,7 @@ pub fn css(animations: bool) -> String {
 /* Shared dismiss button styling (row + toast) */
 .notification-dismiss-btn,
 .notification-toast-dismiss {{
+    color: var(--color-foreground-primary);
     min-width: 20px;
     min-height: 20px;
     padding: 0;
