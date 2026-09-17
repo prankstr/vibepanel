@@ -110,11 +110,16 @@ use gtk4::glib;
 use gtk4::pango::EllipsizeMode;
 use gtk4::prelude::*;
 use gtk4::subclass::prelude::*;
-use gtk4::{Align, Box as GtkBox, CssProvider, GestureClick, Label, Overlay, Widget};
+use gtk4::{
+    Align, ApplicationWindow, Box as GtkBox, CssProvider, EventControllerScroll,
+    EventControllerScrollFlags, GestureClick, Label, Overlay, Widget,
+};
+use gtk4_layer_shell::{KeyboardMode, LayerShell};
 use tracing::{debug, trace, warn};
 use vibepanel_core::config::WidgetEntry;
 
 use crate::services::callbacks::CallbackId;
+use crate::services::compositor::CompositorManager;
 use crate::services::config_manager::ConfigManager;
 use crate::services::tooltip::TooltipManager;
 use crate::services::workspace::{Workspace, WorkspaceService, WorkspaceServiceSnapshot};
@@ -939,6 +944,141 @@ pub struct WorkspacesWidget {
     base: BaseWidget,
     /// Callback ID for WorkspaceService, used to disconnect on drop.
     workspace_callback_id: CallbackId,
+    scroll_focus: Rc<WorkspaceScrollFocus>,
+}
+
+const SCROLL_FOCUS_RELEASE_DELAY_MS: u64 = 250;
+const SCROLL_SETTLE_DELAY_SECS: u64 = 1;
+
+#[derive(Default)]
+struct WorkspaceScrollFocus {
+    window: RefCell<Option<(glib::WeakRef<ApplicationWindow>, glib::SignalHandlerId)>>,
+    pending: Cell<Option<i32>>,
+    acquisition: RefCell<Option<glib::SourceId>>,
+    release: RefCell<Option<glib::SourceId>>,
+    confirmed: Cell<Option<i32>>,
+    target: Cell<Option<(i32, std::time::Instant)>>,
+}
+
+impl WorkspaceScrollFocus {
+    fn request(self: &Rc<Self>, window: &ApplicationWindow, workspace_id: i32) {
+        if self.window.borrow().is_none() {
+            let weak = Rc::downgrade(self);
+            let handler = window.connect_is_active_notify(move |window| {
+                if let Some(state) = weak.upgrade() {
+                    state.dispatch_if_focused(window);
+                }
+            });
+            self.window
+                .borrow_mut()
+                .replace((window.downgrade(), handler));
+        }
+        if let Some(id) = self.release.borrow_mut().take() {
+            id.remove();
+        }
+        self.pending.set(Some(workspace_id));
+        if self.acquisition.borrow().is_none() {
+            // Niri may deny focus (for example, behind fullscreen). Fall back
+            // to switching without warp protection rather than dropping the scroll.
+            let weak = Rc::downgrade(self);
+            self.acquisition
+                .borrow_mut()
+                .replace(glib::timeout_add_local_once(
+                    std::time::Duration::from_secs(1),
+                    move || {
+                        if let Some(state) = weak.upgrade() {
+                            state.acquisition.borrow_mut().take();
+                            let pending = state.pending.take();
+                            state.clear();
+                            if let Some(workspace_id) = pending {
+                                WorkspaceService::global().switch_workspace(workspace_id);
+                            }
+                        }
+                    },
+                ));
+        }
+        window.set_keyboard_mode(KeyboardMode::Exclusive);
+        window.present();
+        // Layer-shell state commits asynchronously. Only actual keyboard focus
+        // confirms that workspace IPC can no longer race the cursor-warp check.
+        self.dispatch_if_focused(window);
+    }
+
+    fn dispatch_if_focused(self: &Rc<Self>, window: &ApplicationWindow) {
+        let Some(workspace_id) = take_focused_scroll(&self.pending, window.is_active()) else {
+            return;
+        };
+        if let Some(id) = self.acquisition.borrow_mut().take() {
+            id.remove();
+        }
+        if let Some(id) = self.release.borrow_mut().take() {
+            id.remove();
+        }
+        WorkspaceService::global().switch_workspace(workspace_id);
+        let weak = Rc::downgrade(self);
+        let window = window.downgrade();
+        self.release
+            .borrow_mut()
+            .replace(glib::timeout_add_local_once(
+                std::time::Duration::from_millis(SCROLL_FOCUS_RELEASE_DELAY_MS),
+                move || {
+                    if let Some(state) = weak.upgrade() {
+                        state.release.borrow_mut().take();
+                        if let Some(window) = window.upgrade() {
+                            window.set_keyboard_mode(KeyboardMode::None);
+                        }
+                    }
+                },
+            ));
+    }
+
+    fn clear(&self) {
+        self.pending.set(None);
+        if let Some(id) = self.acquisition.borrow_mut().take() {
+            id.remove();
+        }
+        if let Some(id) = self.release.borrow_mut().take() {
+            id.remove();
+        }
+        if let Some((window, handler)) = self.window.borrow_mut().take()
+            && let Some(window) = window.upgrade()
+        {
+            window.disconnect(handler);
+            window.set_keyboard_mode(KeyboardMode::None);
+        }
+    }
+
+    fn current(&self) -> Option<i32> {
+        if let Some((workspace_id, deadline)) = self.target.get()
+            && std::time::Instant::now() < deadline
+        {
+            return Some(workspace_id);
+        }
+        self.target.set(None);
+        self.confirmed.get()
+    }
+
+    fn set_target(&self, workspace_id: i32) {
+        self.target.set(Some((
+            workspace_id,
+            std::time::Instant::now() + std::time::Duration::from_secs(SCROLL_SETTLE_DELAY_SECS),
+        )));
+    }
+
+    fn update(&self, workspace_id: Option<i32>) {
+        // Matching IDs cannot acknowledge requests: 2 -> 3 -> 2 may echo the first 2.
+        // Retain target until deadline/cancellation; external changes may
+        // lag navigation by 1s. Clicks supersede it; finer handling needs request IDs.
+        self.confirmed.set(workspace_id);
+    }
+
+    fn cancel_target(&self) {
+        self.target.set(None);
+    }
+}
+
+fn take_focused_scroll(pending: &Cell<Option<i32>>, focused: bool) -> Option<i32> {
+    focused.then(|| pending.take()).flatten()
 }
 
 impl WorkspacesWidget {
@@ -991,10 +1131,80 @@ impl WorkspacesWidget {
         let current_ids = Rc::new(RefCell::new(Vec::new()));
         let separator = config.separator;
 
+        let scroll = EventControllerScroll::new(EventControllerScrollFlags::VERTICAL);
+        scroll.set_propagation_phase(gtk4::PropagationPhase::Capture);
+        let accumulated = Cell::new(0.0f64);
+        let scroll_focus = Rc::new(WorkspaceScrollFocus::default());
+        let weak_focus = Rc::downgrade(&scroll_focus);
+        base.widget().connect_unmap(move |_| {
+            if let Some(state) = weak_focus.upgrade() {
+                state.clear();
+                state.cancel_target();
+            }
+        });
+        let focus_for_scroll = Rc::clone(&scroll_focus);
+        let current_ids_for_scroll = Rc::clone(&current_ids);
+        scroll.connect_scroll(move |controller, _dx, dy| {
+            let delta = workspace_scroll_delta(controller.unit(), dy);
+            let mut acc = accumulated.get();
+            if (acc > 0.0 && delta < 0.0) || (acc < 0.0 && delta > 0.0) {
+                acc = 0.0;
+            }
+            acc += delta;
+
+            while acc.abs() >= 1.0 {
+                let next = adjacent_workspace_id(
+                    &current_ids_for_scroll.borrow(),
+                    focus_for_scroll.current(),
+                    acc > 0.0,
+                );
+                if let Some(workspace_id) = next {
+                    focus_for_scroll.set_target(workspace_id);
+                    TooltipManager::global().cancel_and_hide();
+                    debug!("Switching to workspace {} by scrolling", workspace_id);
+
+                    let window = if CompositorManager::global().backend_name() == "Niri" {
+                        controller
+                            .widget()
+                            .and_then(|widget| widget.root())
+                            .and_then(|root| root.downcast::<ApplicationWindow>().ok())
+                    } else {
+                        None
+                    };
+                    let popover_has_focus = window.as_ref().is_some_and(|window| {
+                        window
+                            .application()
+                            .and_then(|app| app.active_window())
+                            .is_some_and(|active| {
+                                active != window.clone().upcast::<gtk4::Window>()
+                                    && active.is_active()
+                            })
+                    });
+
+                    if let Some(window) = window.filter(|_| !popover_has_focus) {
+                        // Niri's `warp-mouse-to-focus` can move the
+                        // pointer off the bar during a workspace switch. Hold keyboard focus while
+                        // dispatching so repeated scrolling remains over the workspace widget.
+                        focus_for_scroll.request(&window, workspace_id);
+                    } else {
+                        focus_for_scroll.clear();
+                        WorkspaceService::global().switch_workspace(workspace_id);
+                    }
+                }
+                acc -= acc.signum();
+            }
+
+            accumulated.set(acc);
+            glib::Propagation::Stop
+        });
+        base.widget().add_controller(scroll);
+
         let output_id_debug = output_id.clone();
+        let focus_for_updates = Rc::clone(&scroll_focus);
 
         let workspace_callback_id = WorkspaceService::global().connect(move |snapshot| {
             update_indicators(
+                &focus_for_updates,
                 &content_box,
                 ws_container.as_ref(),
                 &workspace_labels,
@@ -1010,6 +1220,13 @@ impl WorkspacesWidget {
                     None
                 },
             );
+
+            let labels = workspace_labels.borrow();
+            focus_for_updates.update(current_ids.borrow().iter().copied().find(|id| {
+                labels
+                    .get(id)
+                    .is_some_and(|indicator| indicator.has_css_class(widget::ACTIVE))
+            }));
         });
 
         debug!(
@@ -1019,6 +1236,7 @@ impl WorkspacesWidget {
         Self {
             base,
             workspace_callback_id,
+            scroll_focus,
         }
     }
 
@@ -1030,8 +1248,28 @@ impl WorkspacesWidget {
 
 impl Drop for WorkspacesWidget {
     fn drop(&mut self) {
+        self.scroll_focus.clear();
         WorkspaceService::global().disconnect(self.workspace_callback_id);
     }
+}
+
+const SURFACE_SCROLL_PIXELS_PER_WORKSPACE: f64 = 25.0;
+
+fn workspace_scroll_delta(unit: gtk4::gdk::ScrollUnit, delta: f64) -> f64 {
+    match unit {
+        gtk4::gdk::ScrollUnit::Surface => delta / SURFACE_SCROLL_PIXELS_PER_WORKSPACE,
+        _ => delta,
+    }
+}
+
+fn adjacent_workspace_id(ids: &[i32], active_id: Option<i32>, forward: bool) -> Option<i32> {
+    let active_index = ids.iter().position(|id| Some(*id) == active_id)?;
+    let next_index = if forward {
+        active_index.checked_add(1)
+    } else {
+        active_index.checked_sub(1)
+    }?;
+    ids.get(next_index).copied()
 }
 
 /// Icon glyphs for workspace indicators.
@@ -1080,6 +1318,7 @@ fn clear_indicators(
 /// `WorkspaceContainer::size_allocate` can detect the active indicator
 /// and `measure()` sees the correct min-width.
 fn create_single_indicator(
+    scroll_focus: &Rc<WorkspaceScrollFocus>,
     label_type: LabelType,
     workspace: &Workspace,
     is_vertical: bool,
@@ -1124,11 +1363,14 @@ fn create_single_indicator(
             trigger_ripple_from_gesture(gesture, x, y, &rh);
         }
     });
+    let scroll_focus = Rc::clone(scroll_focus);
     gesture.connect_released(move |gesture, _n_press, _x, _y| {
         if gesture.current_button() != BUTTON_PRIMARY {
             return;
         }
         TooltipManager::global().cancel_and_hide();
+        scroll_focus.clear();
+        scroll_focus.set_target(workspace_id);
         debug!("Switching to workspace {}", workspace_id);
         WorkspaceService::global().switch_workspace(workspace_id);
     });
@@ -1140,6 +1382,7 @@ fn create_single_indicator(
 /// Create workspace indicator widgets for the given workspaces.
 #[allow(clippy::too_many_arguments)]
 fn create_indicators(
+    scroll_focus: &Rc<WorkspaceScrollFocus>,
     container: &GtkBox,
     ws_container: Option<&WorkspaceContainer>,
     labels_cell: &Rc<RefCell<HashMap<i32, Widget>>>,
@@ -1155,7 +1398,7 @@ fn create_indicators(
     let mut ids = ids_cell.borrow_mut();
 
     for (i, workspace) in workspaces.iter().enumerate() {
-        let indicator = create_single_indicator(label_type, workspace, is_vertical);
+        let indicator = create_single_indicator(scroll_focus, label_type, workspace, is_vertical);
 
         labels.insert(workspace.id, indicator.clone());
         if let Some(wsc) = ws_container {
@@ -1202,6 +1445,7 @@ fn collect_grow_in_indicators(
 /// so it animates from 0-width to its CSS-defined size.
 #[allow(clippy::too_many_arguments)]
 fn recreate_with_grow_in(
+    scroll_focus: &Rc<WorkspaceScrollFocus>,
     container: &GtkBox,
     wsc: &WorkspaceContainer,
     labels_cell: &Rc<RefCell<HashMap<i32, Widget>>>,
@@ -1214,6 +1458,7 @@ fn recreate_with_grow_in(
     is_vertical: bool,
 ) {
     create_indicators(
+        scroll_focus,
         container,
         Some(wsc),
         labels_cell,
@@ -1356,6 +1601,7 @@ fn collect_display_ids(
 /// workspace.
 #[allow(clippy::too_many_arguments)]
 fn update_indicators(
+    scroll_focus: &Rc<WorkspaceScrollFocus>,
     container: &GtkBox,
     ws_container: Option<&WorkspaceContainer>,
     labels_cell: &Rc<RefCell<HashMap<i32, Widget>>>,
@@ -1516,6 +1762,7 @@ fn update_indicators(
                     // ── Path A2: Reorder — same IDs, different order. ──
                     // Full recreate without grow-in; container width unchanged.
                     recreate_with_grow_in(
+                        scroll_focus,
                         container,
                         wsc,
                         labels_cell,
@@ -1533,6 +1780,7 @@ fn update_indicators(
                     pre_recreate_width = Some(wsc.imp().current_width.get());
 
                     recreate_with_grow_in(
+                        scroll_focus,
                         container,
                         wsc,
                         labels_cell,
@@ -1552,6 +1800,7 @@ fn update_indicators(
                     pre_recreate_width = Some(wsc.imp().current_width.get());
 
                     recreate_with_grow_in(
+                        scroll_focus,
                         container,
                         wsc,
                         labels_cell,
@@ -1575,6 +1824,7 @@ fn update_indicators(
         } else {
             // Non-minimal — full recreate.
             create_indicators(
+                scroll_focus,
                 container,
                 None,
                 labels_cell,
@@ -1831,6 +2081,85 @@ mod tests {
             name: name.to_string(),
             options,
         }
+    }
+
+    #[test]
+    fn test_adjacent_workspace_id() {
+        let ids = [1, 2, 3];
+
+        assert_eq!(adjacent_workspace_id(&ids, Some(2), false), Some(1));
+        assert_eq!(adjacent_workspace_id(&ids, Some(2), true), Some(3));
+        assert_eq!(adjacent_workspace_id(&ids, Some(1), false), None);
+        assert_eq!(adjacent_workspace_id(&ids, Some(3), true), None);
+        assert_eq!(adjacent_workspace_id(&ids, None, true), None);
+    }
+
+    #[test]
+    fn test_scroll_waits_for_focus_and_cancels_on_clear() {
+        let state = WorkspaceScrollFocus::default();
+        state.pending.set(Some(2));
+        assert_eq!(take_focused_scroll(&state.pending, false), None);
+        assert_eq!(state.pending.get(), Some(2));
+        state.pending.set(Some(3));
+        assert_eq!(take_focused_scroll(&state.pending, true), Some(3));
+        assert_eq!(take_focused_scroll(&state.pending, true), None);
+        state.pending.set(Some(4));
+        state.clear();
+        assert_eq!(take_focused_scroll(&state.pending, true), None);
+    }
+
+    #[test]
+    fn test_scroll_state_reconciles_snapshots_and_cancellation() {
+        let state = WorkspaceScrollFocus::default();
+        state.update(Some(1));
+        state.set_target(2);
+        state.set_target(3);
+        state.set_target(2);
+
+        state.update(Some(2));
+        assert_eq!(state.current(), Some(2));
+        assert!(state.target.get().is_some());
+
+        state.update(Some(3));
+        assert_eq!(state.current(), Some(2));
+
+        state.cancel_target();
+        assert_eq!(state.current(), Some(3));
+
+        state.target.set(Some((4, std::time::Instant::now())));
+        assert_eq!(state.current(), Some(3));
+        assert_eq!(state.target.get(), None);
+    }
+
+    #[test]
+    fn test_click_supersedes_scroll_before_and_after_confirmation() {
+        let state = WorkspaceScrollFocus::default();
+        state.update(Some(1));
+        state.set_target(2);
+        state.update(Some(2));
+        state.pending.set(Some(3));
+        state.clear();
+        state.set_target(4);
+        assert_eq!(take_focused_scroll(&state.pending, true), None);
+        for confirmed in [Some(2), Some(4)] {
+            state.update(confirmed);
+            assert_eq!(
+                adjacent_workspace_id(&[1, 2, 3, 4, 5], state.current(), true),
+                Some(5)
+            );
+        }
+    }
+
+    #[test]
+    fn test_workspace_scroll_delta_uses_scroll_units() {
+        assert_eq!(
+            workspace_scroll_delta(gtk4::gdk::ScrollUnit::Wheel, 1.0),
+            1.0
+        );
+        assert_eq!(
+            workspace_scroll_delta(gtk4::gdk::ScrollUnit::Surface, 25.0),
+            1.0
+        );
     }
 
     #[test]

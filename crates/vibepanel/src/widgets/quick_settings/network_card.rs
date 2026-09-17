@@ -1962,6 +1962,23 @@ mod tests {
 
     #[test]
     fn failed_clear_timer_drops_source_id_before_callback() {
+        let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
+            .arg("widgets::quick_settings::network_card::tests::failed_clear_timer_runner")
+            .arg("--exact")
+            .arg("--ignored")
+            .arg("--test-threads=1")
+            .output()
+            .expect("timer test subprocess should run");
+        assert!(
+            output.status.success(),
+            "timer test subprocess failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    #[ignore = "internal runner requiring exclusive GLib default context"]
+    fn failed_clear_timer_runner() {
         let source_slot = Rc::new(RefCell::new(None));
         let fired = Rc::new(Cell::new(0));
         let context = glib::MainContext::default();
