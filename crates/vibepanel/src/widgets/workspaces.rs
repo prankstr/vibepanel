@@ -119,13 +119,13 @@ use tracing::{debug, trace, warn};
 use vibepanel_core::config::WidgetEntry;
 
 use crate::services::callbacks::CallbackId;
+use crate::services::compositor::CompositorManager;
 use crate::services::config_manager::ConfigManager;
 use crate::services::tooltip::TooltipManager;
 use crate::services::workspace::{Workspace, WorkspaceService, WorkspaceServiceSnapshot};
 use crate::styles::{state, widget};
 use crate::widgets::WidgetConfig;
 use crate::widgets::base::BaseWidget;
-use crate::widgets::layer_shell_popover::popover_keyboard_mode;
 use crate::widgets::ripple::{trigger_ripple_from_gesture, wrap_with_ripple};
 use crate::widgets::warn_unknown_options;
 
@@ -973,40 +973,35 @@ impl WorkspaceScrollFocus {
                 .borrow_mut()
                 .replace((window.downgrade(), handler));
         }
-        self.queue_request(workspace_id);
-        window.set_keyboard_mode(popover_keyboard_mode());
-        window.present();
-        // Layer-shell state commits asynchronously. Only actual keyboard focus
-        // confirms that workspace IPC can no longer race the cursor-warp check.
-        self.dispatch_if_focused(window);
-    }
-
-    fn queue_request(self: &Rc<Self>, workspace_id: i32) {
         if let Some(id) = self.release.borrow_mut().take() {
             id.remove();
         }
         self.pending.set(Some(workspace_id));
-        if self.acquisition.borrow().is_some() {
-            return;
-        }
-        // A compositor may deny focus (for example, behind fullscreen). Fall back
-        // to switching without warp protection rather than dropping the scroll.
-        let weak = Rc::downgrade(self);
-        self.acquisition
-            .borrow_mut()
-            .replace(glib::timeout_add_local_once(
-                std::time::Duration::from_secs(1),
-                move || {
-                    if let Some(state) = weak.upgrade() {
-                        state.acquisition.borrow_mut().take();
-                        let pending = state.pending.take();
-                        state.clear();
-                        if let Some(workspace_id) = pending {
-                            WorkspaceService::global().switch_workspace(workspace_id);
+        if self.acquisition.borrow().is_none() {
+            // Niri may deny focus (for example, behind fullscreen). Fall back
+            // to switching without warp protection rather than dropping the scroll.
+            let weak = Rc::downgrade(self);
+            self.acquisition
+                .borrow_mut()
+                .replace(glib::timeout_add_local_once(
+                    std::time::Duration::from_secs(1),
+                    move || {
+                        if let Some(state) = weak.upgrade() {
+                            state.acquisition.borrow_mut().take();
+                            let pending = state.pending.take();
+                            state.clear();
+                            if let Some(workspace_id) = pending {
+                                WorkspaceService::global().switch_workspace(workspace_id);
+                            }
                         }
-                    }
-                },
-            ));
+                    },
+                ));
+        }
+        window.set_keyboard_mode(KeyboardMode::Exclusive);
+        window.present();
+        // Layer-shell state commits asynchronously. Only actual keyboard focus
+        // confirms that workspace IPC can no longer race the cursor-warp check.
+        self.dispatch_if_focused(window);
     }
 
     fn dispatch_if_focused(self: &Rc<Self>, window: &ApplicationWindow) {
@@ -1168,10 +1163,14 @@ impl WorkspacesWidget {
                     TooltipManager::global().cancel_and_hide();
                     debug!("Switching to workspace {} by scrolling", workspace_id);
 
-                    let window = controller
-                        .widget()
-                        .and_then(|widget| widget.root())
-                        .and_then(|root| root.downcast::<ApplicationWindow>().ok());
+                    let window = if CompositorManager::global().backend_name() == "Niri" {
+                        controller
+                            .widget()
+                            .and_then(|widget| widget.root())
+                            .and_then(|root| root.downcast::<ApplicationWindow>().ok())
+                    } else {
+                        None
+                    };
                     let popover_has_focus = window.as_ref().is_some_and(|window| {
                         window
                             .application()
@@ -1183,7 +1182,7 @@ impl WorkspacesWidget {
                     });
 
                     if let Some(window) = window.filter(|_| !popover_has_focus) {
-                        // Cursor-warp settings such as niri's `warp-mouse-to-focus` can move the
+                        // Niri's `warp-mouse-to-focus` can move the
                         // pointer off the bar during a workspace switch. Hold keyboard focus while
                         // dispatching so repeated scrolling remains over the workspace widget.
                         focus_for_scroll.request(&window, workspace_id);
