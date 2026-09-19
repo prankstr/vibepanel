@@ -407,9 +407,6 @@ impl NmService {
             if let Some(previous) = previous {
                 let _ = previous.await;
             }
-            if this.mobile.attempt.get() != attempt {
-                return;
-            }
             let variant = Variant::tuple_from_iter([
                 NM_IFACE.to_variant(),
                 "WwanEnabled".to_variant(),
@@ -431,6 +428,7 @@ impl NmService {
                 .await;
             if let Err(ref e) = dbus_result {
                 warn!("Failed to set WwanEnabled: {}", e);
+                this.update_nm_flags();
             }
             // The WwanEnabled property change triggers NM's PropertiesChanged
             // signal, which fires update_nm_flags → fetch_mobile_device_info.
