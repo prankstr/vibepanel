@@ -214,8 +214,19 @@ impl NmService {
                 this.notify_snapshot(|_| {});
 
                 let this_weak = Rc::downgrade(&this);
-                proxy.connect_local("g-properties-changed", false, move |_| {
-                    if let Some(this) = this_weak.upgrade() {
+                proxy.connect_local("g-properties-changed", false, move |values| {
+                    let state_changed = values
+                        .get(1)
+                        .and_then(|value| value.get::<Variant>().ok())
+                        .and_then(|changed| changed.get::<HashMap<String, Variant>>())
+                        .is_some_and(|changed| changed.contains_key("State"));
+                    let state_invalidated = values
+                        .get(2)
+                        .and_then(|value| value.get::<Vec<String>>().ok())
+                        .is_some_and(|invalidated| invalidated.iter().any(|name| name == "State"));
+                    if (state_changed || state_invalidated)
+                        && let Some(this) = this_weak.upgrade()
+                    {
                         this.notify_snapshot(|_| {});
                     }
                     None

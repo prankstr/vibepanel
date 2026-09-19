@@ -516,14 +516,24 @@ impl NmService {
             let result = async {
                 let (bus, owner) = target.ok_or("NetworkManager unavailable")?;
                 let (sender, receiver) = async_channel::bounded(1);
+                let cancelled = cancel.connect_cancelled({
+                    let sender = sender.clone();
+                    move |_| {
+                        let _ = sender.try_send(Err("Connection cancelled".into()));
+                    }
+                });
                 let selected_owner = owner.clone();
                 thread::spawn(move || {
-                    let _ = sender.send_blocking(Self::get_mobile_nm_status_for_owner(
+                    let _ = sender.try_send(Self::get_mobile_nm_status_for_owner(
                         &selected_owner,
                         connect,
                     ));
                 });
-                let status = receiver.recv().await.map_err(|e| e.to_string())??;
+                let status = receiver.recv().await.map_err(|e| e.to_string());
+                if let Some(id) = cancelled {
+                    cancel.disconnect_cancelled(id);
+                }
+                let status = status??;
                 mobile_connection(
                     |method, args| {
                         bus.call_future(
