@@ -726,7 +726,7 @@ impl NmService {
             let result = Self::activate_wifi(
                 call,
                 |active| {
-                    wait_wifi_activation(
+                    wait_activation(
                         bus.clone(),
                         owner.to_string(),
                         active.to_string(),
@@ -1015,7 +1015,7 @@ impl NmService {
     }
 }
 
-async fn wait_wifi_activation(
+pub(super) async fn wait_activation(
     bus: gio::DBusConnection,
     owner: String,
     active: String,
@@ -1066,7 +1066,7 @@ async fn wait_wifi_activation(
                         .and_then(|v| v.get::<Vec<glib::variant::ObjectPath>>())
                     && !paths.iter().any(|path| path.as_str() == active)
                 {
-                    let _ = sender.try_send(Err("Wi-Fi activation disappeared".into()));
+                    let _ = sender.try_send(Err("Connection activation disappeared".into()));
                 }
             }
         },
@@ -1141,13 +1141,13 @@ async fn wait_wifi_activation(
             match event? {
                 1 => continue,
                 2 => return Ok(()),
-                3 | 4 => return Err("Wi-Fi activation ended before connecting".into()),
-                _ => return Err("Invalid Wi-Fi activation state".into()),
+                3 | 4 => return Err("Connection activation ended before connecting".into()),
+                _ => return Err("Invalid connection activation state".into()),
             }
         }
     })
     .await
-    .unwrap_or_else(|_| Err("Wi-Fi activation timed out".into()));
+    .unwrap_or_else(|_| Err("Connection activation timed out".into()));
     read_cancel.cancel();
     if let Some(id) = cancelled {
         cancel.disconnect_cancelled(id);
@@ -1421,7 +1421,7 @@ mod tests {
                         1u32.to_variant()
                     }
                 }).build().unwrap();
-                let mut watcher = std::pin::pin!(wait_wifi_activation(client.clone(), server.unique_name().unwrap().to_string(),
+                let mut watcher = std::pin::pin!(wait_activation(client.clone(), server.unique_name().unwrap().to_string(),
                     "/active".into(), cancel, Duration::from_millis(if case == "timeout" { 20 } else { 2000 })));
                 if case == "cancel_then_state" {
                     // Install the watcher, then hold it until both cancellation and state are queued.

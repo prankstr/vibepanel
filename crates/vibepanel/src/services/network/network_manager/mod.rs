@@ -182,7 +182,7 @@ pub struct MobileState {
     pub access_technology: Option<String>,
     /// Signal quality (0-100).
     pub signal_quality: Option<u32>,
-    /// Set on nmcli failure, auto-cleared after 5s by UI or on next successful connection.
+    /// Set on connection failure, auto-cleared after 5s by UI or on next successful connection.
     pub failed: bool,
 }
 
@@ -252,15 +252,9 @@ enum NmUpdate {
         supported: bool,
         has_modem: bool,
     },
-    /// Sent after nmcli connect/disconnect returns. Clears the local connecting
-    /// intent flag so the next MobileDeviceInfo uses the real D-Bus state.
-    MobileConnectionAttemptFinished {
-        success: bool,
-    },
-    /// Sent after toggling WwanEnabled via D-Bus. Semantically the same as
-    /// `MobileConnectionAttemptFinished` but makes the call site's intent
-    /// explicit.
-    MobileToggleFinished {
+    /// Completes the current connect, disconnect or radio toggle operation.
+    MobileOperationFinished {
+        attempt: u64,
         success: bool,
     },
     #[cfg(debug_assertions)]
@@ -276,6 +270,9 @@ pub(super) struct MobileInternal {
     pub(super) refresh_pending: Cell<bool>,
     /// Set synchronously in connect/enable, cleared when real D-Bus state arrives.
     pub(super) connecting_local: Cell<bool>,
+    pub(super) attempt: Cell<u64>,
+    pub(super) activation_cancel: RefCell<Option<gio::Cancellable>>,
+    pub(super) activation_task: RefCell<Option<glib::JoinHandle<()>>>,
 }
 
 impl MobileInternal {
@@ -284,6 +281,9 @@ impl MobileInternal {
             signal_subscriptions: RefCell::new(Vec::new()),
             refresh_pending: Cell::new(false),
             connecting_local: Cell::new(false),
+            attempt: Cell::new(0),
+            activation_cancel: RefCell::new(None),
+            activation_task: RefCell::new(None),
         }
     }
 }
@@ -573,7 +573,7 @@ impl NmService {
                 // "Connecting…" before D-Bus signals arrive. When NM confirms
                 // active/connecting, the local flag is redundant and cleared.
                 // If NM shows neither, keep the flag until the next update.
-                // `MobileConnectionAttemptFinished` / `MobileToggleFinished`
+                // `MobileOperationFinished`
                 // clears it unconditionally as a safety net.
                 let (effective_connecting, clear_local) = mobile::resolve_mobile_connecting(
                     self.mobile.connecting_local.get(),
@@ -606,8 +606,10 @@ impl NmService {
                     changed
                 });
             }
-            NmUpdate::MobileConnectionAttemptFinished { success }
-            | NmUpdate::MobileToggleFinished { success } => {
+            NmUpdate::MobileOperationFinished { attempt, success } => {
+                if attempt != self.mobile.attempt.get() {
+                    return;
+                }
                 // Clear local connecting intent; the next MobileDeviceInfo
                 // will use real D-Bus state.
                 self.mobile.connecting_local.set(false);
@@ -832,6 +834,7 @@ impl NmService {
             .refresh_generation
             .set(self.wifi.refresh_generation.get() + 1);
         self.cancel_wifi_attempt();
+        self.cancel_mobile_attempt();
         self.wifi.networks.borrow_mut().clear();
         if !self.snapshot.borrow().available {
             return; // Already unavailable

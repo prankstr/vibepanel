@@ -1,13 +1,12 @@
 //! Mobile/cellular networking via ModemManager and NetworkManager D-Bus.
 
-use std::os::unix::process::ExitStatusExt;
-use std::process::{Command, Output};
+use std::rc::Rc;
 use std::thread;
 use std::time::Duration;
 
 use gtk4::gio::{self, prelude::*};
 use gtk4::glib::{self, Variant};
-use tracing::{error, warn};
+use tracing::warn;
 
 use super::{
     IFACE_ACTIVE_CONN, IFACE_SETTINGS, IFACE_SETTINGS_CONN, MM_ACCESS_TECH_EDGE,
@@ -41,6 +40,8 @@ pub(super) struct MobileNmStatus {
     /// The first GSM/CDMA connection profile name, if one exists.
     pub profile_name: Option<String>,
     pub active_name: Option<String>,
+    pub profile_path: Option<String>,
+    pub active_path: Option<String>,
 }
 
 impl NmService {
@@ -100,13 +101,25 @@ impl NmService {
     pub(super) fn get_mobile_nm_status_sync() -> Result<MobileNmStatus, String> {
         let nm_proxy = system_dbus_proxy_sync(NM_SERVICE, NM_PATH, NM_IFACE)
             .map_err(|e| format!("Failed to create NM proxy: {}", e))?;
+        let owner = nm_proxy.name_owner().ok_or("NetworkManager unavailable")?;
+        Self::get_mobile_nm_status_for_owner(&owner, true)
+    }
+
+    fn get_mobile_nm_status_for_owner(
+        owner: &str,
+        include_profiles: bool,
+    ) -> Result<MobileNmStatus, String> {
+        let nm_proxy =
+            system_dbus_proxy_sync(owner, NM_PATH, NM_IFACE).map_err(|e| e.to_string())?;
 
         let mut mobile_active = false;
         let mut mobile_connecting = false;
         let mut active_name: Option<String> = None;
+        let mut active_path = None;
+        let mut active_profile = None;
         if let Some(active_conns) = nm_proxy.cached_property("ActiveConnections") {
             for conn_path in active_conns.iter().filter_map(|v| objpath_to_string(&v)) {
-                let conn_proxy = system_dbus_proxy_sync(NM_SERVICE, &conn_path, IFACE_ACTIVE_CONN)
+                let conn_proxy = system_dbus_proxy_sync(owner, &conn_path, IFACE_ACTIVE_CONN)
                     .map_err(|e| format!("Failed to create active conn proxy: {}", e))?;
 
                 let ctype = conn_proxy
@@ -121,6 +134,13 @@ impl NmService {
                     active_name = conn_proxy
                         .cached_property("Id")
                         .and_then(|v| v.get::<String>());
+                    if matches!(state, 1 | 2) {
+                        active_path = Some(conn_path);
+                        active_profile = conn_proxy
+                            .cached_property("Connection")
+                            .and_then(|v| objpath_to_string(&v))
+                            .filter(|path| path != "/");
+                    }
                     match state {
                         // NM_ACTIVE_CONNECTION_STATE_ACTIVATED
                         2 => {
@@ -138,18 +158,25 @@ impl NmService {
             }
         }
 
-        let mobile_profile_name = Self::find_first_mobile_profile_sync()?;
+        // Disconnect needs only the active path; inaccessible settings must not block it.
+        let profile = if include_profiles {
+            Self::find_first_mobile_profile_sync(owner)?
+        } else {
+            None
+        };
 
         Ok(MobileNmStatus {
             active: mobile_active,
             connecting: mobile_connecting,
-            profile_name: mobile_profile_name,
+            profile_name: profile.as_ref().map(|(_, name)| name.clone()),
+            profile_path: active_profile.or_else(|| profile.map(|(path, _)| path)),
+            active_path,
             active_name,
         })
     }
 
-    fn get_connection_settings(conn_path: &str) -> Result<Variant, String> {
-        let conn_proxy = system_dbus_proxy_sync(NM_SERVICE, conn_path, IFACE_SETTINGS_CONN)
+    fn get_connection_settings(owner: &str, conn_path: &str) -> Result<Variant, String> {
+        let conn_proxy = system_dbus_proxy_sync(owner, conn_path, IFACE_SETTINGS_CONN)
             .map_err(|e| format!("Failed to create settings conn proxy: {}", e))?;
 
         conn_proxy
@@ -169,9 +196,9 @@ impl NmService {
             .and_then(|props| Self::get_string_prop(&props, key))
     }
 
-    /// Find the first GSM/CDMA connection profile name via NetworkManager's Settings interface.
-    pub(super) fn find_first_mobile_profile_sync() -> Result<Option<String>, String> {
-        let settings_proxy = system_dbus_proxy_sync(NM_SERVICE, NM_SETTINGS_PATH, IFACE_SETTINGS)
+    /// Find the first GSM/CDMA profile path and display name.
+    fn find_first_mobile_profile_sync(owner: &str) -> Result<Option<(String, String)>, String> {
+        let settings_proxy = system_dbus_proxy_sync(owner, NM_SETTINGS_PATH, IFACE_SETTINGS)
             .map_err(|e| format!("Failed to create NM settings proxy: {}", e))?;
 
         let result = settings_proxy
@@ -189,11 +216,14 @@ impl NmService {
             .iter()
             .filter_map(|v| objpath_to_string(&v))
         {
-            if let Ok(settings) = Self::get_connection_settings(&conn)
+            if let Ok(settings) = Self::get_connection_settings(owner, &conn)
                 && let Some(ctype) = Self::parse_connection_prop(&settings, "type")
                 && (ctype == "gsm" || ctype == "cdma")
             {
-                return Ok(Self::parse_connection_prop(&settings, "id"));
+                return Ok(Some((
+                    conn,
+                    Self::parse_connection_prop(&settings, "id").unwrap_or_default(),
+                )));
             }
         }
         Ok(None)
@@ -321,7 +351,8 @@ impl NmService {
     }
 
     /// Enable or disable WWAN/modem via NetworkManager.
-    pub fn set_mobile_enabled(&self, enabled: bool) {
+    pub fn set_mobile_enabled(self: &Rc<Self>, enabled: bool) {
+        self.cancel_mobile_attempt();
         #[cfg(debug_assertions)]
         if debug_mobile_mock::is_enabled() {
             if enabled {
@@ -349,6 +380,11 @@ impl NmService {
         let Some(nm) = self.nm_proxy.borrow().clone() else {
             return;
         };
+        let Some(owner) = nm.name_owner() else {
+            return;
+        };
+        let attempt = self.mobile.attempt.get();
+        let previous = self.mobile.activation_task.take();
 
         if enabled {
             // Enabling WWAN often triggers auto-connect of the mobile profile.
@@ -366,34 +402,49 @@ impl NmService {
             });
         }
 
-        thread::spawn(move || {
+        let this = self.clone();
+        let task = glib::spawn_future_local(async move {
+            if let Some(previous) = previous {
+                let _ = previous.await;
+            }
+            if this.mobile.attempt.get() != attempt {
+                return;
+            }
             let variant = Variant::tuple_from_iter([
                 NM_IFACE.to_variant(),
                 "WwanEnabled".to_variant(),
                 enabled.to_variant().to_variant(),
             ]);
 
-            let dbus_result = nm.call_sync(
-                "org.freedesktop.DBus.Properties.Set",
-                Some(&variant),
-                gio::DBusCallFlags::NONE,
-                5000,
-                None::<&gio::Cancellable>,
-            );
+            let dbus_result = nm
+                .connection()
+                .call_future(
+                    Some(&owner),
+                    NM_PATH,
+                    super::PROPERTIES_IFACE,
+                    "Set",
+                    Some(&variant),
+                    None,
+                    gio::DBusCallFlags::NONE,
+                    5000,
+                )
+                .await;
             if let Err(ref e) = dbus_result {
-                error!("Failed to set WwanEnabled: {}", e);
+                warn!("Failed to set WwanEnabled: {}", e);
             }
             // The WwanEnabled property change triggers NM's PropertiesChanged
             // signal, which fires update_nm_flags → fetch_mobile_device_info.
-            send_nm_update(NmUpdate::MobileToggleFinished {
+            this.apply_update(NmUpdate::MobileOperationFinished {
+                attempt,
                 success: dbus_result.is_ok(),
             });
             Self::fetch_mobile_device_info();
         });
+        self.mobile.activation_task.replace(Some(task));
     }
 
     /// Connect the first configured mobile profile (gsm/cdma) via NetworkManager.
-    pub fn connect_mobile(&self) {
+    pub fn connect_mobile(self: &Rc<Self>) {
         self.mobile.connecting_local.set(true);
         self.notify_snapshot(|s| {
             s.mobile.connecting = true;
@@ -408,61 +459,11 @@ impl NmService {
             return;
         }
 
-        thread::spawn(move || {
-            let conn_name = match Self::get_mobile_nm_status_sync() {
-                Ok(status) => status
-                    .active_name
-                    .or(status.profile_name)
-                    // NM status returned OK but had no profile names — fall back
-                    // to scanning for the first available mobile profile.
-                    .or_else(|| Self::find_first_mobile_profile_sync().ok().flatten()),
-                _ => Self::find_first_mobile_profile_sync().ok().flatten(),
-            };
-
-            let Some(conn_name) = conn_name else {
-                warn!("No GSM/CDMA profile found to connect");
-                // No profile — clear connecting intent and refresh.
-                send_nm_update(NmUpdate::MobileConnectionAttemptFinished { success: false });
-                Self::fetch_mobile_device_info();
-                return;
-            };
-
-            let success = match nmcli_output_with_timeout(Command::new("nmcli").args([
-                "connection",
-                "up",
-                "id",
-                &conn_name,
-            ])) {
-                Ok(output) => {
-                    if output.status.success() {
-                        true
-                    } else {
-                        let stderr = String::from_utf8_lossy(&output.stderr);
-                        warn!(
-                            "nmcli mobile connect failed for '{}': {}",
-                            conn_name,
-                            stderr.trim()
-                        );
-                        false
-                    }
-                }
-                Err(e) => {
-                    error!("{}", e);
-                    false
-                }
-            };
-            // nmcli returned — clear local connecting intent, then fetch real state.
-            send_nm_update(NmUpdate::MobileConnectionAttemptFinished { success });
-            Self::fetch_mobile_device_info();
-        });
+        self.start_mobile_connection(true);
     }
 
     /// Disconnect active mobile connection via NetworkManager.
-    ///
-    /// On success, NM's `PropertiesChanged` signal cascade handles UI convergence
-    /// automatically. On failure, we explicitly fetch state and report the error
-    /// since no NM signals will fire.
-    pub fn disconnect_mobile(&self) {
+    pub fn disconnect_mobile(self: &Rc<Self>) {
         self.mobile.connecting_local.set(false);
         self.notify_snapshot(|s| {
             s.mobile.connecting = false;
@@ -477,49 +478,93 @@ impl NmService {
             return;
         }
 
-        thread::spawn(move || {
-            let active_name = Self::get_mobile_nm_status_sync().ok().and_then(|status| {
-                if status.active {
-                    status.active_name
-                } else {
-                    None
-                }
-            });
+        self.start_mobile_connection(false);
+    }
 
-            let mut success = true;
-            if let Some(name) = active_name {
-                match nmcli_output_with_timeout(Command::new("nmcli").args([
-                    "connection",
-                    "down",
-                    "id",
-                    &name,
-                ])) {
-                    Ok(output) if !output.status.success() => {
-                        let stderr = String::from_utf8_lossy(&output.stderr);
-                        warn!(
-                            "nmcli mobile disconnect failed for '{}': {}",
-                            name,
-                            stderr.trim()
-                        );
-                        success = false;
-                    }
-                    Err(e) => {
-                        error!("{}", e);
-                        success = false;
-                    }
-                    _ => {}
-                }
+    /// Invalidate the in-flight attempt; leaves `connecting_local` to the caller.
+    fn abort_mobile_attempt(&self) {
+        self.mobile.attempt.set(self.mobile.attempt.get() + 1);
+        if let Some(cancel) = self.mobile.activation_cancel.take() {
+            cancel.cancel();
+        }
+    }
+
+    pub(super) fn cancel_mobile_attempt(&self) {
+        self.abort_mobile_attempt();
+        self.mobile.connecting_local.set(false);
+    }
+
+    fn start_mobile_connection(self: &Rc<Self>, connect: bool) {
+        // Callers already set `connecting_local`; don't clear and re-set it here.
+        self.abort_mobile_attempt();
+        let attempt = self.mobile.attempt.get();
+        let cancel = gio::Cancellable::new();
+        self.mobile.activation_cancel.replace(Some(cancel.clone()));
+        let previous = self.mobile.activation_task.take();
+        let target = self.nm_proxy.borrow().as_ref().and_then(|nm| {
+            nm.name_owner()
+                .map(|owner| (nm.connection(), owner.to_string()))
+        });
+        let this = self.clone();
+        let task = glib::spawn_future_local(async move {
+            if let Some(previous) = previous {
+                let _ = previous.await;
             }
-
-            if !success {
-                // Disconnect failed — no NM signals will fire, so the
-                // optimistic `active=false` would remain stale. Explicitly
-                // fetch the real state and clear local connecting intent.
-                send_nm_update(NmUpdate::MobileConnectionAttemptFinished { success: false });
+            if cancel.is_cancelled() {
+                return;
+            }
+            let result = async {
+                let (bus, owner) = target.ok_or("NetworkManager unavailable")?;
+                let (sender, receiver) = async_channel::bounded(1);
+                let selected_owner = owner.clone();
+                thread::spawn(move || {
+                    let _ = sender.send_blocking(Self::get_mobile_nm_status_for_owner(
+                        &selected_owner,
+                        connect,
+                    ));
+                });
+                let status = receiver.recv().await.map_err(|e| e.to_string())??;
+                mobile_connection(
+                    |method, args| {
+                        bus.call_future(
+                            Some(&owner),
+                            NM_PATH,
+                            NM_IFACE,
+                            method,
+                            Some(args),
+                            None,
+                            gio::DBusCallFlags::NONE,
+                            30_000,
+                        )
+                    },
+                    |active| {
+                        super::wifi::wait_activation(
+                            bus.clone(),
+                            owner.clone(),
+                            active.into(),
+                            cancel.clone(),
+                            Duration::from_secs(60),
+                        )
+                    },
+                    &status,
+                    connect,
+                    &cancel,
+                )
+                .await
+            }
+            .await;
+            if let Err(e) = &result {
+                warn!("Mobile connection operation failed: {e}");
+            }
+            if this.mobile.attempt.get() == attempt {
+                this.apply_update(NmUpdate::MobileOperationFinished {
+                    attempt,
+                    success: result.is_ok(),
+                });
                 Self::fetch_mobile_device_info();
             }
-            // On success, NM property-change signals handle state convergence.
         });
+        self.mobile.activation_task.replace(Some(task));
     }
 
     /// Clear the mobile failed connection state (called by UI after showing error).
@@ -532,62 +577,60 @@ impl NmService {
     }
 }
 
-/// Timeout for `nmcli` subprocess calls. Cellular modems and their firmware
-/// can be slow, so we allow a generous 60 seconds before giving up.
-const NMCLI_TIMEOUT: Duration = Duration::from_secs(60);
-
-/// Run an `nmcli` command with a timeout guard for slow modem firmware.
-///
-/// The calling thread blocks on `wait_with_output()` (kernel `waitpid`),
-/// while a watchdog thread uses `recv_timeout()` on a channel. If the main
-/// thread finishes first it signals the channel, causing the watchdog to
-/// exit immediately. If the timeout expires before the signal arrives, the
-/// watchdog sends SIGKILL to the child process.
-///
-/// Timeout detection checks `output.status.signal() == Some(SIGKILL)` rather
-/// than a flag, so it reflects what actually happened to the process.
-fn nmcli_output_with_timeout(cmd: &mut Command) -> Result<Output, String> {
-    let child = cmd
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("Failed to spawn nmcli: {e}"))?;
-
-    let pid = child.id() as i32;
-    let (tx, rx) = std::sync::mpsc::channel::<()>();
-
-    thread::spawn(move || {
-        if rx.recv_timeout(NMCLI_TIMEOUT).is_err() {
-            // Timeout expired and sender didn't signal — kill the child.
-            // SAFETY: Sending SIGKILL to a process. If the process already
-            // exited and was reaped, kill() returns ESRCH which is harmless.
-            // Theoretical PID reuse: if the child exits and its PID is recycled
-            // before the timeout fires, we'd kill an unrelated process. In
-            // practice this can't happen here because wait_with_output() below
-            // is the only call that reaps the child — if it completes before
-            // the timeout, tx.send(()) cancels the watchdog. If it hasn't
-            // completed, the child is still alive and owns the PID.
-            unsafe {
-                libc::kill(pid, libc::SIGKILL);
-            }
-        }
-    });
-
-    let output = child
-        .wait_with_output()
-        .map_err(|e| format!("Failed to wait on nmcli: {e}"))?;
-
-    // Signal the watchdog to exit early. If it already fired, that's fine.
-    let _ = tx.send(());
-
-    if !output.status.success() && output.status.signal() == Some(libc::SIGKILL) {
-        return Err(format!(
-            "nmcli timed out after {}s",
-            NMCLI_TIMEOUT.as_secs()
-        ));
+async fn mobile_connection<F, W>(
+    call: impl Fn(&str, &Variant) -> F,
+    wait: impl FnOnce(&str) -> W,
+    status: &MobileNmStatus,
+    connect: bool,
+    cancel: &gio::Cancellable,
+) -> Result<(), String>
+where
+    F: std::future::Future<Output = Result<Variant, glib::Error>>,
+    W: std::future::Future<Output = Result<(), String>>,
+{
+    use glib::variant::ObjectPath;
+    if cancel.is_cancelled() {
+        return Err("Connection cancelled".into());
     }
-
-    Ok(output)
+    if !connect {
+        if let Some(active) = &status.active_path {
+            let active = ObjectPath::try_from(active.as_str()).map_err(|e| e.to_string())?;
+            call("DeactivateConnection", &(active,).to_variant())
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+        return Ok(());
+    }
+    let profile = status
+        .profile_path
+        .as_deref()
+        .ok_or("No GSM/CDMA profile found")?;
+    let profile = ObjectPath::try_from(profile).map_err(|e| e.to_string())?;
+    let automatic = ObjectPath::try_from("/").expect("valid root path");
+    // Keep the reply even when cancelled: it identifies exactly what needs cleanup.
+    let reply = call(
+        "ActivateConnection",
+        &(profile, automatic.clone(), automatic).to_variant(),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    let (active,) = reply
+        .get::<(ObjectPath,)>()
+        .ok_or("Invalid activation path")?;
+    let result = if cancel.is_cancelled() {
+        Err("Connection cancelled".into())
+    } else {
+        wait(active.as_str()).await
+    };
+    if result.is_err() || cancel.is_cancelled() {
+        if let Err(e) = call("DeactivateConnection", &(active,).to_variant()).await {
+            warn!("Mobile activation cleanup failed: {e}");
+        }
+        return Err(result
+            .err()
+            .unwrap_or_else(|| "Connection cancelled".into()));
+    }
+    Ok(())
 }
 
 /// Check if a mobile/cellular connection is active.
@@ -770,87 +813,147 @@ mod tests {
         assert!(clear, "should clear local flag");
     }
 
-    // --- nmcli_output_with_timeout tests ---
-
-    /// Helper: build a `Command` that runs for the given duration then exits.
-    fn sleep_cmd(secs: f32) -> Command {
-        let mut cmd = Command::new("sleep");
-        cmd.arg(format!("{secs}"));
-        cmd
-    }
-
     #[test]
-    fn nmcli_timeout_happy_path() {
-        // A fast command should succeed and return its stdout.
-        let mut cmd = Command::new("echo");
-        cmd.arg("hello");
-        let output = nmcli_output_with_timeout(&mut cmd).expect("should succeed");
-        assert!(output.status.success());
-        assert_eq!(output.stdout.trim_ascii(), b"hello");
-    }
-
-    #[test]
-    fn nmcli_timeout_kills_slow_process() {
-        // Override NMCLI_TIMEOUT by testing the internals directly:
-        // spawn a long sleep, but use a short timeout via a custom wrapper.
-        let child = Command::new("sleep")
-            .arg("60")
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .unwrap();
-
-        let pid = child.id() as libc::pid_t;
-        let short_timeout = Duration::from_millis(200);
-        let (tx, rx) = std::sync::mpsc::channel::<()>();
-
-        std::thread::spawn(move || {
-            if rx.recv_timeout(short_timeout).is_err() {
-                unsafe {
-                    libc::kill(pid, libc::SIGKILL);
-                }
+    fn mobile_connection_lifecycle() {
+        use glib::variant::ObjectPath;
+        use std::cell::{Cell, RefCell};
+        for case in [
+            "success",
+            "failure",
+            "cancel_before",
+            "cancel_reply",
+            "cancel_wait",
+            "method_error",
+            "disconnect",
+            "disconnect_error",
+            "inactive",
+            "no_profile",
+        ] {
+            let cancel = gio::Cancellable::new();
+            if case == "cancel_before" {
+                cancel.cancel();
             }
+            let status = MobileNmStatus {
+                profile_path: (case != "no_profile").then(|| "/profile".into()),
+                active_path: (case != "inactive").then(|| "/old_active".into()),
+                ..Default::default()
+            };
+            let calls = RefCell::new(Vec::new());
+            let waited = Cell::new(false);
+            let object = |path: &str| ObjectPath::try_from(path).unwrap();
+            let connect = !matches!(case, "disconnect" | "disconnect_error" | "inactive");
+            let result = glib::MainContext::new().block_on(mobile_connection(
+                |method, args| {
+                    calls.borrow_mut().push(method.to_string());
+                    std::future::ready(match method {
+                        "ActivateConnection" => {
+                            assert_eq!(
+                                args.get::<(ObjectPath, ObjectPath, ObjectPath)>(),
+                                Some((object("/profile"), object("/"), object("/")))
+                            );
+                            if case == "cancel_reply" {
+                                cancel.cancel();
+                            }
+                            if case == "method_error" {
+                                Err(glib::Error::new(
+                                    gio::IOErrorEnum::PermissionDenied,
+                                    "Denied",
+                                ))
+                            } else {
+                                Ok((object("/new_active"),).to_variant())
+                            }
+                        }
+                        "DeactivateConnection" => {
+                            assert_eq!(
+                                args.get::<(ObjectPath,)>(),
+                                Some((object(if connect {
+                                    "/new_active"
+                                } else {
+                                    "/old_active"
+                                }),))
+                            );
+                            if case == "disconnect_error" {
+                                Err(glib::Error::new(
+                                    gio::IOErrorEnum::PermissionDenied,
+                                    "Denied",
+                                ))
+                            } else {
+                                Ok(().to_variant())
+                            }
+                        }
+                        _ => panic!("Unexpected method {method}"),
+                    })
+                },
+                |active| {
+                    assert_eq!(active, "/new_active");
+                    waited.set(true);
+                    if case == "cancel_wait" {
+                        cancel.cancel();
+                    }
+                    std::future::ready(if case == "failure" {
+                        Err("Activation failed".into())
+                    } else {
+                        Ok(())
+                    })
+                },
+                &status,
+                connect,
+                &cancel,
+            ));
+            assert_eq!(
+                result.is_ok(),
+                matches!(case, "success" | "disconnect" | "inactive"),
+                "{case}"
+            );
+            assert_eq!(
+                waited.get(),
+                matches!(case, "success" | "failure" | "cancel_wait"),
+                "{case}"
+            );
+            let expected: &[&str] = match case {
+                "cancel_before" | "inactive" | "no_profile" => &[],
+                "disconnect" | "disconnect_error" => &["DeactivateConnection"],
+                "failure" | "cancel_reply" | "cancel_wait" => {
+                    &["ActivateConnection", "DeactivateConnection"]
+                }
+                _ => &["ActivateConnection"],
+            };
+            assert_eq!(*calls.borrow(), expected, "{case}");
+        }
+    }
+
+    #[test]
+    fn obsolete_mobile_completion_cannot_clear_new_attempt() {
+        use super::super::{MobileInternal, NmSnapshot, WifiInternal};
+        use std::cell::RefCell;
+        let service = NmService {
+            nm_proxy: RefCell::new(None),
+            snapshot: RefCell::new(NmSnapshot::unknown()),
+            callbacks: crate::services::callbacks::Callbacks::new(),
+            wifi: WifiInternal::new(),
+            mobile: MobileInternal::new(),
+        };
+        let cancel = gio::Cancellable::new();
+        service
+            .mobile
+            .activation_cancel
+            .replace(Some(cancel.clone()));
+        service.cancel_mobile_attempt();
+        assert!(cancel.is_cancelled());
+        service.mobile.connecting_local.set(true);
+        service.notify_snapshot(|s| s.mobile.connecting = true);
+        service.apply_update(NmUpdate::MobileOperationFinished {
+            attempt: 0,
+            success: false,
         });
-
-        let start = std::time::Instant::now();
-        let output = child.wait_with_output().unwrap();
-        let _ = tx.send(());
-        let elapsed = start.elapsed();
-
-        assert!(
-            elapsed < Duration::from_secs(2),
-            "should have been killed quickly, took {elapsed:?}"
-        );
-        assert!(!output.status.success());
-        assert_eq!(output.status.signal(), Some(libc::SIGKILL));
-    }
-
-    #[test]
-    fn nmcli_timeout_watchdog_exits_early_on_fast_command() {
-        // Verify the watchdog thread doesn't linger: a fast command should
-        // complete well before NMCLI_TIMEOUT, and the function should return
-        // promptly without waiting for the watchdog to sleep.
-        let start = std::time::Instant::now();
-        let mut cmd = sleep_cmd(0.0);
-        let result = nmcli_output_with_timeout(&mut cmd);
-        let elapsed = start.elapsed();
-
-        assert!(result.is_ok());
-        assert!(
-            elapsed < Duration::from_secs(2),
-            "should return immediately, took {elapsed:?}"
-        );
-    }
-
-    #[test]
-    fn nmcli_timeout_nonzero_exit_not_treated_as_timeout() {
-        // A command that exits quickly with non-zero status should return Ok,
-        // not be misidentified as a timeout.
-        let mut cmd = Command::new("sh");
-        cmd.args(["-c", "exit 1"]);
-        let output =
-            nmcli_output_with_timeout(&mut cmd).expect("should return Ok for non-timeout failure");
-        assert!(!output.status.success());
-        assert_ne!(output.status.signal(), Some(libc::SIGKILL));
+        assert!(service.mobile.connecting_local.get());
+        assert!(service.snapshot().mobile.connecting);
+        assert!(!service.snapshot().mobile.failed);
+        service.apply_update(NmUpdate::MobileOperationFinished {
+            attempt: 1,
+            success: true,
+        });
+        assert!(!service.mobile.connecting_local.get());
+        assert!(!service.snapshot().mobile.connecting);
     }
 }
