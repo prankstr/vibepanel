@@ -62,6 +62,7 @@
           pname = "vibepanel";
           version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.package.version;
           inherit src nativeBuildInputs buildInputs;
+          nativeCheckInputs = [ pkgs.dbus ];
           strictDeps = true;
         };
 
