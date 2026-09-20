@@ -167,8 +167,9 @@ pub struct Window {
     pub is_focused: bool,
     /// Whether this window is requesting attention.
     pub is_urgent: bool,
-    /// Whether this window is a (currently visible) scratchpad client.
-    /// Compositors without a scratchpad concept always report `false`.
+    /// Whether this window is a (currently visible) scratchpad client, such as
+    /// a regular or named MangoWC scratchpad. Compositors
+    /// without a scratchpad concept always report `false`.
     pub is_scratchpad: bool,
 }
 
