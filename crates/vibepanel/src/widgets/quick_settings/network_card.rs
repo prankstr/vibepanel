@@ -1095,7 +1095,7 @@ pub fn populate_wifi_list(
         if net.security.is_secured() {
             extra_parts.push("Secured".to_string());
         }
-        // Don't show "Saved" while connecting (nmcli creates profile before auth completes)
+        // "Connecting..." already says enough; "Saved" is noise until the attempt settles.
         if net.known && !is_connecting {
             extra_parts.push("Saved".to_string());
         }
@@ -1390,7 +1390,6 @@ pub fn show_password_dialog_with_error(
     ssid: &str,
     error_message: Option<&str>,
 ) {
-    let ssid = ssid.trim();
     if ssid.is_empty() {
         return;
     }
@@ -1525,6 +1524,19 @@ fn on_password_connect_clicked(state: &NetworkCardState, window: WeakRef<Applica
 
     let service = NetworkService::global();
     let snapshot = service.snapshot();
+    let path = match &snapshot {
+        NetworkSnapshot::NetworkManager(nm) => nm
+            .wifi
+            .networks
+            .iter()
+            .find(|network| network.ssid == ssid && network.security.is_secured())
+            .and_then(|network| network.path.clone()),
+        NetworkSnapshot::Iwd(iwd) => iwd
+            .networks
+            .iter()
+            .find(|network| network.ssid == ssid)
+            .and_then(|network| network.path.clone()),
+    };
 
     // Check if this is an IWD auth request (agent callback pending)
     // Verify the auth request SSID matches our target to avoid submitting
@@ -1540,22 +1552,10 @@ fn on_password_connect_clicked(state: &NetworkCardState, window: WeakRef<Applica
                 "Auth request SSID '{}' doesn't match target '{}', connecting directly",
                 auth_ssid, ssid
             );
-            let path = snapshot
-                .networks()
-                .iter()
-                .find(|n| n.ssid == ssid)
-                .and_then(|n| n.path.clone());
             service.connect_to_network(&ssid, Some(&password), path.as_deref());
         }
     } else {
         // No pending IWD auth request — connect with password directly.
-        // NetworkManager doesn't need a path; IWD does, so look it up from
-        // the current snapshot.
-        let path = snapshot
-            .networks()
-            .iter()
-            .find(|n| n.ssid == ssid)
-            .and_then(|n| n.path.clone());
         service.connect_to_network(&ssid, Some(&password), path.as_deref());
     }
 }
@@ -1666,7 +1666,18 @@ pub fn on_network_changed(
     if let NetworkSnapshot::NetworkManager(nm_snap) = snapshot {
         let current_target = state.password_target_ssid.borrow().clone();
         if let Some(ref target_ssid) = current_target {
-            if let Some(ref failed_ssid) = nm_snap.wifi.failed_ssid {
+            let connecting = nm_snap.wifi.connecting_ssid.as_ref() == Some(target_ssid);
+            // Only update on transitions so later snapshots preserve failure text.
+            if connecting != state.connect_anim_source.borrow().is_some() {
+                set_password_connecting_state(
+                    state,
+                    connecting,
+                    connecting.then(|| window.downgrade()),
+                );
+            }
+            if !nm_snap.available || nm_snap.wifi.enabled == Some(false) {
+                hide_password_dialog(state);
+            } else if let Some(ref failed_ssid) = nm_snap.wifi.failed_ssid {
                 if failed_ssid == target_ssid {
                     // Connection failed for our target - show error and re-enable form
                     debug!("Connection failed for '{}', showing error", failed_ssid);
@@ -1685,7 +1696,8 @@ pub fn on_network_changed(
                     // Clear the failed state so we don't re-trigger
                     NetworkService::global().clear_failed_state();
                 }
-            } else if nm_snap.wifi.ssid.as_ref() == Some(target_ssid)
+            } else if nm_snap.wifi.connected
+                && nm_snap.wifi.ssid.as_ref() == Some(target_ssid)
                 && nm_snap.wifi.connecting_ssid.is_none()
             {
                 // Successfully connected to target - hide dialog and clear state
@@ -1695,6 +1707,7 @@ pub fn on_network_changed(
                 );
                 hide_password_dialog(state);
             } else if nm_snap.wifi.connected
+                && nm_snap.wifi.ssid.is_some()
                 && nm_snap.wifi.ssid.as_ref() != Some(target_ssid)
                 && nm_snap.wifi.connecting_ssid.is_none()
                 && nm_snap.wifi.ssid != *state.password_opened_ssid.borrow()
@@ -1708,7 +1721,6 @@ pub fn on_network_changed(
                 );
                 hide_password_dialog(state);
             }
-            // If connecting_ssid matches target, keep showing animation (do nothing)
         } else if let Some(ref failed_ssid) = nm_snap.wifi.failed_ssid {
             // NM doesn't provide failure reasons, so prompting for password is misleading.
             // Show inline error instead.

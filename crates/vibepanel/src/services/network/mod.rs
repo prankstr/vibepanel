@@ -60,7 +60,7 @@ pub struct WifiNetwork {
     pub known: bool,
     /// IWD-only: D-Bus path to the KnownNetwork object (for `forget_network()`).
     pub known_network_path: Option<String>,
-    /// IWD-only: D-Bus path to the Network object (for `connect_to_network()`).
+    /// D-Bus path to the IWD Network or NetworkManager AccessPoint object.
     pub path: Option<String>,
 }
 
@@ -465,11 +465,11 @@ impl NetworkService {
     /// Connect to a Wi-Fi network.
     ///
     /// - `ssid`: Network name (used by NM).
-    /// - `password`: Optional password (NM only; IWD uses agent callbacks).
-    /// - `path`: D-Bus object path (IWD only; ignored by NM).
+    /// - `password`: Password for a new NM profile (saved credentials take precedence), or IWD retry.
+    /// - `path`: D-Bus IWD Network or NM AccessPoint path.
     pub fn connect_to_network(&self, ssid: &str, password: Option<&str>, path: Option<&str>) {
         match &self.backend {
-            NetworkBackend::NetworkManager(inner) => inner.connect_to_network(ssid, password),
+            NetworkBackend::NetworkManager(inner) => inner.connect_to_network(ssid, password, path),
             NetworkBackend::Iwd(inner) => {
                 if let Some(p) = path {
                     // Stash the password so handle_request_passphrase can
@@ -497,7 +497,7 @@ impl NetworkService {
 
     /// Forget a saved Wi-Fi network.
     ///
-    /// - `ssid`: Network name (used by NM to delete the connection).
+    /// - `ssid`: Actual SSID (NM deletes all matching nonvolatile Wi-Fi profiles).
     /// - `path`: D-Bus KnownNetwork path (IWD only; ignored by NM).
     pub fn forget(&self, ssid: &str, path: Option<&str>) {
         match &self.backend {
