@@ -31,7 +31,8 @@ jobs:
             libgtk4-layer-shell-dev \
             libpulse-dev \
             libudev-dev \
-            libdbus-1-dev
+            libdbus-1-dev \
+            dbus-daemon
           rustup component add clippy
       - uses: Swatinem/rust-cache@v2
         with:
@@ -54,6 +55,7 @@ jobs:
             libpulse-dev \
             libudev-dev \
             libdbus-1-dev \
+            dbus-daemon \
             xvfb
       - uses: Swatinem/rust-cache@v2
         with:

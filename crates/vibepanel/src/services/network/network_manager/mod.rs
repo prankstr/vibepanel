@@ -120,6 +120,24 @@ impl WifiState {
     fn unknown() -> Self {
         Self::default()
     }
+
+    fn reconcile_connection(
+        &mut self,
+        device_state: Option<u32>,
+        active_ap: Option<&str>,
+        networks: &[WifiNetwork],
+    ) {
+        self.networks = networks.to_vec();
+        self.device_state = device_state.filter(|_| self.enabled != Some(false));
+        let active_ap = active_ap.filter(|path| !path.is_empty() && *path != "/");
+        self.connected = self.device_state == Some(100) && active_ap.is_some();
+        for network in &mut self.networks {
+            network.active = self.connected && network.path.as_deref() == active_ap;
+        }
+        let active = self.networks.iter().find(|network| network.active);
+        self.ssid = active.map(|network| network.ssid.clone());
+        self.strength = active.map_or(0, |network| network.strength);
+    }
 }
 
 /// Wired (Ethernet) networking state from NetworkManager.
@@ -164,7 +182,7 @@ pub struct MobileState {
     pub access_technology: Option<String>,
     /// Signal quality (0-100).
     pub signal_quality: Option<u32>,
-    /// Set on nmcli failure, auto-cleared after 5s by UI or on next successful connection.
+    /// Set on connection failure, auto-cleared after 5s by UI or on next successful connection.
     pub failed: bool,
 }
 
@@ -196,29 +214,27 @@ impl NmSnapshot {
     }
 }
 
-/// Messages sent from background threads to the main thread.
+/// Updates applied on the main GLib loop, from workers or asynchronous D-Bus operations.
 #[derive(Debug)]
 enum NmUpdate {
     WifiDeviceFound {
         path: String,
-        iface_name: Option<String>,
     },
     EthernetDeviceExists,
     ModemDeviceExists,
     DeviceDiscoveryFailed,
-    ApDetails {
-        ssid: Option<String>,
-        strength: i32,
-    },
-    ApDetailsFailed,
     NetworksRefreshed {
+        generation: u64,
         networks: Vec<WifiNetwork>,
         last_scan: Option<i64>,
     },
     RefreshNetworks,
     ConnectionAttemptFinished {
+        attempt: u64,
         ssid: String,
         success: bool,
+        /// Set only when activation succeeded but the profile could not be saved.
+        message: Option<String>,
     },
     WiredDeviceInfo {
         iface_name: Option<String>,
@@ -236,15 +252,9 @@ enum NmUpdate {
         supported: bool,
         has_modem: bool,
     },
-    /// Sent after nmcli connect/disconnect returns. Clears the local connecting
-    /// intent flag so the next MobileDeviceInfo uses the real D-Bus state.
-    MobileConnectionAttemptFinished {
-        success: bool,
-    },
-    /// Sent after toggling WwanEnabled via D-Bus. Semantically the same as
-    /// `MobileConnectionAttemptFinished` but makes the call site's intent
-    /// explicit.
-    MobileToggleFinished {
+    /// Completes the current connect, disconnect or radio toggle operation.
+    MobileOperationFinished {
+        attempt: u64,
         success: bool,
     },
     #[cfg(debug_assertions)]
@@ -260,6 +270,9 @@ pub(super) struct MobileInternal {
     pub(super) refresh_pending: Cell<bool>,
     /// Set synchronously in connect/enable, cleared when real D-Bus state arrives.
     pub(super) connecting_local: Cell<bool>,
+    pub(super) attempt: Cell<u64>,
+    pub(super) activation_cancel: RefCell<Option<gio::Cancellable>>,
+    pub(super) activation_task: RefCell<Option<glib::JoinHandle<()>>>,
 }
 
 impl MobileInternal {
@@ -268,6 +281,9 @@ impl MobileInternal {
             signal_subscriptions: RefCell::new(Vec::new()),
             refresh_pending: Cell::new(false),
             connecting_local: Cell::new(false),
+            attempt: Cell::new(0),
+            activation_cancel: RefCell::new(None),
+            activation_task: RefCell::new(None),
         }
     }
 }
@@ -276,11 +292,17 @@ impl MobileInternal {
 
 /// Internal Wi-Fi bookkeeping (not exposed in snapshots).
 pub(super) struct WifiInternal {
+    /// Raw AP inventory; snapshot rows are deduplicated only after identity reconciliation.
+    pub(super) networks: RefCell<Vec<WifiNetwork>>,
+    pub(super) refresh_generation: Cell<u64>,
+    pub(super) attempt: Cell<u64>,
+    pub(super) activation_cancel: RefCell<Option<gio::Cancellable>>,
+    /// Replacements await the previous operation's reply and cleanup instead of aborting it.
+    pub(super) activation_task: RefCell<Option<glib::JoinHandle<()>>>,
     pub(super) proxy: RefCell<Option<gio::DBusProxy>>,
     /// Proxy for the base `org.freedesktop.NetworkManager.Device` interface,
     /// used to monitor the `State` property for connecting states (40-90).
     pub(super) device_proxy: RefCell<Option<gio::DBusProxy>>,
-    pub(super) iface_name: RefCell<Option<String>>,
     pub(super) scan_in_progress: Cell<bool>,
     pub(super) last_scan_value: Cell<Option<i64>>,
     pub(super) known_ssids: Arc<Mutex<HashSet<String>>>,
@@ -292,9 +314,13 @@ pub(super) struct WifiInternal {
 impl WifiInternal {
     fn new() -> Self {
         Self {
+            attempt: Cell::new(0),
+            networks: RefCell::new(Vec::new()),
+            refresh_generation: Cell::new(0),
+            activation_cancel: RefCell::new(None),
+            activation_task: RefCell::new(None),
             proxy: RefCell::new(None),
             device_proxy: RefCell::new(None),
-            iface_name: RefCell::new(None),
             scan_in_progress: Cell::new(false),
             last_scan_value: Cell::new(None),
             known_ssids: Arc::new(Mutex::new(HashSet::new())),
@@ -385,6 +411,7 @@ impl NmService {
     pub(super) fn notify_snapshot(&self, f: impl FnOnce(&mut NmSnapshot)) {
         let mut snapshot = self.snapshot.borrow_mut();
         f(&mut snapshot);
+        self.reconcile_wifi_state(&mut snapshot.wifi);
         let clone = snapshot.clone();
         drop(snapshot);
         self.callbacks.notify(&clone);
@@ -394,6 +421,7 @@ impl NmService {
     pub(super) fn notify_snapshot_if(&self, f: impl FnOnce(&mut NmSnapshot) -> bool) {
         let mut snapshot = self.snapshot.borrow_mut();
         if f(&mut snapshot) {
+            self.reconcile_wifi_state(&mut snapshot.wifi);
             let clone = snapshot.clone();
             drop(snapshot);
             self.callbacks.notify(&clone);
@@ -404,8 +432,7 @@ impl NmService {
 
     fn apply_update(&self, update: NmUpdate) {
         match update {
-            NmUpdate::WifiDeviceFound { path, iface_name } => {
-                *self.wifi.iface_name.borrow_mut() = iface_name;
+            NmUpdate::WifiDeviceFound { path } => {
                 self.notify_snapshot_if(|s| {
                     let changed = !s.wifi.has_device;
                     s.wifi.has_device = true;
@@ -430,21 +457,14 @@ impl NmService {
             NmUpdate::DeviceDiscoveryFailed => {
                 self.set_unavailable();
             }
-            NmUpdate::ApDetails { ssid, strength } => {
-                self.notify_snapshot(|s| {
-                    s.wifi.connected = true;
-                    s.wifi.ssid = ssid;
-                    s.wifi.strength = strength;
-                });
-                self.refresh_networks_async();
-            }
-            NmUpdate::ApDetailsFailed => {
-                self.set_disconnected();
-            }
             NmUpdate::NetworksRefreshed {
+                generation,
                 networks,
                 last_scan,
             } => {
+                if generation != self.wifi.refresh_generation.get() {
+                    return;
+                }
                 let prev_last_scan = self.wifi.last_scan_value.get();
                 if let Some(ls) = last_scan {
                     self.wifi.last_scan_value.set(Some(ls));
@@ -468,8 +488,8 @@ impl NmService {
                 let scanning = self.wifi.scan_in_progress.get();
                 let connecting_ssid = self.wifi.connecting_ssid.borrow().clone();
                 let failed_ssid = self.wifi.failed_ssid.borrow().clone();
+                self.wifi.networks.replace(networks);
                 self.notify_snapshot(|s| {
-                    s.wifi.networks = networks;
                     s.wifi.is_ready = true;
                     s.wifi.scanning = scanning;
                     s.wifi.connecting_ssid = connecting_ssid;
@@ -479,19 +499,37 @@ impl NmService {
             NmUpdate::RefreshNetworks => {
                 self.refresh_networks_async();
             }
-            NmUpdate::ConnectionAttemptFinished { ssid, success } => {
+            NmUpdate::ConnectionAttemptFinished {
+                attempt,
+                ssid,
+                success,
+                message,
+            } => {
+                if self.wifi.attempt.get() != attempt {
+                    return;
+                }
                 *self.wifi.connecting_ssid.borrow_mut() = None;
+                *self
+                    .wifi
+                    .known_ssids_last_refresh
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = None;
+                if let Some(message) = message {
+                    crate::services::desktop_notification::send_with_id(
+                        "Wi-Fi connected, but could not save network",
+                        &glib::markup_escape_text(&message),
+                        "network-wireless",
+                        crate::services::desktop_notification::Urgency::Normal,
+                        false,
+                        false,
+                        |_| {},
+                    );
+                }
 
                 if success {
                     *self.wifi.failed_ssid.borrow_mut() = None;
                 } else {
                     *self.wifi.failed_ssid.borrow_mut() = Some(ssid);
-                    // Invalidate known SSIDs cache so failed network doesn't show "Saved".
-                    *self
-                        .wifi
-                        .known_ssids_last_refresh
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner()) = None;
                 }
 
                 let failed_ssid = self.wifi.failed_ssid.borrow().clone();
@@ -535,7 +573,7 @@ impl NmService {
                 // "Connecting…" before D-Bus signals arrive. When NM confirms
                 // active/connecting, the local flag is redundant and cleared.
                 // If NM shows neither, keep the flag until the next update.
-                // `MobileConnectionAttemptFinished` / `MobileToggleFinished`
+                // `MobileOperationFinished`
                 // clears it unconditionally as a safety net.
                 let (effective_connecting, clear_local) = mobile::resolve_mobile_connecting(
                     self.mobile.connecting_local.get(),
@@ -568,19 +606,15 @@ impl NmService {
                     changed
                 });
             }
-            NmUpdate::MobileConnectionAttemptFinished { success }
-            | NmUpdate::MobileToggleFinished { success } => {
+            NmUpdate::MobileOperationFinished { attempt, success } => {
+                if attempt != self.mobile.attempt.get() {
+                    return;
+                }
                 // Clear local connecting intent; the next MobileDeviceInfo
                 // will use real D-Bus state.
                 self.mobile.connecting_local.set(false);
 
                 if !success {
-                    // Re-read the actual WwanEnabled property from NM so
-                    // the optimistic `mobile.enabled` set in
-                    // `set_mobile_enabled()` is reverted to the real value
-                    // (the D-Bus Set call failed, so no PropertiesChanged
-                    // signal will fire to correct it automatically).
-                    self.update_nm_flags();
                     self.notify_snapshot(|s| {
                         s.mobile.failed = true;
                         s.mobile.connecting = false;
@@ -790,13 +824,19 @@ impl NmService {
     }
 
     fn set_unavailable(&self) {
+        self.wifi
+            .refresh_generation
+            .set(self.wifi.refresh_generation.get() + 1);
+        self.cancel_wifi_attempt();
+        self.cancel_mobile_attempt();
+        self.wifi.networks.borrow_mut().clear();
         if !self.snapshot.borrow().available {
             return; // Already unavailable
         }
-        self.notify_snapshot(|s| *s = NmSnapshot::unknown());
         self.nm_proxy.replace(None);
         self.wifi.proxy.replace(None);
         self.wifi.device_proxy.replace(None);
+        self.notify_snapshot(|s| *s = NmSnapshot::unknown());
     }
 
     // ── Shared Device Discovery ──────────────────────────────────────
@@ -856,7 +896,7 @@ impl NmService {
 
             debug!("Found Wi-Fi device: {} (iface: {:?})", path, iface_name);
 
-            send_nm_update(NmUpdate::WifiDeviceFound { path, iface_name });
+            send_nm_update(NmUpdate::WifiDeviceFound { path });
         });
     }
 
@@ -960,15 +1000,8 @@ impl NmService {
             // readiness so the spinner shows during the next re-enable cycle
             // (matching IWD's clear_station() behavior).
             if wifi_enabled == Some(false) {
-                snapshot.wifi.connected = false;
-                snapshot.wifi.ssid = None;
-                snapshot.wifi.strength = 0;
                 snapshot.wifi.is_ready = false;
                 snapshot.wifi.scanning = false;
-                snapshot.wifi.device_state = None;
-                for net in &mut snapshot.wifi.networks {
-                    net.active = false;
-                }
             }
         }
 
@@ -1002,6 +1035,7 @@ impl NmService {
         }
 
         if changed {
+            self.reconcile_wifi_state(&mut snapshot.wifi);
             let snapshot_clone = snapshot.clone();
             drop(snapshot);
             self.callbacks.notify(&snapshot_clone);

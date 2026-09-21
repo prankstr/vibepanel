@@ -2,7 +2,7 @@
 //!
 //! - Discovers VPN connections (WireGuard and OpenVPN) via NetworkManager
 //! - Monitors active connection state changes
-//! - Provides connect/disconnect operations via nmcli
+//! - Provides connect/disconnect operations via D-Bus
 //!
 //! ## Architecture
 //!
