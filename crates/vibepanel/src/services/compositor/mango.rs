@@ -43,6 +43,8 @@ const DEFAULT_WORKSPACE_COUNT: u32 = 9;
 /// Synthetic workspace id MangoWC uses to signal overview mode.
 const OVERVIEW_WORKSPACE_ID: i32 = 0;
 const OVERVIEW_WORKSPACE_NAME: &str = "overview";
+/// Tag 0 marks membership in Mango's special overlay workspace.
+const SPECIAL_TAG_ID: i64 = 0;
 
 #[derive(Debug)]
 struct MangoSharedState {
@@ -713,7 +715,15 @@ fn apply_focused_window_from_monitors(shared: &Arc<MangoSharedState>, value: &Va
     changed
 }
 
-/// True if a client is a scratchpad (regular or named), regardless of visibility.
+/// Mango's tag-0 overlay clients do not carry scratchpad flags.
+fn is_special_tag_client(client: &Value) -> bool {
+    client
+        .get("tags")
+        .and_then(Value::as_array)
+        .is_some_and(|tags| tags.iter().any(|tag| tag.as_i64() == Some(SPECIAL_TAG_ID)))
+}
+
+/// True if a client is a regular or named scratchpad, regardless of visibility.
 fn is_scratchpad_client(client: &Value) -> bool {
     client
         .get("is_scratchpad")
@@ -725,8 +735,10 @@ fn is_scratchpad_client(client: &Value) -> bool {
             .unwrap_or(false)
 }
 
-/// True if a client is a dismissed (hidden) scratchpad. Mango clears a
-/// scratchpad's tags when dismissing it, so a scratchpad with no tags is hidden.
+/// True if a client is a dismissed (hidden) scratchpad.
+///
+/// Mango clears a regular/named scratchpad's tags when dismissing it, so no
+/// tags means hidden.
 fn is_dismissed_scratchpad(client: &Value) -> bool {
     if !is_scratchpad_client(client) {
         return false;
@@ -756,14 +768,11 @@ fn apply_window_list_from_clients(shared: &Arc<MangoSharedState>, value: &Value)
             {
                 return None;
             }
-            let window = client_value_to_window(client)?;
-            // Always drop dismissed (hidden) scratchpads. Visible scratchpads are
-            // flagged via Window.is_scratchpad and filtered by taskbar
-            // show_scratchpad_windows.
-            if is_dismissed_scratchpad(client) {
+            // Tag 0 is an overlay above the bar; exclude it even when shown.
+            if is_special_tag_client(client) || is_dismissed_scratchpad(client) {
                 return None;
             }
-            Some(window)
+            client_value_to_window(client)
         })
         .enumerate()
         .collect();
@@ -1631,5 +1640,53 @@ mod tests {
             windows.is_empty(),
             "scratchpad without tags should be hidden"
         );
+    }
+
+    // --- special overlay workspace (Tag 0) filtering ---
+
+    #[test]
+    fn socket_window_list_excludes_special_tags_regardless_of_visibility() {
+        let shared = Arc::new(MangoSharedState::default());
+        let value = serde_json::json!({
+            "clients": [
+                {"id": 1, "tags": [0], "is_visible": false},
+                {"id": 2, "tags": [0], "is_visible": true},
+                {"id": 3, "tags": [0]},
+                {"id": 4, "tags": [1], "is_visible": false}
+            ]
+        });
+
+        assert!(apply_window_list_from_clients(&shared, &value));
+        let windows = shared.windows.read();
+
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].id, 4, "ordinary off-workspace client is kept");
+        assert_eq!(windows[0].workspace_id, Some(1));
+    }
+
+    #[test]
+    fn socket_window_list_updates_when_moving_between_normal_and_special_tags() {
+        let shared = Arc::new(MangoSharedState::default());
+        let special = serde_json::json!({
+            "clients": [{"id": 9, "tags": [0], "is_visible": true}]
+        });
+        let normal = serde_json::json!({
+            "clients": [{"id": 9, "tags": [2], "is_visible": true}]
+        });
+        assert!(apply_window_list_from_clients(&shared, &normal));
+        {
+            let windows = shared.windows.read();
+            assert_eq!(windows.len(), 1);
+            assert_eq!(windows[0].id, 9);
+            assert!(!windows[0].is_scratchpad);
+            assert_eq!(windows[0].workspace_id, Some(2));
+        }
+        assert!(apply_window_list_from_clients(&shared, &special));
+        assert!(shared.windows.read().is_empty());
+        assert!(apply_window_list_from_clients(&shared, &normal));
+        let windows = shared.windows.read();
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].workspace_id, Some(2));
+        assert!(!windows[0].is_scratchpad);
     }
 }
