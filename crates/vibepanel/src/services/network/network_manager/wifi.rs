@@ -278,6 +278,9 @@ impl NmService {
         let Some(owner) = wifi.name_owner() else {
             return;
         };
+        // Proxies with connect_local handlers must stay on their creating thread.
+        let path = wifi.object_path().to_string();
+        let bus = wifi.connection();
         let active_ap = wifi
             .cached_property("ActiveAccessPoint")
             .and_then(|value| objpath_to_string(&value))
@@ -287,7 +290,15 @@ impl NmService {
         let known_ssids_refresh = Arc::clone(&self.wifi.known_ssids_last_refresh);
 
         thread::spawn(move || {
-            let Ok(wifi) = system_dbus_proxy_sync(&owner, &wifi.object_path(), IFACE_WIFI) else {
+            let Ok(wifi) = gio::DBusProxy::new_sync(
+                &bus,
+                gio::DBusProxyFlags::NONE,
+                None::<&gio::DBusInterfaceInfo>,
+                Some(&owner),
+                &path,
+                IFACE_WIFI,
+                None::<&gio::Cancellable>,
+            ) else {
                 return;
             };
             // Get LastScan timestamp
@@ -603,25 +614,26 @@ impl NmService {
             return;
         };
 
-        thread::spawn(move || {
-            // Set WirelessEnabled property via D-Bus Properties interface
-            // Signature is (ssv) - interface name, property name, variant value
-            let variant = Variant::tuple_from_iter([
-                NM_IFACE.to_variant(),
-                "WirelessEnabled".to_variant(),
-                enabled.to_variant().to_variant(),
-            ]);
-
-            if let Err(e) = nm.call_sync(
-                "org.freedesktop.DBus.Properties.Set",
-                Some(&variant),
-                gio::DBusCallFlags::NONE,
-                5000,
-                None::<&gio::Cancellable>,
-            ) {
-                error!("Failed to set WirelessEnabled: {}", e);
-            }
-        });
+        let Some(owner) = nm.name_owner() else {
+            return;
+        };
+        // Pin the call to this daemon without moving its main-thread proxy to a worker.
+        nm.connection().call(
+            Some(&owner),
+            super::NM_PATH,
+            super::PROPERTIES_IFACE,
+            "Set",
+            Some(&(NM_IFACE, "WirelessEnabled", enabled.to_variant()).to_variant()),
+            None,
+            gio::DBusCallFlags::NONE,
+            5000,
+            None::<&gio::Cancellable>,
+            |result| {
+                if let Err(e) = result {
+                    error!("Failed to set WirelessEnabled: {e}");
+                }
+            },
+        );
     }
 
     /// Request a Wi-Fi scan.
@@ -1432,8 +1444,103 @@ mod tests {
                 if !server.is_closed() { server.close_future().await.unwrap(); }
             }
             profiles_handle_partial_failures(&address, flags, &client).await;
+            proxies_stay_on_main_thread(&address, flags, &client).await;
             client.close_future().await.unwrap();
         })).unwrap();
+    }
+
+    async fn proxies_stay_on_main_thread(
+        address: &str,
+        flags: gio::DBusConnectionFlags,
+        client: &gio::DBusConnection,
+    ) {
+        use super::super::{MobileInternal, NmSnapshot, WifiInternal};
+        use std::cell::RefCell;
+
+        let server = gio::DBusConnection::for_address_future(address, flags, None)
+            .await
+            .unwrap();
+        let info = gio::DBusNodeInfo::for_xml(
+            r#"<node>
+            <interface name="org.freedesktop.NetworkManager.Device.Wireless">
+                <method name="GetAccessPoints"><arg type="ao" direction="out"/></method>
+            </interface>
+            <interface name="org.freedesktop.NetworkManager">
+                <property name="WirelessEnabled" type="b" access="readwrite"/>
+            </interface></node>"#,
+        )
+        .unwrap();
+        let (pending, requests) = async_channel::unbounded();
+        let wifi_registration = server
+            .register_object("/wifi", &info.interfaces()[0])
+            .method_call(move |_, _, _, _, _, _, invocation| {
+                pending.try_send(invocation).unwrap();
+            })
+            .build()
+            .unwrap();
+        let (toggled, toggles) = async_channel::unbounded();
+        let nm_registration = server
+            .register_object(super::super::NM_PATH, &info.interfaces()[1])
+            .property(|_, _, _, _, _| true.to_variant())
+            .set_property(move |_, _, _, _, _, value| {
+                toggled.try_send(value.get::<bool>().unwrap()).unwrap();
+                true
+            })
+            .build()
+            .unwrap();
+
+        let service = NmService {
+            nm_proxy: RefCell::new(None),
+            snapshot: RefCell::new(NmSnapshot::unknown()),
+            callbacks: crate::services::callbacks::Callbacks::new(),
+            wifi: WifiInternal::new(),
+            mobile: MobileInternal::new(),
+        };
+        for enabled in [false, true] {
+            // Reinstall proxies after teardown, as rediscovery does after a restart.
+            let mut weak_proxies = Vec::new();
+            for (path, iface, slot) in [
+                ("/wifi", IFACE_WIFI, &service.wifi.proxy),
+                (super::super::NM_PATH, NM_IFACE, &service.nm_proxy),
+            ] {
+                let proxy = gio::DBusProxy::new_future(
+                    client,
+                    gio::DBusProxyFlags::NONE,
+                    None::<&gio::DBusInterfaceInfo>,
+                    server.unique_name().as_deref(),
+                    path,
+                    iface,
+                )
+                .await
+                .unwrap();
+                proxy.connect_local("g-properties-changed", false, |_| None);
+                weak_proxies.push(proxy.downgrade());
+                slot.replace(Some(proxy));
+            }
+            service.set_available(true);
+            service.refresh_networks_async();
+            // Hold the worker's reply so teardown races with actual pending I/O.
+            let invocation = glib::future_with_timeout(Duration::from_secs(5), requests.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            service.set_wifi_enabled(enabled);
+            service.set_unavailable();
+            assert!(weak_proxies.iter().all(|proxy| proxy.upgrade().is_none()));
+            assert!(!service.snapshot().available);
+            assert_eq!(
+                glib::future_with_timeout(Duration::from_secs(5), toggles.recv())
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                enabled
+            );
+            // A vanished device fails the in-flight refresh without publishing stale state.
+            invocation.return_dbus_error("org.freedesktop.DBus.Error.UnknownObject", "Removed");
+        }
+        server.unregister_object(wifi_registration).unwrap();
+        server.unregister_object(nm_registration).unwrap();
+        server.close_future().await.unwrap();
     }
 
     /// Fatal errors propagate, private/volatile profiles are skipped, and forget keeps
