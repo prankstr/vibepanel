@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.0](https://github.com/prankstr/vibepanel/compare/v0.16.1...v0.17.0) (2026-09-21)
+
+
+### Features
+
+* **quick_settings:** add QR code sharing for active Wi-Fi networks ([#222](https://github.com/prankstr/vibepanel/issues/222)) ([67d31d2](https://github.com/prankstr/vibepanel/commit/67d31d24ac02f5303059914c4ed0d21c19498804))
+* **workspace:** scroll to change workspace when hovering widget([#226](https://github.com/prankstr/vibepanel/issues/226)) ([1528cf8](https://github.com/prankstr/vibepanel/commit/1528cf8e0a5cf9a91bc3716775737c761c70360a))
+
+
+### Bug Fixes
+
+* **mango/taskbar:** filter special tag clients ([#229](https://github.com/prankstr/vibepanel/issues/229)) ([14d8283](https://github.com/prankstr/vibepanel/commit/14d82833ae41419ce83c9400b13f9254e0cc810a))
+* **network:** don't delete known wifi profiles on failed connection attempt ([#220](https://github.com/prankstr/vibepanel/issues/220)) ([2c1f77b](https://github.com/prankstr/vibepanel/commit/2c1f77b3a59781dce4ec383227ccf05366722611))
+* **network:** fix crash and restore Wi-Fi/VPN after NetworkManager restart ([#232](https://github.com/prankstr/vibepanel/issues/232)) ([386c059](https://github.com/prankstr/vibepanel/commit/386c059093e667def325dbf551a3175e68e0b069))
+* **nix:** provide session bus config for integration tests ([#233](https://github.com/prankstr/vibepanel/issues/233)) ([3656b2a](https://github.com/prankstr/vibepanel/commit/3656b2ab0127b9eb532ab0f8804eebc4a56c00dc)), closes [#230](https://github.com/prankstr/vibepanel/issues/230)
+* **notifications:** use foreground color for dismiss buttons ([#225](https://github.com/prankstr/vibepanel/issues/225)) ([3aa9e7a](https://github.com/prankstr/vibepanel/commit/3aa9e7a2864b0a138641223b7add3eef756cf7bc))
+
 ## [0.16.1](https://github.com/prankstr/vibepanel/compare/v0.16.0...v0.16.1) (2026-08-27)
 
 
