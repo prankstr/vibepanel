@@ -804,10 +804,17 @@ impl ToggleCard {
         // Also listen for focus_visible changes on the window so the ring
         // disappears when GTK's 3 s timeout fires.
         {
-            let cb = card_box.clone();
-            let cb2 = card_box.clone();
+            let cb = card_box.downgrade();
+            let cb2 = cb.clone();
             let toggle_weak = toggle.downgrade();
+            let focus_subscription = std::cell::RefCell::new(
+                None::<(
+                    gtk4::glib::WeakRef<gtk4::Window>,
+                    gtk4::glib::SignalHandlerId,
+                )>,
+            );
             toggle.connect_notify_local(Some("has-focus"), move |btn, _| {
+                let Some(cb) = cb.upgrade() else { return };
                 let dominated = btn.has_focus()
                     && btn
                         .root()
@@ -820,12 +827,22 @@ impl ToggleCard {
                 }
             });
             toggle.connect_notify_local(Some("root"), move |btn, _| {
+                // Reflow re-roots retained cards; replace their window subscription.
+                if let Some((window, handler)) = focus_subscription.borrow_mut().take()
+                    && let Some(window) = window.upgrade()
+                {
+                    window.disconnect(handler);
+                }
+                if let Some(cb) = cb2.upgrade() {
+                    cb.remove_css_class(crate::styles::surface::TOGGLE_FOCUSED);
+                }
                 let Some(window) = btn.root().and_downcast::<gtk4::Window>() else {
                     return;
                 };
                 let tw = toggle_weak.clone();
                 let cb = cb2.clone();
-                window.connect_focus_visible_notify(move |window| {
+                let handler = window.connect_focus_visible_notify(move |window| {
+                    let Some(cb) = cb.upgrade() else { return };
                     let focused = tw.upgrade().is_some_and(|t| t.has_focus());
                     if !focused || !gtk4::prelude::GtkWindowExt::gets_focus_visible(window) {
                         cb.remove_css_class(crate::styles::surface::TOGGLE_FOCUSED);
@@ -833,6 +850,7 @@ impl ToggleCard {
                         cb.add_css_class(crate::styles::surface::TOGGLE_FOCUSED);
                     }
                 });
+                focus_subscription.replace(Some((window.downgrade(), handler)));
             });
         }
 

@@ -385,7 +385,7 @@ impl AccordionManager {
         card: &Rc<dyn ExpandableCard>,
         expander_btn: &Button,
         on_toggle: Option<Rc<dyn Fn(bool)>>,
-    ) {
+    ) -> gtk4::glib::SignalHandlerId {
         let accordion = Rc::clone(accordion);
         let revealer = card.base().revealer.borrow().clone();
         let arrow = card.base().arrow.borrow().clone();
@@ -416,7 +416,7 @@ impl AccordionManager {
             if let Some(ref callback) = on_toggle {
                 callback(expanding);
             }
-        });
+        })
     }
 }
 
