@@ -146,6 +146,7 @@ impl VpnSnapshot {
 pub enum VpnUpdate {
     /// Full refresh of VPN connections complete.
     ConnectionsRefreshed {
+        generation: u64,
         connections: Vec<VpnConnection>,
         /// Object paths of active VPN connections (for signal subscriptions).
         active_vpn_paths: Vec<String>,
@@ -181,6 +182,8 @@ pub struct VpnService {
     snapshot: RefCell<VpnSnapshot>,
     callbacks: Callbacks<VpnSnapshot>,
     refresh_pending: Cell<bool>,
+    /// Invalidates in-flight refreshes so a stale worker cannot overwrite newer state.
+    refresh_generation: Cell<u64>,
     _signal_subscriptions: RefCell<Vec<gio::SignalSubscription>>,
     /// Recreated when active connections change.
     active_conn_subscriptions: RefCell<Vec<gio::SignalSubscription>>,
@@ -209,6 +212,7 @@ impl VpnService {
             snapshot: RefCell::new(initial_snapshot),
             callbacks: Callbacks::new(),
             refresh_pending: Cell::new(false),
+            refresh_generation: Cell::new(0),
             _signal_subscriptions: RefCell::new(Vec::new()),
             active_conn_subscriptions: RefCell::new(Vec::new()),
             last_used_uuid: RefCell::new(last_used_uuid),
@@ -459,12 +463,16 @@ impl VpnService {
 
     /// Apply an update from background threads to the service state.
     /// Called via glib::idle_add_once from send_vpn_update().
-    pub(crate) fn apply_update(&self, update: VpnUpdate) {
+    pub(crate) fn apply_update(self: &Rc<Self>, update: VpnUpdate) {
         match update {
             VpnUpdate::ConnectionsRefreshed {
+                generation,
                 mut connections,
                 active_vpn_paths,
             } => {
+                if generation != self.refresh_generation.get() {
+                    return;
+                }
                 let active_count = connections.iter().filter(|c| c.active).count();
                 let any_active = active_count > 0;
 
@@ -543,9 +551,6 @@ impl VpnService {
                 let snapshot_clone = snapshot.clone();
                 drop(snapshot);
 
-                // Reset refresh_pending so future refreshes can proceed
-                self.refresh_pending.set(false);
-
                 self.callbacks.notify(&snapshot_clone);
             }
             VpnUpdate::RequestRefresh => {
@@ -587,27 +592,42 @@ impl VpnService {
     }
 
     /// Queue a debounced refresh (50ms delay to coalesce rapid signals).
-    /// Uses the same pattern as BluetoothService::update_state_debounced.
-    fn queue_refresh(&self) {
+    ///
+    /// `refresh_pending` tracks only the debounce timer, so signals arriving
+    /// while a worker runs schedule a follow-up instead of being dropped.
+    fn queue_refresh(self: &Rc<Self>) {
         if self.refresh_pending.get() {
             return;
         }
         self.refresh_pending.set(true);
-
-        let connection = self.connection.borrow().clone();
+        let generation = self.refresh_generation.get() + 1;
+        self.refresh_generation.set(generation);
 
         // Use timeout_add_local with ControlFlow::Break (like BluetoothService)
         // This avoids issues with timeout_add_local_once auto-removal causing
         // panics when trying to .remove() an already-fired source.
+        let weak = Rc::downgrade(self);
         glib::timeout_add_local(Duration::from_millis(STATE_REFRESH_DELAY_MS), move || {
-            if let Some(ref conn) = connection {
-                Self::refresh_connections_async(conn.clone());
+            let Some(this) = weak.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
+            if generation != this.refresh_generation.get() {
+                return glib::ControlFlow::Break;
+            }
+            // Only this generation's timer may release the debounce slot.
+            this.refresh_pending.set(false);
+            if let Some(conn) = this.connection.borrow().clone() {
+                Self::refresh_connections_async(conn, generation);
             }
             glib::ControlFlow::Break
         });
     }
 
     fn set_unavailable(&self) {
+        // Invalidate in-flight refreshes even when already marked unavailable.
+        self.refresh_generation
+            .set(self.refresh_generation.get() + 1);
+        self.refresh_pending.set(false);
         let mut snapshot = self.snapshot.borrow_mut();
         if !snapshot.available {
             return; // Already unavailable
@@ -619,9 +639,8 @@ impl VpnService {
         drop(snapshot);
         self.callbacks.notify(&snapshot_clone);
 
-        // Clear proxies.
-        self.nm_proxy.replace(None);
-        self.settings_proxy.replace(None);
+        // Keep daemon proxies alive to detect NM returning.
+        self.active_conn_subscriptions.borrow_mut().clear();
     }
 
     /// Save current VPN state to disk.
@@ -636,6 +655,29 @@ impl VpnService {
     }
 
     // D-Bus Initialization
+
+    fn watch_nm_owner(this: &Rc<Self>, proxy: &gio::DBusProxy) {
+        let weak = Rc::downgrade(this);
+        proxy.connect_local("notify::g-name-owner", false, move |values| {
+            let this = weak.upgrade()?;
+            let has_owner = values[0]
+                .get::<gio::DBusProxy>()
+                .ok()
+                .and_then(|p| p.name_owner())
+                .is_some();
+            if has_owner {
+                if let Some(conn) = this.connection.borrow().as_ref() {
+                    VpnSecretAgent::re_register_with_agent_manager(conn);
+                }
+                // An old in-flight refresh must not suppress restart recovery.
+                this.refresh_pending.set(false);
+                send_vpn_update(VpnUpdate::RequestRefresh);
+            } else {
+                this.set_unavailable();
+            }
+            None
+        });
+    }
 
     fn init_dbus(this: &Rc<Self>) {
         let this_weak = Rc::downgrade(this);
@@ -698,25 +740,7 @@ impl VpnService {
 
                         *this.nm_proxy.borrow_mut() = Some(proxy.clone());
 
-                        // Monitor for service appearing/disappearing (e.g., NM restart).
-                        let this_weak = Rc::downgrade(&this);
-                        proxy.connect_local("notify::g-name-owner", false, move |values| {
-                            let this = this_weak.upgrade()?;
-                            let proxy = values[0].get::<gio::DBusProxy>().ok();
-                            let has_owner = proxy.and_then(|p| p.name_owner()).is_some();
-                            if has_owner {
-                                // Service reappeared — re-register SecretAgent with new NM instance.
-                                if let Some(conn) = this.connection.borrow().as_ref() {
-                                    VpnSecretAgent::re_register_with_agent_manager(conn);
-                                }
-                                // Service reappeared - refresh.
-                                send_vpn_update(VpnUpdate::RequestRefresh);
-                            } else {
-                                // Service disappeared - mark unavailable.
-                                this.set_unavailable();
-                            }
-                            None
-                        });
+                        Self::watch_nm_owner(&this, &proxy);
 
                         // Subscribe to ActiveConnections property changes.
                         let sub = conn_for_nm.subscribe_to_signal(
@@ -815,11 +839,12 @@ impl VpnService {
 
     // D-Bus: Refresh Connections
 
-    fn refresh_connections_async(connection: gio::DBusConnection) {
+    fn refresh_connections_async(connection: gio::DBusConnection, generation: u64) {
         // Run in a background thread to avoid blocking.
         thread::spawn(move || {
             let (connections, active_vpn_paths) = Self::fetch_vpn_connections_sync(&connection);
             send_vpn_update(VpnUpdate::ConnectionsRefreshed {
+                generation,
                 connections,
                 active_vpn_paths,
             });
@@ -847,7 +872,11 @@ impl VpnService {
         ) {
             Ok(v) => v,
             Err(e) => {
-                warn!("VPN: Failed to list connections: {}", e);
+                if crate::services::is_dbus_disconnect(&e, connection, NM_SERVICE) {
+                    debug!("VPN: Refresh interrupted by daemon exit: {e}");
+                } else {
+                    warn!("VPN: Failed to list connections: {e}");
+                }
                 return (result, Vec::new());
             }
         };
@@ -1089,5 +1118,140 @@ impl VpnService {
             }
         }
         None
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+
+    fn vpn_refresh(generation: u64, uuid: &str) -> VpnUpdate {
+        VpnUpdate::ConnectionsRefreshed {
+            generation,
+            connections: vec![VpnConnection {
+                uuid: uuid.into(),
+                name: uuid.into(),
+                active: false,
+                state: VpnState::Deactivated,
+                autoconnect: false,
+                vpn_type: "vpn".into(),
+            }],
+            active_vpn_paths: Vec::new(),
+        }
+    }
+
+    fn test_service() -> Rc<VpnService> {
+        Rc::new(VpnService {
+            connection: RefCell::new(None),
+            nm_proxy: RefCell::new(None),
+            settings_proxy: RefCell::new(None),
+            snapshot: RefCell::new(VpnSnapshot::unknown()),
+            callbacks: Callbacks::new(),
+            refresh_pending: Cell::new(false),
+            refresh_generation: Cell::new(0),
+            _signal_subscriptions: RefCell::new(Vec::new()),
+            active_conn_subscriptions: RefCell::new(Vec::new()),
+            last_used_uuid: RefCell::new(None),
+            operation_lock: Arc::new(Mutex::new(())),
+        })
+    }
+
+    pub(crate) fn debounce_and_result_generations() {
+        // The private-bus subprocess isolates these thread-local timers.
+        let context = glib::MainContext::default();
+        let _guard = context.acquire().unwrap();
+        let service = test_service();
+
+        // Drain timers even after invalidation clears refresh_pending.
+        let settle = || {
+            let main_loop = glib::MainLoop::new(Some(&context), false);
+            let done = main_loop.clone();
+            glib::timeout_add_local_once(
+                Duration::from_millis(STATE_REFRESH_DELAY_MS + 1),
+                move || done.quit(),
+            );
+            main_loop.run();
+        };
+
+        service.queue_refresh();
+        let scheduled = service.refresh_generation.get();
+        service.queue_refresh();
+        assert_eq!(service.refresh_generation.get(), scheduled, "coalesced");
+        settle();
+        assert!(!service.refresh_pending.get());
+
+        // Accepted after the timer fired, so a signal during enumeration schedules again.
+        service.queue_refresh();
+        assert_eq!(service.refresh_generation.get(), scheduled + 1);
+
+        // Neither current nor obsolete results may clear the queued timer.
+        let generation = service.refresh_generation.get();
+        service.apply_update(vpn_refresh(generation, "connected"));
+        assert!(service.refresh_pending.get());
+        service.apply_update(vpn_refresh(scheduled, "stale"));
+        assert_eq!(service.snapshot().primary().unwrap().uuid, "connected");
+        assert!(service.refresh_pending.get());
+
+        // Invalidate the queued timer, then model a replacement's occupied slot.
+        service.set_unavailable();
+        assert!(!service.refresh_pending.get());
+        service.refresh_pending.set(true);
+        settle();
+        assert!(
+            service.refresh_pending.get(),
+            "obsolete timer cleared newer slot"
+        );
+    }
+
+    pub(crate) async fn owner_changes_invalidate_vpn_results(
+        address: &str,
+        flags: gio::DBusConnectionFlags,
+        client: &gio::DBusConnection,
+    ) {
+        let service = test_service();
+        service.last_used_uuid.replace(Some("saved-vpn".into()));
+        service.refresh_pending.set(true);
+        for (path, iface, slot) in [
+            (NM_PATH, NM_IFACE, &service.nm_proxy),
+            (NM_SETTINGS_PATH, NM_SETTINGS_IFACE, &service.settings_proxy),
+        ] {
+            let proxy = gio::DBusProxy::new_future(
+                client,
+                gio::DBusProxyFlags::DO_NOT_AUTO_START
+                    | gio::DBusProxyFlags::DO_NOT_LOAD_PROPERTIES,
+                None::<&gio::DBusInterfaceInfo>,
+                Some(NM_SERVICE),
+                path,
+                iface,
+            )
+            .await
+            .unwrap();
+            slot.replace(Some(proxy));
+        }
+        let proxy = service.nm_proxy.borrow().as_ref().unwrap().clone();
+        VpnService::watch_nm_owner(&service, &proxy);
+        let published_generation = Cell::new(0);
+        crate::services::test_support::check_nm_restarts(address, flags, proxy, |available| {
+            if available {
+                assert!(!service.refresh_pending.get());
+                let generation = service.refresh_generation.get();
+                published_generation.set(generation);
+                service.apply_update(vpn_refresh(generation, "saved-vpn"));
+                let snapshot = service.snapshot();
+                assert!(snapshot.available && snapshot.is_ready);
+                assert_eq!(snapshot.primary().unwrap().uuid, "saved-vpn");
+            } else {
+                let snapshot = service.snapshot();
+                assert!(!snapshot.available && snapshot.connections.is_empty());
+                assert_eq!(snapshot.preferred_uuid.as_deref(), Some("saved-vpn"));
+                service.apply_update(vpn_refresh(published_generation.get(), "stale-vpn"));
+                assert!(service.snapshot.borrow().connections.is_empty());
+                // The next owner must clear a leftover pending refresh.
+                service.refresh_pending.set(true);
+            }
+            assert!(service.nm_proxy.borrow().is_some());
+            assert!(service.settings_proxy.borrow().is_some());
+        })
+        .await;
     }
 }

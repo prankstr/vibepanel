@@ -455,7 +455,15 @@ impl NmService {
                 }
             }
             NmUpdate::DeviceDiscoveryFailed => {
-                self.set_unavailable();
+                if self
+                    .nm_proxy
+                    .borrow()
+                    .as_ref()
+                    .and_then(|p| p.name_owner())
+                    .is_none()
+                {
+                    self.set_unavailable();
+                }
             }
             NmUpdate::NetworksRefreshed {
                 generation,
@@ -787,13 +795,13 @@ impl NmService {
                         let this_weak = Rc::downgrade(&this);
                         proxy.connect_local("notify::g-name-owner", false, move |values| {
                             let this = this_weak.upgrade()?;
-                            let proxy = values[0].get::<gio::DBusProxy>().ok();
-                            let has_owner = proxy.as_ref().and_then(|p| p.name_owner()).is_some();
+                            let has_owner = values[0]
+                                .get::<gio::DBusProxy>()
+                                .ok()
+                                .and_then(|p| p.name_owner())
+                                .is_some();
                             if has_owner {
-                                // Service reappeared - restore proxy and rediscover Wi-Fi device.
-                                if let Some(p) = proxy {
-                                    this.nm_proxy.replace(Some(p));
-                                }
+                                // Service reappeared - rediscover its devices.
                                 this.set_available(true);
                                 this.update_nm_flags();
                                 Self::discover_network_devices();
@@ -804,11 +812,13 @@ impl NmService {
                             None
                         });
 
-                        // Mark as available now that we have a proxy.
-                        this.set_available(true);
-                        this.update_nm_flags();
-
-                        Self::discover_network_devices();
+                        if proxy.name_owner().is_some() {
+                            this.set_available(true);
+                            this.update_nm_flags();
+                            Self::discover_network_devices();
+                        } else {
+                            this.set_unavailable();
+                        }
                     },
                 );
             },
@@ -833,7 +843,7 @@ impl NmService {
         if !self.snapshot.borrow().available {
             return; // Already unavailable
         }
-        self.nm_proxy.replace(None);
+        // Keep the main proxy: its name-owner watcher detects NM coming back.
         self.wifi.proxy.replace(None);
         self.wifi.device_proxy.replace(None);
         self.notify_snapshot(|s| *s = NmSnapshot::unknown());

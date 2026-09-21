@@ -271,6 +271,9 @@ impl NmService {
     pub(super) fn refresh_networks_async(&self) {
         let generation = self.wifi.refresh_generation.get() + 1;
         self.wifi.refresh_generation.set(generation);
+        if !self.snapshot.borrow().available {
+            return;
+        }
         let Some(wifi) = self.wifi.proxy.borrow().clone() else {
             return;
         };
@@ -278,6 +281,9 @@ impl NmService {
         let Some(owner) = wifi.name_owner() else {
             return;
         };
+        // Proxies with connect_local handlers must stay on their creating thread.
+        let path = wifi.object_path().to_string();
+        let bus = wifi.connection();
         let active_ap = wifi
             .cached_property("ActiveAccessPoint")
             .and_then(|value| objpath_to_string(&value))
@@ -287,9 +293,20 @@ impl NmService {
         let known_ssids_refresh = Arc::clone(&self.wifi.known_ssids_last_refresh);
 
         thread::spawn(move || {
-            let Ok(wifi) = system_dbus_proxy_sync(&owner, &wifi.object_path(), IFACE_WIFI) else {
+            let Ok(wifi) = gio::DBusProxy::new_sync(
+                &bus,
+                gio::DBusProxyFlags::NONE,
+                None::<&gio::DBusInterfaceInfo>,
+                Some(&owner),
+                &path,
+                IFACE_WIFI,
+                None::<&gio::Cancellable>,
+            ) else {
                 return;
             };
+            if wifi.name_owner().is_none() {
+                return;
+            }
             // Get LastScan timestamp
             let last_scan = wifi
                 .cached_property("LastScan")
@@ -299,7 +316,11 @@ impl NmService {
             let mut ap_paths = match Self::get_access_points_sync(&wifi) {
                 Ok(paths) => paths,
                 Err(e) => {
-                    error!("Failed to get access points: {}", e);
+                    if Self::wifi_refresh_target_gone(&e, &bus, &owner, &path) {
+                        debug!("Wi-Fi refresh target disappeared: {e}");
+                    } else {
+                        error!("Failed to get access points: {e}");
+                    }
                     return;
                 }
             };
@@ -337,16 +358,52 @@ impl NmService {
         });
     }
 
-    fn get_access_points_sync(wifi: &gio::DBusProxy) -> Result<Vec<String>, String> {
-        let result = wifi
-            .call_sync(
-                "GetAccessPoints",
-                None,
-                gio::DBusCallFlags::NONE,
-                5000,
-                None::<&gio::Cancellable>,
+    fn wifi_refresh_target_gone(
+        error: &glib::Error,
+        bus: &gio::DBusConnection,
+        owner: &str,
+        device: &str,
+    ) -> bool {
+        if crate::services::is_dbus_disconnect(error, bus, owner) {
+            return true;
+        }
+        if !matches!(
+            error.kind::<gio::DBusError>(),
+            Some(
+                gio::DBusError::UnknownObject
+                    | gio::DBusError::UnknownInterface
+                    | gio::DBusError::UnknownMethod
             )
-            .map_err(|e| format!("GetAccessPoints failed: {}", e))?;
+        ) {
+            return false;
+        }
+        // NM reports UnknownMethod for removed devices too; verify removal.
+        match bus.call_sync(
+            Some(owner),
+            super::NM_PATH,
+            NM_IFACE,
+            "GetDevices",
+            None,
+            None,
+            gio::DBusCallFlags::NONE,
+            1000,
+            None::<&gio::Cancellable>,
+        ) {
+            Ok(reply) => reply
+                .get::<(Vec<glib::variant::ObjectPath>,)>()
+                .is_some_and(|(paths,)| !paths.iter().any(|path| path.as_str() == device)),
+            Err(error) => crate::services::is_dbus_disconnect(&error, bus, owner),
+        }
+    }
+
+    fn get_access_points_sync(wifi: &gio::DBusProxy) -> Result<Vec<String>, glib::Error> {
+        let result = wifi.call_sync(
+            "GetAccessPoints",
+            None,
+            gio::DBusCallFlags::NONE,
+            5000,
+            None::<&gio::Cancellable>,
+        )?;
 
         let paths: Vec<String> = result
             .child_value(0)
@@ -603,25 +660,26 @@ impl NmService {
             return;
         };
 
-        thread::spawn(move || {
-            // Set WirelessEnabled property via D-Bus Properties interface
-            // Signature is (ssv) - interface name, property name, variant value
-            let variant = Variant::tuple_from_iter([
-                NM_IFACE.to_variant(),
-                "WirelessEnabled".to_variant(),
-                enabled.to_variant().to_variant(),
-            ]);
-
-            if let Err(e) = nm.call_sync(
-                "org.freedesktop.DBus.Properties.Set",
-                Some(&variant),
-                gio::DBusCallFlags::NONE,
-                5000,
-                None::<&gio::Cancellable>,
-            ) {
-                error!("Failed to set WirelessEnabled: {}", e);
-            }
-        });
+        let Some(owner) = nm.name_owner() else {
+            return;
+        };
+        // Pin the call to this daemon without moving its main-thread proxy to a worker.
+        nm.connection().call(
+            Some(&owner),
+            super::NM_PATH,
+            super::PROPERTIES_IFACE,
+            "Set",
+            Some(&(NM_IFACE, "WirelessEnabled", enabled.to_variant()).to_variant()),
+            None,
+            gio::DBusCallFlags::NONE,
+            5000,
+            None::<&gio::Cancellable>,
+            |result| {
+                if let Err(e) = result {
+                    error!("Failed to set WirelessEnabled: {e}");
+                }
+            },
+        );
     }
 
     /// Request a Wi-Fi scan.
@@ -1154,6 +1212,18 @@ fn new_wifi_settings(
 mod tests {
     use super::*;
 
+    fn test_service() -> NmService {
+        use super::super::{MobileInternal, NmSnapshot, WifiInternal};
+        use std::cell::RefCell;
+        NmService {
+            nm_proxy: RefCell::new(None),
+            snapshot: RefCell::new(NmSnapshot::unknown()),
+            callbacks: crate::services::callbacks::Callbacks::new(),
+            wifi: WifiInternal::new(),
+            mobile: MobileInternal::new(),
+        }
+    }
+
     fn test_network(path: &str) -> WifiNetwork {
         WifiNetwork {
             ssid: "test".into(),
@@ -1239,15 +1309,7 @@ mod tests {
 
     #[test]
     fn obsolete_list_results_cannot_overwrite_newer_snapshot() {
-        use super::super::{MobileInternal, NmSnapshot, WifiInternal};
-        use std::cell::RefCell;
-        let service = NmService {
-            nm_proxy: RefCell::new(None),
-            snapshot: RefCell::new(NmSnapshot::unknown()),
-            callbacks: crate::services::callbacks::Callbacks::new(),
-            wifi: WifiInternal::new(),
-            mobile: MobileInternal::new(),
-        };
+        let service = test_service();
         service.wifi.refresh_generation.set(2);
         service.apply_update(NmUpdate::NetworksRefreshed {
             generation: 2,
@@ -1305,15 +1367,7 @@ mod tests {
 
     #[test]
     fn unavailable_service_cancels_both_activation_attempts() {
-        use super::super::{MobileInternal, NmSnapshot, WifiInternal};
-        use std::cell::RefCell;
-        let service = NmService {
-            nm_proxy: RefCell::new(None),
-            snapshot: RefCell::new(NmSnapshot::unknown()),
-            callbacks: crate::services::callbacks::Callbacks::new(),
-            wifi: WifiInternal::new(),
-            mobile: MobileInternal::new(),
-        };
+        let service = test_service();
         for available in [true, false] {
             service.snapshot.borrow_mut().available = available;
             let wifi = gio::Cancellable::new();
@@ -1356,6 +1410,7 @@ mod tests {
     #[rustfmt::skip]
     fn activation_signal_runner() {
         assert_eq!(std::env::var("VIBEPANEL_TEST_BUS").as_deref(), Ok("1"));
+        crate::services::vpn::tests::debounce_and_result_generations();
         let context = glib::MainContext::new();
         context.with_thread_default(|| context.block_on(async {
             let address = std::env::var("DBUS_SESSION_BUS_ADDRESS").unwrap();
@@ -1432,8 +1487,123 @@ mod tests {
                 if !server.is_closed() { server.close_future().await.unwrap(); }
             }
             profiles_handle_partial_failures(&address, flags, &client).await;
+            proxies_stay_on_main_thread(&address, flags, &client).await;
+            discovery_failure_respects_current_owner(&address, flags, &client).await;
+            crate::services::vpn::tests::owner_changes_invalidate_vpn_results(&address, flags, &client).await;
             client.close_future().await.unwrap();
         })).unwrap();
+    }
+
+    async fn proxies_stay_on_main_thread(
+        address: &str,
+        flags: gio::DBusConnectionFlags,
+        client: &gio::DBusConnection,
+    ) {
+        let server = gio::DBusConnection::for_address_future(address, flags, None)
+            .await
+            .unwrap();
+        let info = gio::DBusNodeInfo::for_xml(
+            r#"<node>
+            <interface name="org.freedesktop.NetworkManager.Device.Wireless">
+                <method name="GetAccessPoints"><arg type="ao" direction="out"/></method>
+            </interface>
+            <interface name="org.freedesktop.NetworkManager">
+                <property name="WirelessEnabled" type="b" access="readwrite"/>
+            </interface></node>"#,
+        )
+        .unwrap();
+        let (pending, requests) = async_channel::unbounded();
+        let wifi_registration = server
+            .register_object("/wifi", &info.interfaces()[0])
+            .method_call(move |_, _, _, _, _, _, invocation| {
+                pending.try_send(invocation).unwrap();
+            })
+            .build()
+            .unwrap();
+        let (toggled, toggles) = async_channel::unbounded();
+        let nm_registration = server
+            .register_object(super::super::NM_PATH, &info.interfaces()[1])
+            .property(|_, _, _, _, _| true.to_variant())
+            .set_property(move |_, _, _, _, _, value| {
+                toggled.try_send(value.get::<bool>().unwrap()).unwrap();
+                true
+            })
+            .build()
+            .unwrap();
+
+        let service = test_service();
+        for enabled in [false, true] {
+            let mut weak_proxies = Vec::new();
+            for (path, iface, slot) in [
+                ("/wifi", IFACE_WIFI, &service.wifi.proxy),
+                (super::super::NM_PATH, NM_IFACE, &service.nm_proxy),
+            ] {
+                let proxy = gio::DBusProxy::new_future(
+                    client,
+                    gio::DBusProxyFlags::NONE,
+                    None::<&gio::DBusInterfaceInfo>,
+                    server.unique_name().as_deref(),
+                    path,
+                    iface,
+                )
+                .await
+                .unwrap();
+                proxy.connect_local("g-properties-changed", false, |_| None);
+                weak_proxies.push(proxy.downgrade());
+                slot.replace(Some(proxy));
+            }
+            service.set_available(true);
+            service.refresh_networks_async();
+            // Hold the reply until teardown.
+            let invocation = glib::future_with_timeout(Duration::from_secs(5), requests.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            service.set_wifi_enabled(enabled);
+            service.set_unavailable();
+            // Also check final proxy release while a toggle is pending.
+            service.nm_proxy.take();
+            assert!(weak_proxies.iter().all(|proxy| proxy.upgrade().is_none()));
+            assert!(!service.snapshot().available);
+            assert_eq!(
+                glib::future_with_timeout(Duration::from_secs(5), toggles.recv())
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                enabled
+            );
+            invocation.return_dbus_error("org.freedesktop.DBus.Error.ServiceUnknown", "NM stopped");
+        }
+        server.unregister_object(wifi_registration).unwrap();
+        server.unregister_object(nm_registration).unwrap();
+        server.close_future().await.unwrap();
+    }
+
+    async fn discovery_failure_respects_current_owner(
+        address: &str,
+        flags: gio::DBusConnectionFlags,
+        client: &gio::DBusConnection,
+    ) {
+        let service = test_service();
+        let proxy = gio::DBusProxy::new_future(
+            client,
+            gio::DBusProxyFlags::DO_NOT_AUTO_START | gio::DBusProxyFlags::DO_NOT_LOAD_PROPERTIES,
+            None::<&gio::DBusInterfaceInfo>,
+            Some(NM_SERVICE),
+            super::super::NM_PATH,
+            NM_IFACE,
+        )
+        .await
+        .unwrap();
+        service.nm_proxy.replace(Some(proxy.clone()));
+        crate::services::test_support::check_nm_restarts(address, flags, proxy, |available| {
+            service.set_available(true);
+            // A late enumeration failure cannot override a live daemon owner.
+            service.apply_update(NmUpdate::DeviceDiscoveryFailed);
+            assert_eq!(service.snapshot().available, available);
+            assert!(service.nm_proxy.borrow().is_some());
+        })
+        .await;
     }
 
     /// Fatal errors propagate, private/volatile profiles are skipped, and forget keeps

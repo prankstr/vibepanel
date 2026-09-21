@@ -119,6 +119,76 @@ const CARD_ROW_SPACING: i32 = 8;
 const CARD_ROW_GAP: i32 = 8;
 const AUDIO_SECTION_TOP_MARGIN: i32 = 12;
 
+struct ToggleCardInfo {
+    card: gtk4::Widget,
+    revealer: Option<Revealer>,
+    expander_button: Option<Button>,
+    expandable: Option<Rc<dyn ExpandableCard>>,
+    on_toggle: Option<Rc<dyn Fn(bool)>>,
+    expander_handler: RefCell<Option<glib::SignalHandlerId>>,
+}
+
+fn rebuild_card_rows(grid: &GtkBox, cards: &[ToggleCardInfo]) {
+    // Reuse the widgets and their state, but replace handlers tied to old rows.
+    for card in cards {
+        if let (Some(button), Some(handler)) = (
+            &card.expander_button,
+            card.expander_handler.borrow_mut().take(),
+        ) {
+            button.disconnect(handler);
+        }
+        if let Some(parent) = card.card.parent().and_downcast::<GtkBox>() {
+            parent.remove(&card.card);
+        }
+    }
+    while let Some(child) = grid.first_child() {
+        grid.remove(&child);
+    }
+
+    // Use each card's own visibility, even while the popover is closed.
+    let visible: Vec<_> = cards
+        .iter()
+        .filter(|card| card.card.get_visible())
+        .collect();
+    for (index, chunk) in visible.chunks(2).enumerate() {
+        let row = GtkBox::new(Orientation::Horizontal, CARD_ROW_GAP);
+        row.add_css_class(qs::CARDS_ROW);
+        row.set_homogeneous(true);
+        row.set_margin_top(if index == 0 { 0 } else { CARD_ROW_SPACING });
+        let accordion = Rc::new(AccordionManager::new());
+        for card in chunk {
+            row.append(&card.card);
+            if let (Some(button), Some(expandable)) = (&card.expander_button, &card.expandable) {
+                accordion.register_dyn(Rc::clone(expandable));
+                let handler = AccordionManager::setup_expander_with_callback(
+                    &accordion,
+                    expandable,
+                    button,
+                    card.on_toggle.clone(),
+                );
+                card.expander_handler.replace(Some(handler));
+            }
+        }
+        if chunk.len() == 1 {
+            row.append(&GtkBox::new(Orientation::Horizontal, 0));
+        }
+        grid.append(&row);
+        for card in chunk {
+            if let Some(revealer) = &card.revealer {
+                grid.append(revealer);
+            }
+        }
+        // Two previously independent expanded cards may now share a row.
+        if let Some(expanded) = chunk
+            .iter()
+            .filter_map(|card| card.revealer.as_ref())
+            .find(|revealer| revealer.reveals_child())
+        {
+            accordion.collapse_others(expanded);
+        }
+    }
+}
+
 /// Full Quick Settings window.
 ///
 /// ## Animation architecture
@@ -159,6 +229,7 @@ pub struct QuickSettingsWindow {
     /// tick callbacks and idle callbacks.
     anim_generation: Rc<Cell<u32>>,
     cards_config: QuickSettingsCardsConfig,
+    toggle_cards: RefCell<Vec<ToggleCardInfo>>,
     power_commands: PowerCommandsConfig,
     audio_scroll_percentage: i32,
     remember_expanded_state: bool,
@@ -253,6 +324,7 @@ impl QuickSettingsWindow {
             anim_state: Rc::new(RefCell::new(AnimState::new_idle())),
             anim_generation: Rc::new(Cell::new(0)),
             cards_config: config.cards,
+            toggle_cards: RefCell::new(Vec::new()),
             power_commands: config.power_commands,
             audio_scroll_percentage: config.audio_scroll_percentage,
             remember_expanded_state: config.remember_expanded_state,
@@ -476,29 +548,13 @@ impl QuickSettingsWindow {
 
         let cfg = &qs.cards_config;
 
-        // Collect toggle cards and their revealers.
-        // These are the cards that appear in the 2-per-row grid.
-        //
-        // Cards with expandable state store a trait object for uniform accordion
-        // registration. Cards that need custom expand/collapse behavior (e.g.,
-        // Power card updating its subtitle) provide an on_toggle callback.
-        struct ToggleCardInfo {
-            card: gtk4::Widget,
-            revealer: Option<Revealer>,
-            expander_button: Option<Button>,
-            /// Expandable card state (if this card supports accordion behavior).
-            expandable: Option<Rc<dyn ExpandableCard>>,
-            /// Optional callback invoked after expand/collapse toggle.
-            /// Receives `true` if expanding, `false` if collapsing.
-            on_toggle: Option<Rc<dyn Fn(bool)>>,
-        }
-
         let mut toggle_cards: Vec<ToggleCardInfo> = Vec::new();
 
         // Build enabled cards
         if cfg.network {
             let (card, revealer, expander_button) = Self::build_network_card(qs);
             toggle_cards.push(ToggleCardInfo {
+                expander_handler: RefCell::new(None),
                 card,
                 revealer: Some(revealer),
                 expander_button,
@@ -509,6 +565,7 @@ impl QuickSettingsWindow {
         if cfg.bluetooth {
             let (card, revealer, expander_button) = Self::build_bluetooth_card(qs);
             toggle_cards.push(ToggleCardInfo {
+                expander_handler: RefCell::new(None),
                 card,
                 revealer: Some(revealer),
                 expander_button,
@@ -516,9 +573,12 @@ impl QuickSettingsWindow {
                 on_toggle: None,
             });
         }
-        if cfg.vpn && VpnService::global().snapshot().available {
+        // Always build the card; availability controls visibility, so a popover
+        // first opened while NM is down still recovers without being recreated.
+        if cfg.vpn {
             let (card, revealer, expander_button) = Self::build_vpn_card(qs);
             toggle_cards.push(ToggleCardInfo {
+                expander_handler: RefCell::new(None),
                 card,
                 revealer: Some(revealer),
                 expander_button,
@@ -529,6 +589,7 @@ impl QuickSettingsWindow {
         if cfg.idle_inhibitor {
             let card = Self::build_idle_inhibitor_card(qs);
             toggle_cards.push(ToggleCardInfo {
+                expander_handler: RefCell::new(None),
                 card,
                 revealer: None,
                 expander_button: None,
@@ -539,6 +600,7 @@ impl QuickSettingsWindow {
         if cfg.updates {
             let (card, revealer, expander_button) = build_updates_card(&qs.updates);
             toggle_cards.push(ToggleCardInfo {
+                expander_handler: RefCell::new(None),
                 card,
                 revealer: Some(revealer),
                 expander_button,
@@ -551,6 +613,7 @@ impl QuickSettingsWindow {
             match power_card::build_power_card(qs.power_commands.clone()) {
                 PowerCardBuildResult::Popover { card, state: _ } => {
                     toggle_cards.push(ToggleCardInfo {
+                        expander_handler: RefCell::new(None),
                         card,
                         revealer: None,
                         expander_button: None,
@@ -572,6 +635,7 @@ impl QuickSettingsWindow {
                     // subtitle might be set after callback creation.
                     let state_clone = Rc::clone(&state);
                     toggle_cards.push(ToggleCardInfo {
+                        expander_handler: RefCell::new(None),
                         card,
                         revealer: Some(revealer),
                         expander_button,
@@ -590,54 +654,18 @@ impl QuickSettingsWindow {
             }
         }
 
-        // Build rows dynamically with per-row accordion managers
-        let mut is_first_row = true;
-        for chunk in toggle_cards.chunks(2) {
-            let row = GtkBox::new(Orientation::Horizontal, CARD_ROW_GAP);
-            row.add_css_class(qs::CARDS_ROW);
-            row.set_homogeneous(true);
-            if !is_first_row {
-                row.set_margin_top(CARD_ROW_SPACING);
-            }
-            is_first_row = false;
-
-            // Create per-row accordion manager.
-            // Note: row_accordion is not stored in a struct field, but it stays alive
-            // because setup_expander_with_callback captures Rc<AccordionManager> in GTK
-            // signal closures, which are prevent it from being dropped while the buttons exist.
-            let row_accordion = Rc::new(AccordionManager::new());
-
-            for tc in chunk {
-                row.append(&tc.card);
-
-                // Register expandable cards with this row's accordion
-                if let (Some(expander_btn), Some(expandable)) =
-                    (&tc.expander_button, &tc.expandable)
-                {
-                    row_accordion.register_dyn(Rc::clone(expandable));
-                    AccordionManager::setup_expander_with_callback(
-                        &row_accordion,
-                        expandable,
-                        expander_btn,
-                        tc.on_toggle.clone(),
-                    );
+        let grid = GtkBox::new(Orientation::Vertical, 0);
+        rebuild_card_rows(&grid, &toggle_cards);
+        *qs.toggle_cards.borrow_mut() = toggle_cards;
+        content.append(&grid);
+        if let Some(card) = qs.vpn.card.upgrade() {
+            let weak_qs = Rc::downgrade(qs);
+            let weak_grid = grid.downgrade();
+            card.connect_visible_notify(move |_| {
+                if let (Some(qs), Some(grid)) = (weak_qs.upgrade(), weak_grid.upgrade()) {
+                    rebuild_card_rows(&grid, &qs.toggle_cards.borrow());
                 }
-            }
-
-            // If odd number of cards in this row, add placeholder for consistent sizing
-            if chunk.len() == 1 {
-                let placeholder = GtkBox::new(Orientation::Horizontal, 0);
-                row.append(&placeholder);
-            }
-
-            content.append(&row);
-
-            // Add revealers after the row (they expand below the cards)
-            for tc in chunk {
-                if let Some(ref revealer) = tc.revealer {
-                    content.append(revealer);
-                }
-            }
+            });
         }
 
         if cfg.audio {
@@ -931,9 +959,12 @@ impl QuickSettingsWindow {
         *qs.vpn.base.card_icon.borrow_mut() = Some(vpn_card.icon_handle.clone());
         *qs.vpn.base.subtitle.borrow_mut() = vpn_card.subtitle.clone();
         *qs.vpn.base.arrow.borrow_mut() = vpn_card.expander_icon.clone();
+        vpn_card.card.set_visible(vpn_snapshot.available);
+        qs.vpn.card.set(Some(&vpn_card.card));
 
         let vpn_revealer = Revealer::new();
         vpn_revealer.set_reveal_child(false);
+        vpn_revealer.set_visible(vpn_snapshot.available);
         vpn_revealer.set_transition_type(RevealerTransitionType::SlideDown);
         vpn_revealer.set_transition_duration(ConfigManager::global().animation_duration(250));
 

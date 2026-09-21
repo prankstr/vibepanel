@@ -17,7 +17,8 @@ use tracing::debug;
 use super::components::ListRow;
 use super::ui_helpers::{
     ExpandableCard, ExpandableCardBase, add_placeholder_row, build_accent_subtitle, clear_list_box,
-    create_qs_list_box, create_row_action_label, set_icon_active, set_subtitle_active,
+    collapse_revealer_instant, create_qs_list_box, create_row_action_label, set_icon_active,
+    set_subtitle_active,
 };
 use super::window::QuickSettingsWindow;
 use crate::services::icons::IconsService;
@@ -231,6 +232,8 @@ pub fn vpn_icon_name() -> &'static str {
 pub struct VpnCardState {
     /// Common expandable card state (toggle, icon, subtitle, list_box, revealer, arrow).
     pub base: ExpandableCardBase,
+    /// Card owned by the window; weak to avoid a cycle through its expander.
+    pub card: gtk4::glib::WeakRef<gtk4::Widget>,
     /// Guard flag to prevent feedback loops when programmatically updating toggle.
     pub updating_toggle: Cell<bool>,
     /// Inline auth prompt container (reusable, re-parented under the matching connection row).
@@ -249,6 +252,7 @@ impl VpnCardState {
     pub fn new() -> Self {
         Self {
             base: ExpandableCardBase::new(),
+            card: gtk4::glib::WeakRef::new(),
             updating_toggle: Cell::new(false),
             auth_box: RefCell::new(None),
             auth_entries: RefCell::new(Vec::new()),
@@ -441,6 +445,20 @@ fn create_vpn_action_widget(_state: &Rc<VpnCardState>, conn: &VpnConnection) -> 
 pub fn on_vpn_changed(state: &Rc<VpnCardState>, snapshot: &VpnSnapshot) -> bool {
     let primary = snapshot.primary();
     let has_connections = !snapshot.connections.is_empty();
+
+    // The card is always constructed, so hide it instead of leaving it stale.
+    if let Some(card) = state.card.upgrade() {
+        card.set_visible(snapshot.available);
+    }
+    if let Some(revealer) = state.base.revealer.borrow().as_ref() {
+        if !snapshot.available && revealer.reveals_child() {
+            collapse_revealer_instant(revealer);
+            if let Some(arrow) = state.base.arrow.borrow().as_ref() {
+                arrow.widget().remove_css_class(state::EXPANDED);
+            }
+        }
+        revealer.set_visible(snapshot.available);
+    }
 
     // Check if a pending connect completed and restore keyboard if needed
     let (pending_connect_completed, should_restore) =
