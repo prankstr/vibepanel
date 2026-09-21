@@ -75,6 +75,10 @@
           // {
             inherit cargoArtifacts;
 
+            preCheck = ''
+              export VIBEPANEL_TEST_DBUS_CONFIG="${pkgs.dbus}/share/dbus-1/session.conf"
+            '';
+
             # Make runtime graphics drivers available to GTK.
             preFixup = ''
               gappsWrapperArgs+=(

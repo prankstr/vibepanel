@@ -1331,7 +1331,11 @@ mod tests {
     #[test]
     fn activation_signals_on_private_bus() {
         // Isolate D-Bus and GLib globals from the user's session and other unit tests.
-        let output = std::process::Command::new("dbus-run-session")
+        let mut command = std::process::Command::new("dbus-run-session");
+        if let Some(config) = std::env::var_os("VIBEPANEL_TEST_DBUS_CONFIG") {
+            command.arg("--config-file").arg(config);
+        }
+        let output = command
             .arg("--")
             .arg(std::env::current_exe().unwrap())
             .args([
