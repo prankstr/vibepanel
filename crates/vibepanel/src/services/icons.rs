@@ -339,6 +339,7 @@ fn material_symbol_lookup(icon_name: &str) -> Option<&'static str> {
         "ram-symbolic" => "memory_alt",
         "video-display-symbolic" => "developer_board",
         "disk-symbolic" => "hard_drive",
+        "drive-removable-symbolic" => "usb",
         "system-monitor-symbolic" => "speed",
 
         // Directional arrows
@@ -993,6 +994,11 @@ pub fn gtk_icon_candidates(logical: &str) -> &'static [&'static str] {
             "drive-harddisk-symbolic",
             "drive-harddisk",
             "media-flash-symbolic",
+        ],
+        "drive-removable-symbolic" => &[
+            "drive-removable-media-symbolic",
+            "media-removable-symbolic",
+            "drive-harddisk-symbolic",
         ],
         "system-monitor-symbolic" => &[
             "applications-engineering-symbolic",
