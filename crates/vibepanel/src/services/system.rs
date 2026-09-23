@@ -91,6 +91,10 @@ pub struct SystemSnapshot {
 
     /// Mounted block-device filesystems, sorted by mount point.
     pub mounts: Vec<MountUsage>,
+
+    /// Usage for paths registered with [`SystemService::watch_path`]. A missing
+    /// key means no result yet; `None` means the path could not be queried.
+    pub path_usage: HashMap<String, Option<SpaceUsage>>,
 }
 
 /// One mounted block-device filesystem.
@@ -374,6 +378,8 @@ fn discover_mounts() -> Vec<(Vec<u8>, MountUsage)> {
         .collect()
 }
 
+type PathUsage = HashMap<String, Option<SpaceUsage>>;
+
 /// How long a filesystem query may run before its result is shown as unavailable.
 const STORAGE_STALE_AFTER: Duration = Duration::from_secs(10);
 
@@ -405,6 +411,10 @@ impl<K> Default for WatchedPaths<K> {
 }
 
 impl<K: Eq + Hash + Clone> WatchedPaths<K> {
+    fn watch(&mut self, key: &K) {
+        self.0.entry(key.clone()).or_default().watchers += 1;
+    }
+
     fn unwatch(&mut self, key: &K) {
         let Some(entry) = self.0.get_mut(key) else {
             return;
@@ -469,14 +479,16 @@ impl<K: Eq + Hash + Clone> WatchedPaths<K> {
     }
 }
 
-/// Mounts as shown in the snapshot. Mounts without a result yet and mounts
-/// reporting no capacity are left out.
+/// Mounts and watched paths as shown in the snapshot. Mounts without a result
+/// yet and mounts reporting no capacity are left out; paths without a result
+/// yet are left out so the widget shows "loading".
 fn published_storage(
     drives: &[(Vec<u8>, MountUsage)],
     mount_usage: &WatchedPaths<Vec<u8>>,
+    paths: &WatchedPaths<String>,
     now: Instant,
-) -> Vec<MountUsage> {
-    drives
+) -> (Vec<MountUsage>, PathUsage) {
+    let mounts = drives
         .iter()
         .filter_map(|(key, mount)| {
             let usage = mount_usage.get(key, now)?;
@@ -485,7 +497,13 @@ fn published_storage(
                 ..mount.clone()
             })
         })
-        .collect()
+        .collect();
+    let paths = paths
+        .0
+        .keys()
+        .filter_map(|path| Some((path.clone(), paths.get(path, now)?)))
+        .collect();
+    (mounts, paths)
 }
 
 /// Return space usage of the filesystem holding `path`.
@@ -551,6 +569,9 @@ pub struct SystemService {
 
     /// A mount discovery is running.
     discovering: Cell<bool>,
+
+    /// Paths watched by disk widgets, queried independently.
+    watched_paths: RefCell<WatchedPaths<String>>,
 }
 
 impl SystemService {
@@ -584,6 +605,7 @@ impl SystemService {
             drives: RefCell::new(Vec::new()),
             mount_usage: RefCell::new(WatchedPaths::default()),
             discovering: Cell::new(false),
+            watched_paths: RefCell::new(WatchedPaths::default()),
         });
 
         let weak = Rc::downgrade(&service);
@@ -639,9 +661,21 @@ impl SystemService {
         self.history.borrow().iter().copied().collect()
     }
 
-    /// Rediscover mounts and query every idle mount, each on its own thread.
-    /// Results are shown on the next poll.
+    /// Start reporting usage for the filesystem holding `path` in
+    /// [`SystemSnapshot::path_usage`]. Pair with [`Self::unwatch_path`].
+    pub fn watch_path(self: &Rc<Self>, path: &str) {
+        self.watched_paths.borrow_mut().watch(&path.to_string());
+        Self::query_all(self, |this| &this.watched_paths);
+    }
+
+    pub fn unwatch_path(&self, path: &str) {
+        self.watched_paths.borrow_mut().unwatch(&path.to_string());
+    }
+
+    /// Rediscover mounts and query every idle mount and watched path, each on
+    /// its own thread. Results are shown on the next poll.
     fn refresh_storage(this: &Rc<Self>) {
+        Self::query_all(this, |this| &this.watched_paths);
         if this.discovering.replace(true) {
             return;
         }
@@ -700,9 +734,10 @@ impl SystemService {
     }
 
     fn apply_storage(&self, snapshot: &mut SystemSnapshot) {
-        snapshot.mounts = published_storage(
+        (snapshot.mounts, snapshot.path_usage) = published_storage(
             &self.drives.borrow(),
             &self.mount_usage.borrow(),
+            &self.watched_paths.borrow(),
             Instant::now(),
         );
     }
@@ -861,24 +896,39 @@ impl Drop for SystemService {
     }
 }
 
-/// Format bytes as a human-readable string (e.g., "8.2G", "512M").
-pub fn format_bytes(bytes: u64) -> String {
+/// Unit for a compact byte count: `(divisor, suffix, decimals)`.
+fn byte_unit(bytes: u64) -> (f64, char, usize) {
     const KB: u64 = 1024;
     const MB: u64 = KB * 1024;
     const GB: u64 = MB * 1024;
     const TB: u64 = GB * 1024;
 
-    if bytes >= TB {
-        format!("{:.1}T", bytes as f64 / TB as f64)
-    } else if bytes >= GB {
-        format!("{:.1}G", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.0}M", bytes as f64 / MB as f64)
-    } else if bytes >= KB {
-        format!("{:.0}K", bytes as f64 / KB as f64)
-    } else {
-        format!("{}B", bytes)
+    match bytes {
+        TB.. => (TB as f64, 'T', 1),
+        GB.. => (GB as f64, 'G', 1),
+        MB.. => (MB as f64, 'M', 0),
+        KB.. => (KB as f64, 'K', 0),
+        _ => (1.0, 'B', 0),
     }
+}
+
+/// Format bytes as a human-readable string (e.g., "8.2G", "512M").
+pub fn format_bytes(bytes: u64) -> String {
+    let (divisor, unit, decimals) = byte_unit(bytes);
+    format!("{:.decimals$}{unit}", bytes as f64 / divisor)
+}
+
+/// Format `used/total` with both values in the total's unit, e.g. "0.5/1.8T".
+///
+/// Since `used <= total`, the text is never wider than when `used == total`,
+/// which lets callers reserve a stable width from the total alone.
+pub fn format_used_of_total(used: u64, total: u64) -> String {
+    let (divisor, unit, decimals) = byte_unit(total);
+    format!(
+        "{:.decimals$}/{:.decimals$}{unit}",
+        used as f64 / divisor,
+        total as f64 / divisor
+    )
 }
 
 /// Format bytes as a human-readable string with full unit names.
@@ -934,6 +984,23 @@ mod tests {
             format_bytes(8 * 1024 * 1024 * 1024 + 200 * 1024 * 1024),
             "8.2G"
         );
+        assert_eq!(format_bytes(1024u64.pow(4)), "1.0T");
+    }
+
+    #[test]
+    fn test_format_used_of_total_uses_totals_unit() {
+        const GIB: u64 = 1024 * 1024 * 1024;
+        const TIB: u64 = GIB * 1024;
+        assert_eq!(format_used_of_total(337 * GIB, 460 * GIB), "337.0/460.0G");
+        assert_eq!(
+            format_used_of_total(512 * 1024 * 1024, 16 * GIB),
+            "0.5/16.0G"
+        );
+        assert_eq!(format_used_of_total(900 * 1024 * 1024, TIB), "0.0/1.0T");
+        // GiB -> TiB boundary stays in the total's unit, not "999.0G/1.8T".
+        let total = TIB * 18 / 10;
+        assert_eq!(format_used_of_total(999 * GIB, total), "1.0/1.8T");
+        assert_eq!(format_used_of_total(0, 0), "0/0B");
     }
 
     #[test]
@@ -1088,6 +1155,34 @@ mod tests {
     }
 
     #[test]
+    fn test_watched_paths_isolate_hung_queries() {
+        let now = Instant::now();
+        let later = now + STORAGE_STALE_AFTER;
+        let mut paths = WatchedPaths::default();
+        paths.watch(&key("/mnt/nas"));
+        assert_eq!(paths.claim(now), [key("/mnt/nas")]);
+
+        // The NAS query hangs; another path still starts and publishes.
+        paths.watch(&key("/"));
+        assert_eq!(paths.claim(now), [key("/")]);
+        assert!(paths.finish(&key("/"), Some(space(1)))); // first result
+        assert_eq!(paths.get(&key("/"), later), Some(Some(space(1))));
+        assert_eq!(paths.get(&key("/mnt/nas"), now), None); // no result yet
+        assert_eq!(paths.get(&key("/mnt/nas"), later), Some(None)); // stuck
+
+        // Re-watching the hung path does not start a second query.
+        paths.unwatch(&key("/mnt/nas"));
+        paths.watch(&key("/mnt/nas"));
+        assert_eq!(paths.claim(later), [key("/")]);
+        assert!(!paths.finish(&key("/"), Some(space(1)))); // not first
+
+        // Unwatched while hung: its late result is dropped with the entry.
+        paths.unwatch(&key("/mnt/nas"));
+        assert!(!paths.finish(&key("/mnt/nas"), Some(space(2))));
+        assert!(!paths.0.contains_key("/mnt/nas"));
+    }
+
+    #[test]
     fn test_hung_mount_stays_listed_without_hiding_others() {
         let now = Instant::now();
         let later = now + STORAGE_STALE_AFTER;
@@ -1099,7 +1194,8 @@ mod tests {
             (path.as_bytes().to_vec(), mount)
         };
         let listed = |drives: &[(Vec<u8>, MountUsage)], usage: &WatchedPaths<Vec<u8>>, at| {
-            published_storage(drives, usage, at)
+            let (mounts, _) = published_storage(drives, usage, &WatchedPaths::default(), at);
+            mounts
                 .into_iter()
                 .map(|mount| (mount.mount_point, mount.usage.map(|usage| usage.total)))
                 .collect::<Vec<_>>()
