@@ -654,6 +654,7 @@ impl NiriBackend {
     ///
     /// Returns (workspace_changed, window_changed, keyboard_layout_changed).
     fn handle_event(shared: &SharedState, event: &Value) -> (bool, bool, bool) {
+        super::visibility::notify_changed();
         let mut workspace_changed = false;
         let mut window_changed = false;
         let mut keyboard_layout_changed = false;
@@ -892,6 +893,7 @@ impl NiriBackend {
         let mut backoff_ms = RECONNECT_INITIAL_MS;
 
         while running.load(Ordering::SeqCst) {
+            super::visibility::notify_changed();
             // Connect and request event stream
             let stream = match UnixStream::connect(&socket_path) {
                 Ok(s) => {
@@ -1004,6 +1006,7 @@ impl NiriBackend {
                             && e.kind() != std::io::ErrorKind::TimedOut
                         {
                             if running.load(Ordering::SeqCst) {
+                                super::visibility::notify_changed();
                                 error!("Error reading from Niri socket: {}", e);
                             }
                             break;
@@ -1018,6 +1021,12 @@ impl NiriBackend {
 }
 
 impl CompositorBackend for NiriBackend {
+    fn visibility_reader(&self) -> Option<super::visibility::VisibilityReader> {
+        Some(super::visibility::VisibilityReader::Niri(
+            self.socket_path.read().clone()?,
+        ))
+    }
+
     fn start(&self, on_workspace_update: WorkspaceCallback, on_window_update: WindowCallback) {
         if self.running.swap(true, Ordering::SeqCst) {
             warn!("NiriBackend already running");

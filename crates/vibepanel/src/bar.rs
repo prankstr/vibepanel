@@ -196,6 +196,26 @@ fn apply_edge_hover(targets: &[EdgeClickTarget], active_idx: Option<usize>) {
     }
 }
 
+fn activate_edge_target(
+    gesture: &GestureClick,
+    reference: &gtk4::Widget,
+    x: f64,
+    y: f64,
+    interaction: &EdgeInteraction,
+) {
+    TooltipManager::global().cancel_and_hide();
+    interaction.popover.ipc_toggle();
+    if let Some(ripple) = interaction.ripple.as_ref()
+        && let Some(point) = reference.compute_point(
+            ripple.widget(),
+            &gtk4::graphene::Point::new(x as f32, y as f32),
+        )
+    {
+        crate::widgets::ripple::trigger_ripple(ripple, point.x() as f64, point.y() as f64);
+    }
+    gesture.set_state(gtk4::EventSequenceState::Claimed);
+}
+
 fn install_edge_click_handler(
     outer_box: &gtk4::Box,
     position: BarPosition,
@@ -227,16 +247,7 @@ fn install_edge_click_handler(
             targets[target_idx].interaction.clone()
         };
 
-        TooltipManager::global().cancel_and_hide();
-        // Toggle via the popover registry path. MenuHandle::show() routes
-        // through PopoverTracker::set_active(), which dismisses any other
-        // active popover — net behavior matches direct widget clicks.
-        interaction.popover.ipc_toggle();
-        if let Some(ripple) = interaction.ripple.as_ref() {
-            trigger_ripple_from_gesture(gesture, x, y, ripple);
-        }
-
-        gesture.set_state(gtk4::EventSequenceState::Claimed);
+        activate_edge_target(gesture, outer_widget, x, y, &interaction);
     });
 
     outer_box.add_controller(gesture);
@@ -279,6 +290,12 @@ fn install_edge_click_handler(
     outer_box.add_controller(motion);
 }
 
+fn dismiss_bar_popup(gesture: &GestureClick) {
+    TooltipManager::global().cancel_and_hide();
+    PopoverTracker::global().dismiss_active();
+    gesture.set_state(gtk4::EventSequenceState::Claimed);
+}
+
 fn install_bar_background_click_handler(outer_box: &gtk4::Box) {
     let gesture = GestureClick::new();
     gesture.set_button(0);
@@ -288,9 +305,7 @@ fn install_bar_background_click_handler(outer_box: &gtk4::Box) {
             return;
         }
 
-        TooltipManager::global().cancel_and_hide();
-        PopoverTracker::global().dismiss_active();
-        gesture.set_state(gtk4::EventSequenceState::Claimed);
+        dismiss_bar_popup(gesture);
     });
     outer_box.add_controller(gesture);
 }
@@ -323,6 +338,7 @@ fn click_inside_bar_widget(gesture: &GestureClick, x: f64, y: f64) -> bool {
 /// Production-built bar content shared by the layer-shell window path and
 /// runtime UI regression tests.
 pub(crate) struct BuiltBarContent {
+    edge_targets: EdgeClickTargets,
     pub root: gtk4::Box,
     pub bar: SectionedBar,
 }
@@ -483,6 +499,7 @@ pub(crate) fn build_bar_content(
     install_edge_click_handler(&outer_box, position, &edge_targets);
 
     BuiltBarContent {
+        edge_targets,
         root: outer_box,
         bar: bar_box,
     }
@@ -499,7 +516,10 @@ pub fn create_bar_window(
     monitor: &gtk4::gdk::Monitor,
     output_id: &str,
     state: &mut BarState,
-) -> ApplicationWindow {
+) -> (
+    ApplicationWindow,
+    Rc<crate::services::bar_visibility::BarVisibilityController>,
+) {
     let position = config.bar.position();
     let is_vertical = position.is_vertical();
     let bar_height = rendered_bar_height(config);
@@ -508,7 +528,7 @@ pub fn create_bar_window(
         .application(app)
         .title("vibepanel")
         .decorated(false)
-        .resizable(false)
+        .resizable(true)
         .default_height(if is_vertical { -1 } else { bar_height })
         .default_width(if is_vertical { bar_height } else { -1 })
         .build();
@@ -543,7 +563,11 @@ pub fn create_bar_window(
     );
 
     // Reserve space (exclusive zone) so other windows don't overlap
-    window.auto_exclusive_zone_enable();
+    if config.bar.visibility == vibepanel_core::config::BarVisibility::Always {
+        window.auto_exclusive_zone_enable();
+    } else {
+        window.set_exclusive_zone(-1);
+    }
 
     // Bar doesn't need keyboard input
     window.set_keyboard_mode(KeyboardMode::None);
@@ -562,7 +586,6 @@ pub fn create_bar_window(
 
     let is_island_mode = config.bar.background_opacity == 0.0;
 
-    let bar_box_for_blur = bar_box.clone();
     window.connect_map(move |win| {
         if is_vertical {
             win.set_default_size(bar_height, target_height);
@@ -577,36 +600,8 @@ pub fn create_bar_window(
                 target_width
             );
         }
-
-        // Apply bar blur region on map (opaque/translucent bar path).
-        // The islands path is handled by the layout allocate callback below.
-        //
-        // Island mode: allocation applies active blur regions. If blur was
-        // disabled while unmapped, clean up the stale protocol object now that
-        // the wl_surface is resolvable again.
-        //
-        // Opaque/translucent mode: apply blur on map.  The else-branch
-        // removes any stale protocol object left from a previous map cycle
-        // (blur enabled on last show, then disabled while bars were hidden).
-        // `remove_blur_region` is idempotent (no-op when no effect exists).
-        if is_island_mode {
-            if !ConfigManager::global().blur_enabled()
-                && let Some(blur) =
-                    crate::services::background_effect::BackgroundEffectManager::global()
-            {
-                blur.remove_blur_region(win);
-            }
-        } else if ConfigManager::global().blur_enabled() {
-            if let Some(blur) =
-                crate::services::background_effect::BackgroundEffectManager::global()
-            {
-                blur.apply_bar_blur_region(win, &bar_box_for_blur);
-            }
-        } else if let Some(blur) =
-            crate::services::background_effect::BackgroundEffectManager::global()
-        {
-            blur.remove_blur_region(win);
-        }
+        // Blur is applied by BarVisibilityController when the bar settles
+        // fully revealed and removed when it starts hiding.
     });
 
     // Install layout callback for island blur (transparent bar mode).
@@ -614,14 +609,9 @@ pub fn create_bar_window(
     // the whole surface. The callback fires after every layout pass so the blur
     // region stays in sync as widgets move or resize (tray changes, title width, etc).
     //
-    // We also keep a shared clone of the island-apply closure so the theme-change
-    // hot-reload handler can trigger an immediate re-apply when blur is toggled on.
-    //
-    // `prev_bounds` caches the last-applied island bounds to skip redundant
-    // Wayland protocol traffic.  It is hoisted here (rather than inside the
-    // closure) so the theme-change handler can clear it when blur is toggled off
-    // — otherwise the stale cache would short-circuit the next apply.
-    let prev_bounds = Rc::new(RefCell::new(Vec::<(i32, i32, i32, i32)>::new()));
+    // Allocation, reveal and theme changes share the same blur cache.
+    // None means invalidated; Some([]) means an applied empty geometry.
+    let prev_bounds = Rc::new(RefCell::new(None::<Vec<(i32, i32, i32, i32)>>));
     // Clone for the theme-change handler so it can invalidate the cache on any
     // theme change (the original `prev_bounds` is moved into the island closure).
     let prev_bounds_for_theme = Rc::clone(&prev_bounds);
@@ -631,12 +621,13 @@ pub fn create_bar_window(
         let bar_box_weak = bar_box.downgrade();
         let closure: Rc<dyn Fn()> = Rc::new(move || {
             if !ConfigManager::global().blur_enabled() {
-                // Clean up any stale blur effect left from before blur was
-                // disabled (e.g. ipc_hide -> blur-off -> ipc_show).
-                // Only do this once: if prev_bounds is already empty we've
-                // either already cleaned up or never had blur applied.
-                if !prev_bounds.borrow().is_empty() {
-                    prev_bounds.borrow_mut().clear();
+                // Remove a previously applied region once when blur is disabled.
+                if prev_bounds
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|bounds| !bounds.is_empty())
+                {
+                    *prev_bounds.borrow_mut() = Some(Vec::new());
                     // Defer the remove out of the GTK allocate pass: it calls
                     // wl_surface.commit() synchronously, and we'd rather not
                     // do that mid-layout.  Re-check guard inside idle in case
@@ -644,7 +635,11 @@ pub fn create_bar_window(
                     let win_weak_idle = win_weak.clone();
                     let prev_bounds_idle = Rc::clone(&prev_bounds);
                     gtk4::glib::idle_add_local_once(move || {
-                        if !prev_bounds_idle.borrow().is_empty() {
+                        if !prev_bounds_idle
+                            .borrow()
+                            .as_ref()
+                            .is_some_and(Vec::is_empty)
+                        {
                             return;
                         }
                         if ConfigManager::global().blur_enabled() {
@@ -664,11 +659,9 @@ pub fn create_bar_window(
             let Some(win) = win_weak.upgrade() else {
                 return;
             };
-            // Bar is mapped but opacity-hidden (e.g. hide_all during monitor
-            // hotplug debounce).  Skip blur — it would be applied to an
-            // invisible surface.  reconfigure_all() rebuilds bars and
-            // connect_map re-applies blur when they are shown again.
-            if win.opacity() <= 0.0 {
+            // Hidden geometry is not an applied blur region.
+            if win.has_css_class(crate::styles::class::BAR_AUTO_HIDDEN) {
+                *prev_bounds.borrow_mut() = None;
                 return;
             }
             let Some(blur) = crate::services::background_effect::BackgroundEffectManager::global()
@@ -683,10 +676,10 @@ pub fn create_bar_window(
             // Skip redundant Wayland protocol traffic when bounds haven't changed.
             // The allocate callback fires on every layout pass (clock tick, tray
             // icon change, etc.) but most passes produce identical island bounds.
-            if *prev_bounds.borrow() == islands {
+            if prev_bounds.borrow().as_ref() == Some(&islands) {
                 return;
             }
-            *prev_bounds.borrow_mut() = islands.clone();
+            *prev_bounds.borrow_mut() = Some(islands.clone());
             if !islands.is_empty() {
                 blur.apply_bar_island_blur_regions(&win, &islands);
             } else {
@@ -698,7 +691,11 @@ pub fn create_bar_window(
                 let win_weak_idle = win_weak.clone();
                 let prev_bounds_idle = Rc::clone(&prev_bounds);
                 gtk4::glib::idle_add_local_once(move || {
-                    if !prev_bounds_idle.borrow().is_empty() {
+                    if !prev_bounds_idle
+                        .borrow()
+                        .as_ref()
+                        .is_some_and(Vec::is_empty)
+                    {
                         return;
                     }
                     if let Some(win) = win_weak_idle.upgrade()
@@ -715,7 +712,7 @@ pub fn create_bar_window(
             .and_downcast::<crate::sectioned_bar::CenterPriorityLayout>()
         {
             let closure_clone = Rc::clone(&closure);
-            lm.set_on_allocate(move || closure_clone());
+            lm.connect_allocated(move || closure_clone());
         }
         Some(closure)
     } else {
@@ -731,14 +728,18 @@ pub fn create_bar_window(
     {
         let win_weak = window.downgrade();
         let bar_box_for_theme = bar_box.clone();
+        let island_apply = island_apply.clone();
         let theme_cb_id = ConfigManager::global().on_theme_change(move || {
             let Some(win) = win_weak.upgrade() else {
                 return;
             };
             if ConfigManager::global().blur_enabled() {
+                if win.has_css_class(crate::styles::class::BAR_AUTO_HIDDEN) {
+                    return;
+                }
                 // Invalidate the island-bounds cache so radius/theme changes
                 // force a re-apply (the cache only tracks geometry, not radii).
-                prev_bounds_for_theme.borrow_mut().clear();
+                *prev_bounds_for_theme.borrow_mut() = None;
                 if let Some(apply) = &island_apply {
                     // Island mode: re-apply per-island regions immediately.
                     apply();
@@ -757,7 +758,52 @@ pub fn create_bar_window(
         state.add_handle(Box::new(ThemeCallbackGuard(theme_cb_id)));
     }
 
-    window.set_visible(true);
+    let visibility = crate::services::bar_visibility::BarVisibilityController::new(
+        app,
+        &window,
+        &bar_box,
+        monitor,
+        output_id,
+        config,
+        island_apply,
+    );
+
+    if let Some(trigger) = visibility.reveal_trigger() {
+        let gesture = GestureClick::new();
+        gesture.set_button(0);
+        let controller = Rc::downgrade(&visibility);
+        let root = built_content.root.downgrade();
+        let targets = built_content.edge_targets;
+        gesture.connect_pressed(move |gesture, _, x, y| {
+            let (Some(controller), Some(root)) = (controller.upgrade(), root.upgrade()) else {
+                return;
+            };
+            if !controller.is_fully_revealed() {
+                return;
+            }
+            // The trigger occupies the screen edge, outside the bar's widget
+            // bounds. Project along that edge using the ordinary edge targets.
+            let (x, y) = match position {
+                BarPosition::Top => (x, -1.0),
+                BarPosition::Bottom => (x, root.height() as f64 + 1.0),
+                BarPosition::Left => (-1.0, y),
+                BarPosition::Right => (root.width() as f64 + 1.0, y),
+            };
+            let interaction = {
+                let targets = targets.borrow();
+                edge_target_at(&targets, root.upcast_ref(), position, x, y)
+                    .map(|idx| targets[idx].interaction.clone())
+            };
+            if gesture.current_button() == gdk::BUTTON_PRIMARY
+                && let Some(interaction) = interaction
+            {
+                activate_edge_target(gesture, root.upcast_ref(), x, y, &interaction);
+            } else {
+                dismiss_bar_popup(gesture);
+            }
+        });
+        trigger.add_controller(gesture);
+    }
 
     info!(
         "Bar window created: size={}px, margin={}px, monitor={:?}, widgets={}",
@@ -767,7 +813,7 @@ pub fn create_bar_window(
         state.handle_count()
     );
 
-    window
+    (window, visibility)
 }
 
 /// Collect the surface-local bounds of every visible widget island in the bar.
@@ -776,7 +822,7 @@ pub fn create_bar_window(
 /// `.widget-wrapper` boxes that are visible, and returns their
 /// `(x, y, width, height)` in surface-local logical coordinates via
 /// `Widget::compute_bounds()`.
-fn collect_island_bounds(
+pub(crate) fn collect_island_bounds(
     bar_box: &SectionedBar,
     native: &gtk4::Native,
 ) -> Vec<(i32, i32, i32, i32)> {

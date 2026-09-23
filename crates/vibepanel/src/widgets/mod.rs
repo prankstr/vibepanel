@@ -13,6 +13,7 @@
 //! identity for per-widget styling (e.g., `[widgets.clock].background_color`).
 //! This class is also used to generate popover class names like `clock-popover`.
 
+pub(crate) mod bar_slide;
 mod base;
 mod battery;
 mod battery_popover;
@@ -37,6 +38,8 @@ mod network_speed;
 mod notifications;
 mod notifications_common;
 mod notifications_popover;
+#[cfg(test)]
+pub(crate) use notifications_popover::compute_max_scroll_height;
 mod notifications_toast;
 mod osd;
 pub(crate) mod ripple;
@@ -58,6 +61,8 @@ pub mod css;
 pub mod quick_settings;
 
 pub use base::BaseWidget;
+#[cfg(test)]
+pub(crate) use base::configure_popover;
 pub(crate) use base::{MenuHandle, RippleHandle, trigger_ripple_from_gesture};
 pub use battery::{BatteryConfig, BatteryWidget};
 pub(crate) use clock::CalendarWeatherPopoverBinding;

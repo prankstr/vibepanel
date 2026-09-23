@@ -116,3 +116,36 @@ Known follow-ups:
   than pixels.
 - Add more surface-specific tests for OSD, tray/menu surfaces, and quick
   settings once shared UI regression helpers are reused outside `sectioned_bar.rs`.
+
+## Isolated Wayland tests
+
+Run the layer-shell contracts, including auto-hide and live Sway intellihide,
+in a private headless Sway compositor:
+
+```sh
+scripts/run-auto-hide-tests.sh
+```
+
+Requires Sway, swaymsg, Python 3, grim, and dbus-run-session. The harness uses a
+virtual pointer and private Wayland/D-Bus sessions, and stops its compositor on
+exit. It leaves logs in the printed temporary directory.
+
+For Mango regressions at fractional scale 1.8:
+
+```sh
+GSK_RENDERER=gl scripts/run-auto-hide-tests.sh test_layer_shell_auto_hide mango
+```
+
+The tests cover stationary edge hover, all four animated slide directions,
+reversal, manual suppression, and hidden island layout updates. Screenshot
+comparisons catch stale Wayland buffers that GTK visibility flags cannot detect.
+
+The Always-mode contract checks reserved space during hotplug and pointer clicks
+after output resizing. The Sway intellihide contract also moves a floating window
+across two outputs.
+
+Visibility uses pointer, popup, allocation, and compositor events with one-shot
+hide/reveal deadlines. The idle checks reject periodic policy evaluations and IPC
+queries. Niri uses layout events; Mango, Hyprland, and Sway retain 100 ms geometry
+refreshes only while floating windows are visible. Unavailable or incomplete
+scenes retry after one second. Unchanged scenes do not wake GTK.

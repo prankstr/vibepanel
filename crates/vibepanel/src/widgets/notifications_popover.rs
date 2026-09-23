@@ -22,7 +22,7 @@ use crate::services::tooltip::TooltipManager;
 use crate::styles::{button, card, color, notification as notif, surface};
 
 use super::css::DISMISS_ANIMATION_MS;
-use super::layer_shell_popover::{calculate_bar_exclusive_zone, calculate_popover_bar_margin};
+use super::layer_shell_popover::{calculate_bar_reserved_zone, calculate_popover_bar_margin};
 use super::notifications_common::{
     POPOVER_WIDTH, create_notification_body, create_notification_image_widget, format_timestamp,
 };
@@ -44,14 +44,11 @@ const CONTAINER_VERTICAL_OVERHEAD: i32 = 64;
 /// Minimum margin from the far screen edge.
 const FAR_EDGE_MARGIN: i32 = 8;
 
-/// Below this height, don't bother constraining the scroll area.
-const MIN_HEIGHT_THRESHOLD: i32 = 100;
-
 /// Fallback max scroll height when monitor geometry is unavailable.
 const FALLBACK_MAX_HEIGHT: i32 = 500;
 
 /// Compute the maximum ScrolledWindow height based on monitor geometry.
-fn compute_max_scroll_height(monitor: Option<Monitor>) -> i32 {
+pub(crate) fn compute_max_scroll_height(monitor: Option<Monitor>) -> i32 {
     let Some(monitor) = monitor else {
         return FALLBACK_MAX_HEIGHT;
     };
@@ -63,7 +60,7 @@ fn compute_max_scroll_height(monitor: Option<Monitor>) -> i32 {
 
     if config_mgr.bar_position().is_horizontal() {
         let bar_margin = calculate_popover_bar_margin();
-        occupied_height += calculate_bar_exclusive_zone() + bar_margin;
+        occupied_height += calculate_bar_reserved_zone() + bar_margin;
     }
 
     let max_height = geom.height()
@@ -72,11 +69,7 @@ fn compute_max_scroll_height(monitor: Option<Monitor>) -> i32 {
         - CONTAINER_VERTICAL_OVERHEAD
         - FAR_EDGE_MARGIN;
 
-    if max_height > MIN_HEIGHT_THRESHOLD {
-        max_height
-    } else {
-        FALLBACK_MAX_HEIGHT
-    }
+    max_height.max(1)
 }
 
 /// Build the full popover content widget.
