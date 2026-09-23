@@ -66,6 +66,14 @@ background_opacity = 1.0
 #   stable_width = false # Disable width stabilization; default stabilizes common 2-digit metric values
 #   # Also supported by [widgets.memory] and [widgets.gpu]
 #
+#   [widgets.disk]
+#   path = "/home"   # Reports the filesystem containing this path; need not be a mount point (default: "/")
+#   format = "free"  # "percentage" (default), "free", or "used/total" (alias "both")
+#   stable_width = true  # default: false
+#   # More filesystems: name instances "disk-<id>", e.g. right = ["disk", "disk-home"],
+#   # each configured by its own [widgets.disk-home] table and styled via .disk-home
+#   # Only while mounted: show_if = "mountpoint -q /mnt/usb", show_if_interval = 5
+#
 #   [widgets.gpu]
 #   devices = "auto"  # "auto" (default), "all", or zero-based indices such as [0, 1]
 #   # "all" checks every GPU while the GPU widget or system popover is active. Runtime-suspended

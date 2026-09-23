@@ -20,6 +20,7 @@ mod calendar_popover;
 mod clock;
 mod cpu;
 mod custom;
+mod disk;
 mod gpu;
 mod gpu_format;
 mod history_graph;
@@ -77,6 +78,7 @@ pub use workspaces::{WorkspacesConfig, WorkspacesWidget};
 
 pub use cpu::{CpuConfig, CpuWidget};
 pub use custom::{CustomConfig, CustomWidget};
+pub use disk::{DiskConfig, DiskWidget};
 pub use gpu::{GpuConfig, GpuWidget};
 pub use keyboard_layout::{KeyboardLayoutConfig, KeyboardLayoutWidget};
 pub use mango_layout::{MangoLayoutConfig, MangoLayoutWidget};
@@ -118,9 +120,15 @@ pub(crate) enum PopoverKind {
 pub(crate) fn popover_kind_for(widget_name: &str) -> PopoverKind {
     match widget_name {
         "cpu" | "memory" | "gpu" | "network_speed" => PopoverKind::System,
+        name if is_disk(name) => PopoverKind::System,
         "clock" | "weather" => PopoverKind::CalendarWeather,
         _ => PopoverKind::Unmergeable,
     }
+}
+
+/// "disk" or a named instance like "disk-home" with its own `[widgets.disk-home]` table.
+fn is_disk(name: &str) -> bool {
+    name == "disk" || name.strip_prefix("disk-").is_some_and(|id| !id.is_empty())
 }
 
 pub(crate) const VERTICAL_METRIC_CHARS: i32 = 3;
@@ -342,6 +350,13 @@ impl WidgetFactory {
                 let edge_interaction = memory.edge_interaction();
                 Some(BuiltWidget::new(root, memory).with_edge_interaction(edge_interaction))
             }
+            name if is_disk(name) => {
+                let cfg = DiskConfig::from_entry(entry);
+                let disk = DiskWidget::new(cfg);
+                let root = disk.widget().clone().upcast::<Widget>();
+                let edge_interaction = disk.edge_interaction();
+                Some(BuiltWidget::new(root, disk).with_edge_interaction(edge_interaction))
+            }
             "gpu" => {
                 if !GpuService::global().snapshot().available() {
                     debug!("Skipping gpu widget: no supported GPU detected");
@@ -429,6 +444,12 @@ impl WidgetFactory {
                 let memory = MemoryWidget::new_passive(cfg);
                 let root = memory.widget().clone().upcast::<Widget>();
                 Some(BuiltWidget::new(root, memory))
+            }
+            name if is_disk(name) => {
+                let cfg = DiskConfig::from_entry(entry);
+                let disk = DiskWidget::new_passive(cfg);
+                let root = disk.widget().clone().upcast::<Widget>();
+                Some(BuiltWidget::new(root, disk))
             }
             "gpu" => {
                 if !GpuService::global().snapshot().available() {
@@ -538,6 +559,9 @@ mod tests {
     fn popover_kind_system_widgets() {
         assert_eq!(popover_kind_for("cpu"), PopoverKind::System);
         assert_eq!(popover_kind_for("memory"), PopoverKind::System);
+        assert_eq!(popover_kind_for("disk"), PopoverKind::System);
+        assert_eq!(popover_kind_for("disk-home"), PopoverKind::System);
+        assert_eq!(popover_kind_for("disk-"), PopoverKind::Unmergeable);
         assert_eq!(popover_kind_for("gpu"), PopoverKind::System);
         assert_eq!(popover_kind_for("network_speed"), PopoverKind::System);
     }
