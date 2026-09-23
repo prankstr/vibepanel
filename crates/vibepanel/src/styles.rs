@@ -1402,6 +1402,9 @@ pub mod system_popover {
     /// Expander header row (`.system-expander-header`).
     pub const EXPANDER_HEADER: &str = "system-expander-header";
 
+    /// Clickable value in a section title (`.system-title-button`).
+    pub const TITLE_BUTTON: &str = "system-title-button";
+
     /// Expander content container (`.system-expander-content`).
     pub const EXPANDER_CONTENT: &str = "system-expander-content";
 
