@@ -656,6 +656,10 @@ impl Config {
 
         lines.push("Bar Configuration:".to_string());
         lines.push(format!("  position: {}", self.bar.position));
+        lines.push(format!(
+            "  visibility: {:?} (hide {}ms, reveal {}ms)",
+            self.bar.visibility, self.bar.hide_delay_ms, self.bar.reveal_delay_ms
+        ));
         lines.push(format!("  size: {}px", self.bar.size));
         lines.push(format!("  spacing: {}px", self.bar.spacing));
         lines.push(format!("  screen_margin: {}px", self.bar.screen_margin));
@@ -795,10 +799,25 @@ impl BarPosition {
     }
 }
 
+/// Automatic bar visibility policy.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BarVisibility {
+    #[default]
+    Always,
+    AutoHide,
+    Intellihide,
+}
+
 /// Bar-level configuration.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct BarConfig {
+    pub visibility: BarVisibility,
+    /// Delay before hiding after interaction ends, in milliseconds.
+    pub hide_delay_ms: u32,
+    /// Continuous edge-hover duration before revealing, in milliseconds.
+    pub reveal_delay_ms: u32,
     /// Bar position on screen: "top", "bottom", "left", or "right".
     /// Default: "top"
     pub position: String,
@@ -851,6 +870,9 @@ pub struct BarConfig {
 impl Default for BarConfig {
     fn default() -> Self {
         Self {
+            visibility: BarVisibility::Always,
+            hide_delay_ms: 150,
+            reveal_delay_ms: 150,
             position: "top".to_string(),
             size: 32,
             spacing: 8,
@@ -1784,6 +1806,19 @@ impl Default for AdvancedConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bar_visibility_defaults_and_partial_overrides() {
+        let old = Config::load_with_defaults("[bar]\nsize = 40").unwrap();
+        assert_eq!(old.bar.visibility, BarVisibility::Always);
+        assert_eq!(old.bar.hide_delay_ms, 150);
+        let new =
+            Config::load_with_defaults("[bar]\nvisibility = 'intellihide'\nreveal_delay_ms = 0")
+                .unwrap();
+        assert_eq!(new.bar.visibility, BarVisibility::Intellihide);
+        assert_eq!(new.bar.hide_delay_ms, 150);
+        assert_eq!(new.bar.reveal_delay_ms, 0);
+    }
 
     #[test]
     fn test_default_config() {

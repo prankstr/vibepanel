@@ -128,6 +128,18 @@ struct ToastLayout {
     initial_margin: i32,
 }
 
+// Automatic bars have no exclusive zone to keep toasts clear of their footprint.
+fn unreserved_bar_offset(edge: Edge) -> i32 {
+    use super::layer_shell_popover::{
+        calculate_bar_exclusive_zone, calculate_bar_reserved_zone, popover_bar_edge,
+    };
+    if edge == popover_bar_edge() {
+        calculate_bar_exclusive_zone() - calculate_bar_reserved_zone()
+    } else {
+        0
+    }
+}
+
 /// Floating toast window for displaying a single notification.
 pub(super) struct NotificationToast {
     window: Window,
@@ -195,9 +207,13 @@ impl NotificationToast {
 
         window.set_anchor(Edge::Left, horizontal_edge == Some(Edge::Left));
         window.set_anchor(Edge::Right, horizontal_edge == Some(Edge::Right));
-        window.set_margin(vertical_edge, layout.initial_margin);
+        let initial_margin = layout.initial_margin + unreserved_bar_offset(vertical_edge);
+        window.set_margin(vertical_edge, initial_margin);
         if let Some(horizontal_edge) = horizontal_edge {
-            window.set_margin(horizontal_edge, horizontal_margin);
+            window.set_margin(
+                horizontal_edge,
+                horizontal_margin + unreserved_bar_offset(horizontal_edge),
+            );
         }
 
         let notification_id = notification.id;
@@ -209,7 +225,7 @@ impl NotificationToast {
             timeout_ms: Cell::new(0),
             on_timeout: Rc::clone(&on_remove),
             pointer_hovered: Cell::new(false),
-            current_bar_margin: Cell::new(layout.initial_margin),
+            current_bar_margin: Cell::new(initial_margin),
             animation_source: RefCell::new(None),
             bar_edge: vertical_edge,
             height: Cell::new(TOAST_ESTIMATED_HEIGHT),
@@ -397,6 +413,7 @@ impl NotificationToast {
     }
 
     pub fn update_bar_margin(self: &Rc<Self>, target_margin: i32, animate: bool) {
+        let target_margin = target_margin + unreserved_bar_offset(self.bar_edge);
         let current = self.current_bar_margin.get();
 
         if !animate {

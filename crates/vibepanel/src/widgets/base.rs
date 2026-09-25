@@ -46,6 +46,8 @@ const SHOW_IF_TIMEOUT_SECS: u64 = 5;
 /// - Center alignment
 /// - Configurable vertical offset from config
 pub fn configure_popover(popover: &Popover) {
+    popover.connect_visible_notify(|_| PopoverTracker::global().notify_changed());
+    popover.connect_unmap(|_| PopoverTracker::global().notify_changed());
     popover.set_has_arrow(false);
     popover.set_autohide(true);
     popover.add_css_class(surface::WIDGET_MENU);
@@ -308,7 +310,13 @@ impl MenuHandle {
         let (anchor, monitor) = self.get_anchor_info();
 
         // Register as active popup and store the ID for later clearing
-        let id = PopoverTracker::global().set_active(popover.clone());
+        let id = PopoverTracker::global().set_active(
+            popover.clone(),
+            monitor
+                .as_ref()
+                .and_then(|m| m.connector())
+                .map(|s| s.to_string()),
+        );
         self.tracker_id.set(Some(id));
 
         popover.show_at(anchor, monitor);

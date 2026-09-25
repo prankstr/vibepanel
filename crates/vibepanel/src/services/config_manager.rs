@@ -702,6 +702,10 @@ impl ConfigManager {
         self.config.borrow().bar.size
     }
 
+    pub fn bar_visibility(&self) -> vibepanel_core::config::BarVisibility {
+        self.config.borrow().bar.visibility
+    }
+
     pub fn bar_padding(&self) -> u32 {
         self.config.borrow().bar.padding
     }

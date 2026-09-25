@@ -81,10 +81,10 @@ pub(crate) enum AnimDirection {
 
 /// Shared animation state, passed to the tick callback via `Rc<RefCell<_>>`.
 ///
-/// `progress` represents the current visual state:
-///   0.0 = fully hidden (opacity 0)
-///   1.0 = fully visible (opacity 1)
+/// Progress ranges from fully hidden (0.0) to fully visible (1.0).
 pub(crate) struct AnimState {
+    /// Use cubic ease-out on reveal and quintic ease-in on hide for bar slides.
+    bar_slide_curves: bool,
     /// Current direction of animation.
     pub(crate) direction: AnimDirection,
     /// Frame-clock time (microseconds) when this animation segment started.
@@ -104,6 +104,7 @@ pub(crate) struct AnimState {
 impl AnimState {
     pub(crate) fn new_idle() -> Self {
         Self {
+            bar_slide_curves: false,
             direction: AnimDirection::Opening,
             start_time_us: 0,
             start_progress: 0.0,
@@ -111,6 +112,11 @@ impl AnimState {
             active: false,
             tick_generation: 0,
         }
+    }
+
+    pub(crate) fn with_bar_slide_curves(mut self) -> Self {
+        self.bar_slide_curves = true;
+        self
     }
 
     /// Compute the current eased progress given the frame clock time.
@@ -124,10 +130,16 @@ impl AnimState {
         // animation that reverses takes half the time.
         let segment_duration_ms = ANIM_DURATION_MS * distance;
         let t = (elapsed_ms / segment_duration_ms).clamp(0.0, 1.0);
-        // Quintic ease-out: snappy start, long gentle tail.
-        // Approximates the Material Design `cubic-bezier(0.2, 0, 0, 1)` curve
-        // used in the original CSS transitions.
-        let eased = 1.0 - (1.0 - t).powi(5);
+        let eased = if self.bar_slide_curves {
+            match self.direction {
+                // Leave enough travel near the end to make the slowdown visible.
+                AnimDirection::Opening => 1.0 - (1.0 - t).powi(3),
+                AnimDirection::Closing => t.powi(5),
+            }
+        } else {
+            // Popovers retain their snappy quintic ease-out in both directions.
+            1.0 - (1.0 - t).powi(5)
+        };
         self.start_progress + (self.target_progress - self.start_progress) * eased
     }
 
@@ -302,10 +314,21 @@ pub fn calculate_popover_bar_margin() -> i32 {
     let bar_opacity = config_mgr.bar_background_opacity();
     let popover_offset = config_mgr.popover_offset() as i32;
 
-    if bar_opacity > 0.0 {
+    let offset = if bar_opacity > 0.0 {
         popover_offset - bar_padding
     } else {
         popover_offset
+    };
+    // Automatic modes do not reserve space. Anchor explicitly beyond the bar.
+    offset + calculate_bar_exclusive_zone() - calculate_bar_reserved_zone()
+}
+
+/// Space actually reserved by the bar, distinct from its physical thickness.
+pub fn calculate_bar_reserved_zone() -> i32 {
+    if ConfigManager::global().bar_visibility() == vibepanel_core::config::BarVisibility::Always {
+        calculate_bar_exclusive_zone()
+    } else {
+        0
     }
 }
 
@@ -322,9 +345,19 @@ pub fn popover_bar_edge() -> Edge {
     }
 }
 
+/// Automatic bars use explicit offsets, ignoring other reserved screen edges.
+pub(crate) fn popover_exclusive_zone() -> i32 {
+    if ConfigManager::global().bar_visibility() == vibepanel_core::config::BarVisibility::Always {
+        0
+    } else {
+        -1
+    }
+}
+
 /// Configure layer-shell anchors so the popover hugs the bar edge and can be
 /// positioned along the opposite axis with a single far-edge margin.
 pub fn configure_popover_layer_anchors(window: &ApplicationWindow) {
+    window.set_exclusive_zone(popover_exclusive_zone());
     match ConfigManager::global().bar_position() {
         BarPosition::Top => {
             window.set_anchor(Edge::Top, true);
@@ -1091,7 +1124,9 @@ impl LayerShellPopover {
     pub fn hide(&self) {
         // Mark as logically closed immediately — the toggle logic in BaseWidget
         // checks this to decide show vs hide on the next click.
-        self.logically_open.set(false);
+        if self.logically_open.replace(false) {
+            crate::popover_tracker::PopoverTracker::global().notify_changed();
+        }
 
         // Restore focus suppression so the next open starts no-focus.
         // (keyboard nav defers removal to enable_keyboard_nav().)

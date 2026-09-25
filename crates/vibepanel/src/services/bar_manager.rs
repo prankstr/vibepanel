@@ -29,6 +29,7 @@ use gtk4::{Application, ApplicationWindow};
 use tracing::{debug, info};
 
 use vibepanel_core::Config;
+use vibepanel_core::config::BarVisibility;
 
 use crate::bar;
 use crate::services::surfaces::SurfaceStyleManager;
@@ -43,6 +44,7 @@ struct BarInstance {
     window: ApplicationWindow,
     /// Widget handles for this bar (timers, callbacks, etc.).
     state: BarState,
+    visibility: Rc<super::bar_visibility::BarVisibilityController>,
 }
 
 impl Drop for BarInstance {
@@ -72,8 +74,11 @@ pub struct BarManager {
     app: RefCell<Option<Application>>,
     /// Bar instances keyed by monitor connector name.
     bars: RefCell<HashMap<String, BarInstance>>,
-    /// Whether bars are hidden via IPC (full hide: exclusive zone + opacity + input).
-    hidden: Cell<bool>,
+    /// Last IPC show/hide, applied to every bar including re-created ones.
+    ipc_shown: Cell<Option<bool>>,
+    /// Mode `ipc_shown` was recorded in; the bool means
+    /// "manually hidden" in Always but "pinned/released" in automatic modes.
+    ipc_mode: Cell<Option<BarVisibility>>,
 }
 
 // Thread-local singleton storage
@@ -108,7 +113,8 @@ impl BarManager {
         Rc::new(Self {
             app: RefCell::new(None),
             bars: RefCell::new(HashMap::new()),
-            hidden: Cell::new(false),
+            ipc_shown: Cell::new(None),
+            ipc_mode: Cell::new(None),
         })
     }
 
@@ -155,7 +161,8 @@ impl BarManager {
         }
 
         let mut state = BarState::new();
-        let window = bar::create_bar_window(app_ref, config, monitor, &key, &mut state);
+        let (window, visibility) =
+            bar::create_bar_window(app_ref, config, monitor, &key, &mut state);
 
         // Apply Pango font attributes to all labels if enabled in config.
         SurfaceStyleManager::global().apply_pango_attrs_all(&window);
@@ -164,13 +171,22 @@ impl BarManager {
             monitor: monitor.clone(),
             window: window.clone(),
             state,
+            visibility: visibility.clone(),
         };
 
         self.bars.borrow_mut().insert(key.clone(), instance);
 
-        // If bars are IPC-hidden, unmap the newly created bar immediately
-        if self.hidden.get() {
-            window.set_visible(false);
+        // Stored IPC state is mode-specific; drop it when the mode changes.
+        let mode = config.bar.visibility;
+        if self
+            .ipc_mode
+            .replace(Some(mode))
+            .is_some_and(|old| old != mode)
+        {
+            self.ipc_shown.set(None);
+        }
+        if let Some(shown) = self.ipc_shown.get() {
+            visibility.set_ipc_shown(shown);
         }
 
         info!(
@@ -186,6 +202,7 @@ impl BarManager {
     /// Removes the instance from the map. The `Drop` implementation for [BarInstance]
     /// will automatically close the window and the `BarState` drop will clean up widgets.
     pub fn remove_bar(&self, key: &str) {
+        crate::popover_tracker::PopoverTracker::global().dismiss_on_output(key);
         if self.bars.borrow_mut().remove(key).is_some() {
             debug!("Removing bar for key={}", key);
         }
@@ -252,15 +269,13 @@ impl BarManager {
 
         // Clear the popover registry before destroying bars — handles will be
         // re-registered during bar rebuild.
+        crate::popover_tracker::PopoverTracker::global().dismiss_active();
         crate::popover_registry::clear();
 
-        // Remove all existing bars
-        let keys: Vec<String> = self.bars.borrow().keys().cloned().collect();
-        for key in keys {
+        for key in self.active_monitors() {
             self.remove_bar(&key);
         }
 
-        // Recreate bars based on current monitors and config
         self.sync_monitors(display, config);
 
         info!(
@@ -291,94 +306,63 @@ impl BarManager {
     }
 
     /// Get all active monitor keys.
-    #[allow(dead_code)]
     pub fn active_monitors(&self) -> Vec<String> {
         self.bars.borrow().keys().cloned().collect()
     }
 
-    /// Hide all bars immediately.
-    ///
-    /// This is used during monitor hotplug to prevent bars from briefly
-    /// appearing on the wrong monitor when the compositor reassigns surfaces.
-    /// Call this immediately when a monitor change signal is received, before
-    /// the delayed sync runs.
+    /// Suppress bars during hotplug until monitor assignments settle.
     pub fn hide_all(&self) {
         for instance in self.bars.borrow().values() {
-            // Remove blur before hiding — blur is compositor-side and persists
-            // even when the surface is at opacity 0.  The BarInstance::Drop impl
-            // also calls remove_blur_region, so this is idempotent.
-            if let Some(blur) =
-                crate::services::background_effect::BackgroundEffectManager::global()
-            {
-                blur.remove_blur_region(&instance.window);
-            }
-            instance.window.set_opacity(0.0);
+            instance.visibility.set_monitor_suppressed(true);
         }
-        debug!("All bars hidden for monitor change");
     }
 
-    /// Show all bars.
-    ///
-    /// Called after sync_monitors to reveal bars that weren't removed.
-    /// No-op if bars are IPC-hidden (the hidden state takes precedence).
-    ///
-    /// Blur regions are not restored here — `reconfigure_all()` rebuilds
-    /// bars before this call, and `connect_map` re-applies blur on map.
+    /// End hotplug suppression, respecting manual hiding and automatic policy.
     pub fn show_all(&self) {
-        if self.hidden.get() {
-            debug!("show_all skipped: bars are IPC-hidden");
-            return;
-        }
         for instance in self.bars.borrow().values() {
-            instance.window.set_opacity(1.0);
+            instance.visibility.set_monitor_suppressed(false);
         }
-        debug!("All bars shown after monitor sync");
     }
 
-    /// Hide all bars via IPC (full hide).
-    ///
-    /// Unmaps bar surfaces so they are completely invisible and release their
-    /// exclusive zone. Uses `set_visible(false)` which unmaps the layer-shell
-    /// surface at the compositor level — `set_opacity(0.0)` alone is not
-    /// sufficient because the compositor still composites the surface.
-    ///
-    /// Blur regions are **not** removed here — unmapping suspends
-    /// compositor-side blur while the protocol object persists across
-    /// unmap/remap.  The compositor restores blur automatically on
-    /// `ipc_show()`.  This differs from `hide_all()` which uses
-    /// `set_opacity(0.0)` (surface stays mapped, blur must be explicitly
-    /// removed to avoid blurring an invisible surface).  See
-    /// `background_effect.rs` "Blur lifecycle" docs.
+    /// Hide Always bars; release automatic bars back to their visibility policy.
     pub fn ipc_hide(&self) {
-        if self.hidden.get() {
-            return;
-        }
-        self.hidden.set(true);
-        for instance in self.bars.borrow().values() {
-            instance.window.set_visible(false);
-        }
-        info!("Bars hidden via IPC");
+        self.set_all_ipc_shown(false);
+        info!("IPC bar override released (Always bars hidden)");
     }
 
-    /// Show all bars via IPC (reverse full hide).
-    ///
-    /// Remaps bar surfaces. Layer-shell properties (anchors, monitor binding,
-    /// auto exclusive zone) are preserved across unmap/remap cycles by
-    /// gtk4-layer-shell, so `set_visible(true)` restores the bar fully.
+    /// Reveal bars, pinning automatic bars until IPC hide or toggle.
     pub fn ipc_show(&self) {
-        if !self.hidden.get() {
-            return;
-        }
-        self.hidden.set(false);
-        for instance in self.bars.borrow().values() {
-            instance.window.set_visible(true);
-        }
+        self.set_all_ipc_shown(true);
         info!("Bars shown via IPC");
     }
 
-    /// Toggle bar visibility via IPC.
+    fn set_all_ipc_shown(&self, shown: bool) {
+        self.ipc_shown.set(Some(shown));
+        for visibility in self.visibilities() {
+            visibility.set_ipc_shown(shown);
+        }
+    }
+
+    /// Clone controllers so `bars` is not borrowed while popups dismiss.
+    fn visibilities(&self) -> Vec<Rc<super::bar_visibility::BarVisibilityController>> {
+        self.bars
+            .borrow()
+            .values()
+            .map(|bar| bar.visibility.clone())
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_visibility(
+        &self,
+        key: &str,
+    ) -> Rc<super::bar_visibility::BarVisibilityController> {
+        self.bars.borrow()[key].visibility.clone()
+    }
+
+    /// Show and pin every bar if any is hidden; otherwise hide/release all.
     pub fn ipc_toggle(&self) {
-        if self.hidden.get() {
+        if self.visibilities().iter().any(|v| !v.is_shown()) {
             self.ipc_show();
         } else {
             self.ipc_hide();

@@ -12,6 +12,16 @@
 # =============================================================================
 
 [bar]
+# Automatic modes overlay windows without reserving space.
+# Intellihide hides for tiled windows or floating windows overlapping the bar.
+# In automatic modes IPC show pins the bar; hide retracts it immediately
+# (intellihide keeps it hidden until that output's windows change).
+# Toggle shows and pins all bars if any is hidden, otherwise hides/releases all.
+# The 2px reveal edge captures input.
+visibility = "always"   # "always", "auto-hide", "intellihide"
+# Delays apply to pointer interaction; window changes act immediately.
+# hide_delay_ms = 150
+# reveal_delay_ms = 150
 position = "top"         # "top", "bottom", "left", or "right"
 size = 32
 border_radius = 30

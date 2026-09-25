@@ -29,6 +29,7 @@
 
 /// Core structural/layout CSS classes.
 pub mod class {
+    pub const BAR_AUTO_HIDDEN: &str = "bar-auto-hidden";
     /// Outer widget wrapper (`.widget-wrapper`).
     /// Rectangular hit target so clicks register in rounded corners.
     pub const WIDGET_WRAPPER: &str = "widget-wrapper";

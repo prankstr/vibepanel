@@ -76,7 +76,11 @@ fn synthetic_id_for_name(name: &str) -> i32 {
     -2_000_000_000 + offset
 }
 
-fn ipc_send(stream: &mut UnixStream, msg_type: u32, payload: &[u8]) -> std::io::Result<()> {
+pub(super) fn ipc_send(
+    stream: &mut UnixStream,
+    msg_type: u32,
+    payload: &[u8],
+) -> std::io::Result<()> {
     let len = payload.len() as u32;
     let mut header = [0u8; IPC_HEADER_SIZE];
     header[..6].copy_from_slice(IPC_MAGIC);
@@ -91,7 +95,7 @@ fn ipc_send(stream: &mut UnixStream, msg_type: u32, payload: &[u8]) -> std::io::
 
 /// Read an i3 IPC message from the given stream.
 /// Returns (message_type, payload_bytes).
-fn ipc_recv(stream: &mut UnixStream) -> std::io::Result<(u32, Vec<u8>)> {
+pub(super) fn ipc_recv(stream: &mut UnixStream) -> std::io::Result<(u32, Vec<u8>)> {
     let mut header = [0u8; IPC_HEADER_SIZE];
     stream.read_exact(&mut header)?;
 
@@ -577,6 +581,7 @@ impl SwayBackend {
         let mut backoff_ms = RECONNECT_INITIAL_MS;
 
         while running.load(Ordering::SeqCst) {
+            super::visibility::notify_changed();
             let mut stream = match UnixStream::connect(&socket_path) {
                 Ok(s) => {
                     backoff_ms = RECONNECT_INITIAL_MS;
@@ -597,7 +602,7 @@ impl SwayBackend {
                 }
             };
 
-            let subscribe_payload = b"[\"workspace\", \"window\", \"input\"]";
+            let subscribe_payload = b"[\"workspace\", \"window\", \"input\", \"output\"]";
             if let Err(e) = ipc_send(&mut stream, IPC_SUBSCRIBE, subscribe_payload) {
                 if running.load(Ordering::SeqCst) {
                     warn!(
@@ -653,6 +658,7 @@ impl SwayBackend {
 
                 match ipc_recv(&mut stream) {
                     Ok((msg_type, data)) => {
+                        super::visibility::notify_changed();
                         let event: Value = match serde_json::from_slice(&data) {
                             Ok(v) => v,
                             Err(e) => {
@@ -691,6 +697,7 @@ impl SwayBackend {
                             continue; // Expected timeout, check running flag
                         }
                         if running.load(Ordering::SeqCst) {
+                            super::visibility::notify_changed();
                             error!("Error reading {} event: {}", wm, e);
                         }
                         break; // Reconnect
@@ -779,6 +786,12 @@ impl SwayBackend {
 }
 
 impl CompositorBackend for SwayBackend {
+    fn visibility_reader(&self) -> Option<super::visibility::VisibilityReader> {
+        Some(super::visibility::VisibilityReader::Sway(
+            self.socket_path.read().clone()?,
+        ))
+    }
+
     fn start(&self, on_workspace_update: WorkspaceCallback, on_window_update: WindowCallback) {
         if self.running.swap(true, Ordering::SeqCst) {
             warn!("{} backend already running", self.compositor_name);

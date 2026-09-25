@@ -1418,7 +1418,7 @@ impl QuickSettingsWindow {
         // vertical space; left/right bars occupy horizontal space and should not
         // reduce the available popover height.
         let vertical_bar_reservation = if is_horizontal {
-            calculate_bar_exclusive_zone() + bar_margin
+            crate::widgets::layer_shell_popover::calculate_bar_reserved_zone() + bar_margin
         } else {
             0
         };
@@ -1673,7 +1673,9 @@ impl QuickSettingsWindow {
 
         // Mark as logically closed immediately so toggle_at() can re-open
         // during the close animation instead of swallowing the click.
-        self.logically_open.set(false);
+        if self.logically_open.replace(false) {
+            PopoverTracker::global().notify_changed();
+        }
 
         // Restore focus suppression so the next open starts no-focus.
         gtk4::prelude::GtkWindowExt::set_focus_visible(&self.window, false);
@@ -1926,6 +1928,11 @@ impl QuickSettingsWindowHandle {
         *self.window.borrow_mut() = None;
     }
 
+    #[cfg(test)]
+    pub(crate) fn test_close_directly(&self) {
+        self.window.borrow().as_ref().unwrap().hide_panel();
+    }
+
     /// Store a reference to the bar-side QS widget for anchor derivation.
     pub fn set_bar_widget(&self, widget: gtk4::Widget) {
         *self.bar_widget.borrow_mut() = Some(widget);
@@ -1989,6 +1996,10 @@ impl QuickSettingsWindowHandle {
             *self.window.borrow_mut() = Some(qs);
         }
 
+        let output = monitor
+            .as_ref()
+            .and_then(|m| m.connector())
+            .map(|s| s.to_string());
         // Update position and show
         if let Some(qs) = self.window.borrow().as_ref() {
             qs.set_anchor_position(anchor, monitor);
@@ -2000,7 +2011,7 @@ impl QuickSettingsWindowHandle {
             window: self.window.clone(),
             tracker_id: self.tracker_id.clone(),
         };
-        let id = PopoverTracker::global().set_active(Rc::new(dismissible));
+        let id = PopoverTracker::global().set_active(Rc::new(dismissible), output);
         self.tracker_id.set(Some(id));
     }
 }

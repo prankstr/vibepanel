@@ -24,6 +24,7 @@ pub mod mango_layouts;
 mod niri;
 mod sway;
 pub mod types;
+pub mod visibility;
 
 pub use factory::BackendKind;
 pub use hyprland::HyprlandBackend;

@@ -6,6 +6,7 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
+use crate::services::callbacks::{CallbackId, Callbacks};
 use crate::widgets::layer_shell_popover::Dismissible;
 
 thread_local! {
@@ -15,9 +16,12 @@ thread_local! {
 /// Unique identifier for a registered popover.
 pub type PopoverId = u64;
 
+type ActivePopover = (PopoverId, Rc<dyn Dismissible>, Option<String>);
+
 pub struct PopoverTracker {
-    active: RefCell<Option<(PopoverId, Rc<dyn Dismissible>)>>,
+    active: RefCell<Option<ActivePopover>>,
     next_id: Cell<PopoverId>,
+    changes: Callbacks<()>,
 }
 
 impl Default for PopoverTracker {
@@ -25,6 +29,7 @@ impl Default for PopoverTracker {
         Self {
             active: RefCell::new(None),
             next_id: Cell::new(1),
+            changes: Callbacks::new(),
         }
     }
 }
@@ -47,7 +52,7 @@ impl PopoverTracker {
     ///
     /// If there's already an active popover, it will be dismissed first.
     #[must_use = "the returned PopoverId must be stored and passed to clear_if_active() on close"]
-    pub fn set_active(&self, popover: Rc<dyn Dismissible>) -> PopoverId {
+    pub fn set_active(&self, popover: Rc<dyn Dismissible>, output: Option<String>) -> PopoverId {
         // Dismiss any existing active popover
         self.dismiss_active();
 
@@ -56,9 +61,30 @@ impl PopoverTracker {
         self.next_id.set(id + 1);
 
         // Set the new active popover
-        *self.active.borrow_mut() = Some((id, popover));
+        *self.active.borrow_mut() = Some((id, popover, output));
+        self.notify_changed();
 
         id
+    }
+
+    pub fn holds_output(&self, output: &str) -> bool {
+        self.active
+            .borrow()
+            .as_ref()
+            .is_some_and(|(_, popover, owner)| {
+                owner.as_deref().is_none_or(|owner| owner == output) && popover.is_visible()
+            })
+    }
+
+    pub fn dismiss_on_output(&self, output: &str) {
+        let owns = self
+            .active
+            .borrow()
+            .as_ref()
+            .is_some_and(|(_, _, owner)| owner.as_deref().is_none_or(|owner| owner == output));
+        if owns {
+            self.dismiss_active();
+        }
     }
 
     /// Clear the active popover reference without dismissing it.
@@ -71,9 +97,10 @@ impl PopoverTracker {
             .active
             .borrow()
             .as_ref()
-            .is_some_and(|(active_id, _)| *active_id == id);
+            .is_some_and(|(active_id, _, _)| *active_id == id);
         if is_same {
             *self.active.borrow_mut() = None;
+            self.notify_changed();
         }
     }
 
@@ -82,10 +109,23 @@ impl PopoverTracker {
         // Take the active popover while releasing the borrow immediately.
         // This is important because dismiss() may call clear_if_active() which needs to borrow.
         let active = self.active.borrow_mut().take();
-        if let Some((_, dismissible)) = active
-            && dismissible.is_visible()
-        {
-            dismissible.dismiss();
+        if let Some((_, dismissible, _)) = active {
+            if dismissible.is_visible() {
+                dismissible.dismiss();
+            }
+            self.notify_changed();
         }
+    }
+
+    pub fn connect_changed(&self, callback: impl Fn() + 'static) -> CallbackId {
+        self.changes.register(move |_| callback())
+    }
+
+    pub fn disconnect_changed(&self, id: CallbackId) {
+        self.changes.unregister(id);
+    }
+
+    pub fn notify_changed(&self) {
+        self.changes.notify(&());
     }
 }
