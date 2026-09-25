@@ -309,6 +309,40 @@ pub fn calculate_popover_bar_margin() -> i32 {
     }
 }
 
+/// Fallback popover scroll height when monitor geometry is unavailable.
+const POPOVER_FALLBACK_MAX_HEIGHT: i32 = 500;
+
+/// Below this height, don't bother constraining a popover scroll area.
+const POPOVER_MIN_HEIGHT_THRESHOLD: i32 = 100;
+
+/// Minimum margin between a popover and the far screen edge.
+const POPOVER_FAR_EDGE_MARGIN: i32 = 8;
+
+/// Maximum height for a popover's scrollable content on `monitor`.
+///
+/// Subtracts the bar (for horizontal bars), the popover's bar margin, the
+/// caller's non-scrolling `overhead`, and a far-edge margin from the monitor height.
+pub(crate) fn popover_max_content_height(monitor: Option<&Monitor>, overhead: i32) -> i32 {
+    let Some(monitor) = monitor else {
+        return POPOVER_FALLBACK_MAX_HEIGHT;
+    };
+    let bar_reservation = if ConfigManager::global().bar_position().is_horizontal() {
+        calculate_bar_exclusive_zone() + calculate_popover_bar_margin()
+    } else {
+        0
+    };
+    max_content_height_for(monitor.geometry().height(), bar_reservation, overhead)
+}
+
+fn max_content_height_for(monitor_height: i32, bar_reservation: i32, overhead: i32) -> i32 {
+    let max_height = monitor_height - bar_reservation - overhead - POPOVER_FAR_EDGE_MARGIN;
+    if max_height > POPOVER_MIN_HEIGHT_THRESHOLD {
+        max_height
+    } else {
+        POPOVER_FALLBACK_MAX_HEIGHT
+    }
+}
+
 /// Get the edge that popovers should anchor to (same side as the bar).
 ///
 /// When bar is at the top, popovers anchor to `Edge::Top` and open downward.
@@ -1720,6 +1754,16 @@ impl Dismissible for LayerShellPopover {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn max_content_height_subtracts_reservations_or_falls_back() {
+        // 1080 - 40 bar - 112 overhead - 8 far edge
+        assert_eq!(max_content_height_for(1080, 40, 112), 920);
+        assert_eq!(
+            max_content_height_for(200, 40, 112),
+            POPOVER_FALLBACK_MAX_HEIGHT
+        );
+    }
 
     #[test]
     fn right_margin_centers_anchor_when_space_allows() {

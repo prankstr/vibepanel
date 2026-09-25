@@ -726,6 +726,19 @@ pub mod widget {
     /// Memory high usage state (`.memory-high`).
     pub const MEMORY_HIGH: &str = "memory-high";
 
+    // Disk
+    /// Disk widget (`.disk`).
+    pub const DISK: &str = "disk";
+
+    /// Disk icon (`.disk-icon`).
+    pub const DISK_ICON: &str = "disk-icon";
+
+    /// Disk label (`.disk-label`).
+    pub const DISK_LABEL: &str = "disk-label";
+
+    /// Disk high usage state (`.disk-high`).
+    pub const DISK_HIGH: &str = "disk-high";
+
     // GPU
     /// GPU widget (`.gpu`).
     pub const GPU: &str = "gpu";
@@ -1401,6 +1414,9 @@ pub mod system_popover {
 
     /// Expander header row (`.system-expander-header`).
     pub const EXPANDER_HEADER: &str = "system-expander-header";
+
+    /// Clickable value in a section title (`.system-title-button`).
+    pub const TITLE_BUTTON: &str = "system-title-button";
 
     /// Expander content container (`.system-expander-content`).
     pub const EXPANDER_CONTENT: &str = "system-expander-content";

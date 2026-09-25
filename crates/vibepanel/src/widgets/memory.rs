@@ -16,7 +16,9 @@ use vibepanel_core::config::WidgetEntry;
 use crate::services::callbacks::CallbackId;
 use crate::services::config_manager::ConfigManager;
 use crate::services::icons::IconHandle;
-use crate::services::system::{SystemService, SystemSnapshot, format_bytes, format_bytes_long};
+use crate::services::system::{
+    SystemService, SystemSnapshot, format_bytes, format_bytes_long, format_used_of_total,
+};
 use crate::services::tooltip::TooltipManager;
 use crate::styles::{class, widget};
 use crate::widgets::base::BaseWidget;
@@ -208,12 +210,7 @@ fn format_memory(snapshot: &SystemSnapshot, format: &MemoryFormat, is_vertical: 
     match format {
         MemoryFormat::Percentage => format!("{:.0}%", snapshot.memory_percent),
         MemoryFormat::Absolute => format_bytes(snapshot.memory_used),
-        MemoryFormat::Both => {
-            let used = format_bytes(snapshot.memory_used);
-            let total = format_bytes(snapshot.memory_total);
-            let used_without_unit = used.trim_end_matches(|c: char| c.is_ascii_alphabetic());
-            format!("{used_without_unit}/{total}")
-        }
+        MemoryFormat::Both => format_used_of_total(snapshot.memory_used, snapshot.memory_total),
     }
 }
 
@@ -368,6 +365,13 @@ mod tests {
             format_memory(&snapshot, &MemoryFormat::Both, false),
             "10.0/16.0G"
         );
+
+        // Used below 1 GiB stays in the total's unit (was "512/16.0G").
+        let low = SystemSnapshot {
+            memory_used: 512 * 1024 * 1024,
+            ..snapshot
+        };
+        assert_eq!(format_memory(&low, &MemoryFormat::Both, false), "0.5/16.0G");
     }
 
     #[test]

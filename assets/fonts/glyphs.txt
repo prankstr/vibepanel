@@ -97,6 +97,7 @@ stop
 sunny
 table
 thunderstorm
+usb
 view_array
 view_module
 view_quilt

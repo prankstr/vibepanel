@@ -17,16 +17,18 @@
 //! │ └───────────────────────────┤
 //! ├─────────────────────────────┤
 //! │ ┌───────────┐ ┌───────────┐ │
-//! │ │ Disk I/O  │ │  Network  │ │
+//! │ │  Disk     │ │  Network  │ │
 //! │ └───────────┘ └───────────┘ │
 //! └─────────────────────────────┘
 //! ```
 //!
-//! The CPU section has an expandable per-core breakdown that spans full width.
+//! The CPU section has an expandable per-core breakdown, and the Disk card
+//! header expands a per-drive usage list; both span full width.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
+use gtk4::gdk::Monitor;
 use gtk4::pango::EllipsizeMode;
 use gtk4::prelude::*;
 use gtk4::{
@@ -41,12 +43,13 @@ use crate::services::gpu::{
 };
 use crate::services::icons::{IconHandle, IconsService};
 use crate::services::system::{
-    SYSTEM_HISTORY_SAMPLES, SystemService, SystemSnapshot, format_bytes_long, format_speed,
+    DISK_HIGH_THRESHOLD, MountUsage, SYSTEM_HISTORY_SAMPLES, SpaceUsage, SystemService,
+    SystemSnapshot, format_bytes_long, format_speed,
 };
 use crate::styles::{button, card, color, icon, surface, system_popover as sp};
 use crate::widgets::gpu_format;
 use crate::widgets::history_graph::{HistoryGraph, HistoryScale, HistorySeries};
-use crate::widgets::layer_shell_popover::animate_reveal;
+use crate::widgets::layer_shell_popover::{animate_reveal, popover_max_content_height};
 
 const GPU_TITLE_MAX_CHARS: i32 = 44;
 const GPU_GRAPH_HEIGHT: i32 = 56;
@@ -54,11 +57,25 @@ const SYSTEM_GRAPH_HEIGHT: i32 = 56;
 const GPU_VALUE_MAX_CHARS: i32 = 20;
 const GPU_DEVICES_MAX_HEIGHT: i32 = 360;
 
+/// Non-scrolling height around the popover content: 16px surface padding and
+/// 8px shadow margin on each side.
+const SYSTEM_POPOVER_OVERHEAD: i32 = 48;
+
 /// A single pre-allocated per-core row with its updatable widgets.
 #[derive(Clone)]
 struct CoreRow {
     bar: ProgressBar,
     pct_label: Label,
+}
+
+/// A per-mount usage row in the drives expander.
+struct DriveRow {
+    icon: IconHandle,
+    mount_label: Label,
+    percent_label: Label,
+    bar: ProgressBar,
+    detail_label: Label,
+    usage_label: Label,
 }
 
 #[derive(Clone)]
@@ -144,10 +161,17 @@ pub struct SystemPopoverController {
     net_upload_label: Label,
     net_graph: HistoryGraph,
 
-    // Disk I/O section
+    // Disk section
     disk_read_label: Label,
     disk_write_label: Label,
     disk_graph: HistoryGraph,
+    disk_header_btn: gtk4::Button,
+    disk_usage_label: Label,
+    drives_expander_chevron: IconHandle,
+    drives_revealer: Revealer,
+    drive_rows_box: GtkBox,
+    drives_expanded: Rc<Cell<bool>>,
+    drive_rows: Rc<RefCell<Vec<DriveRow>>>,
 
     // GPU section (conditional: only present when GPUs are detected)
     gpu_card: GtkBox,
@@ -237,6 +261,8 @@ impl SystemPopoverController {
                     .collect(),
             ),
         ]);
+
+        self.update_drive_rows(&snapshot.mounts);
     }
 
     /// Update the GPU card from the latest GPU snapshot.
@@ -282,18 +308,77 @@ impl SystemPopoverController {
         }
     }
 
-    /// Toggle the cores expander visibility.
-    fn toggle_cores(&self) {
-        let expanded = !self.cores_expanded.get();
-        self.cores_expanded.set(expanded);
-        animate_reveal(&self.cores_revealer, expanded);
-
-        let chevron = if expanded {
-            "pan-up-symbolic"
+    fn update_drive_rows(&self, mounts: &[MountUsage]) {
+        let count = mounts.len();
+        let has_mounts = count > 0;
+        let headline = headline_mount(mounts);
+        self.disk_header_btn.set_sensitive(has_mounts);
+        self.disk_usage_label.set_visible(has_mounts);
+        self.drives_expander_chevron
+            .widget()
+            .set_visible(has_mounts);
+        let tooltip = has_mounts.then(|| headline_tooltip(headline.map(|(mount, _)| mount)));
+        if self.disk_header_btn.tooltip_text().as_deref() != tooltip.as_deref() {
+            self.disk_header_btn.set_tooltip_text(tooltip.as_deref());
+        }
+        if let Some((mount, usage)) = headline {
+            self.disk_usage_label.set_label(&format!(
+                "{} {:.0}%",
+                mount.mount_point,
+                usage.percent()
+            ));
+            set_high(&self.disk_usage_label, usage);
         } else {
-            "pan-down-symbolic"
-        };
-        self.cores_expander_chevron.set_icon(chevron);
+            self.disk_usage_label.set_label("--");
+            set_high(&self.disk_usage_label, SpaceUsage::default());
+            if !has_mounts && self.drives_expanded.get() {
+                toggle_expander(
+                    &self.drives_expanded,
+                    &self.drives_revealer,
+                    &self.drives_expander_chevron,
+                );
+            }
+        }
+
+        let mut rows = self.drive_rows.borrow_mut();
+        if rows.len() != count {
+            while let Some(child) = self.drive_rows_box.first_child() {
+                self.drive_rows_box.remove(&child);
+            }
+            rows.clear();
+            for _ in 0..count {
+                let (container, row) = build_drive_row();
+                self.drive_rows_box.append(&container);
+                rows.push(row);
+            }
+        }
+
+        for (row, mount) in rows.iter().zip(mounts) {
+            row.icon.set_icon(if mount.removable {
+                "drive-removable-symbolic"
+            } else {
+                "disk-symbolic"
+            });
+            row.mount_label.set_label(&mount.mount_point);
+            row.detail_label
+                .set_label(&format!("{} · {}", mount.device, mount.fs_type));
+            row.bar.set_visible(mount.usage.is_some());
+            let Some(usage) = mount.usage else {
+                // Still mounted, but its usage could not be read.
+                row.percent_label.set_label("");
+                row.usage_label.set_label("Unavailable");
+                continue;
+            };
+            row.percent_label
+                .set_label(&format!("{:.0}%", usage.percent()));
+            set_high(&row.percent_label, usage);
+            row.bar.set_fraction(f64::from(usage.percent() / 100.0));
+            row.usage_label.set_label(&format!(
+                "{} / {}",
+                format_bytes_long(usage.used),
+                format_bytes_long(usage.total)
+            ));
+        }
     }
 
     /// Update the per-core CPU bars.
@@ -359,6 +444,115 @@ fn section_title(icon_name: &str, text: &str, icons: &IconsService) -> GtkBox {
     container.append(&label);
 
     container
+}
+
+/// Flip an expander's state, animating its revealer and chevron.
+fn toggle_expander(expanded: &Cell<bool>, revealer: &Revealer, chevron: &IconHandle) {
+    let now_expanded = !expanded.get();
+    expanded.set(now_expanded);
+    animate_reveal(revealer, now_expanded);
+    chevron.set_icon(if now_expanded {
+        "pan-up-symbolic"
+    } else {
+        "pan-down-symbolic"
+    });
+}
+
+/// Mount summarized in the Disk card header: `/`, else the fullest drive,
+/// among drives whose usage could be read.
+fn headline_mount(mounts: &[MountUsage]) -> Option<(&MountUsage, SpaceUsage)> {
+    let readable = || {
+        mounts
+            .iter()
+            .filter_map(|mount| Some((mount, mount.usage?)))
+    };
+    readable()
+        .find(|(mount, _)| mount.mount_point == "/")
+        .or_else(|| readable().max_by(|(_, a), (_, b)| a.percent().total_cmp(&b.percent())))
+}
+
+fn headline_tooltip(mount: Option<&MountUsage>) -> String {
+    match mount {
+        Some(mount) => format!("{} usage. Click to show drives", mount.mount_point),
+        None => "Click to show drives".to_string(),
+    }
+}
+
+/// Swap a usage label between accent and error at the high-usage threshold.
+fn set_high(label: &Label, usage: SpaceUsage) {
+    let (add, remove) = if usage.percent() >= DISK_HIGH_THRESHOLD {
+        (color::ERROR, color::ACCENT)
+    } else {
+        (color::ACCENT, color::ERROR)
+    };
+    label.remove_css_class(remove);
+    label.add_css_class(add);
+}
+
+/// Build a full-width revealer holding expander content.
+fn expander_revealer(spacing: i32) -> (Revealer, GtkBox) {
+    let revealer = Revealer::new();
+    revealer.set_transition_type(RevealerTransitionType::SlideDown);
+    revealer.set_transition_duration(ConfigManager::global().animation_duration(200));
+    revealer.set_reveal_child(false);
+
+    let content = GtkBox::new(Orientation::Vertical, spacing);
+    content.add_css_class(sp::EXPANDER_CONTENT);
+    revealer.set_child(Some(&content));
+
+    (revealer, content)
+}
+
+fn build_drive_row() -> (GtkBox, DriveRow) {
+    let icons = IconsService::global();
+    let container = GtkBox::new(Orientation::Vertical, 4);
+
+    let header = GtkBox::new(Orientation::Horizontal, 6);
+    let icon = icons.create_icon("disk-symbolic", &[icon::TEXT, sp::SECTION_ICON]);
+    header.append(&icon.widget());
+
+    let mount_label = Label::new(None);
+    mount_label.set_halign(Align::Start);
+    mount_label.set_xalign(0.0);
+    mount_label.set_hexpand(true);
+    mount_label.set_ellipsize(EllipsizeMode::Middle);
+    header.append(&mount_label);
+
+    let percent_label = Label::new(None);
+    percent_label.add_css_class(color::ACCENT);
+    percent_label.set_width_chars(4);
+    percent_label.set_xalign(1.0);
+    header.append(&percent_label);
+    container.append(&header);
+
+    let bar = ProgressBar::new();
+    bar.add_css_class(sp::PROGRESS_BAR);
+    container.append(&bar);
+
+    let footer = GtkBox::new(Orientation::Horizontal, 8);
+    let detail_label = Label::new(None);
+    detail_label.add_css_class(color::MUTED);
+    detail_label.set_halign(Align::Start);
+    detail_label.set_xalign(0.0);
+    detail_label.set_hexpand(true);
+    detail_label.set_ellipsize(EllipsizeMode::End);
+    footer.append(&detail_label);
+
+    let usage_label = Label::new(None);
+    usage_label.add_css_class(color::MUTED);
+    usage_label.set_halign(Align::End);
+    footer.append(&usage_label);
+    container.append(&footer);
+
+    let row = DriveRow {
+        icon,
+        mount_label,
+        percent_label,
+        bar,
+        detail_label,
+        usage_label,
+    };
+    (container, row)
 }
 
 fn section_title_with_values(
@@ -533,7 +727,6 @@ pub fn build_system_popover_with_controller() -> (Widget, SystemPopoverControlle
     let icons = IconsService::global();
 
     let container = GtkBox::new(Orientation::Vertical, 0);
-    container.add_css_class(sp::POPOVER);
 
     let top_row = GtkBox::new(Orientation::Horizontal, 8);
     top_row.set_homogeneous(true);
@@ -623,14 +816,7 @@ pub fn build_system_popover_with_controller() -> (Widget, SystemPopoverControlle
     top_row.append(&memory_card);
     container.append(&top_row);
 
-    let cores_revealer = Revealer::new();
-    cores_revealer.set_transition_type(RevealerTransitionType::SlideDown);
-    cores_revealer.set_transition_duration(ConfigManager::global().animation_duration(200));
-    cores_revealer.set_reveal_child(false);
-
-    let cpu_cores_box = GtkBox::new(Orientation::Vertical, 4);
-    cpu_cores_box.add_css_class(sp::EXPANDER_CONTENT);
-    cores_revealer.set_child(Some(&cpu_cores_box));
+    let (cores_revealer, cpu_cores_box) = expander_revealer(4);
     container.append(&cores_revealer);
 
     // GPU section (all detected GPUs in one full-width card)
@@ -678,7 +864,23 @@ pub fn build_system_popover_with_controller() -> (Widget, SystemPopoverControlle
 
     let disk_section = GtkBox::new(Orientation::Vertical, 8);
     disk_section.set_vexpand(true);
-    disk_section.append(&section_title("disk-symbolic", "Disk I/O", &icons));
+    // The usage value and chevron toggle the drives list.
+    let (disk_title, disk_values) = section_title_with_values("disk-symbolic", "Disk", &icons);
+    let disk_toggle = GtkBox::new(Orientation::Horizontal, 4);
+    let disk_usage_label = Label::new(Some("--"));
+    disk_usage_label.add_css_class(color::ACCENT);
+    disk_usage_label.set_width_chars(4);
+    disk_usage_label.set_xalign(1.0);
+    disk_toggle.append(&disk_usage_label);
+    let drives_expander_chevron =
+        icons.create_icon("pan-down-symbolic", &[icon::TEXT, color::MUTED]);
+    disk_toggle.append(&drives_expander_chevron.widget());
+    let disk_header_btn = crate::widgets::base::vp_button();
+    disk_header_btn.set_child(Some(&disk_toggle));
+    disk_header_btn.add_css_class(button::COMPACT);
+    disk_header_btn.add_css_class(sp::TITLE_BUTTON);
+    disk_values.append(&disk_header_btn);
+    disk_section.append(&disk_title);
 
     let disk_graph = HistoryGraph::new(
         SYSTEM_HISTORY_SAMPLES,
@@ -720,6 +922,8 @@ pub fn build_system_popover_with_controller() -> (Widget, SystemPopoverControlle
     disk_grid.append(&disk_write);
 
     disk_section.append(&disk_grid);
+
+    let drives_expanded = Rc::new(Cell::new(false));
     disk_card.append(&disk_section);
     bottom_row.append(&disk_card);
 
@@ -785,6 +989,12 @@ pub fn build_system_popover_with_controller() -> (Widget, SystemPopoverControlle
     bottom_row.append(&network_card);
     container.append(&bottom_row);
 
+    // The whole popover scrolls, so the drive list needs no scroller of its own.
+    let (drives_revealer, drives_card) = expander_revealer(0);
+    let drives_rows = GtkBox::new(Orientation::Vertical, 12);
+    drives_card.append(&drives_rows);
+    container.append(&drives_revealer);
+
     let controller = SystemPopoverController {
         cpu_usage_label,
         cpu_temp_label,
@@ -804,6 +1014,13 @@ pub fn build_system_popover_with_controller() -> (Widget, SystemPopoverControlle
         disk_read_label,
         disk_write_label,
         disk_graph,
+        disk_header_btn: disk_header_btn.clone(),
+        disk_usage_label,
+        drives_expander_chevron,
+        drives_revealer,
+        drive_rows_box: drives_rows,
+        drives_expanded,
+        drive_rows: Rc::new(RefCell::new(Vec::new())),
         gpu_card,
         gpu_usage_label,
         gpu_temp_label,
@@ -811,16 +1028,41 @@ pub fn build_system_popover_with_controller() -> (Widget, SystemPopoverControlle
         gpu_device_rows: Rc::new(RefCell::new(Vec::new())),
     };
 
-    let controller_clone = controller.clone();
-    expander_btn.connect_clicked(move |_| {
-        controller_clone.toggle_cores();
-    });
+    // Capture only the toggled parts: the controller owns the Disk header
+    // button, so capturing it would keep both alive forever.
+    for (button, expanded, revealer, chevron) in [
+        (
+            &expander_btn,
+            &controller.cores_expanded,
+            &controller.cores_revealer,
+            &controller.cores_expander_chevron,
+        ),
+        (
+            &disk_header_btn,
+            &controller.drives_expanded,
+            &controller.drives_revealer,
+            &controller.drives_expander_chevron,
+        ),
+    ] {
+        let (expanded, revealer, chevron) = (expanded.clone(), revealer.clone(), chevron.clone());
+        button.connect_clicked(move |_| toggle_expander(&expanded, &revealer, &chevron));
+    }
 
     controller.update_from_snapshot(&snapshot);
 
     controller.update_from_gpu_snapshot(&gpu_snapshot);
 
-    (container.upcast::<Widget>(), controller)
+    // Everything expanded can exceed the screen; scroll the whole popover.
+    let scroller = ScrolledWindow::new();
+    scroller.set_policy(PolicyType::Never, PolicyType::Automatic);
+    scroller.set_propagate_natural_height(true);
+    scroller.set_propagate_natural_width(true);
+    scroller.set_child(Some(&container));
+    // The popover shell adds `.popover` to this root; keep both classes on one
+    // element so their shared padding applies once.
+    scroller.add_css_class(sp::POPOVER);
+
+    (scroller.upcast::<Widget>(), controller)
 }
 
 /// Create and wire the system popover menu on a bar widget.
@@ -841,10 +1083,19 @@ pub(crate) fn wire_system_popover_for_menu(menu_handle: &Rc<crate::widgets::base
     let gpu_callback_id: Rc<Cell<Option<CallbackId>>> = Rc::new(Cell::new(None));
     let system_callback_id: Rc<Cell<Option<CallbackId>>> = Rc::new(Cell::new(None));
 
+    // Content is built once and reused, so the monitor-based height cap is
+    // reapplied on every show in case geometry changed.
+    let scroller: Rc<RefCell<Option<ScrolledWindow>>> = Rc::default();
+    let monitor: Rc<RefCell<Option<Monitor>>> = Rc::default();
+
     let controller_for_builder = controller.clone();
-    menu_handle.set_builder(move || {
+    let scroller_for_builder = scroller.clone();
+    let monitor_for_builder = monitor.clone();
+    menu_handle.set_builder_with_monitor(move |anchor_monitor| {
         let (widget, ctrl) = build_system_popover_with_controller();
         *controller_for_builder.borrow_mut() = Some(ctrl);
+        *scroller_for_builder.borrow_mut() = widget.downcast_ref::<ScrolledWindow>().cloned();
+        *monitor_for_builder.borrow_mut() = anchor_monitor;
         widget
     });
 
@@ -855,6 +1106,12 @@ pub(crate) fn wire_system_popover_for_menu(menu_handle: &Rc<crate::widgets::base
     let gpu_cb_for_show = gpu_callback_id.clone();
     let system_cb_for_show = system_callback_id.clone();
     menu_handle.set_on_show(move || {
+        if let Some(window) = scroller.borrow().as_ref() {
+            window.set_max_content_height(popover_max_content_height(
+                monitor.borrow().as_ref(),
+                SYSTEM_POPOVER_OVERHEAD,
+            ));
+        }
         let gpu_service = GpuService::global();
 
         // A close-animation reversal fires on_show before on_close, so retain
@@ -898,8 +1155,37 @@ pub(crate) fn wire_system_popover_for_menu(menu_handle: &Rc<crate::widgets::base
 
 #[cfg(test)]
 mod tests {
-    use super::{gpu_clock_fraction, gpu_power_fraction};
+    use super::{gpu_clock_fraction, gpu_power_fraction, headline_mount};
     use crate::services::gpu::GpuDeviceSnapshot;
+    use crate::services::system::{MountUsage, SpaceUsage};
+
+    #[test]
+    fn test_headline_prefers_readable_root_then_fullest() {
+        let mount = |mount_point: &str, used: Option<u64>| MountUsage {
+            mount_point: mount_point.to_string(),
+            usage: used.map(|used| SpaceUsage {
+                used,
+                available: 100 - used,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let boot = mount("/boot", Some(90));
+        let data = mount("/data", Some(40));
+        let root = mount("/", Some(20));
+        let headline =
+            |mounts: &[MountUsage]| headline_mount(mounts).map(|(mount, _)| mount.clone());
+
+        assert_eq!(
+            headline(&[boot.clone(), root.clone(), data.clone()]),
+            Some(root)
+        );
+        assert_eq!(headline(&[data.clone(), boot.clone()]), Some(boot.clone()));
+        // An unreadable root or drive is skipped, not chosen.
+        assert_eq!(headline(&[mount("/", None), data.clone()]), Some(data));
+        assert_eq!(headline(&[mount("/", None), mount("/usb", None)]), None);
+        assert_eq!(headline(&[]), None);
+    }
 
     #[test]
     fn test_gpu_metric_fractions_use_real_limits() {
