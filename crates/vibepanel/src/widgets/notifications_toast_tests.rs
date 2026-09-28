@@ -583,14 +583,14 @@ fn test_notification_toast_structure_contract() {
 
     for ((position, vertical_edge, horizontal_edge), mode) in cases.into_iter().flat_map(|case| {
         [
-            vibepanel_core::config::BarVisibility::Always,
-            vibepanel_core::config::BarVisibility::AutoHide,
+            vibepanel_core::config::AutoHide::Never,
+            vibepanel_core::config::AutoHide::Always,
         ]
         .map(|mode| (case, mode))
     }) {
         let mut config = Config::default();
         config.theme.mode = "dark".to_string();
-        config.bar.visibility = mode;
+        config.bar.auto_hide = mode;
         config.advanced.compositor = "mango".to_string();
         ConfigManager::replace_global_for_test(config.clone());
         let _css_provider =
@@ -653,13 +653,12 @@ fn test_notification_toast_structure_contract() {
             toast.window.is_anchor(Edge::Right),
             horizontal_edge == Some(Edge::Right)
         );
-        let bar_offset = if mode == vibepanel_core::config::BarVisibility::AutoHide
-            && vertical_edge == Edge::Top
-        {
-            crate::widgets::layer_shell_popover::calculate_bar_exclusive_zone()
-        } else {
-            0
-        };
+        let bar_offset =
+            if mode == vibepanel_core::config::AutoHide::Always && vertical_edge == Edge::Top {
+                crate::widgets::layer_shell_popover::calculate_bar_exclusive_zone()
+            } else {
+                0
+            };
         assert_eq!(
             toast.window.margin(vertical_edge),
             TOAST_EDGE_MARGIN + bar_offset

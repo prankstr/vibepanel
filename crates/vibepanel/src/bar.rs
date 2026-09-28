@@ -563,7 +563,7 @@ pub fn create_bar_window(
     );
 
     // Reserve space (exclusive zone) so other windows don't overlap
-    if config.bar.visibility == vibepanel_core::config::BarVisibility::Always {
+    if config.bar.auto_hide == vibepanel_core::config::AutoHide::Never {
         window.auto_exclusive_zone_enable();
     } else {
         window.set_exclusive_zone(-1);

@@ -206,7 +206,7 @@ pub type WindowListCallback = Arc<dyn Fn(WindowListSnapshot) + Send + Sync>;
 /// Services should marshal updates to the GTK main loop as needed.
 pub trait CompositorBackend: Send + Sync {
     /// A read-only IPC reader for automatic bar visibility. Used off the GTK
-    /// thread, and only while an intellihide bar subscribes.
+    /// thread, and only while a smart auto-hide bar subscribes.
     fn visibility_reader(&self) -> Option<super::visibility::VisibilityReader> {
         None
     }

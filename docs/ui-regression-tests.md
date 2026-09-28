@@ -119,7 +119,7 @@ Known follow-ups:
 
 ## Isolated Wayland tests
 
-Run the layer-shell contracts, including auto-hide and live Sway intellihide,
+Run the layer-shell contracts, including auto-hide and live Sway smart auto-hide,
 in a private headless Sway compositor:
 
 ```sh
@@ -141,7 +141,7 @@ reversal, manual suppression, and hidden island layout updates. Screenshot
 comparisons catch stale Wayland buffers that GTK visibility flags cannot detect.
 
 The Always-mode contract checks reserved space during hotplug and pointer clicks
-after output resizing. The Sway intellihide contract also moves a floating window
+after output resizing. The Sway smart auto-hide contract also moves a floating window
 across two outputs.
 
 Visibility uses pointer, popup, allocation, and compositor events with one-shot

@@ -8,7 +8,7 @@ use gtk4::prelude::*;
 use gtk4::{Application, ApplicationWindow, EventControllerMotion, gdk, glib};
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use vibepanel_core::Config;
-use vibepanel_core::config::{BarPosition, BarVisibility};
+use vibepanel_core::config::{AutoHide, BarPosition};
 
 use crate::popover_tracker::PopoverTracker;
 use crate::sectioned_bar::{CenterPriorityLayout, SectionedBar};
@@ -26,7 +26,7 @@ struct Policy {
     edge_since: Option<Instant>,
     /// Last shown because of the pointer, a popup or a pin.
     held: bool,
-    /// IPC hide; holds against intellihide until this output's decision changes.
+    /// IPC hide; holds against smart auto-hide until this output's decision changes.
     dismissed: Option<HideDecision>,
 }
 
@@ -64,9 +64,9 @@ impl Policy {
             false
         };
         let pointer = input.interacting || edge_ready;
-        if settings.mode == BarVisibility::Always
+        if settings.mode == AutoHide::Never
             || pointer
-            || (settings.mode == BarVisibility::Intellihide
+            || (settings.mode == AutoHide::Smart
                 && input.decision == HideDecision::Show
                 && self.dismissed.is_none())
         {
@@ -96,7 +96,7 @@ impl Policy {
 }
 
 struct Settings {
-    mode: BarVisibility,
+    mode: AutoHide,
     hide_delay: Duration,
     reveal_delay: Duration,
 }
@@ -178,8 +178,8 @@ impl BarVisibilityController {
         config: &Config,
         island_apply: Option<Rc<dyn Fn()>>,
     ) -> Rc<Self> {
-        let mode = config.bar.visibility;
-        let automatic = mode != BarVisibility::Always;
+        let mode = config.bar.auto_hide;
+        let automatic = mode != AutoHide::Never;
         let trigger = automatic.then(|| {
             let trigger = ApplicationWindow::builder()
                 .application(app)
@@ -226,7 +226,7 @@ impl BarVisibilityController {
             trigger.set_child(Some(&content));
             trigger
         });
-        let subscription = (mode == BarVisibility::Intellihide).then(|| {
+        let subscription = (mode == AutoHide::Smart).then(|| {
             VisibilitySubscription::acquire(CompositorManager::global().visibility_reader())
         });
         let content = window
@@ -371,10 +371,10 @@ impl BarVisibilityController {
         self.shown.get()
     }
 
-    /// Always keeps manual suppression. Automatic modes pin on show; hide
-    /// retracts immediately and holds against intellihide until the scene changes.
+    /// Never mode keeps manual suppression. Auto-hiding modes pin on show; hide
+    /// retracts immediately and holds against smart auto-hide until the scene changes.
     pub fn set_ipc_shown(self: &Rc<Self>, shown: bool) {
-        let automatic = self.settings.mode != BarVisibility::Always;
+        let automatic = self.settings.mode != AutoHide::Never;
         self.manual_hidden.set(!shown && !automatic);
         self.pinned.set(shown && automatic);
         if !shown {
@@ -465,9 +465,9 @@ impl BarVisibilityController {
             let unknown = decision == HideDecision::Unknown;
             if self.unknown.replace(unknown) != unknown {
                 if unknown {
-                    tracing::debug!(output = %self.output, "Intellihide state unavailable; using auto-hide until window state is known");
+                    tracing::debug!(output = %self.output, "Smart auto-hide window state unavailable; hiding until it is known");
                 } else {
-                    tracing::debug!(output = %self.output, "Intellihide window state available");
+                    tracing::debug!(output = %self.output, "Smart auto-hide window state available");
                 }
             }
         }
@@ -539,9 +539,7 @@ impl BarVisibilityController {
     }
 
     fn animate_visual(self: &Rc<Self>, shown: bool) {
-        if self.settings.mode == BarVisibility::Always
-            || !ConfigManager::global().animations_enabled()
-        {
+        if self.settings.mode == AutoHide::Never || !ConfigManager::global().animations_enabled() {
             self.snap_visual(shown);
             return;
         }
@@ -719,7 +717,7 @@ impl Drop for BarVisibilityController {
 mod tests {
     use super::*;
 
-    fn settings(mode: BarVisibility) -> Settings {
+    fn settings(mode: AutoHide) -> Settings {
         Settings {
             mode,
             hide_delay: Duration::from_millis(300),
@@ -738,7 +736,7 @@ mod tests {
     #[test]
     fn scene_hides_immediately_but_pointer_release_waits_for_delay() {
         let now = Instant::now();
-        let settings = settings(BarVisibility::Intellihide);
+        let settings = settings(AutoHide::Smart);
         let mut policy = Policy::default();
         assert!(policy.update(now, &settings, input(HideDecision::Show)));
         assert!(!policy.update(now, &settings, input(HideDecision::Hide)));
@@ -760,7 +758,7 @@ mod tests {
     #[test]
     fn edge_requires_continuous_dwell_and_manual_hide_wins() {
         let now = Instant::now();
-        let settings = settings(BarVisibility::AutoHide);
+        let settings = settings(AutoHide::Always);
         let mut policy = Policy::default();
         let edge = || Inputs {
             edge: true,
@@ -789,7 +787,7 @@ mod tests {
     #[test]
     fn unavailable_scene_falls_back_but_clear_scene_reveals_immediately() {
         let now = Instant::now();
-        let settings = settings(BarVisibility::Intellihide);
+        let settings = settings(AutoHide::Smart);
         let mut policy = Policy::default();
         assert!(!policy.update(now, &settings, input(HideDecision::Unknown)));
         assert!(policy.update(now, &settings, input(HideDecision::Show)));
@@ -798,7 +796,7 @@ mod tests {
     #[test]
     fn ipc_hide_retracts_immediately_unless_hovered() {
         let now = Instant::now();
-        let settings = settings(BarVisibility::AutoHide);
+        let settings = settings(AutoHide::Always);
         let mut policy = Policy::default();
         let hover = || Inputs {
             interacting: true,
@@ -812,9 +810,9 @@ mod tests {
     }
 
     #[test]
-    fn intellihide_dismissal_holds_until_decision_changes() {
+    fn smart_dismissal_holds_until_decision_changes() {
         let now = Instant::now();
-        let settings = settings(BarVisibility::Intellihide);
+        let settings = settings(AutoHide::Smart);
         let mut policy = Policy::default();
         assert!(policy.update(now, &settings, input(HideDecision::Show)));
         policy.dismiss(HideDecision::Show);

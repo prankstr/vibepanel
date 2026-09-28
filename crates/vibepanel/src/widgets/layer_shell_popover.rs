@@ -325,7 +325,7 @@ pub fn calculate_popover_bar_margin() -> i32 {
 
 /// Space actually reserved by the bar, distinct from its physical thickness.
 pub fn calculate_bar_reserved_zone() -> i32 {
-    if ConfigManager::global().bar_visibility() == vibepanel_core::config::BarVisibility::Always {
+    if ConfigManager::global().bar_auto_hide() == vibepanel_core::config::AutoHide::Never {
         calculate_bar_exclusive_zone()
     } else {
         0
@@ -347,7 +347,7 @@ pub fn popover_bar_edge() -> Edge {
 
 /// Automatic bars use explicit offsets, ignoring other reserved screen edges.
 pub(crate) fn popover_exclusive_zone() -> i32 {
-    if ConfigManager::global().bar_visibility() == vibepanel_core::config::BarVisibility::Always {
+    if ConfigManager::global().bar_auto_hide() == vibepanel_core::config::AutoHide::Never {
         0
     } else {
         -1

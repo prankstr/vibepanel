@@ -521,7 +521,7 @@ fn run_layer_shell_auto_hide_contract(position: &str, opacity: f64, animated: bo
     config.bar.screen_margin = if opacity > 0.0 { 0 } else { 12 };
     config.bar.background_opacity = opacity;
     config.theme.animations = animated;
-    config.bar.visibility = vibepanel_core::config::BarVisibility::AutoHide;
+    config.bar.auto_hide = vibepanel_core::config::AutoHide::Always;
     config.bar.hide_delay_ms = 60;
     config.bar.reveal_delay_ms = 30;
     config.widgets.center = vec![WidgetPlacement::Single("clock".into())];
@@ -830,7 +830,7 @@ fn run_layer_shell_intellihide_sway_contract() {
     };
     let mut config = layer_shell_test_config();
     config.advanced.compositor = "sway".into();
-    config.bar.visibility = vibepanel_core::config::BarVisibility::Intellihide;
+    config.bar.auto_hide = vibepanel_core::config::AutoHide::Smart;
     config.bar.hide_delay_ms = 30;
     let bar = present_layer_shell_bar(&context, &config, true);
     wait_for_bar_contract(|| bar._visibility.test_shown());
@@ -1027,10 +1027,10 @@ fn run_layer_shell_always_hotplug_contract() {
     apply_layer_shell_config(&config, false);
     let always_height = height(Some(context.monitor.clone()));
     for mode in [
-        vibepanel_core::config::BarVisibility::AutoHide,
-        vibepanel_core::config::BarVisibility::Intellihide,
+        vibepanel_core::config::AutoHide::Always,
+        vibepanel_core::config::AutoHide::Smart,
     ] {
-        config.bar.visibility = mode;
+        config.bar.auto_hide = mode;
         apply_layer_shell_config(&config, false);
         assert_eq!(
             height(Some(context.monitor.clone())),
@@ -1038,7 +1038,7 @@ fn run_layer_shell_always_hotplug_contract() {
             "notification height must not count bar thickness twice"
         );
     }
-    config.bar.visibility = vibepanel_core::config::BarVisibility::Always;
+    config.bar.auto_hide = vibepanel_core::config::AutoHide::Never;
     let bar = present_layer_shell_bar(&context, &config, false);
     let client = ApplicationWindow::builder()
         .application(&context.app)
@@ -1136,9 +1136,9 @@ fn run_layer_shell_always_hotplug_contract() {
         std::fs::write(pointer, "600 600").unwrap();
     }
     let mut auto = config.clone();
-    auto.bar.visibility = vibepanel_core::config::BarVisibility::AutoHide;
+    auto.bar.auto_hide = vibepanel_core::config::AutoHide::Always;
     auto.bar.hide_delay_ms = 30;
-    // Always: toggle twice stores "shown", which would pin an automatic bar.
+    // Never: toggle twice stores "shown", which would pin an automatic bar.
     manager.create_bar_for_monitor(&context.monitor, 0, &config);
     manager.ipc_toggle();
     wait_for_bar_contract(|| !manager.test_visibility(&key).is_shown());
@@ -1148,7 +1148,7 @@ fn run_layer_shell_always_hotplug_contract() {
     manager.create_bar_for_monitor(&context.monitor, 0, &auto);
     manager.show_all();
     wait_for_bar_contract(|| !manager.test_visibility(&key).is_shown());
-    // AutoHide: toggle twice stores "released", which would hide an Always bar.
+    // Always: toggle twice stores "released", which would hide a never-mode bar.
     manager.ipc_toggle();
     wait_for_bar_contract(|| manager.test_visibility(&key).is_shown());
     manager.ipc_toggle();
@@ -1158,7 +1158,7 @@ fn run_layer_shell_always_hotplug_contract() {
     manager.show_all();
     assert!(
         manager.test_visibility(&key).is_shown(),
-        "automatic-mode release must not hide an Always bar"
+        "automatic-mode release must not hide a never-mode bar"
     );
     manager.remove_bar(&key);
 }

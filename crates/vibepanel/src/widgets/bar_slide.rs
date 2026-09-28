@@ -69,7 +69,7 @@ mod imp {
         }
 
         fn size_allocate(&self, width: i32, height: i32, baseline: i32) {
-            // Full allocation keeps hidden geometry and intellihide stable.
+            // Full allocation keeps hidden geometry and smart auto-hide stable.
             if let Some(child) = self.child.upgrade() {
                 child.allocate(width, height, baseline, None);
             }

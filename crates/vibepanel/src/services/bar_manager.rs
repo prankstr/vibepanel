@@ -29,7 +29,7 @@ use gtk4::{Application, ApplicationWindow};
 use tracing::{debug, info};
 
 use vibepanel_core::Config;
-use vibepanel_core::config::BarVisibility;
+use vibepanel_core::config::AutoHide;
 
 use crate::bar;
 use crate::services::surfaces::SurfaceStyleManager;
@@ -77,8 +77,8 @@ pub struct BarManager {
     /// Last IPC show/hide, applied to every bar including re-created ones.
     ipc_shown: Cell<Option<bool>>,
     /// Mode `ipc_shown` was recorded in; the bool means
-    /// "manually hidden" in Always but "pinned/released" in automatic modes.
-    ipc_mode: Cell<Option<BarVisibility>>,
+    /// "manually hidden" in never mode but "pinned/released" in automatic modes.
+    ipc_mode: Cell<Option<AutoHide>>,
 }
 
 // Thread-local singleton storage
@@ -177,7 +177,7 @@ impl BarManager {
         self.bars.borrow_mut().insert(key.clone(), instance);
 
         // Stored IPC state is mode-specific; drop it when the mode changes.
-        let mode = config.bar.visibility;
+        let mode = config.bar.auto_hide;
         if self
             .ipc_mode
             .replace(Some(mode))
@@ -324,10 +324,10 @@ impl BarManager {
         }
     }
 
-    /// Hide Always bars; release automatic bars back to their visibility policy.
+    /// Hide never-mode bars; release auto-hiding bars back to their visibility policy.
     pub fn ipc_hide(&self) {
         self.set_all_ipc_shown(false);
-        info!("IPC bar override released (Always bars hidden)");
+        info!("IPC bar override released (never-mode bars hidden)");
     }
 
     /// Reveal bars, pinning automatic bars until IPC hide or toggle.

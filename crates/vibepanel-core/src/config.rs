@@ -657,8 +657,8 @@ impl Config {
         lines.push("Bar Configuration:".to_string());
         lines.push(format!("  position: {}", self.bar.position));
         lines.push(format!(
-            "  visibility: {:?} (hide {}ms, reveal {}ms)",
-            self.bar.visibility, self.bar.hide_delay_ms, self.bar.reveal_delay_ms
+            "  auto_hide: {:?} (hide {}ms, reveal {}ms)",
+            self.bar.auto_hide, self.bar.hide_delay_ms, self.bar.reveal_delay_ms
         ));
         lines.push(format!("  size: {}px", self.bar.size));
         lines.push(format!("  spacing: {}px", self.bar.spacing));
@@ -799,21 +799,24 @@ impl BarPosition {
     }
 }
 
-/// Automatic bar visibility policy.
+/// Bar auto-hide mode.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum BarVisibility {
+pub enum AutoHide {
+    /// Bar stays shown (IPC can still hide it).
     #[default]
+    Never,
+    /// Hidden until the pointer reaches the screen edge.
     Always,
-    AutoHide,
-    Intellihide,
+    /// Also shown while no tiled window or overlapping floater covers the bar.
+    Smart,
 }
 
 /// Bar-level configuration.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct BarConfig {
-    pub visibility: BarVisibility,
+    pub auto_hide: AutoHide,
     /// Delay before hiding after interaction ends, in milliseconds.
     pub hide_delay_ms: u32,
     /// Continuous edge-hover duration before revealing, in milliseconds.
@@ -870,7 +873,7 @@ pub struct BarConfig {
 impl Default for BarConfig {
     fn default() -> Self {
         Self {
-            visibility: BarVisibility::Always,
+            auto_hide: AutoHide::Never,
             hide_delay_ms: 150,
             reveal_delay_ms: 150,
             position: "top".to_string(),
@@ -1808,16 +1811,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn bar_visibility_defaults_and_partial_overrides() {
+    fn bar_auto_hide_defaults_and_partial_overrides() {
         let old = Config::load_with_defaults("[bar]\nsize = 40").unwrap();
-        assert_eq!(old.bar.visibility, BarVisibility::Always);
+        assert_eq!(old.bar.auto_hide, AutoHide::Never);
         assert_eq!(old.bar.hide_delay_ms, 150);
         let new =
-            Config::load_with_defaults("[bar]\nvisibility = 'intellihide'\nreveal_delay_ms = 0")
-                .unwrap();
-        assert_eq!(new.bar.visibility, BarVisibility::Intellihide);
+            Config::load_with_defaults("[bar]\nauto_hide = 'smart'\nreveal_delay_ms = 0").unwrap();
+        assert_eq!(new.bar.auto_hide, AutoHide::Smart);
         assert_eq!(new.bar.hide_delay_ms, 150);
         assert_eq!(new.bar.reveal_delay_ms, 0);
+        let always = Config::load_with_defaults("[bar]\nauto_hide = 'always'").unwrap();
+        assert_eq!(always.bar.auto_hide, AutoHide::Always);
+        for invalid in [
+            "auto_hide = true",
+            "auto_hide = 'intellihide'",
+            "visibility = 'always'",
+        ] {
+            assert!(
+                Config::load_with_defaults(&format!("[bar]\n{invalid}")).is_err(),
+                "{invalid} should be rejected"
+            );
+        }
     }
 
     #[test]

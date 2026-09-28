@@ -1,4 +1,4 @@
-//! Window state used by intellihide, before taskbar filtering.
+//! Window state used by smart auto-hide, before taskbar filtering.
 //!
 //! All tiled layouts use the same policy. Only floating windows need geometry.
 //! Existing compositor event subscriptions wake one shared worker off the GTK thread.
@@ -119,7 +119,14 @@ impl VisibilityReader {
             Self::Niri(path) => {
                 let workspaces = query(path, b"\"Workspaces\"\n", None, false)?;
                 let windows = query(path, b"\"Windows\"\n", None, false)?;
-                niri_scene(&workspaces["Ok"]["Workspaces"], &windows["Ok"]["Windows"])
+                // Pre-25.05 niri lacks OverviewState; treat as closed.
+                let overview = query(path, b"\"OverviewState\"\n", None, false)
+                    .is_some_and(|v| v["Ok"]["OverviewState"]["is_open"] == true);
+                niri_scene(
+                    &workspaces["Ok"]["Workspaces"],
+                    &windows["Ok"]["Windows"],
+                    overview,
+                )
             }
             Self::Hyprland(path) => hyprland_scene(
                 &query(path, b"j/monitors", None, true)?,
@@ -268,7 +275,7 @@ impl VisibilityReader {
             // varies by version. One shared worker polls at most 10 times/second
             // while floaters are visible; tiled-only and empty scenes do not poll.
             // Each poll reads the full scene for every output; narrow to
-            // outputs hosting an intellihide bar if polling cost shows up.
+            // outputs hosting a smart auto-hide bar if polling cost shows up.
             Some(Duration::from_millis(100))
         } else if snapshot.values().any(|output| output.incomplete) {
             Some(Duration::from_secs(1))
@@ -294,7 +301,9 @@ impl VisibilitySubscription {
                 return worker;
             }
             if reader.is_none() {
-                tracing::warn!("Intellihide is unavailable for this compositor; using auto-hide");
+                tracing::warn!(
+                    "Smart auto-hide is unavailable for this compositor; using auto-hide"
+                );
             }
             let snapshot = Arc::new(RwLock::new(Snapshot::default()));
             let signal = Arc::new(RefreshSignal::default());
@@ -311,7 +320,7 @@ impl VisibilitySubscription {
                             reader.run(&signal, &snapshot, sender);
                         });
                 if let Err(error) = result {
-                    tracing::warn!(%error, "Could not start intellihide worker");
+                    tracing::warn!(%error, "Could not start smart auto-hide worker");
                 }
             }
             let worker = Rc::new(Self {
@@ -423,17 +432,18 @@ fn mango_scene(monitors: &Value, clients: &Value) -> Option<Snapshot> {
     let monitors = monitors["monitors"].as_array()?;
     let clients = clients["clients"].as_array()?;
     let mut scene = Snapshot::new();
+    let mut overview = Vec::new();
     for monitor in monitors {
         let name = monitor["name"].as_str()?;
-        let origin = monitor["x"].as_f64().zip(monitor["y"].as_f64());
-        let mut output = OutputWindows::default();
-        // Overview coordinates do not describe the normal workspace.
         if monitor["active_tags"]
             .as_array()
             .is_some_and(|tags| tags.contains(&Value::from(super::mango::OVERVIEW_WORKSPACE_ID)))
         {
-            output.incomplete = true;
+            overview.push(name);
+            continue;
         }
+        let origin = monitor["x"].as_f64().zip(monitor["y"].as_f64());
+        let mut output = OutputWindows::default();
         for client in clients
             .iter()
             .filter(|client| client["monitor"].as_str() == Some(name))
@@ -466,10 +476,20 @@ fn mango_scene(monitors: &Value, clients: &Value) -> Option<Snapshot> {
         .filter_map(|monitor| Some((monitor["name"].as_str()?.to_string(), rect(monitor)?)))
         .collect();
     project_floating(&mut scene, &outputs);
+    // Inserted after projection so neighbouring floaters cannot hide it.
+    for name in overview {
+        scene.insert(name.to_string(), overview_output());
+    }
     Some(scene)
 }
 
-fn niri_scene(workspaces: &Value, windows: &Value) -> Option<Snapshot> {
+/// Overview rearranges every window, so smart auto-hide keeps the bar visible.
+fn overview_output() -> OutputWindows {
+    OutputWindows::default()
+}
+
+/// Niri's overview spans every output at once.
+fn niri_scene(workspaces: &Value, windows: &Value, overview: bool) -> Option<Snapshot> {
     let workspaces = workspaces.as_array()?;
     let windows = windows.as_array()?;
     let mut scene = Snapshot::new();
@@ -477,6 +497,10 @@ fn niri_scene(workspaces: &Value, windows: &Value) -> Option<Snapshot> {
         let Some(name) = workspace["output"].as_str() else {
             continue;
         };
+        if overview {
+            scene.insert(name.to_string(), overview_output());
+            continue;
+        }
         let id = workspace["id"].as_u64()?;
         let mut output = OutputWindows::default();
         for window in windows
@@ -640,7 +664,7 @@ mod tests {
         let server = thread::spawn(move || {
             let deadline = Instant::now() + Duration::from_secs(3);
             let mut count = 0;
-            while count < 6 && Instant::now() < deadline {
+            while count < 9 && Instant::now() < deadline {
                 let Ok((mut stream, _)) = listener.accept() else {
                     thread::sleep(Duration::from_millis(5));
                     continue;
@@ -654,6 +678,8 @@ mod tests {
                     .unwrap();
                 let reply = if command.contains("Workspaces") {
                     json!({"Ok":{"Workspaces":[{"id":1,"output":"A","is_active":true}]}})
+                } else if command.contains("OverviewState") {
+                    json!({"Ok":{"OverviewState":{"is_open":false}}})
                 } else {
                     let windows = if server_tiled.load(Ordering::Relaxed) {
                         json!([{"workspace_id":1,"is_floating":false}])
@@ -682,7 +708,7 @@ mod tests {
             )
         });
         let wait_reply = || {
-            for _ in 0..2 {
+            for _ in 0..3 {
                 received.recv_timeout(Duration::from_secs(2)).unwrap();
             }
         };
@@ -713,7 +739,7 @@ mod tests {
         assert!(snapshot.read()["A"].tiled);
         signal.stop();
         worker.join().unwrap();
-        assert_eq!(server.join().unwrap(), 6);
+        assert_eq!(server.join().unwrap(), 9);
     }
 
     #[test]
@@ -788,11 +814,28 @@ mod tests {
                 "tile_pos_in_workspace_view":[450,0],"tile_size":[100,100]}},
             {"workspace_id":3,"is_floating":false}
         ]);
-        let scene = niri_scene(&workspaces, &windows).unwrap();
+        let scene = niri_scene(&workspaces, &windows, false).unwrap();
         assert!(scene["A"].tiled);
         assert!(!scene["B"].tiled);
         assert_eq!(scene["B"].decision(&[bar()]), HideDecision::Hide);
-        assert!(niri_scene(&Value::Null, &windows).is_none());
+        assert!(niri_scene(&Value::Null, &windows, false).is_none());
+    }
+
+    #[test]
+    fn niri_overview_shows_on_every_output() {
+        let workspaces = json!([
+            {"id":1,"output":"A","is_active":true},
+            {"id":2,"output":"B","is_active":true}
+        ]);
+        let windows = json!([
+            {"workspace_id":1,"is_floating":false,"layout":{}},
+            {"workspace_id":2,"is_floating":true,"layout":{
+                "tile_pos_in_workspace_view":[450,0],"tile_size":[100,100]}}
+        ]);
+        let scene = niri_scene(&workspaces, &windows, true).unwrap();
+        for output in ["A", "B"] {
+            assert_eq!(scene[output].decision(&[bar()]), HideDecision::Show);
+        }
     }
 
     #[test]
@@ -807,6 +850,24 @@ mod tests {
         let scene = mango_scene(&monitors, &clients).unwrap();
         assert!(!scene["A"].tiled);
         assert_eq!(scene["A"].decision(&[bar()]), HideDecision::Hide);
+    }
+
+    #[test]
+    fn mango_overview_shows_only_on_its_own_monitor() {
+        let monitors = json!({"monitors":[
+            {"name":"A","x":0,"y":0,"width":1000,"height":800,"active_tags":[0]},
+            {"name":"B","x":1000,"y":0,"width":1000,"height":800,"active_tags":[1]}
+        ]});
+        let clients = json!({"clients":[
+            {"monitor":"A","is_visible":true,"is_floating":false,"tags":[1]},
+            {"monitor":"B","is_visible":true,"is_floating":false,"tags":[1]},
+            // Floater owned by B spilling over A's bar must not hide it.
+            {"monitor":"B","is_visible":true,"is_floating":true,"tags":[1],
+             "x":450,"y":0,"width":600,"height":100}
+        ]});
+        let scene = mango_scene(&monitors, &clients).unwrap();
+        assert_eq!(scene["A"].decision(&[bar()]), HideDecision::Show);
+        assert_eq!(scene["B"].decision(&[bar()]), HideDecision::Hide);
     }
 
     #[test]
@@ -898,7 +959,7 @@ mod tests {
         ]);
         let windows = json!([{"workspace_id":1,"is_floating":true,"layout":{
             "tile_pos_in_workspace_view":[-100,0],"tile_size":[2000,200]}}]);
-        let scene = niri_scene(&workspaces, &windows).unwrap();
+        let scene = niri_scene(&workspaces, &windows, false).unwrap();
         assert_eq!(scene["A"].decision(&[bar()]), HideDecision::Hide);
         assert_eq!(scene["B"].decision(&[bar()]), HideDecision::Show);
     }
