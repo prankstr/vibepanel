@@ -18,10 +18,15 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::ffi::OsStr;
 use std::fs;
+use std::hash::Hash;
+use std::os::unix::ffi::OsStrExt;
+use std::path::Path;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+use gtk4::gio;
 use gtk4::glib::{self, SourceId};
 use sysinfo::{Components, CpuRefreshKind, MemoryRefreshKind, Networks, RefreshKind, System};
 use tracing::{debug, trace};
@@ -37,6 +42,9 @@ pub const SYSTEM_HISTORY_SAMPLES: usize = 60;
 
 /// Threshold above which CPU/memory is considered "high" usage.
 pub const HIGH_USAGE_THRESHOLD: f32 = 80.0;
+
+/// Threshold above which a filesystem is considered nearly full.
+pub const DISK_HIGH_THRESHOLD: f32 = 90.0;
 
 /// Canonical snapshot of system resource state.
 #[derive(Debug, Clone, Default)]
@@ -80,6 +88,47 @@ pub struct SystemSnapshot {
 
     /// Aggregate physical disk write speed in bytes/sec.
     pub disk_write_speed: u64,
+
+    /// Mounted block-device filesystems, sorted by mount point.
+    pub mounts: Vec<MountUsage>,
+
+    /// Usage for paths registered with [`SystemService::watch_path`]. A missing
+    /// key means no result yet; `None` means the path could not be queried.
+    pub path_usage: HashMap<String, Option<SpaceUsage>>,
+}
+
+/// One mounted block-device filesystem.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MountUsage {
+    /// Device name, e.g. `nvme0n1p2` or `sdb1`; the mapper name (e.g.
+    /// `luks-root`) for device-mapper nodes.
+    pub device: String,
+    pub mount_point: String,
+    pub fs_type: String,
+    pub removable: bool,
+    /// `None` if its usage could not be read (e.g. the query is hung).
+    pub usage: Option<SpaceUsage>,
+}
+
+/// Space usage of a filesystem, in bytes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SpaceUsage {
+    pub total: u64,
+    pub used: u64,
+    /// Space available to unprivileged users.
+    pub available: u64,
+}
+
+impl SpaceUsage {
+    /// Usage percentage as reported by `df` (reserved blocks count as used).
+    pub fn percent(&self) -> f32 {
+        let usable = self.used + self.available;
+        if usable == 0 {
+            0.0
+        } else {
+            (self.used as f64 / usable as f64 * 100.0) as f32
+        }
+    }
 }
 
 impl SystemSnapshot {
@@ -212,6 +261,271 @@ fn disk_delta_bytes(
         })
 }
 
+/// Decode the octal escapes (`\040` etc.) used in `/proc/self/mounts`.
+fn unescape_mount_field(field: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(field.len());
+    let mut i = 0;
+    while i < field.len() {
+        if field[i] == b'\\'
+            && let Some(value) = field
+                .get(i + 1..i + 4)
+                .and_then(|octal| std::str::from_utf8(octal).ok())
+                .and_then(|octal| u8::from_str_radix(octal, 8).ok())
+        {
+            out.push(value);
+            i += 4;
+        } else {
+            out.push(field[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
+/// A parsed mount record: `(source, mount_point, fs_type)`. Paths stay raw
+/// bytes because the kernel does not escape non-UTF-8 bytes, and `statvfs`
+/// needs the exact path.
+type MountRecord = (Vec<u8>, Vec<u8>, String);
+
+/// Parse `/proc/self/mounts` into block-device mounts, one entry per device
+/// at its shortest mount point, sorted by mount point.
+///
+/// Only `/dev/` sources are kept, so network and virtual filesystems whose
+/// `statvfs` could hang or that report no real capacity are never queried.
+fn parse_mounts(input: &[u8]) -> Vec<MountRecord> {
+    let mut by_device: HashMap<Vec<u8>, (Vec<u8>, String)> = HashMap::new();
+    for line in input.split(|&byte| byte == b'\n') {
+        let mut fields = line
+            .split(|byte| byte.is_ascii_whitespace())
+            .filter(|field| !field.is_empty());
+        let (Some(source), Some(mount_point), Some(fs_type)) =
+            (fields.next(), fields.next(), fields.next())
+        else {
+            continue;
+        };
+        let fs_type = String::from_utf8_lossy(fs_type).into_owned();
+        if !source.starts_with(b"/dev/") || matches!(fs_type.as_str(), "squashfs" | "erofs") {
+            continue;
+        }
+        let mount_point = unescape_mount_field(mount_point);
+        let entry = by_device
+            .entry(unescape_mount_field(source))
+            .or_insert_with(|| (mount_point.clone(), fs_type));
+        if mount_point.len() < entry.0.len() {
+            entry.0 = mount_point;
+        }
+    }
+    let mut mounts: Vec<_> = by_device
+        .into_iter()
+        .map(|(source, (mount_point, fs_type))| (source, mount_point, fs_type))
+        .collect();
+    mounts.sort_by(|a, b| a.1.cmp(&b.1));
+    mounts
+}
+
+/// Whether a block device's sysfs path belongs to a removable drive: anything
+/// on USB, or an SD card (whose MMC card device reports `SD`; eMMC reports `MMC`).
+fn is_removable_block(sys_path: &Path, read_type: impl Fn(&Path) -> Option<String>) -> bool {
+    let is_usb = sys_path
+        .components()
+        .any(|part| part.as_os_str().to_string_lossy().starts_with("usb"));
+    is_usb
+        || sys_path
+            .ancestors()
+            .find(|dir| {
+                dir.file_name()
+                    .map(|name| name.to_string_lossy())
+                    .is_some_and(|name| name.starts_with("mmc") && name.contains(':'))
+            })
+            .and_then(|card| read_type(&card.join("type")))
+            .is_some_and(|kind| kind.trim() == "SD")
+}
+
+/// Name to show for a kernel block device: the mapper name for device-mapper
+/// nodes (`dm-0` -> `luks-root`, `vg-home`), otherwise the kernel name.
+fn display_device(device: String, read: impl Fn(&Path) -> Option<String>) -> String {
+    if !device.starts_with("dm-") {
+        return device;
+    }
+    read(&Path::new("/sys/class/block").join(&device).join("dm/name"))
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .unwrap_or(device)
+}
+
+/// Find mounted block devices without touching their filesystems, so this
+/// cannot block on a hung mount. Keyed by raw mount point.
+fn discover_mounts() -> Vec<(Vec<u8>, MountUsage)> {
+    let input = fs::read("/proc/self/mounts").unwrap_or_default();
+    parse_mounts(&input)
+        .into_iter()
+        .map(|(source, mount_point, fs_type)| {
+            let device = fs::canonicalize(OsStr::from_bytes(&source))
+                .ok()
+                .and_then(|path| Some(path.file_name()?.to_string_lossy().into_owned()))
+                .unwrap_or_else(|| String::from_utf8_lossy(&source).into_owned());
+            let removable = fs::canonicalize(format!("/sys/class/block/{device}"))
+                .is_ok_and(|path| is_removable_block(&path, |file| fs::read_to_string(file).ok()));
+            let mount = MountUsage {
+                device: display_device(device, |file| fs::read_to_string(file).ok()),
+                mount_point: String::from_utf8_lossy(&mount_point).into_owned(),
+                fs_type,
+                removable,
+                usage: None,
+            };
+            (mount_point, mount)
+        })
+        .collect()
+}
+
+type PathUsage = HashMap<String, Option<SpaceUsage>>;
+
+/// How long a filesystem query may run before its result is shown as unavailable.
+const STORAGE_STALE_AFTER: Duration = Duration::from_secs(10);
+
+/// One watched filesystem: its watcher count, when its running query started,
+/// and its last result (`None` until the first query finishes).
+#[derive(Debug, Default)]
+struct WatchedPath {
+    watchers: usize,
+    started: Option<Instant>,
+    usage: Option<Option<SpaceUsage>>,
+}
+
+/// Filesystems queried with `statvfs`, which can block on a hung mount
+/// (NFS, flaky USB, FUSE). Each one is queried on its own thread, at most one
+/// at a time, so a hung filesystem only affects itself. An unwatched entry
+/// whose query is still running is kept with zero watchers until it returns,
+/// so watching it again cannot start a second blocked query.
+///
+/// Known limitation: entries are keyed by path, so if a hung filesystem is
+/// replaced by another mount at the same path, the path stays unavailable
+/// until the old query returns (or the panel restarts).
+#[derive(Debug)]
+struct WatchedPaths<K>(HashMap<K, WatchedPath>);
+
+impl<K> Default for WatchedPaths<K> {
+    fn default() -> Self {
+        Self(HashMap::new())
+    }
+}
+
+impl<K: Eq + Hash + Clone> WatchedPaths<K> {
+    fn watch(&mut self, key: &K) {
+        self.0.entry(key.clone()).or_default().watchers += 1;
+    }
+
+    fn unwatch(&mut self, key: &K) {
+        let Some(entry) = self.0.get_mut(key) else {
+            return;
+        };
+        entry.watchers = entry.watchers.saturating_sub(1);
+        if entry.watchers == 0 && entry.started.is_none() {
+            self.0.remove(key);
+        }
+    }
+
+    /// Watch exactly `keys`, once each.
+    fn sync(&mut self, keys: &HashSet<K>) {
+        for key in keys {
+            self.0.entry(key.clone()).or_default().watchers = 1;
+        }
+        let gone: Vec<K> = self
+            .0
+            .iter()
+            .filter(|(key, entry)| entry.watchers > 0 && !keys.contains(*key))
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in gone {
+            self.unwatch(&key);
+        }
+    }
+
+    /// Claim every watched entry with no query running.
+    fn claim(&mut self, now: Instant) -> Vec<K> {
+        self.0
+            .iter_mut()
+            .filter(|(_, entry)| entry.watchers > 0 && entry.started.is_none())
+            .map(|(key, entry)| {
+                entry.started = Some(now);
+                key.clone()
+            })
+            .collect()
+    }
+
+    /// Record a finished query; the result is dropped if no longer watched.
+    /// Returns true for an entry's first result.
+    fn finish(&mut self, key: &K, usage: Option<SpaceUsage>) -> bool {
+        let Some(entry) = self.0.get_mut(key) else {
+            return false;
+        };
+        entry.started = None;
+        if entry.watchers == 0 {
+            self.0.remove(key);
+            false
+        } else {
+            entry.usage.replace(usage).is_none()
+        }
+    }
+
+    /// Usage as shown: `None` while not watched or before the first result,
+    /// `Some(None)` if unavailable or its query has been stuck too long.
+    fn get(&self, key: &K, now: Instant) -> Option<Option<SpaceUsage>> {
+        let entry = self.0.get(key).filter(|entry| entry.watchers > 0)?;
+        let stuck = entry
+            .started
+            .is_some_and(|started| now.saturating_duration_since(started) >= STORAGE_STALE_AFTER);
+        if stuck { Some(None) } else { entry.usage }
+    }
+}
+
+/// Mounts and watched paths as shown in the snapshot. Mounts without a result
+/// yet and mounts reporting no capacity are left out; paths without a result
+/// yet are left out so the widget shows "loading".
+fn published_storage(
+    drives: &[(Vec<u8>, MountUsage)],
+    mount_usage: &WatchedPaths<Vec<u8>>,
+    paths: &WatchedPaths<String>,
+    now: Instant,
+) -> (Vec<MountUsage>, PathUsage) {
+    let mounts = drives
+        .iter()
+        .filter_map(|(key, mount)| {
+            let usage = mount_usage.get(key, now)?;
+            (usage.is_none_or(|usage| usage.total > 0)).then(|| MountUsage {
+                usage,
+                ..mount.clone()
+            })
+        })
+        .collect();
+    let paths = paths
+        .0
+        .keys()
+        .filter_map(|path| Some((path.clone(), paths.get(path, now)?)))
+        .collect();
+    (mounts, paths)
+}
+
+/// Return space usage of the filesystem holding `path`.
+fn statvfs_usage(path: &[u8]) -> Option<SpaceUsage> {
+    let path = std::ffi::CString::new(path).ok()?;
+    let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    // SAFETY: `path` is a valid C string and `stat` is written on success.
+    if unsafe { libc::statvfs(path.as_ptr(), stat.as_mut_ptr()) } != 0 {
+        return None;
+    }
+    // SAFETY: statvfs returned success, so the struct is initialized.
+    let stat = unsafe { stat.assume_init() };
+    let block = stat.f_frsize;
+    let total = stat.f_blocks * block;
+    let free = stat.f_bfree * block;
+    Some(SpaceUsage {
+        total,
+        used: total.saturating_sub(free),
+        available: stat.f_bavail * block,
+    })
+}
+
 /// Shared, process-wide system monitoring service.
 ///
 /// This service polls system metrics at regular intervals and notifies
@@ -246,6 +560,18 @@ pub struct SystemService {
 
     /// Polling interval in seconds.
     poll_interval: Cell<u32>,
+
+    /// Mounted drives from the last discovery.
+    drives: RefCell<Vec<(Vec<u8>, MountUsage)>>,
+
+    /// Usage of each discovered drive, queried independently.
+    mount_usage: RefCell<WatchedPaths<Vec<u8>>>,
+
+    /// A mount discovery is running.
+    discovering: Cell<bool>,
+
+    /// Paths watched by disk widgets, queried independently.
+    watched_paths: RefCell<WatchedPaths<String>>,
 }
 
 impl SystemService {
@@ -276,6 +602,10 @@ impl SystemService {
             components: RefCell::new(components),
             disk_counters: RefCell::new(HashMap::new()),
             poll_interval: Cell::new(DEFAULT_POLL_INTERVAL_SECS),
+            drives: RefCell::new(Vec::new()),
+            mount_usage: RefCell::new(WatchedPaths::default()),
+            discovering: Cell::new(false),
+            watched_paths: RefCell::new(WatchedPaths::default()),
         });
 
         let weak = Rc::downgrade(&service);
@@ -331,6 +661,87 @@ impl SystemService {
         self.history.borrow().iter().copied().collect()
     }
 
+    /// Start reporting usage for the filesystem holding `path` in
+    /// [`SystemSnapshot::path_usage`]. Pair with [`Self::unwatch_path`].
+    pub fn watch_path(self: &Rc<Self>, path: &str) {
+        self.watched_paths.borrow_mut().watch(&path.to_string());
+        Self::query_all(self, |this| &this.watched_paths);
+    }
+
+    pub fn unwatch_path(&self, path: &str) {
+        self.watched_paths.borrow_mut().unwatch(&path.to_string());
+    }
+
+    /// Rediscover mounts and query every idle mount and watched path, each on
+    /// its own thread. Results are shown on the next poll.
+    fn refresh_storage(this: &Rc<Self>) {
+        Self::query_all(this, |this| &this.watched_paths);
+        if this.discovering.replace(true) {
+            return;
+        }
+        let weak = Rc::downgrade(this);
+        glib::spawn_future_local(async move {
+            let result = gio::spawn_blocking(discover_mounts).await;
+            let Some(this) = weak.upgrade() else {
+                return;
+            };
+            this.discovering.set(false);
+            let Ok(drives) = result else {
+                return;
+            };
+            let keys = drives.iter().map(|(key, _)| key.clone()).collect();
+            this.mount_usage.borrow_mut().sync(&keys);
+            *this.drives.borrow_mut() = drives;
+            Self::query_all(&this, |this| &this.mount_usage);
+        });
+    }
+
+    /// Query every watched, idle entry of `paths` on its own worker thread.
+    fn query_all<K>(this: &Rc<Self>, paths: fn(&Self) -> &RefCell<WatchedPaths<K>>)
+    where
+        K: AsRef<[u8]> + Eq + Hash + Clone + Send + 'static,
+    {
+        let claimed = paths(this).borrow_mut().claim(Instant::now());
+        for key in claimed {
+            let weak = Rc::downgrade(this);
+            glib::spawn_future_local(async move {
+                // A dedicated thread, not gio::spawn_blocking: statvfs can block
+                // forever on a hung filesystem and must not hold a thread of
+                // GIO's shared pool. A failed spawn or a panicked query (closed
+                // channel) counts as unavailable.
+                let query = key.clone();
+                let (tx, rx) = async_channel::bounded(1);
+                let spawned =
+                    std::thread::Builder::new()
+                        .name("vp-statvfs".into())
+                        .spawn(move || {
+                            let _ = tx.send_blocking(statvfs_usage(query.as_ref()));
+                        });
+                let usage = match spawned {
+                    Ok(_) => rx.recv().await.ok().flatten(),
+                    Err(_) => None,
+                };
+                let Some(this) = weak.upgrade() else {
+                    return;
+                };
+                // Publish first results now instead of on the next poll.
+                if paths(&this).borrow_mut().finish(&key, usage) {
+                    this.apply_storage(&mut this.snapshot.borrow_mut());
+                    this.callbacks.notify(&this.snapshot.borrow());
+                }
+            });
+        }
+    }
+
+    fn apply_storage(&self, snapshot: &mut SystemSnapshot) {
+        (snapshot.mounts, snapshot.path_usage) = published_storage(
+            &self.drives.borrow(),
+            &self.mount_usage.borrow(),
+            &self.watched_paths.borrow(),
+            Instant::now(),
+        );
+    }
+
     /// Insert a discontinuity so graphs do not connect samples across it.
     fn record_history_break(&self) {
         let mut history = self.history.borrow_mut();
@@ -343,6 +754,7 @@ impl SystemService {
     fn start_polling(this: &Rc<Self>) {
         // Do an initial poll immediately
         this.poll();
+        Self::refresh_storage(this);
 
         // Schedule periodic polls
         let this_weak = Rc::downgrade(this);
@@ -353,6 +765,7 @@ impl SystemService {
         let source_id = glib::timeout_add_seconds_local(interval, move || {
             if let Some(this) = this_weak.upgrade() {
                 this.poll();
+                Self::refresh_storage(&this);
                 glib::ControlFlow::Continue
             } else {
                 glib::ControlFlow::Break
@@ -438,7 +851,7 @@ impl SystemService {
         let disk_write_speed = bytes_per_second(disk_write, elapsed);
 
         // Update snapshot
-        let new_snapshot = SystemSnapshot {
+        let mut new_snapshot = SystemSnapshot {
             available: true,
             cpu_usage,
             cpu_per_core,
@@ -451,7 +864,9 @@ impl SystemService {
             net_upload_speed,
             disk_read_speed,
             disk_write_speed,
+            ..Default::default()
         };
+        self.apply_storage(&mut new_snapshot);
 
         // Do not connect samples across a prolonged stall in the main loop.
         // Suspend is handled separately because Instant does not advance during it.
@@ -481,24 +896,39 @@ impl Drop for SystemService {
     }
 }
 
-/// Format bytes as a human-readable string (e.g., "8.2G", "512M").
-pub fn format_bytes(bytes: u64) -> String {
+/// Unit for a compact byte count: `(divisor, suffix, decimals)`.
+fn byte_unit(bytes: u64) -> (f64, char, usize) {
     const KB: u64 = 1024;
     const MB: u64 = KB * 1024;
     const GB: u64 = MB * 1024;
     const TB: u64 = GB * 1024;
 
-    if bytes >= TB {
-        format!("{:.1}T", bytes as f64 / TB as f64)
-    } else if bytes >= GB {
-        format!("{:.1}G", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.0}M", bytes as f64 / MB as f64)
-    } else if bytes >= KB {
-        format!("{:.0}K", bytes as f64 / KB as f64)
-    } else {
-        format!("{}B", bytes)
+    match bytes {
+        TB.. => (TB as f64, 'T', 1),
+        GB.. => (GB as f64, 'G', 1),
+        MB.. => (MB as f64, 'M', 0),
+        KB.. => (KB as f64, 'K', 0),
+        _ => (1.0, 'B', 0),
     }
+}
+
+/// Format bytes as a human-readable string (e.g., "8.2G", "512M").
+pub fn format_bytes(bytes: u64) -> String {
+    let (divisor, unit, decimals) = byte_unit(bytes);
+    format!("{:.decimals$}{unit}", bytes as f64 / divisor)
+}
+
+/// Format `used/total` with both values in the total's unit, e.g. "0.5/1.8T".
+///
+/// Since `used <= total`, the text is never wider than when `used == total`,
+/// which lets callers reserve a stable width from the total alone.
+pub fn format_used_of_total(used: u64, total: u64) -> String {
+    let (divisor, unit, decimals) = byte_unit(total);
+    format!(
+        "{:.decimals$}/{:.decimals$}{unit}",
+        used as f64 / divisor,
+        total as f64 / divisor
+    )
 }
 
 /// Format bytes as a human-readable string with full unit names.
@@ -554,6 +984,23 @@ mod tests {
             format_bytes(8 * 1024 * 1024 * 1024 + 200 * 1024 * 1024),
             "8.2G"
         );
+        assert_eq!(format_bytes(1024u64.pow(4)), "1.0T");
+    }
+
+    #[test]
+    fn test_format_used_of_total_uses_totals_unit() {
+        const GIB: u64 = 1024 * 1024 * 1024;
+        const TIB: u64 = GIB * 1024;
+        assert_eq!(format_used_of_total(337 * GIB, 460 * GIB), "337.0/460.0G");
+        assert_eq!(
+            format_used_of_total(512 * 1024 * 1024, 16 * GIB),
+            "0.5/16.0G"
+        );
+        assert_eq!(format_used_of_total(900 * 1024 * 1024, TIB), "0.0/1.0T");
+        // GiB -> TiB boundary stays in the total's unit, not "999.0G/1.8T".
+        let total = TIB * 18 / 10;
+        assert_eq!(format_used_of_total(999 * GIB, total), "1.0/1.8T");
+        assert_eq!(format_used_of_total(0, 0), "0/0B");
     }
 
     #[test]
@@ -637,6 +1084,162 @@ mod tests {
     fn test_rate_uses_actual_elapsed_time() {
         assert_eq!(bytes_per_second(3_000, Duration::from_secs(3)), 1_000);
         assert_eq!(bytes_per_second(3_000, Duration::ZERO), 0);
+    }
+
+    #[test]
+    fn test_parse_mounts_keeps_block_devices_once() {
+        let mounts = parse_mounts(
+            b"/dev/nvme0n1p6 /home btrfs rw 0 0\n\
+             /dev/nvme0n1p6 / btrfs rw 0 0\n\
+             /dev/nvme0n1p5 /boot ext4 rw 0 0\n\
+             overlay /var/lib/docker/x overlay rw 0 0\n\
+             tmpfs /tmp tmpfs rw 0 0\n\
+             /dev/loop0 /snap/core squashfs ro 0 0\n\
+             /dev/loop1 /sysroot erofs ro 0 0\n\
+             /dev/sdb1 /run/media/me/USB\\040STICK vfat rw 0 0\n\
+             /dev/sdc1 /run/media/me/caf\xe9 vfat rw 0 0",
+        );
+        let summary: Vec<_> = mounts
+            .iter()
+            .map(|(source, mount, fs)| (source.as_slice(), mount.as_slice(), fs.as_str()))
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                (&b"/dev/nvme0n1p6"[..], &b"/"[..], "btrfs"),
+                (b"/dev/nvme0n1p5", b"/boot", "ext4"),
+                (b"/dev/sdb1", b"/run/media/me/USB STICK", "vfat"),
+                (b"/dev/sdc1", b"/run/media/me/caf\xe9", "vfat"),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_removable_detects_usb_and_sd_but_not_emmc() {
+        let card_type = |kind: &'static str| move |_: &Path| Some(format!("{kind}\n"));
+        let usb = Path::new("/sys/devices/pci0000:00/usb2/2-1/host0/block/sdb/sdb1");
+        let mmc =
+            Path::new("/sys/devices/platform/mmc_host/mmc0/mmc0:aaaa/block/mmcblk0/mmcblk0p1");
+        let nvme = Path::new("/sys/devices/pci0000:00/nvme/nvme0/nvme0n1/nvme0n1p1");
+
+        assert!(is_removable_block(usb, |_| None));
+        assert!(is_removable_block(mmc, card_type("SD")));
+        assert!(!is_removable_block(mmc, card_type("MMC")));
+        assert!(!is_removable_block(nvme, card_type("SD")));
+    }
+
+    #[test]
+    fn test_display_device_uses_mapper_name() {
+        let sysfs = |name: &'static str| {
+            move |file: &Path| {
+                (file == Path::new("/sys/class/block/dm-0/dm/name")).then(|| name.to_string())
+            }
+        };
+        assert_eq!(
+            display_device("dm-0".into(), sysfs("luks-root\n")),
+            "luks-root"
+        );
+        assert_eq!(display_device("dm-0".into(), sysfs("\n")), "dm-0");
+        assert_eq!(display_device("sda1".into(), sysfs("luks-root\n")), "sda1");
+    }
+
+    fn space(total: u64) -> SpaceUsage {
+        SpaceUsage {
+            total,
+            ..Default::default()
+        }
+    }
+
+    fn key(path: &str) -> String {
+        path.to_string()
+    }
+
+    #[test]
+    fn test_watched_paths_isolate_hung_queries() {
+        let now = Instant::now();
+        let later = now + STORAGE_STALE_AFTER;
+        let mut paths = WatchedPaths::default();
+        paths.watch(&key("/mnt/nas"));
+        assert_eq!(paths.claim(now), [key("/mnt/nas")]);
+
+        // The NAS query hangs; another path still starts and publishes.
+        paths.watch(&key("/"));
+        assert_eq!(paths.claim(now), [key("/")]);
+        assert!(paths.finish(&key("/"), Some(space(1)))); // first result
+        assert_eq!(paths.get(&key("/"), later), Some(Some(space(1))));
+        assert_eq!(paths.get(&key("/mnt/nas"), now), None); // no result yet
+        assert_eq!(paths.get(&key("/mnt/nas"), later), Some(None)); // stuck
+
+        // Re-watching the hung path does not start a second query.
+        paths.unwatch(&key("/mnt/nas"));
+        paths.watch(&key("/mnt/nas"));
+        assert_eq!(paths.claim(later), [key("/")]);
+        assert!(!paths.finish(&key("/"), Some(space(1)))); // not first
+
+        // Unwatched while hung: its late result is dropped with the entry.
+        paths.unwatch(&key("/mnt/nas"));
+        assert!(!paths.finish(&key("/mnt/nas"), Some(space(2))));
+        assert!(!paths.0.contains_key("/mnt/nas"));
+    }
+
+    #[test]
+    fn test_hung_mount_stays_listed_without_hiding_others() {
+        let now = Instant::now();
+        let later = now + STORAGE_STALE_AFTER;
+        let drive = |path: &str| {
+            let mount = MountUsage {
+                mount_point: path.to_string(),
+                ..Default::default()
+            };
+            (path.as_bytes().to_vec(), mount)
+        };
+        let listed = |drives: &[(Vec<u8>, MountUsage)], usage: &WatchedPaths<Vec<u8>>, at| {
+            let (mounts, _) = published_storage(drives, usage, &WatchedPaths::default(), at);
+            mounts
+                .into_iter()
+                .map(|mount| (mount.mount_point, mount.usage.map(|usage| usage.total)))
+                .collect::<Vec<_>>()
+        };
+        let sync = |usage: &mut WatchedPaths<Vec<u8>>, drives: &[(Vec<u8>, MountUsage)]| {
+            usage.sync(&drives.iter().map(|(key, _)| key.clone()).collect());
+        };
+
+        let mut drives = vec![drive("/"), drive("/empty"), drive("/usb")];
+        let mut usage = WatchedPaths::default();
+        sync(&mut usage, &drives);
+        assert_eq!(usage.claim(now).len(), 3);
+        usage.finish(&b"/".to_vec(), Some(space(100)));
+        usage.finish(&b"/empty".to_vec(), Some(space(0)));
+        // "/usb" hangs: left out until it times out, then listed as unavailable.
+        // The zero-capacity mount is always left out.
+        assert_eq!(listed(&drives, &usage, now), [(key("/"), Some(100))]);
+        assert_eq!(
+            listed(&drives, &usage, later),
+            [(key("/"), Some(100)), (key("/usb"), None)]
+        );
+
+        // Mounts still come and go while "/usb" hangs; unplugged, it disappears.
+        drives = vec![drive("/"), drive("/data")];
+        sync(&mut usage, &drives);
+        usage.claim(later);
+        usage.finish(&b"/data".to_vec(), Some(space(5)));
+        assert_eq!(
+            listed(&drives, &usage, later),
+            [(key("/"), Some(100)), (key("/data"), Some(5))]
+        );
+        usage.finish(&b"/usb".to_vec(), Some(space(1)));
+        assert!(!usage.0.contains_key(b"/usb".as_slice()));
+    }
+
+    #[test]
+    fn test_usage_percent_matches_df() {
+        let usage = SpaceUsage {
+            total: 100,
+            used: 45,
+            available: 45,
+        };
+        assert_eq!(usage.percent(), 50.0);
+        assert_eq!(SpaceUsage::default().percent(), 0.0);
     }
 
     #[test]

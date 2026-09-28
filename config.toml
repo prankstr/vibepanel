@@ -69,6 +69,12 @@ background_opacity = 1.0
 #   stable_width = false # Disable width stabilization; default stabilizes common 2-digit metric values
 #   # Also supported by [widgets.memory] and [widgets.gpu]
 #
+#   [widgets.disk]
+#   path = "/home"   # Filesystem containing this path (default: "/")
+#   format = "free"  # "percentage" (default), "free", or "used/total"
+#   stable_width = true  # default: false
+#   # More drives: add "disk-<id>" widgets, each with its own [widgets.disk-<id>] table
+#
 #   [widgets.gpu]
 #   devices = "auto"  # "auto" (default), "all", or zero-based indices such as [0, 1]
 #   # "all" checks every GPU while the GPU widget or system popover is active. Runtime-suspended

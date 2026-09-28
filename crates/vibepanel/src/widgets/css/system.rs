@@ -74,6 +74,22 @@ button.system-expander-header > overlay > box {
     border-radius: var(--radius-card);
 }
 
+/* Clickable title value: bleed the hover background past the value
+   without moving it from where other cards place theirs. */
+button.system-title-button {
+    margin: -2px -6px;
+    color: var(--color-foreground-primary);
+}
+
+button.system-title-button > overlay > box {
+    padding: 2px 6px;
+}
+
+.system-title-button:hover {
+    background: var(--color-card-overlay-hover);
+    border-radius: var(--radius-card);
+}
+
 .system-network-icon {
     font-size: 0.9em;
 }
