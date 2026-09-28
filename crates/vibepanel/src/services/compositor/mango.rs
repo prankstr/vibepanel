@@ -41,7 +41,7 @@ const SOCKET_RECONNECT_MS: u64 = 1000;
 /// Fallback tag count used until `all-monitors` reports the real one.
 const DEFAULT_WORKSPACE_COUNT: u32 = 9;
 /// Synthetic workspace id MangoWC uses to signal overview mode.
-const OVERVIEW_WORKSPACE_ID: i32 = 0;
+pub(super) const OVERVIEW_WORKSPACE_ID: i32 = 0;
 const OVERVIEW_WORKSPACE_NAME: &str = "overview";
 /// Tag 0 marks membership in Mango's special overlay workspace.
 const SPECIAL_TAG_ID: i64 = 0;
@@ -233,6 +233,12 @@ impl MangoBackend {
 }
 
 impl CompositorBackend for MangoBackend {
+    fn visibility_reader(&self) -> Option<super::visibility::VisibilityReader> {
+        Some(super::visibility::VisibilityReader::Mango(
+            self.socket_path.clone()?,
+        ))
+    }
+
     fn start(&self, on_workspace_update: WorkspaceCallback, on_window_update: WindowCallback) {
         let Some(socket_path) = self.socket_path.clone() else {
             error!(
@@ -450,6 +456,7 @@ fn watch_mango_command<F>(
     F: FnMut(Value),
 {
     while running.load(Ordering::SeqCst) {
+        super::visibility::notify_changed();
         let mut stream = match UnixStream::connect(&socket_path) {
             Ok(stream) => stream,
             Err(e) => {
@@ -478,12 +485,14 @@ fn watch_mango_command<F>(
             match reader.read_until(b'\n', &mut response) {
                 Ok(0) => {
                     if let Some(value) = parse_json_line(&String::from_utf8_lossy(&response)) {
+                        super::visibility::notify_changed();
                         handle_value(value);
                     }
                     break;
                 }
                 Ok(_) => {
                     if let Some(value) = parse_json_line(&String::from_utf8_lossy(&response)) {
+                        super::visibility::notify_changed();
                         handle_value(value);
                     }
                     response.clear();
@@ -492,6 +501,7 @@ fn watch_mango_command<F>(
                     if e.kind() == std::io::ErrorKind::WouldBlock
                         || e.kind() == std::io::ErrorKind::TimedOut => {}
                 Err(e) => {
+                    super::visibility::notify_changed();
                     warn!("Mango IPC watch '{}' ended: {}", command, e);
                     break;
                 }

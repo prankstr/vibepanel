@@ -190,11 +190,11 @@ enum InhibitAction {
 
 #[derive(Subcommand, Debug)]
 enum BarAction {
-    /// Show the bar
+    /// Show the bar (pins it open in automatic modes)
     Show,
-    /// Hide the bar (releases exclusive zone)
+    /// Hide bars; automatic bars return when hovered or when windows change
     Hide,
-    /// Toggle bar visibility
+    /// Show all bars if any is hidden; otherwise hide them
     Toggle,
 }
 

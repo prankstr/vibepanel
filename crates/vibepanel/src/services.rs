@@ -28,6 +28,7 @@ pub use wayland::{activation, background_effect};
 
 pub mod audio;
 pub mod bar_manager;
+pub mod bar_visibility;
 pub mod battery;
 pub mod battery_alert;
 pub mod bluetooth;

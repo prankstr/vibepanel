@@ -702,6 +702,10 @@ impl ConfigManager {
         self.config.borrow().bar.size
     }
 
+    pub fn bar_auto_hide(&self) -> vibepanel_core::config::AutoHide {
+        self.config.borrow().bar.auto_hide
+    }
+
     pub fn bar_padding(&self) -> u32 {
         self.config.borrow().bar.padding
     }

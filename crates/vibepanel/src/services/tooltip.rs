@@ -145,6 +145,8 @@ impl TooltipWindow {
         }
 
         Self::reset_margins(&self.window);
+        self.window
+            .set_exclusive_zone(crate::widgets::layer_shell_popover::popover_exclusive_zone());
 
         // Determine vertical edge based on bar position
         let bar_edge = match ConfigManager::global().bar_position() {
@@ -190,6 +192,8 @@ impl TooltipWindow {
         }
 
         Self::reset_margins(&self.window);
+        self.window
+            .set_exclusive_zone(crate::widgets::layer_shell_popover::popover_exclusive_zone());
 
         let bar_edge = match ConfigManager::global().bar_position() {
             BarPosition::Right => Edge::Right,
@@ -446,9 +450,10 @@ impl TooltipManager {
             )
             .unwrap_or((cursor_rel_x, cursor_rel_y));
 
-        // For Y position: layer-shell exclusive zone means the tooltip's bar-edge anchor
-        // starts past the bar's exclusive zone, so we only need a small offset
-        let tooltip_y = TOOLTIP_CURSOR_OFFSET_Y;
+        // Automatic bars reserve no space, so include their thickness explicitly.
+        let bar_offset = crate::widgets::layer_shell_popover::calculate_bar_exclusive_zone()
+            - crate::widgets::layer_shell_popover::calculate_bar_reserved_zone();
+        let tooltip_y = TOOLTIP_CURSOR_OFFSET_Y + bar_offset;
 
         // Ensure tooltip window exists
         self.ensure_tooltip_window();
@@ -486,7 +491,7 @@ impl TooltipManager {
 
                 tooltip_window.show_horizontal(x_margin, tooltip_y, anchor, monitor.as_ref());
             } else {
-                let tooltip_x = TOOLTIP_SIDE_BAR_OFFSET_X;
+                let tooltip_x = TOOLTIP_SIDE_BAR_OFFSET_X + bar_offset;
                 let tooltip_y = cursor_screen_y + TOOLTIP_CURSOR_OFFSET_Y;
 
                 let (anchor, y_margin) =

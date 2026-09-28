@@ -61,6 +61,9 @@ pub struct CompositorManager {
 }
 
 impl CompositorManager {
+    pub fn visibility_reader(&self) -> Option<super::visibility::VisibilityReader> {
+        self.backend.borrow().as_ref()?.visibility_reader()
+    }
     fn new(advanced_config: &AdvancedConfig) -> Rc<Self> {
         let manager = Rc::new(Self {
             backend: RefCell::new(None),

@@ -822,6 +822,7 @@ impl HyprlandBackend {
     /// Handle a Hyprland event line.
     /// Returns (workspace_changed, window_changed, keyboard_layout_changed).
     fn handle_event(&self, line: &str) -> (bool, bool, bool) {
+        super::visibility::notify_changed();
         let Some((event, data)) = line.split_once(">>") else {
             return (false, false, false);
         };
@@ -1037,6 +1038,7 @@ impl HyprlandBackend {
         let mut backoff_ms = RECONNECT_INITIAL_MS;
 
         while backend.running.load(Ordering::SeqCst) {
+            super::visibility::notify_changed();
             // Connect to event socket
             let stream = match UnixStream::connect(&event_socket_path) {
                 Ok(s) => {
@@ -1104,6 +1106,7 @@ impl HyprlandBackend {
                             && e.kind() != std::io::ErrorKind::TimedOut
                         {
                             if backend.running.load(Ordering::SeqCst) {
+                                super::visibility::notify_changed();
                                 error!("Error reading from Hyprland event socket: {}", e);
                             }
                             break;
@@ -1118,6 +1121,12 @@ impl HyprlandBackend {
 }
 
 impl CompositorBackend for HyprlandBackend {
+    fn visibility_reader(&self) -> Option<super::visibility::VisibilityReader> {
+        Some(super::visibility::VisibilityReader::Hyprland(
+            self.socket_path.read().clone()?,
+        ))
+    }
+
     fn start(&self, on_workspace_update: WorkspaceCallback, on_window_update: WindowCallback) {
         if self.running.swap(true, Ordering::SeqCst) {
             warn!("HyprlandBackend already running");

@@ -12,6 +12,9 @@
 # =============================================================================
 
 [bar]
+auto_hide = "never" # "never", "always", "smart" (stays shown while no tiled or overlapping floating window covers the bar)
+# hide_delay_ms = 150    # delay to hide after the pointer leaves
+# reveal_delay_ms = 150  # delay before revealing
 position = "top"         # "top", "bottom", "left", or "right"
 size = 32
 border_radius = 30

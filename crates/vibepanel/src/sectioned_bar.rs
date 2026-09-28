@@ -18,7 +18,7 @@ use crate::layout_math::{
 
 mod imp {
     use super::*;
-    use std::cell::{Cell, RefCell};
+    use std::cell::Cell;
 
     pub struct CenterPriorityLayout {
         pub orientation: Cell<Orientation>,
@@ -33,9 +33,7 @@ mod imp {
         pub last_center_width: Cell<i32>,
         pub last_right_x: Cell<i32>,
         pub last_right_width: Cell<i32>,
-        /// Optional callback fired after every allocation pass.
-        /// Used by bar blur to recompute island regions when layout changes.
-        pub on_allocate: RefCell<Option<Box<dyn Fn()>>>,
+        pub allocation_callbacks: crate::services::callbacks::Callbacks<()>,
     }
 
     impl Default for CenterPriorityLayout {
@@ -52,7 +50,7 @@ mod imp {
                 last_center_width: Cell::default(),
                 last_right_x: Cell::default(),
                 last_right_width: Cell::default(),
-                on_allocate: RefCell::default(),
+                allocation_callbacks: Default::default(),
             }
         }
     }
@@ -213,10 +211,7 @@ mod imp {
                     );
                 }
 
-                // Fire post-allocate callback (used by bar blur).
-                if let Some(cb) = self.on_allocate.borrow().as_ref() {
-                    cb();
-                }
+                self.allocation_callbacks.notify(&());
                 return;
             }
 
@@ -291,10 +286,7 @@ mod imp {
                 );
             }
 
-            // Fire post-allocate callback (used by bar blur).
-            if let Some(cb) = self.on_allocate.borrow().as_ref() {
-                cb();
-            }
+            self.allocation_callbacks.notify(&());
         }
 
         fn create_layout_child(&self, widget: &Widget, for_child: &Widget) -> LayoutChild {
@@ -341,11 +333,17 @@ impl CenterPriorityLayout {
         self.imp().right_expand.set(expand);
     }
 
-    /// Set a callback to be fired after every layout allocation pass.
-    ///
-    /// Used by bar blur to recompute island regions when layout changes.
-    pub fn set_on_allocate<F: Fn() + 'static>(&self, cb: F) {
-        *self.imp().on_allocate.borrow_mut() = Some(Box::new(cb));
+    pub(crate) fn connect_allocated(
+        &self,
+        callback: impl Fn() + 'static,
+    ) -> crate::services::callbacks::CallbackId {
+        self.imp()
+            .allocation_callbacks
+            .register(move |_| callback())
+    }
+
+    pub(crate) fn disconnect_allocated(&self, id: crate::services::callbacks::CallbackId) {
+        self.imp().allocation_callbacks.unregister(id);
     }
 }
 

@@ -63,6 +63,31 @@ jobs:
       - name: Run display-required UI regression tests
         run: scripts/run-ui-regression-tests.sh
 
+  layer-shell-tests:
+    runs-on: ubuntu-latest
+    container: rust:trixie
+    name: Layer-shell Tests (headless Sway)
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          apt-get update
+          apt-get install -y \
+            libgtk-4-dev \
+            libgtk4-layer-shell-dev \
+            libpulse-dev \
+            libudev-dev \
+            libdbus-1-dev \
+            dbus-daemon \
+            sway \
+            grim \
+            python3
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Run layer-shell contracts
+        run: scripts/run-auto-hide-tests.sh
+
   font-check:
     runs-on: ubuntu-latest
     name: Font subset manifest
