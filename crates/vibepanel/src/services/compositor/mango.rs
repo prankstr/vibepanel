@@ -44,7 +44,7 @@ const DEFAULT_WORKSPACE_COUNT: u32 = 9;
 pub(super) const OVERVIEW_WORKSPACE_ID: i32 = 0;
 const OVERVIEW_WORKSPACE_NAME: &str = "overview";
 /// Tag 0 marks membership in Mango's special overlay workspace.
-const SPECIAL_TAG_ID: i64 = 0;
+pub(super) const SPECIAL_TAG_ID: i64 = 0;
 
 #[derive(Debug)]
 struct MangoSharedState {
