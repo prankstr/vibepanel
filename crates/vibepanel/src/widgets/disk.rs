@@ -43,7 +43,7 @@ impl DiskFormat {
     fn from_str(s: &str) -> Self {
         match s.to_lowercase().as_str() {
             "free" => Self::Free,
-            "used/total" | "both" => Self::UsedOfTotal,
+            "used/total" => Self::UsedOfTotal,
             _ => Self::Percentage,
         }
     }
@@ -259,7 +259,7 @@ mod tests {
         let mut options = std::collections::HashMap::new();
         options.insert("path".to_string(), toml::Value::String("/home".into()));
         options.insert("format".to_string(), toml::Value::String("FREE".into()));
-        assert_eq!(DiskFormat::from_str("both"), DiskFormat::UsedOfTotal);
+        assert_eq!(DiskFormat::from_str("used/total"), DiskFormat::UsedOfTotal);
         let config = DiskConfig::from_entry(&WidgetEntry {
             name: "disk".to_string(),
             options,
