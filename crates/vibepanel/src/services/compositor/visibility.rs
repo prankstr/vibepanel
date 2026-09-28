@@ -63,18 +63,25 @@ pub struct OutputWindows {
     /// Output-local floating window rectangles, including borders when reported.
     pub floating: Vec<Rect>,
     pub incomplete: bool,
+    /// Compositor mode drawn beneath the bar (mango overview and special tag):
+    /// keep the bar shown and reserve its space.
+    pub reserve: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HideDecision {
     Hide,
     Show,
+    /// Show and reserve the bar's space.
+    Reserve,
     Unknown,
 }
 
 impl OutputWindows {
     pub fn decision(&self, footprint: &[Rect]) -> HideDecision {
-        if self.tiled
+        if self.reserve {
+            HideDecision::Reserve
+        } else if self.tiled
             || self
                 .floating
                 .iter()
@@ -444,6 +451,14 @@ fn mango_scene(monitors: &Value, clients: &Value) -> Option<Snapshot> {
         }
         let origin = monitor["x"].as_f64().zip(monitor["y"].as_f64());
         let mut output = OutputWindows::default();
+        // While the special tag is open, `active_tags` still names the tags
+        // beneath it but `is_visible` is false for their clients, so derive
+        // visibility from tags instead.
+        let Some(active) = monitor["active_tags"].as_array() else {
+            output.incomplete = true;
+            scene.insert(name.to_string(), output);
+            continue;
+        };
         for client in clients
             .iter()
             .filter(|client| client["monitor"].as_str() == Some(name))
@@ -451,13 +466,20 @@ fn mango_scene(monitors: &Value, clients: &Value) -> Option<Snapshot> {
             if flag(client, "is_minimized") || flag(client, "is_swallowedby") {
                 continue;
             }
-            match client["is_visible"].as_bool() {
-                Some(false) => continue,
-                None => {
-                    output.incomplete = true;
-                    continue;
-                }
-                Some(true) => {}
+            let Some(tags) = client["tags"].as_array() else {
+                output.incomplete = true;
+                continue;
+            };
+            // Special tag clients never hide the bar; while shown they pin it.
+            if tags.contains(&Value::from(super::mango::SPECIAL_TAG_ID)) {
+                output.reserve |= client["is_visible"].as_bool() == Some(true);
+                continue;
+            }
+            let visible = flag(client, "is_global")
+                || flag(client, "is_unglobal")
+                || tags.iter().any(|tag| active.contains(tag));
+            if !visible {
+                continue;
             }
             let geometry = rect(client)
                 .zip(origin)
@@ -476,19 +498,18 @@ fn mango_scene(monitors: &Value, clients: &Value) -> Option<Snapshot> {
         .filter_map(|monitor| Some((monitor["name"].as_str()?.to_string(), rect(monitor)?)))
         .collect();
     project_floating(&mut scene, &outputs);
-    // Inserted after projection so neighbouring floaters cannot hide it.
     for name in overview {
-        scene.insert(name.to_string(), overview_output());
+        let output = OutputWindows {
+            reserve: true,
+            ..OutputWindows::default()
+        };
+        scene.insert(name.to_string(), output);
     }
     Some(scene)
 }
 
-/// Overview rearranges every window, so smart auto-hide keeps the bar visible.
-fn overview_output() -> OutputWindows {
-    OutputWindows::default()
-}
-
-/// Niri's overview spans every output at once.
+/// Niri's overview spans every output at once and is zoomed out, so the bar
+/// shows there without reserving space.
 fn niri_scene(workspaces: &Value, windows: &Value, overview: bool) -> Option<Snapshot> {
     let workspaces = workspaces.as_array()?;
     let windows = windows.as_array()?;
@@ -498,7 +519,7 @@ fn niri_scene(workspaces: &Value, windows: &Value, overview: bool) -> Option<Sna
             continue;
         };
         if overview {
-            scene.insert(name.to_string(), overview_output());
+            scene.insert(name.to_string(), OutputWindows::default());
             continue;
         }
         let id = workspace["id"].as_u64()?;
@@ -839,21 +860,32 @@ mod tests {
     }
 
     #[test]
-    fn mango_includes_special_clients_but_not_minimized_or_hidden() {
-        let monitors = json!({"monitors":[{"name":"A","x":-1000,"y":0,"active_tags":[1,3]}]});
-        let clients = json!({"clients":[
-            {"monitor":"A","is_visible":true,"is_floating":true,"tags":[0],
-             "x":-550,"y":0,"width":100,"height":100},
-            {"monitor":"A","is_visible":true,"is_floating":false,"is_minimized":true},
-            {"monitor":"A","is_visible":false,"is_floating":false}
-        ]});
-        let scene = mango_scene(&monitors, &clients).unwrap();
-        assert!(!scene["A"].tiled);
+    fn mango_special_tag_reserves_and_underlying_tags_follow_active_tags() {
+        // Special tag open over tag 3: tag-3 clients report is_visible=false.
+        let monitors = json!({"monitors":[{"name":"A","x":0,"y":0,"width":1000,"height":800,"active_tags":[3]}]});
+        let underlying = json!({"monitor":"A","is_visible":false,"is_floating":false,"tags":[3]});
+        let open = json!({"monitor":"A","is_visible":true,"is_floating":false,"tags":[0]});
+        let scene = mango_scene(&monitors, &json!({"clients":[open, underlying]})).unwrap();
+        assert_eq!(scene["A"].decision(&[bar()]), HideDecision::Reserve);
+        // Closed special tag: its clients are ignored, tag 3 still hides the bar.
+        let mut closed = open.clone();
+        closed["is_visible"] = json!(false);
+        let scene = mango_scene(&monitors, &json!({"clients":[closed, underlying]})).unwrap();
         assert_eq!(scene["A"].decision(&[bar()]), HideDecision::Hide);
+        let others = json!({"clients":[closed,
+            {"monitor":"A","is_floating":false,"tags":[3],"is_minimized":true},
+            {"monitor":"A","is_floating":false,"tags":[2]},
+            {"monitor":"A","is_floating":false,"tags":[]}
+        ]});
+        let scene = mango_scene(&monitors, &others).unwrap();
+        assert_eq!(scene["A"].decision(&[bar()]), HideDecision::Show);
+        let global =
+            json!({"clients":[{"monitor":"A","is_floating":false,"tags":[5],"is_global":true}]});
+        assert!(mango_scene(&monitors, &global).unwrap()["A"].tiled);
     }
 
     #[test]
-    fn mango_overview_shows_only_on_its_own_monitor() {
+    fn mango_overview_reserves_only_on_its_own_monitor() {
         let monitors = json!({"monitors":[
             {"name":"A","x":0,"y":0,"width":1000,"height":800,"active_tags":[0]},
             {"name":"B","x":1000,"y":0,"width":1000,"height":800,"active_tags":[1]}
@@ -866,7 +898,7 @@ mod tests {
              "x":450,"y":0,"width":600,"height":100}
         ]});
         let scene = mango_scene(&monitors, &clients).unwrap();
-        assert_eq!(scene["A"].decision(&[bar()]), HideDecision::Show);
+        assert_eq!(scene["A"].decision(&[bar()]), HideDecision::Reserve);
         assert_eq!(scene["B"].decision(&[bar()]), HideDecision::Hide);
     }
 
@@ -893,20 +925,20 @@ mod tests {
     #[test]
     fn mango_projects_visible_floaters_but_not_tiled_or_hidden_clients() {
         let monitors = json!({"monitors":[
-            {"name":"A","x":-1000,"y":0,"width":1000,"height":800},
-            {"name":"B","x":0,"y":0,"width":1000,"height":800}
+            {"name":"A","x":-1000,"y":0,"width":1000,"height":800,"active_tags":[1]},
+            {"name":"B","x":0,"y":0,"width":1000,"height":800,"active_tags":[1]}
         ]});
         let clients = json!({"clients":[
-            {"monitor":"A","is_visible":true,"is_floating":true,
+            {"monitor":"A","is_floating":true,"tags":[1],
              "x":-100,"y":0,"width":200,"height":200}
         ]});
         let edge = Rect::new(0.0, 0.0, 1000.0, 32.0).unwrap();
         let scene = mango_scene(&monitors, &clients).unwrap();
         assert_eq!(scene["A"].decision(&[edge]), HideDecision::Hide);
         assert_eq!(scene["B"].decision(&[edge]), HideDecision::Hide);
-        for field in ["is_floating", "is_visible"] {
+        for (field, value) in [("is_floating", json!(false)), ("tags", json!([2]))] {
             let mut clients = clients.clone();
-            clients["clients"][0][field] = json!(false);
+            clients["clients"][0][field] = value;
             let scene = mango_scene(&monitors, &clients).unwrap();
             assert_eq!(scene["B"].decision(&[edge]), HideDecision::Show);
         }

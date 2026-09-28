@@ -67,7 +67,7 @@ impl Policy {
         if settings.mode == AutoHide::Never
             || pointer
             || (settings.mode == AutoHide::Smart
-                && input.decision == HideDecision::Show
+                && matches!(input.decision, HideDecision::Show | HideDecision::Reserve)
                 && self.dismissed.is_none())
         {
             self.shown = true;
@@ -125,6 +125,8 @@ pub struct BarVisibilityController {
     pinned: Cell<bool>,
     monitor_suppressed: Cell<bool>,
     unknown: Cell<bool>,
+    /// Exclusive zone currently claimed for a `Reserve` decision.
+    reserving: Cell<bool>,
     input_state: RefCell<Option<InputRects>>,
     island_apply: Option<Rc<dyn Fn()>>,
     subscription: Option<Rc<VisibilitySubscription>>,
@@ -272,6 +274,7 @@ impl BarVisibilityController {
             pinned: Cell::new(false),
             monitor_suppressed: Cell::new(false),
             unknown: Cell::new(true),
+            reserving: Cell::new(false),
             input_state: RefCell::new(None),
             island_apply,
             subscription,
@@ -486,6 +489,16 @@ impl BarVisibilityController {
             },
         );
         let changed = self.shown.replace(shown) != shown;
+        let reserve = shown && decision == HideDecision::Reserve;
+        if self.reserving.replace(reserve) != reserve {
+            // ponytail: toasts add bar thickness themselves and sit one bar lower
+            // while reserving; make them follow this state if it matters.
+            if reserve {
+                self.window.auto_exclusive_zone_enable();
+            } else {
+                self.window.set_exclusive_zone(-1);
+            }
+        }
         if suppressed {
             self.hovered.set(false);
             self.edge_hovered.set(false);
@@ -791,6 +804,13 @@ mod tests {
         let mut policy = Policy::default();
         assert!(!policy.update(now, &settings, input(HideDecision::Unknown)));
         assert!(policy.update(now, &settings, input(HideDecision::Show)));
+        assert!(policy.update(now, &settings, input(HideDecision::Reserve)));
+        // Reserve is scene state, not a user choice: auto-hide still hides.
+        let always = Settings {
+            mode: AutoHide::Always,
+            ..settings
+        };
+        assert!(!Policy::default().update(now, &always, input(HideDecision::Reserve)));
     }
 
     #[test]
