@@ -418,8 +418,9 @@ window.qs-wifi-qr-window {{
     margin-bottom: 8px;
 }}
 
-/* Individual character entry boxes - square with rounded corners */
-.qs-bt-char-box {{
+/* Individual character entry boxes - square with rounded corners.
+   `.popover entry` prefix out-specifies base.rs's popover entry chrome. */
+.popover entry.qs-bt-char-box {{
     min-width: 36px;
     min-height: 0;
     padding: 8px 0;
@@ -431,13 +432,13 @@ window.qs-wifi-qr-window {{
     color: var(--color-foreground-primary);
 }}
 
-.qs-bt-char-box:focus {{
+.popover entry.qs-bt-char-box:focus-within {{
     border-color: var(--color-accent-primary);
     outline: none;
 }}
 
 /* Read-only character boxes (for confirmation/display modes) */
-.qs-bt-char-box:disabled {{
+.popover entry.qs-bt-char-box:disabled {{
     background: var(--color-card-overlay);
     color: var(--color-foreground-primary);
     opacity: 1;

@@ -137,6 +137,9 @@ pub struct Config {
     /// Audio configuration.
     pub audio: AudioConfig,
 
+    /// Polkit authentication agent configuration.
+    pub polkit: PolkitConfig,
+
     /// Shared weather data configuration.
     pub weather: WeatherConfig,
 
@@ -737,6 +740,9 @@ impl Config {
 
         lines.push("\nAudio:".to_string());
         lines.push(format!("  allow_overdrive: {}", self.audio.allow_overdrive));
+
+        lines.push("\nPolkit:".to_string());
+        lines.push(format!("  enabled: {}", self.polkit.enabled));
 
         lines.join("\n")
     }
@@ -1699,6 +1705,17 @@ impl Default for OsdConfig {
     }
 }
 
+/// Polkit authentication agent configuration.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PolkitConfig {
+    /// Register VibePanel as the session's polkit authentication agent.
+    ///
+    /// Off by default: only one agent can be registered per session, so this
+    /// conflicts with agents like polkit-gnome, hyprpolkitagent or lxpolkit.
+    pub enabled: bool,
+}
+
 /// Audio configuration.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -1993,6 +2010,15 @@ mod tests {
 
         let config = Config::load_with_defaults(user_toml).unwrap();
         assert!(config.audio.allow_overdrive);
+    }
+
+    #[test]
+    fn test_load_with_defaults_polkit() {
+        let config = Config::load_with_defaults("").unwrap();
+        assert!(!config.polkit.enabled);
+
+        let config = Config::load_with_defaults("[polkit]\nenabled = true").unwrap();
+        assert!(config.polkit.enabled);
     }
 
     #[test]

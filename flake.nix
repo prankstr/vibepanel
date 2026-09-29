@@ -79,10 +79,12 @@
               export VIBEPANEL_TEST_DBUS_CONFIG="${pkgs.dbus}/share/dbus-1/session.conf"
             '';
 
-            # Make runtime graphics drivers available to GTK.
+            # Make runtime graphics drivers available to GTK, and libpolkit-agent-1
+            # to the opt-in polkit agent (loaded at runtime).
             preFixup = ''
               gappsWrapperArgs+=(
                 --suffix LD_LIBRARY_PATH : "${pkgs.addDriverRunpath.driverLink}/lib"
+                --suffix LD_LIBRARY_PATH : "${pkgs.lib.getLib pkgs.polkit}/lib"
               )
             '';
 

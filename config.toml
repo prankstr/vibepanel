@@ -141,6 +141,11 @@ show_value = false  # Show current value after the bar
 # Allow output and microphone volume over 100% (over-amplification), capped at PulseAudio's recommended UI max.
 allow_overdrive = false
 
+[polkit]
+# Handle polkit authentication prompts (pkexec, systemctl, mounting, ...) in VibePanel.
+# Only one agent can run per session: disable other agents (polkit-gnome, hyprpolkitagent, ...) first.
+enabled = false
+
 [weather]
 # Shared weather data settings for the weather widget and weather-enabled surfaces.
 # auto_locate = false     # Use GeoClue/IP fallback when no location or coordinates are configured.

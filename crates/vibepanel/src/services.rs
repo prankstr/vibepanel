@@ -47,6 +47,7 @@ pub mod media;
 pub mod media_ipc;
 pub mod network;
 pub mod notification;
+pub mod polkit_agent;
 pub mod power_profile;
 pub mod sleep_watcher;
 pub mod state;

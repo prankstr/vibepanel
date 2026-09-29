@@ -53,6 +53,11 @@ button.vp-btn-card:hover {
     background: var(--color-card-overlay-hover);
 }
 
+button.vp-btn-accent:disabled,
+button.vp-btn-card:disabled {
+    opacity: 0.5;
+}
+
 /* Link-style button - text only, no background */
 button.vp-btn-link,
 .vp-btn-link {

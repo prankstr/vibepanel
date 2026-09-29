@@ -401,6 +401,7 @@ struct ConfigSectionChanges {
     theme: bool,
     osd: bool,
     audio: bool,
+    polkit: bool,
     weather: bool,
     advanced: bool,
     compositor: bool,
@@ -420,6 +421,7 @@ impl ConfigSectionChanges {
             theme: old_theme,
             osd: old_osd,
             audio: old_audio,
+            polkit: old_polkit,
             weather: old_weather,
             advanced: old_advanced,
         } = old;
@@ -429,6 +431,7 @@ impl ConfigSectionChanges {
             theme: new_theme,
             osd: new_osd,
             audio: new_audio,
+            polkit: new_polkit,
             weather: new_weather,
             advanced: new_advanced,
         } = new;
@@ -439,6 +442,7 @@ impl ConfigSectionChanges {
             theme: old_theme != new_theme,
             osd: old_osd != new_osd,
             audio: old_audio != new_audio,
+            polkit: old_polkit != new_polkit,
             weather: old_weather != new_weather,
             advanced: old_advanced != new_advanced,
             compositor: old_advanced.compositor != new_advanced.compositor,
@@ -1236,6 +1240,10 @@ impl ConfigManager {
 
         if changes.audio {
             AudioService::global().set_allow_overdrive(new_config.audio.allow_overdrive);
+        }
+        if changes.polkit {
+            crate::services::polkit_agent::PolkitAgent::global()
+                .set_enabled(new_config.polkit.enabled);
         }
 
         // Weather enablement also depends on widget placement and clock options.
