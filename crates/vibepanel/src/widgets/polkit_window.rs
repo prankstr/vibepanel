@@ -17,13 +17,12 @@ use gtk4_layer_shell::{KeyboardMode, Layer, LayerShell};
 
 use crate::services::background_effect::attach_blur_surface_lifecycle;
 use crate::services::config_manager::{ConfigManager, ThemeCallbackGuard};
+use crate::services::icons::{IconHandle, IconsService};
 use crate::services::polkit_agent::{AuthView, PolkitAgent};
-use crate::services::surfaces::SurfaceStyleManager;
+use crate::services::surfaces::{SHADOW_MARGIN, SurfaceStyleManager};
 use crate::styles::{button, color, polkit, surface};
 use crate::widgets::base::vp_button_with_label;
 use crate::widgets::layer_shell_popover::setup_esc_handler;
-
-const SHADOW_MARGIN: i32 = 8;
 
 pub fn install(app: &Application) {
     let app = app.clone();
@@ -43,6 +42,7 @@ pub fn install(app: &Application) {
 struct PolkitWindow {
     window: ApplicationWindow,
     _theme_callback_guard: ThemeCallbackGuard,
+    _icon: IconHandle,
     card: GtkBox,
     message: Label,
     user: Label,
@@ -73,7 +73,21 @@ impl PolkitWindow {
         card.add_css_class(polkit::POPOVER);
         card.set_size_request(440, -1);
 
+        let header = GtkBox::new(Orientation::Horizontal, 16);
+        let badge = GtkBox::new(Orientation::Vertical, 0);
+        badge.add_css_class(polkit::BADGE);
+        badge.set_valign(Align::Center);
+        let icon = IconsService::global().create_icon("system-lock-screen-symbolic", &[]);
+        let icon_widget = icon.widget();
+        icon_widget.set_halign(Align::Center);
+        icon_widget.set_valign(Align::Center);
+        icon_widget.set_vexpand(true);
+        badge.append(&icon_widget);
+        header.append(&badge);
+
         let text = GtkBox::new(Orientation::Vertical, 4);
+        text.set_hexpand(true);
+        text.set_valign(Align::Center);
         let title = Label::new(Some("Authentication required"));
         title.add_css_class(polkit::TITLE);
         title.add_css_class(color::PRIMARY);
@@ -94,7 +108,8 @@ impl PolkitWindow {
         user.add_css_class(polkit::USER);
         user.set_xalign(0.0);
         text.append(&user);
-        card.append(&text);
+        header.append(&text);
+        card.append(&header);
 
         let fields = GtkBox::new(Orientation::Vertical, 8);
         // PasswordEntry keeps secrets in non-pageable memory, wiped on free.
@@ -151,6 +166,7 @@ impl PolkitWindow {
         let this = Rc::new(Self {
             window,
             _theme_callback_guard: theme_callback_guard,
+            _icon: icon,
             card,
             message,
             user,

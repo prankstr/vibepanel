@@ -275,6 +275,21 @@ label link:active {{
     font-size: var(--font-size-sm);
 }}
 
+.polkit-popover-badge {{
+    min-width: 64px;
+    min-height: 64px;
+    border-radius: var(--radius-widget-lg);
+    background: color-mix(in srgb, var(--color-accent-primary) 18%, transparent);
+    color: var(--color-accent-primary);
+}}
+/* .icon-root sets its own font-size, so size the glyph here. */
+.polkit-popover-badge > .icon-root {{
+    font-size: 28px;
+}}
+.polkit-popover-badge .icon {{
+    -gtk-icon-size: 28px;
+}}
+
 .popover .polkit-popover-actions > button {{
     min-height: 34px;
 }}

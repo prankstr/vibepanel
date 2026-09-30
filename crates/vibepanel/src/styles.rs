@@ -1053,6 +1053,9 @@ pub mod polkit {
     /// Polkit popover card (`.polkit-popover`).
     pub const POPOVER: &str = "polkit-popover";
 
+    /// Lock icon badge (`.polkit-popover-badge`).
+    pub const BADGE: &str = "polkit-popover-badge";
+
     /// Title (`.polkit-popover-title`).
     pub const TITLE: &str = "polkit-popover-title";
 
