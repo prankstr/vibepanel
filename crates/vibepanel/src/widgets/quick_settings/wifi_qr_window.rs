@@ -13,7 +13,7 @@ use qrcode::{Color as QrColor, QrCode};
 use crate::services::background_effect::attach_blur_surface_lifecycle;
 use crate::services::config_manager::{ConfigManager, ThemeCallbackGuard};
 use crate::services::network::{NetworkService, WifiAuthentication, WifiCredentials};
-use crate::services::surfaces::SurfaceStyleManager;
+use crate::services::surfaces::{SHADOW_MARGIN, SurfaceStyleManager};
 use crate::styles::{button, color, qs, surface};
 use crate::widgets::layer_shell_popover::{
     create_click_catcher, popover_keyboard_mode, setup_esc_handler,
@@ -22,7 +22,6 @@ use crate::widgets::rounded_picture::RoundedPicture;
 
 const QR_MAX_IMAGE_SIZE: usize = 280;
 const QR_QUIET_ZONE_MODULES: usize = 4;
-const QR_SHADOW_MARGIN: i32 = 8;
 
 pub struct WifiQrWindow {
     window: ApplicationWindow,
@@ -95,10 +94,10 @@ impl WifiQrWindow {
 
         let wrapper = GtkBox::new(Orientation::Vertical, 0);
         wrapper.add_css_class(surface::POPOVER_WRAPPER);
-        wrapper.set_margin_top(QR_SHADOW_MARGIN);
-        wrapper.set_margin_bottom(QR_SHADOW_MARGIN);
-        wrapper.set_margin_start(QR_SHADOW_MARGIN);
-        wrapper.set_margin_end(QR_SHADOW_MARGIN);
+        wrapper.set_margin_top(SHADOW_MARGIN);
+        wrapper.set_margin_bottom(SHADOW_MARGIN);
+        wrapper.set_margin_start(SHADOW_MARGIN);
+        wrapper.set_margin_end(SHADOW_MARGIN);
         wrapper.append(&card);
         window.set_child(Some(&wrapper));
 

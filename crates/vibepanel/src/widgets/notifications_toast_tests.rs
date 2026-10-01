@@ -184,10 +184,10 @@ fn test_toast_surface_margin_independent_of_shadow_setting() {
     );
 
     assert_eq!(
-        SurfaceStyleManager::global().shadow_margin(SURFACE_SHADOW_MARGIN),
+        SurfaceStyleManager::global().shadow_margin(SHADOW_MARGIN),
         0
     );
-    assert_eq!(toast_surface_margin(), SURFACE_SHADOW_MARGIN);
+    assert_eq!(toast_surface_margin(), SHADOW_MARGIN);
 }
 
 #[test]

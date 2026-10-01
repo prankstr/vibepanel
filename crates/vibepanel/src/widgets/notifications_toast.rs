@@ -26,12 +26,12 @@ type ToastCallback = Rc<dyn Fn(u32)>;
 type ToastActionCallback = Rc<dyn Fn(u32, &str)>;
 use crate::services::background_effect::attach_blur_surface_lifecycle;
 use crate::services::config_manager::{ConfigManager, ThemeCallbackGuard};
-use crate::services::surfaces::SurfaceStyleManager;
+use crate::services::surfaces::{SHADOW_MARGIN, SurfaceStyleManager};
 use crate::styles::{button, color, notification as notif};
 
 use super::notifications_common::{
-    POPOVER_WIDTH, SURFACE_SHADOW_MARGIN, TOAST_EDGE_MARGIN, TOAST_ESTIMATED_HEIGHT, TOAST_GAP,
-    TOAST_SIDE_MARGIN, TOAST_TIMEOUT_CRITICAL_MS, TOAST_TIMEOUT_MS, create_notification_body,
+    POPOVER_WIDTH, TOAST_EDGE_MARGIN, TOAST_ESTIMATED_HEIGHT, TOAST_GAP, TOAST_SIDE_MARGIN,
+    TOAST_TIMEOUT_CRITICAL_MS, TOAST_TIMEOUT_MS, create_notification_body,
     create_notification_image_widget,
 };
 
@@ -45,7 +45,7 @@ fn max_toast_body_height(monitor_height: Option<i32>) -> i32 {
 }
 
 fn toast_surface_margin() -> i32 {
-    SURFACE_SHADOW_MARGIN
+    SHADOW_MARGIN
 }
 
 /// Configurable screen position for notification toasts.

@@ -34,11 +34,6 @@ pub const TOAST_SIDE_MARGIN: i32 = 10;
 /// Popover dimensions
 pub const POPOVER_WIDTH: i32 = 400;
 
-/// Shadow margin for freely-floating surfaces (toast, OSD).
-/// Applied uniformly on all four sides so the CSS `box-shadow` is not clipped
-/// at the layer-shell surface boundary.
-pub const SURFACE_SHADOW_MARGIN: i32 = 8;
-
 const PREVIEW_LINES: usize = 2;
 const BODY_ANIMATION_MS: u32 = 200;
 const PREWARM_HOVER_DELAY: Duration = Duration::from_millis(150);

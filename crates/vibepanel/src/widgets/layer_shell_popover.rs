@@ -37,16 +37,10 @@ use vibepanel_core::config::BarPosition;
 use super::scale_box::ScaleBox;
 use crate::services::compositor::CompositorManager;
 use crate::services::config_manager::ConfigManager;
-use crate::services::surfaces::SurfaceStyleManager;
+use crate::services::surfaces::{SHADOW_MARGIN, SurfaceStyleManager};
 use crate::styles::{class, surface};
 
 type AnchorMonitorCallback = Rc<dyn Fn(Option<Monitor>)>;
-
-/// Margin around popover content for shadow rendering space.
-///
-/// GTK4 box-shadows extend beyond the widget bounds, so we need extra margin
-/// on the outer container to prevent shadow clipping.
-const POPOVER_SHADOW_MARGIN: i32 = 8;
 
 /// Minimum margin from screen edge for popovers.
 const POPOVER_MIN_EDGE_MARGIN: i32 = 4;
@@ -1413,7 +1407,7 @@ impl LayerShellPopover {
             outer.add_css_class(surface::POPOVER_WRAPPER);
             outer.add_css_class(surface::WIDGET_MENU_WRAPPER);
             outer.add_css_class(surface::NO_FOCUS);
-            SurfaceStyleManager::global().apply_shadow_margins(&outer, POPOVER_SHADOW_MARGIN);
+            SurfaceStyleManager::global().apply_shadow_margins(&outer, SHADOW_MARGIN);
             outer.append(&anim_shell);
             window.set_child(Some(&outer));
             install_surface_height_freeze(&window, &anim_shell);
@@ -1720,8 +1714,7 @@ impl LayerShellPopover {
                 );
                 window.set_margin(Edge::Right, right_margin);
             } else {
-                let fallback_margin =
-                    SurfaceStyleManager::global().shadow_margin(POPOVER_SHADOW_MARGIN);
+                let fallback_margin = SurfaceStyleManager::global().shadow_margin(SHADOW_MARGIN);
                 window.set_margin(Edge::Right, fallback_margin);
             }
         } else if anchor.y > 0 {
@@ -1743,8 +1736,7 @@ impl LayerShellPopover {
             );
             window.set_margin(Edge::Bottom, bottom_margin);
         } else {
-            let fallback_margin =
-                SurfaceStyleManager::global().shadow_margin(POPOVER_SHADOW_MARGIN);
+            let fallback_margin = SurfaceStyleManager::global().shadow_margin(SHADOW_MARGIN);
             window.set_margin(Edge::Bottom, fallback_margin);
         }
     }
