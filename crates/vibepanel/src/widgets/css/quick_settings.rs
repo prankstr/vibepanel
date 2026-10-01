@@ -434,6 +434,8 @@ window.qs-wifi-qr-window {{
 
 .popover entry.qs-bt-char-box:focus-within {{
     border-color: var(--color-accent-primary);
+    box-shadow: inset 0 0 0 1px var(--color-accent-primary);
+    background: color-mix(in srgb, var(--color-accent-primary) 18%, transparent);
     outline: none;
 }}
 
