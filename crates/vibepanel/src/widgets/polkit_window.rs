@@ -3,7 +3,7 @@
 //! Renders [`AuthView`] snapshots from [`PolkitAgent`]. No backdrop and no
 //! click-outside dismissal: a stray click must not cancel a password prompt.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ffi::CStr;
 use std::rc::Rc;
 
@@ -22,7 +22,7 @@ use crate::services::polkit_agent::{AuthView, PolkitAgent};
 use crate::services::surfaces::{SHADOW_MARGIN, SurfaceStyleManager};
 use crate::styles::{button, color, polkit, surface};
 use crate::widgets::base::vp_button_with_label;
-use crate::widgets::layer_shell_popover::setup_esc_handler;
+use crate::widgets::layer_shell_popover::{AnimDirection, SurfaceAnimation, setup_esc_handler};
 
 pub fn install(app: &Application) {
     let app = app.clone();
@@ -41,6 +41,9 @@ pub fn install(app: &Application) {
 
 struct PolkitWindow {
     window: ApplicationWindow,
+    anim: SurfaceAnimation,
+    /// Logically shown; the window stays mapped during the close animation.
+    open: Cell<bool>,
     _theme_callback_guard: ThemeCallbackGuard,
     _icon: IconHandle,
     card: GtkBox,
@@ -153,7 +156,9 @@ impl PolkitWindow {
         wrapper.set_margin_bottom(SHADOW_MARGIN);
         wrapper.set_margin_start(SHADOW_MARGIN);
         wrapper.set_margin_end(SHADOW_MARGIN);
-        wrapper.append(&card);
+        let anim = SurfaceAnimation::new();
+        anim.shell().set_child(&card);
+        wrapper.append(anim.shell());
         window.set_child(Some(&wrapper));
 
         let card_for_blur = card.clone();
@@ -165,6 +170,8 @@ impl PolkitWindow {
 
         let this = Rc::new(Self {
             window,
+            anim,
+            open: Cell::new(false),
             _theme_callback_guard: theme_callback_guard,
             _icon: icon,
             card,
@@ -179,8 +186,10 @@ impl PolkitWindow {
 
         cancel.connect_clicked(|_| PolkitAgent::global().cancel());
         // Older gtk4-layer-shell closes the window when its output goes away;
-        // keep it for reuse and answer the request.
-        this.window.connect_close_request(|_| {
+        // keep it for reuse and answer the request. Hide first: cancelling may
+        // show the next queued request.
+        this.window.connect_close_request(|window| {
+            window.set_visible(false);
             PolkitAgent::global().cancel();
             gtk4::glib::Propagation::Stop
         });
@@ -205,6 +214,16 @@ impl PolkitWindow {
         });
 
         this
+    }
+
+    fn animate(&self, direction: AnimDirection, generation: u32) {
+        self.anim.run(
+            direction,
+            generation,
+            &self.window,
+            self.card.upcast_ref(),
+            || {},
+        );
     }
 
     fn active_entry(&self) -> &gtk4::Editable {
@@ -235,11 +254,14 @@ impl PolkitWindow {
         self.echo_entry.set_text("");
     }
 
-    fn render(&self, view: Option<&AuthView>) {
+    fn render(self: &Rc<Self>, view: Option<&AuthView>) {
         let Some(view) = view else {
             self.reset_entries();
-            self.window.set_keyboard_mode(KeyboardMode::None);
-            self.window.set_visible(false);
+            if self.open.replace(false) {
+                self.window.set_keyboard_mode(KeyboardMode::None);
+                let generation = self.anim.next_generation();
+                self.animate(AnimDirection::Closing, generation);
+            }
             return;
         };
 
@@ -261,6 +283,10 @@ impl PolkitWindow {
         }
         let ready = prompt.is_some() && !view.busy;
         let was_ready = self.authenticate.is_sensitive();
+        if !ready {
+            // Insensitive widgets miss focus-out, so GTK warns about the cursor blink.
+            GtkWindowExt::set_focus(&self.window, None::<&gtk4::Widget>);
+        }
         self.entry.set_sensitive(ready);
         self.echo_entry.set_sensitive(ready);
         self.authenticate.set_sensitive(ready);
@@ -274,12 +300,24 @@ impl PolkitWindow {
 
         let styles = SurfaceStyleManager::global();
         styles.apply_pango_attrs_all(&self.card);
-        if !self.window.is_visible() {
+        // Hidden while open: close_request hid it before the next request.
+        if !self.open.replace(true) || !self.window.is_visible() {
             // Exclusive even on Hyprland (unlike popover_keyboard_mode()):
             // blocking other surfaces is fine for a modal prompt.
             crate::popover_tracker::PopoverTracker::global().dismiss_active();
             self.window.set_keyboard_mode(KeyboardMode::Exclusive);
-            self.window.present();
+            if self.anim.can_reverse_on(&self.window, None) {
+                self.animate(AnimDirection::Opening, self.anim.generation());
+            } else {
+                let generation = self.anim.next_generation();
+                let weak = Rc::downgrade(self);
+                self.anim
+                    .present_hidden_then(&self.window, generation, move || {
+                        if let Some(this) = weak.upgrade() {
+                            this.animate(AnimDirection::Opening, generation);
+                        }
+                    });
+            }
         }
         // Only on becoming ready: re-grabbing selects all typed text.
         if ready && !was_ready {
