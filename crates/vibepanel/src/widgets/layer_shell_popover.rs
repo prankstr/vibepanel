@@ -72,6 +72,13 @@ pub(crate) const ANIM_DURATION_MS: f64 = super::css::POPOVER_ANIMATION_MS as f64
 /// ScaleBox renders this as a true (quantized) center scale transform.
 pub(crate) const ANIM_SCALE_FROM: f64 = 0.94;
 
+/// Close progress at which a popover counts as fully hidden.
+///
+/// Compositor-side layer blur (e.g. mango `blur_layer`) is masked by buffer
+/// alpha, not scaled by it, so it stays at full strength over near-invisible
+/// content. Unmapping once content is imperceptible removes that lingering blur.
+const CLOSE_CUTOFF: f64 = 0.05;
+
 /// Direction of the popover animation.
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum AnimDirection {
@@ -152,6 +159,14 @@ impl AnimState {
         }
         let segment_duration_ms = ANIM_DURATION_MS * distance;
         elapsed_ms >= segment_duration_ms
+    }
+
+    /// Like [`is_complete`](Self::is_complete), but a close ends once progress
+    /// drops to [`CLOSE_CUTOFF`].
+    fn popover_is_complete(&self, now_us: i64) -> bool {
+        self.is_complete(now_us)
+            || (self.direction == AnimDirection::Closing
+                && self.current_progress(now_us) <= CLOSE_CUTOFF)
     }
 
     /// Prepare an animation segment and determine if a new tick callback is needed.
@@ -243,7 +258,7 @@ pub(crate) fn run_popover_animation(
             }
             (
                 state.current_progress(now_us),
-                state.is_complete(now_us),
+                state.popover_is_complete(now_us),
                 state.direction,
             )
         };
@@ -1811,5 +1826,19 @@ mod tests {
         assert_eq!(calculate_bar_exclusive_zone_for(32, 4, 12, 1.0), 52);
         assert_eq!(calculate_bar_exclusive_zone_for(32, 4, 12, 0.5), 52);
         assert_eq!(calculate_bar_exclusive_zone_for(32, 4, 12, 0.0), 48);
+    }
+
+    #[test]
+    fn popover_close_completes_at_cutoff_before_full_duration() {
+        let half_us = (ANIM_DURATION_MS * 500.0) as i64;
+        let mut state = AnimState::new_idle();
+        state.prepare(AnimDirection::Closing, 1, 0, 1.0);
+        assert!(!state.popover_is_complete(0));
+        assert!(!state.is_complete(half_us));
+        assert!(state.popover_is_complete(half_us));
+
+        let mut state = AnimState::new_idle();
+        state.prepare(AnimDirection::Opening, 1, 0, 0.0);
+        assert!(!state.popover_is_complete(half_us));
     }
 }
