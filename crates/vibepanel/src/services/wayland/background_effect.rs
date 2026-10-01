@@ -98,17 +98,37 @@ use wayland_protocols::ext::background_effect::v1::client::{
 };
 
 use super::{SurfaceInfo, connection_from_gdk_display, install_event_dispatch};
+use crate::services::config_manager::ConfigManager;
 
 const BLUR_SURFACE_RESIZE_WATCHED_KEY: &str = "vibepanel-blur-surface-watched";
 const BLUR_SURFACE_ACTIVE_KEY: &str = "vibepanel-blur-surface-active";
 
+/// Apply blur to a surface, or remove it when blur is disabled.
+///
+/// Call on map so a stale effect from a previous map cycle is dropped if blur
+/// was disabled while unmapped (cleanup is best-effort on an unmapped surface).
+pub fn sync_blur(
+    window: &impl IsA<gtk4::Widget>,
+    content: Option<gtk4::Widget>,
+    radius_fn: impl Fn() -> i32 + Clone + 'static,
+) {
+    let Some(blur) = BackgroundEffectManager::global() else {
+        return;
+    };
+    if !ConfigManager::global().blur_enabled() {
+        blur.remove_blur_region(window);
+    } else if let Some(content) = content {
+        blur.apply_blur_surface(window, &content, radius_fn);
+    }
+}
+
 /// Attach the standard blur lifecycle for standalone GTK windows.
 ///
-/// Used by OSD, notification toasts, and the media pop-out: apply on map,
-/// remove on unmap while the wl_surface is still resolvable, keep destroy as a
-/// safety net, and live-update on theme changes. Reusable animated surfaces
-/// (bar, popovers, Quick Settings) have bespoke lifecycles and should not use
-/// this helper.
+/// Used by OSD, notification toasts, the media pop-out, and the Wi-Fi QR
+/// dialog: apply on map, remove on unmap while the wl_surface is
+/// still resolvable, keep destroy as a safety net, and live-update on theme
+/// changes. The bar, widget popovers, and Quick Settings manage blur
+/// themselves because they reshape it while animating.
 pub fn attach_blur_surface_lifecycle<W, C, R>(
     window: &W,
     content_resolver: C,
@@ -119,23 +139,12 @@ where
     C: Fn(&W) -> Option<gtk4::Widget> + Clone + 'static,
     R: Fn() -> i32 + Clone + 'static,
 {
-    use crate::services::config_manager::{ConfigManager, ThemeCallbackGuard};
+    use crate::services::config_manager::ThemeCallbackGuard;
 
     let content_for_map = content_resolver.clone();
     let radius_for_map = radius_fn.clone();
     window.connect_map(move |win| {
-        if ConfigManager::global().blur_enabled() {
-            if let Some(blur) = BackgroundEffectManager::global()
-                && let Some(content) = content_for_map(win)
-            {
-                blur.apply_blur_surface(win, &content, radius_for_map.clone());
-            }
-        } else if let Some(blur) = BackgroundEffectManager::global() {
-            // Remove any stale effect from a previous map cycle when blur was
-            // toggled off while the surface was unmapped — the unmap and
-            // theme-change cleanup paths are best-effort on an unmapped surface.
-            blur.remove_blur_region(win);
-        }
+        sync_blur(win, content_for_map(win), radius_for_map.clone());
     });
 
     window.connect_unmap(|win| {
@@ -155,15 +164,7 @@ where
         let Some(win) = win_weak.upgrade() else {
             return;
         };
-        if ConfigManager::global().blur_enabled() {
-            if let Some(blur) = BackgroundEffectManager::global()
-                && let Some(content) = content_resolver(&win)
-            {
-                blur.apply_blur_surface(&win, &content, radius_fn.clone());
-            }
-        } else if let Some(blur) = BackgroundEffectManager::global() {
-            blur.remove_blur_region(&win);
-        }
+        sync_blur(&win, content_resolver(&win), radius_fn.clone());
     });
 
     ThemeCallbackGuard(id)

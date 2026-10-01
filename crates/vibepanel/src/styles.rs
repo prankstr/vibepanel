@@ -335,9 +335,6 @@ pub mod qs {
     /// Cards row (`.qs-cards-row`).
     pub const CARDS_ROW: &str = "qs-cards-row";
 
-    /// Click catcher (`.qs-click-catcher`).
-    pub const CLICK_CATCHER: &str = "qs-click-catcher";
-
     // Toggle components
     /// Toggle icon (`.qs-toggle-icon`).
     pub const TOGGLE_ICON: &str = "qs-toggle-icon";

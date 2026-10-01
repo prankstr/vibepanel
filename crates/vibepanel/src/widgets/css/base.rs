@@ -332,10 +332,12 @@ popover.widget-menu .popover.widget-menu-content {{
     box-shadow: none;
 }}
 
-/* Hide focus outlines in popovers - keyboard nav not primary interaction */
-.vp-no-focus *:focus,
-.vp-no-focus *:focus-visible,
-.vp-no-focus *:focus-within {{
+/* Hide focus outlines in popovers - keyboard nav not primary interaction.
+   Not .popover: GTK marks ancestors focus-visible/-within too, and the
+   surface's box-shadow is its drop shadow. */
+.vp-no-focus *:not(.popover):focus,
+.vp-no-focus *:not(.popover):focus-visible,
+.vp-no-focus *:not(.popover):focus-within {{
     outline: none;
     box-shadow: none;
 }}
