@@ -16,7 +16,7 @@ use crate::services::network::{NetworkService, WifiAuthentication, WifiCredentia
 use crate::services::surfaces::{SHADOW_MARGIN, SurfaceStyleManager};
 use crate::styles::{button, color, qs, surface};
 use crate::widgets::layer_shell_popover::{
-    create_click_catcher, popover_keyboard_mode, setup_esc_handler,
+    AnimDirection, SurfaceAnimation, create_click_catcher, popover_keyboard_mode, setup_esc_handler,
 };
 use crate::widgets::rounded_picture::RoundedPicture;
 
@@ -26,11 +26,14 @@ const QR_QUIET_ZONE_MODULES: usize = 4;
 pub struct WifiQrWindow {
     window: ApplicationWindow,
     backdrop: ApplicationWindow,
+    anim: SurfaceAnimation,
+    card: GtkBox,
     _theme_callback_guard: ThemeCallbackGuard,
     password_controls: GtkBox,
     body: GtkBox,
     ssid_label: Label,
-    generation: Cell<u64>,
+    /// Invalidates credential fetches from earlier opens.
+    fetch_generation: Cell<u64>,
 }
 
 impl WifiQrWindow {
@@ -98,7 +101,9 @@ impl WifiQrWindow {
         wrapper.set_margin_bottom(SHADOW_MARGIN);
         wrapper.set_margin_start(SHADOW_MARGIN);
         wrapper.set_margin_end(SHADOW_MARGIN);
-        wrapper.append(&card);
+        let anim = SurfaceAnimation::new();
+        anim.shell().set_child(&card);
+        wrapper.append(anim.shell());
         window.set_child(Some(&wrapper));
 
         let card_for_blur = card.clone();
@@ -118,11 +123,13 @@ impl WifiQrWindow {
             Self {
                 window,
                 backdrop,
+                anim,
+                card: card.clone(),
                 _theme_callback_guard: theme_callback_guard,
                 password_controls,
                 body,
                 ssid_label,
-                generation: Cell::new(0),
+                fetch_generation: Cell::new(0),
             }
         });
 
@@ -149,22 +156,38 @@ impl WifiQrWindow {
     }
 
     pub fn show(self: &Rc<Self>, ssid: &str, monitor: Option<&Monitor>) {
-        let generation = self.generation.get().wrapping_add(1);
-        self.generation.set(generation);
+        let fetch_generation = self.fetch_generation.get().wrapping_add(1);
+        self.fetch_generation.set(fetch_generation);
         self.ssid_label.set_label(ssid);
         self.ssid_label.set_tooltip_text(Some(ssid));
         self.show_loading();
-        self.window.set_monitor(monitor);
+        let reversing = self.anim.can_reverse_on(&self.window, monitor);
+        if !reversing {
+            // Fresh open; unmap first in case a close is still running elsewhere.
+            self.window.set_visible(false);
+            self.window.set_monitor(monitor);
+        }
         self.backdrop.set_monitor(monitor);
         self.window.set_keyboard_mode(popover_keyboard_mode());
         self.backdrop.present();
-        self.window.present();
+        if reversing {
+            self.start_animation(AnimDirection::Opening, self.anim.generation());
+        } else {
+            let anim_generation = self.anim.next_generation();
+            let modal_weak = Rc::downgrade(self);
+            self.anim
+                .present_hidden_then(&self.window, anim_generation, move || {
+                    if let Some(modal) = modal_weak.upgrade() {
+                        modal.start_animation(AnimDirection::Opening, anim_generation);
+                    }
+                });
+        }
 
         let expected_ssid = ssid.to_string();
         let modal_weak = Rc::downgrade(self);
         NetworkService::global().request_active_wifi_credentials(move |result| {
             if let Some(modal) = modal_weak.upgrade()
-                && modal.generation.get() == generation
+                && modal.fetch_generation.get() == fetch_generation
                 && modal.window.is_visible()
             {
                 modal.show_result(
@@ -176,25 +199,34 @@ impl WifiQrWindow {
     }
 
     pub fn hide(&self) {
-        self.generation.set(self.generation.get().wrapping_add(1));
+        self.fetch_generation
+            .set(self.fetch_generation.get().wrapping_add(1));
         self.window.set_keyboard_mode(KeyboardMode::None);
-        self.window.set_visible(false);
         self.backdrop.set_visible(false);
-        self.clear_content();
+        let generation = self.anim.next_generation();
+        self.start_animation(AnimDirection::Closing, generation);
     }
 
-    fn clear_content(&self) {
-        while let Some(child) = self.body.first_child() {
-            self.body.remove(&child);
-        }
-        while let Some(child) = self.password_controls.first_child() {
-            self.password_controls.remove(&child);
-        }
-        self.password_controls.set_visible(false);
+    fn start_animation(&self, direction: AnimDirection, generation: u32) {
+        let body = self.body.downgrade();
+        let password_controls = self.password_controls.downgrade();
+        self.anim.run(
+            direction,
+            generation,
+            &self.window,
+            self.card.upcast_ref(),
+            move || {
+                if let (Some(body), Some(password_controls)) =
+                    (body.upgrade(), password_controls.upgrade())
+                {
+                    clear_content(&body, &password_controls);
+                }
+            },
+        );
     }
 
     fn show_loading(&self) {
-        self.clear_content();
+        clear_content(&self.body, &self.password_controls);
         let label = Label::new(Some("Loading Wi-Fi credentials..."));
         label.add_css_class(color::MUTED);
         self.body.append(&label);
@@ -202,7 +234,7 @@ impl WifiQrWindow {
     }
 
     fn show_result(&self, result: Result<WifiCredentials, String>) {
-        self.clear_content();
+        clear_content(&self.body, &self.password_controls);
         match result.and_then(|credentials| {
             wifi_qr_texture(&credentials).map(|(texture, image_size, quiet_zone)| {
                 let radius = ConfigManager::global()
@@ -276,6 +308,16 @@ impl Drop for WifiQrWindow {
         self.window.close();
         self.backdrop.close();
     }
+}
+
+fn clear_content(body: &GtkBox, password_controls: &GtkBox) {
+    while let Some(child) = body.first_child() {
+        body.remove(&child);
+    }
+    while let Some(child) = password_controls.first_child() {
+        password_controls.remove(&child);
+    }
+    password_controls.set_visible(false);
 }
 
 fn credentials_for_ssid(

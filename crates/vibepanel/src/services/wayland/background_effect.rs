@@ -122,13 +122,10 @@ pub fn sync_blur(
     }
 }
 
-/// Attach the standard blur lifecycle for standalone GTK windows.
-///
-/// Used by OSD, notification toasts, the media pop-out, and the Wi-Fi QR
-/// dialog: apply on map, remove on unmap while the wl_surface is
-/// still resolvable, keep destroy as a safety net, and live-update on theme
-/// changes. The bar, widget popovers, and Quick Settings manage blur
-/// themselves because they reshape it while animating.
+/// Standard blur lifecycle for standalone windows (OSD, toasts, media
+/// pop-out, Wi-Fi QR): apply on map, remove on unmap/destroy, follow theme
+/// changes. A theme change during an animated close briefly restores
+/// full-size blur.
 pub fn attach_blur_surface_lifecycle<W, C, R>(
     window: &W,
     content_resolver: C,
