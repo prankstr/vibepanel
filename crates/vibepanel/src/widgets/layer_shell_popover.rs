@@ -1,11 +1,12 @@
-//! Layer shell popover infrastructure for widget menus.
+//! Layer shell popover infrastructure.
 //!
-//! Provides two levels of abstraction:
-//!
-//! 1. **Helper functions** - Low-level utilities for layer-shell surfaces
-//!    that need click-catcher or focus handling.
-//!
-//! 2. **`LayerShellPopover`** - Complete popover solution for simple widget menus.
+//! - **Helper functions**: positioning, click-catcher, and focus utilities for
+//!   layer-shell surfaces.
+//! - **[`SurfaceAnimation`]**: open/close animation shared by widget popovers,
+//!   Quick Settings, and dialogs.
+//! - **[`BarPopoverChrome`]**: click-catcher and deferred keyboard navigation
+//!   for bar-anchored popovers.
+//! - **[`LayerShellPopover`]**: complete popover for widget menus.
 
 use gtk4::gdk::{self, Monitor};
 use gtk4::glib::{self, ControlFlow, Propagation};
@@ -16,7 +17,7 @@ use gtk4::{
 
 /// Whether a key is a keyboard navigation key (Tab, arrows, Home, End).
 /// Used by the deferred keyboard nav controller to gate activation.
-pub fn is_keynav_key(keyval: gdk::Key) -> bool {
+fn is_keynav_key(keyval: gdk::Key) -> bool {
     matches!(
         keyval,
         gdk::Key::Tab
@@ -35,18 +36,13 @@ use std::rc::Rc;
 use vibepanel_core::config::BarPosition;
 
 use super::scale_box::ScaleBox;
+use crate::services::background_effect::{BackgroundEffectManager, sync_blur};
 use crate::services::compositor::CompositorManager;
 use crate::services::config_manager::ConfigManager;
-use crate::services::surfaces::SurfaceStyleManager;
+use crate::services::surfaces::{SHADOW_MARGIN, SurfaceStyleManager};
 use crate::styles::{class, surface};
 
 type AnchorMonitorCallback = Rc<dyn Fn(Option<Monitor>)>;
-
-/// Margin around popover content for shadow rendering space.
-///
-/// GTK4 box-shadows extend beyond the widget bounds, so we need extra margin
-/// on the outer container to prevent shadow clipping.
-const POPOVER_SHADOW_MARGIN: i32 = 8;
 
 /// Minimum margin from screen edge for popovers.
 const POPOVER_MIN_EDGE_MARGIN: i32 = 4;
@@ -66,11 +62,18 @@ pub struct PopoverAnchor {
 }
 
 /// Animation duration as f64 milliseconds for tick-callback math.
-pub(crate) const ANIM_DURATION_MS: f64 = super::css::POPOVER_ANIMATION_MS as f64;
+const ANIM_DURATION_MS: f64 = super::css::POPOVER_ANIMATION_MS as f64;
 
 /// Starting scale for popover open/close animation.
 /// ScaleBox renders this as a true (quantized) center scale transform.
-pub(crate) const ANIM_SCALE_FROM: f64 = 0.94;
+const ANIM_SCALE_FROM: f64 = 0.94;
+
+/// Close progress at which a popover counts as fully hidden.
+///
+/// Compositor-side layer blur (e.g. mango `blur_layer`) is masked by buffer
+/// alpha, not scaled by it, so it stays at full strength over near-invisible
+/// content. Unmapping once content is imperceptible removes that lingering blur.
+const CLOSE_CUTOFF: f64 = 0.05;
 
 /// Direction of the popover animation.
 #[derive(Clone, Copy, PartialEq)]
@@ -154,6 +157,14 @@ impl AnimState {
         elapsed_ms >= segment_duration_ms
     }
 
+    /// Like [`is_complete`](Self::is_complete), but a close ends once progress
+    /// drops to [`CLOSE_CUTOFF`].
+    fn popover_is_complete(&self, now_us: i64) -> bool {
+        self.is_complete(now_us)
+            || (self.direction == AnimDirection::Closing
+                && self.current_progress(now_us) <= CLOSE_CUTOFF)
+    }
+
     /// Prepare an animation segment and determine if a new tick callback is needed.
     ///
     /// Captures the current progress (for mid-flight reversal), updates all state
@@ -194,84 +205,326 @@ impl AnimState {
     }
 }
 
-pub(crate) fn snap_anim_shell(shell: &ScaleBox, opacity: f64, scale: f64) {
+fn snap_anim_shell(shell: &ScaleBox, opacity: f64, scale: f64) {
     shell.set_opacity(opacity);
     shell.set_scale(scale);
 }
 
-/// Drive a popover animation, preserving progress during mid-flight reversals.
+/// Open/close animation for a layer-shell surface whose content sits in a
+/// [`ScaleBox`].
 ///
-/// `blur_target` contains the target window and content. `on_complete` runs once
-/// with the completed segment direction.
-pub(crate) fn run_popover_animation(
-    shell: &ScaleBox,
-    anim_state: &Rc<RefCell<AnimState>>,
-    anim_generation: &Rc<Cell<u32>>,
-    generation: u32,
-    direction: AnimDirection,
-    blur_target: Option<(
-        glib::WeakRef<ApplicationWindow>,
-        glib::WeakRef<gtk4::Widget>,
-    )>,
-    on_complete: impl Fn(AnimDirection, &ScaleBox) + 'static,
-) {
-    let start_time_us = shell.frame_clock().map(|fc| fc.frame_time()).unwrap_or(0);
+/// Owns the shell, animation state, and generation counter. Bumping the
+/// generation cancels stale tick and idle callbacks; reusing the current one
+/// while a close is in flight reverses it smoothly (see [`Self::is_closing`]).
+pub(crate) struct SurfaceAnimation {
+    shell: ScaleBox,
+    state: Rc<RefCell<AnimState>>,
+    generation: Rc<Cell<u32>>,
+}
 
-    let need_tick =
-        anim_state
-            .borrow_mut()
-            .prepare(direction, generation, start_time_us, shell.opacity());
-
-    if !need_tick {
-        return;
+impl SurfaceAnimation {
+    pub(crate) fn new() -> Self {
+        let shell = ScaleBox::new();
+        snap_anim_shell(&shell, 0.0, ANIM_SCALE_FROM);
+        Self {
+            shell,
+            state: Rc::new(RefCell::new(AnimState::new_idle())),
+            generation: Rc::new(Cell::new(0)),
+        }
     }
 
-    let anim_state = Rc::clone(anim_state);
-    let anim_gen = Rc::clone(anim_generation);
-    shell.add_tick_callback(move |shell, frame_clock| {
-        // Generation check — bail if a newer cycle started.
-        // Do NOT touch `active` — a newer tick callback owns that now.
-        if anim_gen.get() != generation {
-            return ControlFlow::Break;
+    pub(crate) fn shell(&self) -> &ScaleBox {
+        &self.shell
+    }
+
+    pub(crate) fn generation(&self) -> u32 {
+        self.generation.get()
+    }
+
+    /// Invalidate pending callbacks and return the new generation.
+    pub(crate) fn next_generation(&self) -> u32 {
+        let generation = self.generation.get().wrapping_add(1);
+        self.generation.set(generation);
+        generation
+    }
+
+    pub(crate) fn is_active(&self) -> bool {
+        self.state.borrow().active
+    }
+
+    /// Whether a close is in flight. Callers reopening in this state should
+    /// keep the current generation and call [`Self::run`] with `Opening`.
+    ///
+    /// An unmapped shell (e.g. its output went away mid-fade) has no frame
+    /// clock, so its close can never finish and does not count.
+    pub(crate) fn is_closing(&self) -> bool {
+        let state = self.state.borrow();
+        state.active && state.direction == AnimDirection::Closing && self.shell.is_mapped()
+    }
+
+    /// Whether reopening on `monitor` can reverse the close in flight. A move
+    /// to another output needs a fresh open; `None` keeps the current output.
+    pub(crate) fn can_reverse_on(
+        &self,
+        window: &ApplicationWindow,
+        monitor: Option<&Monitor>,
+    ) -> bool {
+        self.is_closing() && monitor.is_none_or(|m| window.monitor().as_ref() == Some(m))
+    }
+
+    /// Put the shell in its hidden start state, ending any running segment.
+    pub(crate) fn reset_hidden(&self) {
+        self.state.borrow_mut().active = false;
+        snap_anim_shell(&self.shell, 0.0, ANIM_SCALE_FROM);
+    }
+
+    /// Show the shell at full size, ending any running segment.
+    pub(crate) fn snap_open(&self) {
+        self.state.borrow_mut().active = false;
+        snap_anim_shell(&self.shell, 1.0, 1.0);
+    }
+
+    /// Reset the shell, map the window at opacity 0, then on idle (if
+    /// `generation` is still current) run `on_mapped` and reveal it. Hides the
+    /// first frame while the compositor sizes the surface.
+    pub(crate) fn present_hidden_then(
+        &self,
+        window: &ApplicationWindow,
+        generation: u32,
+        on_mapped: impl FnOnce() + 'static,
+    ) {
+        self.reset_hidden();
+        window.set_opacity(0.0);
+        window.set_visible(true);
+        window.present();
+        let window_weak = window.downgrade();
+        let current = Rc::clone(&self.generation);
+        glib::idle_add_local_once(move || {
+            if current.get() != generation {
+                return;
+            }
+            let Some(window) = window_weak.upgrade() else {
+                return;
+            };
+            on_mapped();
+            window.set_opacity(1.0);
+            CompositorManager::global().refresh_pointer_focus();
+        });
+    }
+
+    /// Animate towards `direction`, or snap when animations are disabled.
+    ///
+    /// Closing removes blur first, since compositor blur does not fade with the
+    /// content. When a close completes, the window is hidden and `on_hidden`
+    /// runs. A close reversed with the same generation keeps its tick, which
+    /// then finishes the open instead.
+    pub(crate) fn run(
+        &self,
+        direction: AnimDirection,
+        generation: u32,
+        window: &ApplicationWindow,
+        blur_content: &gtk4::Widget,
+        on_hidden: impl Fn() + 'static,
+    ) {
+        // Nothing to close, and a tick on an unmapped widget would never run.
+        if direction == AnimDirection::Closing && !window.is_visible() {
+            return;
+        }
+        if !ConfigManager::global().animations_enabled() {
+            match direction {
+                AnimDirection::Opening => self.snap_open(),
+                AnimDirection::Closing => {
+                    self.reset_hidden();
+                    window.set_visible(false);
+                    on_hidden();
+                }
+            }
+            return;
         }
 
-        let now_us = frame_clock.frame_time();
-        let (progress, complete, direction) = {
-            let state = anim_state.borrow();
-            if !state.active {
+        if direction == AnimDirection::Closing {
+            // An open may still be waiting for its idle pass with window
+            // opacity at 0; the fade must be visible.
+            window.set_opacity(1.0);
+            if let Some(blur) = BackgroundEffectManager::global() {
+                blur.remove_blur_region(window);
+            }
+        }
+
+        let start_time_us = self
+            .shell
+            .frame_clock()
+            .map(|fc| fc.frame_time())
+            .unwrap_or(0);
+        let need_tick = self.state.borrow_mut().prepare(
+            direction,
+            generation,
+            start_time_us,
+            self.shell.opacity(),
+        );
+        // A running tick with this generation picks up the new direction.
+        if !need_tick {
+            return;
+        }
+
+        let state = Rc::clone(&self.state);
+        let current = Rc::clone(&self.generation);
+        let window_weak = window.downgrade();
+        let blur_weak = blur_content.downgrade();
+        self.shell.add_tick_callback(move |shell, frame_clock| {
+            // A newer cycle owns `active`; just stop.
+            if current.get() != generation {
                 return ControlFlow::Break;
             }
-            (
-                state.current_progress(now_us),
-                state.is_complete(now_us),
-                state.direction,
-            )
-        };
 
-        shell.set_opacity(progress);
-        let scale = ANIM_SCALE_FROM + (1.0 - ANIM_SCALE_FROM) * progress;
-        shell.set_scale(scale);
+            let now_us = frame_clock.frame_time();
+            let (progress, complete, direction) = {
+                let state = state.borrow();
+                if !state.active {
+                    return ControlFlow::Break;
+                }
+                (
+                    state.current_progress(now_us),
+                    state.popover_is_complete(now_us),
+                    state.direction,
+                )
+            };
 
-        if direction == AnimDirection::Opening
-            && ConfigManager::global().blur_enabled()
-            && let Some(blur) =
-                crate::services::background_effect::BackgroundEffectManager::global()
-            && let Some((ref window_weak, ref content_weak)) = blur_target
-            && let Some(window) = window_weak.upgrade()
-            && let Some(content) = content_weak.upgrade()
-        {
-            // Match the blur to the quantized scale that ScaleBox renders.
-            blur.apply_open_animation_blur(&window, &content, shell.scale(), complete);
+            shell.set_opacity(progress);
+            shell.set_scale(ANIM_SCALE_FROM + (1.0 - ANIM_SCALE_FROM) * progress);
+
+            if direction == AnimDirection::Opening
+                && ConfigManager::global().blur_enabled()
+                && let Some(blur) = BackgroundEffectManager::global()
+                && let Some(window) = window_weak.upgrade()
+                && let Some(content) = blur_weak.upgrade()
+            {
+                // Match the blur to the quantized scale that ScaleBox renders.
+                blur.apply_open_animation_blur(&window, &content, shell.scale(), complete);
+            }
+
+            if !complete {
+                return ControlFlow::Continue;
+            }
+            state.borrow_mut().active = false;
+            if direction == AnimDirection::Opening {
+                snap_anim_shell(shell, 1.0, 1.0);
+            } else {
+                snap_anim_shell(shell, 0.0, ANIM_SCALE_FROM);
+                if let Some(window) = window_weak.upgrade() {
+                    window.set_visible(false);
+                }
+                on_hidden();
+            }
+            ControlFlow::Break
+        });
+    }
+}
+
+/// Click-catcher and deferred keyboard navigation shared by bar popovers.
+///
+/// The window's child carries `.vp-no-focus`; focus rings stay hidden until
+/// the first keynav key (Tab, arrows, Home, End).
+#[derive(Default)]
+pub(crate) struct BarPopoverChrome {
+    catcher: RefCell<Option<ApplicationWindow>>,
+    keynav: Rc<RefCell<Option<EventControllerKey>>>,
+}
+
+impl BarPopoverChrome {
+    #[cfg(test)]
+    pub(crate) fn catcher(&self) -> Option<ApplicationWindow> {
+        self.catcher.borrow().clone()
+    }
+
+    /// Show the click-catcher (created lazily) and grab the keyboard.
+    /// `on_dismiss` is only used when the catcher is first created.
+    pub(crate) fn open(
+        &self,
+        window: &ApplicationWindow,
+        monitor: Option<&Monitor>,
+        on_dismiss: impl Fn() + Clone + 'static,
+    ) {
+        let catcher = self
+            .catcher
+            .borrow_mut()
+            .get_or_insert_with(|| {
+                let app = window
+                    .application()
+                    .expect("popover window must have an application");
+                create_click_catcher(&app, calculate_bar_exclusive_zone(), on_dismiss)
+            })
+            .clone();
+        if let Some(monitor) = monitor {
+            catcher.set_monitor(Some(monitor));
+        }
+        catcher.set_margin(popover_bar_edge(), calculate_bar_exclusive_zone());
+        catcher.set_visible(true);
+        window.set_keyboard_mode(popover_keyboard_mode());
+    }
+
+    /// Hide the catcher, release the keyboard and the height freeze, and
+    /// restore focus suppression so the next open starts without focus rings.
+    pub(crate) fn close(&self, window: &ApplicationWindow) {
+        GtkWindowExt::set_focus_visible(window, false);
+        if let Some(child) = window.child() {
+            child.add_css_class(surface::NO_FOCUS);
+        }
+        if let Some(controller) = self.keynav.borrow_mut().take() {
+            window.remove_controller(&controller);
+        }
+        if let Some(ref catcher) = *self.catcher.borrow() {
+            catcher.set_visible(false);
+        }
+        clear_surface_height_freeze(window);
+        window.set_keyboard_mode(KeyboardMode::None);
+    }
+
+    /// Clear auto-focus from `present()` and wait for a keynav key before
+    /// showing focus rings.
+    pub(crate) fn prepare_keynav(&self, window: &ApplicationWindow) {
+        GtkWindowExt::set_focus(window, None::<&gtk4::Widget>);
+        if let Some(old) = self.keynav.borrow_mut().take() {
+            window.remove_controller(&old);
         }
 
-        if complete {
-            anim_state.borrow_mut().active = false;
-            on_complete(direction, shell);
-            return ControlFlow::Break;
-        }
+        let controller = EventControllerKey::new();
+        let slot = Rc::downgrade(&self.keynav);
+        let window_weak = window.downgrade();
+        controller.connect_key_pressed(move |ctrl, keyval, _, _| {
+            if !is_keynav_key(keyval) {
+                return Propagation::Proceed;
+            }
+            let Some(window) = window_weak.upgrade() else {
+                return Propagation::Proceed;
+            };
+            GtkWindowExt::set_focus_visible(&window, true);
+            if let Some(child) = window.child() {
+                child.remove_css_class(surface::NO_FOCUS);
+            }
+            window.remove_controller(ctrl);
+            if let Some(slot) = slot.upgrade() {
+                slot.borrow_mut().take();
+            }
+            if keyval == gdk::Key::Tab || keyval == gdk::Key::ISO_Left_Tab {
+                // GTK's own Tab keynav sets :focus-visible correctly.
+                Propagation::Proceed
+            } else {
+                // Arrows/Home/End: land on the first widget like Tab would.
+                window.child_focus(gtk4::DirectionType::TabForward);
+                Propagation::Stop
+            }
+        });
+        window.add_controller(controller.clone());
+        *self.keynav.borrow_mut() = Some(controller);
+    }
 
-        ControlFlow::Continue
-    });
+    /// Close the catcher window (for `Drop`).
+    pub(crate) fn destroy(&self) {
+        if let Some(catcher) = self.catcher.borrow_mut().take() {
+            catcher.close();
+        }
+    }
 }
 
 fn measured_popover_size(widget: &gtk4::Widget) -> Option<(i32, i32)> {
@@ -746,9 +999,7 @@ impl SurfaceHeightFreeze {
             else {
                 return;
             };
-            if let Some(blur) =
-                crate::services::background_effect::BackgroundEffectManager::global()
-            {
+            if let Some(blur) = BackgroundEffectManager::global() {
                 blur.apply_blur_surface(&window, &content, || {
                     ConfigManager::global().surface_border_radius() as i32
                 });
@@ -803,7 +1054,7 @@ impl SurfaceHeightFreeze {
         else {
             return;
         };
-        if let Some(blur) = crate::services::background_effect::BackgroundEffectManager::global() {
+        if let Some(blur) = BackgroundEffectManager::global() {
             blur.apply_blur_region_animated(&window, &content, 1.0);
         }
     }
@@ -835,7 +1086,7 @@ fn surface_height_freeze_for(widget: &impl IsA<gtk4::Widget>) -> Option<Rc<Surfa
     }
 }
 
-pub(crate) fn clear_surface_height_freeze(window: &ApplicationWindow) {
+fn clear_surface_height_freeze(window: &ApplicationWindow) {
     unsafe {
         if let Some(freeze) = window.data::<Rc<SurfaceHeightFreeze>>(HEIGHT_FREEZE_DATA_KEY) {
             freeze.as_ref().clear();
@@ -891,7 +1142,7 @@ fn ensure_height_freeze_release_hook(revealer: &gtk4::Revealer, freeze: &Rc<Surf
 /// ## Animation architecture
 ///
 /// Open/close animations (opacity fade + scale) are driven by a **tick
-/// callback** on the persistent animation shell ([`run_popover_animation`]),
+/// callback** on the persistent animation shell ([`SurfaceAnimation`]),
 /// not by CSS `transition:` properties. The shell is a [`ScaleBox`] that
 /// renders a true center scale transform with a *quantized* scale value —
 /// continuous per-frame scales leak renderer glyph caches (see the
@@ -909,10 +1160,10 @@ pub struct LayerShellPopover {
     widget_name: String,
     builder: Rc<dyn Fn() -> gtk4::Widget>,
     window: RefCell<Option<ApplicationWindow>>,
-    click_catcher: RefCell<Option<ApplicationWindow>>,
-    /// Persistent animation shell. Never destroyed. Builder content is placed
-    /// inside this as a child and swapped on each show.
-    anim_shell: RefCell<Option<ScaleBox>>,
+    chrome: BarPopoverChrome,
+    /// Open/close animation. Its persistent shell is never destroyed; builder
+    /// content is placed inside it and swapped on each show.
+    anim: SurfaceAnimation,
     /// Widget center in monitor coordinates.
     anchor: Cell<PopoverAnchor>,
     anchor_monitor: RefCell<Option<Monitor>>,
@@ -925,11 +1176,6 @@ pub struct LayerShellPopover {
     on_show: RefCell<Option<Rc<dyn Fn()>>>,
     /// Optional callback invoked when `show_at()` receives a new anchor monitor.
     on_anchor_monitor_changed: RefCell<Option<AnchorMonitorCallback>>,
-    /// Shared animation state driven by the tick callback.
-    anim_state: Rc<RefCell<AnimState>>,
-    /// Generation counter incremented on every show/hide to cancel stale
-    /// tick callbacks and idle callbacks.
-    anim_generation: Rc<Cell<u32>>,
     /// Logical open state. True from the moment show() is called until
     /// hide() is called. Used by is_visible() so the toggle logic in BaseWidget works correctly
     /// even while a close animation is in flight.
@@ -948,9 +1194,6 @@ pub struct LayerShellPopover {
     /// Cached content widget for reuse mode. Kept alive across close cycles
     /// so it can be re-parented on the next open.
     cached_content: RefCell<Option<gtk4::Widget>>,
-    /// One-shot key controller installed by `prepare_keyboard_nav()`.
-    /// Stored so `hide()` can remove it if Tab was never pressed.
-    deferred_kbd_controller: RefCell<Option<EventControllerKey>>,
 }
 
 impl LayerShellPopover {
@@ -970,20 +1213,17 @@ impl LayerShellPopover {
             widget_name: widget_name.to_string(),
             builder: Rc::new(builder),
             window: RefCell::new(None),
-            click_catcher: RefCell::new(None),
-            anim_shell: RefCell::new(None),
+            chrome: BarPopoverChrome::default(),
+            anim: SurfaceAnimation::new(),
             anchor: Cell::new(PopoverAnchor::default()),
             anchor_monitor: RefCell::new(None),
             on_close: RefCell::new(None),
             on_show: RefCell::new(None),
             on_anchor_monitor_changed: RefCell::new(None),
-            anim_state: Rc::new(RefCell::new(AnimState::new_idle())),
-            anim_generation: Rc::new(Cell::new(0)),
             logically_open: Cell::new(false),
             content_dirty: Cell::new(false),
             reuse_content: Cell::new(false),
             cached_content: RefCell::new(None),
-            deferred_kbd_controller: RefCell::new(None),
         })
     }
 
@@ -1004,7 +1244,7 @@ impl LayerShellPopover {
 
     #[cfg(test)]
     pub(crate) fn test_click_catcher(&self) -> Option<ApplicationWindow> {
-        self.click_catcher.borrow().as_ref().cloned()
+        self.chrome.catcher()
     }
 
     /// Set a callback to be invoked when the popover is hidden.
@@ -1045,85 +1285,6 @@ impl LayerShellPopover {
         self.content_dirty.set(true);
     }
 
-    /// Enable keyboard navigation by removing the `.vp-no-focus` CSS class
-    /// from the outer wrapper and enabling GTK's `focus-visible` property so
-    /// Adwaita renders `:focus-visible` rings on focused widgets.
-    ///
-    /// Activated by the deferred Tab controller installed in `show_internal()`.
-    /// On `hide()`, `focus-visible` is reset to `false` and `.vp-no-focus`
-    /// is restored so the next open starts focus-suppressed.
-    pub fn enable_keyboard_nav(&self) {
-        if let Some(ref window) = *self.window.borrow()
-            && let Some(child) = window.child()
-        {
-            gtk4::prelude::GtkWindowExt::set_focus_visible(window, true);
-            child.remove_css_class(surface::NO_FOCUS);
-        }
-    }
-
-    /// Prepare deferred keyboard navigation.
-    ///
-    /// Clears any auto-focus set by `present()` and installs a one-shot key
-    /// controller that waits for a keynav key (Tab, arrows, Home, End).
-    /// On the first such press, `enable_keyboard_nav()` fires and focus
-    /// lands on the first focusable widget with correct `:focus-visible`
-    /// state. Until a keynav key is pressed, the popover shows no focus rings.
-    pub fn prepare_keyboard_nav(self: &Rc<Self>) {
-        let Some(ref window) = *self.window.borrow() else {
-            return;
-        };
-
-        // Clear any auto-focus from present() so Tab starts from nothing
-        // and lands on the first focusable widget.
-        gtk4::prelude::GtkWindowExt::set_focus(window, None::<&gtk4::Widget>);
-
-        // Remove any previous deferred controller (e.g. rapid toggle).
-        self.remove_deferred_kbd_controller();
-
-        let controller = EventControllerKey::new();
-        let weak_self = Rc::downgrade(self);
-        let ctrl_ref = controller.clone();
-        controller.connect_key_pressed(move |_, keyval, _, _| {
-            let is_keynav = is_keynav_key(keyval);
-            if is_keynav && let Some(popover) = weak_self.upgrade() {
-                popover.enable_keyboard_nav();
-                if let Some(ref window) = *popover.window.borrow() {
-                    window.remove_controller(&ctrl_ref);
-                }
-                *popover.deferred_kbd_controller.borrow_mut() = None;
-            }
-            if keyval == gdk::Key::Tab || keyval == gdk::Key::ISO_Left_Tab {
-                // Let Tab propagate — GTK focuses the first widget with
-                // correct :focus-visible via its own keynav path.
-                Propagation::Proceed
-            } else if is_keynav {
-                // For arrows/Home/End, consume the key and simulate Tab's
-                // focus behavior so we land on the first widget instead of
-                // skipping it.
-                if let Some(popover) = weak_self.upgrade()
-                    && let Some(ref window) = *popover.window.borrow()
-                {
-                    window.child_focus(gtk4::DirectionType::TabForward);
-                }
-                Propagation::Stop
-            } else {
-                Propagation::Proceed
-            }
-        });
-
-        window.add_controller(controller.clone());
-        *self.deferred_kbd_controller.borrow_mut() = Some(controller);
-    }
-
-    /// Remove the deferred keyboard nav controller if installed.
-    fn remove_deferred_kbd_controller(&self) {
-        if let Some(controller) = self.deferred_kbd_controller.borrow_mut().take()
-            && let Some(ref window) = *self.window.borrow()
-        {
-            window.remove_controller(&controller);
-        }
-    }
-
     /// Show the popover at the given anchor position.
     ///
     /// Reuses all persistent shells (window, animation, click-catcher) and
@@ -1155,70 +1316,16 @@ impl LayerShellPopover {
             crate::popover_tracker::PopoverTracker::global().notify_changed();
         }
 
-        // Restore focus suppression so the next open starts no-focus.
-        // (keyboard nav defers removal to enable_keyboard_nav().)
-        if let Some(ref window) = *self.window.borrow() {
-            gtk4::prelude::GtkWindowExt::set_focus_visible(window, false);
-            if let Some(child) = window.child()
-                && !child.has_css_class(surface::NO_FOCUS)
-            {
-                child.add_css_class(surface::NO_FOCUS);
-            }
-        }
-        self.remove_deferred_kbd_controller();
-
         // Bump generation to cancel any pending idle callback from show_internal().
-        let generation = self.anim_generation.get().wrapping_add(1);
-        self.anim_generation.set(generation);
+        let generation = self.anim.next_generation();
 
-        // Hide click-catcher immediately so bar is interactive during animation.
-        if let Some(ref catcher) = *self.click_catcher.borrow() {
-            catcher.set_visible(false);
-        }
-
-        let window = self.window.borrow().as_ref().cloned();
-        let anim_shell = self.anim_shell.borrow().as_ref().cloned();
-
-        let Some(window) = window else {
+        let Some(window) = self.window.borrow().as_ref().cloned() else {
             return;
         };
+        // Catcher hides now so the bar is interactive during the fade.
+        self.chrome.close(&window);
 
-        clear_surface_height_freeze(&window);
-
-        // Release keyboard grab while hiding.
-        window.set_keyboard_mode(KeyboardMode::None);
-
-        // If animations are disabled, snap closed immediately.
-        if !ConfigManager::global().animations_enabled() {
-            if let Some(ref shell) = anim_shell {
-                snap_anim_shell(shell, 0.0, ANIM_SCALE_FROM);
-                shell.remove_child();
-            }
-            // No explicit blur removal needed — unmapping suspends
-            // compositor-side blur while the protocol object persists.
-            // Blur is re-applied on next map via connect_map.
-            window.set_visible(false);
-            // Fire on_close now since there's no animation to wait for.
-            if let Some(ref cb) = *self.on_close.borrow() {
-                cb();
-            }
-            return;
-        }
-
-        // Ensure the window is fully visible (the idle callback from show_internal
-        // may not have fired yet, leaving window.opacity at 0.0).
-        window.set_opacity(1.0);
-
-        // Remove blur immediately so the compositor stops drawing it while the
-        // surface fades out.  Blur is a compositor effect independent of surface
-        // opacity — if left in place it would remain visible as the content
-        // becomes transparent.
-        if let Some(blur) = crate::services::background_effect::BackgroundEffectManager::global() {
-            blur.remove_blur_region(&window);
-        }
-
-        // Start (or reverse into) the close animation.
-        // on_close fires when the animation completes (in the tick callback).
+        // on_close fires once the window is hidden.
         self.start_animation(AnimDirection::Closing, generation);
     }
 
@@ -1229,25 +1336,19 @@ impl LayerShellPopover {
     /// the hide→show cycle which would trigger the mid-close reversal path and
     /// skip the content rebuild.
     pub fn rebuild_content(self: &Rc<Self>) {
-        let Some(anim_shell) = self.anim_shell.borrow().as_ref().cloned() else {
+        // Nothing to rebuild before the first show.
+        let Some(window) = self.window.borrow().as_ref().cloned() else {
             return;
         };
+        clear_surface_height_freeze(&window);
 
-        if let Some(ref window) = *self.window.borrow() {
-            clear_surface_height_freeze(window);
-        }
-
+        let anim_shell = self.anim.shell();
         anim_shell.remove_child();
 
         // Invalidate cache so the builder runs fresh.
         *self.cached_content.borrow_mut() = None;
 
-        let content = (self.builder)();
-        content.add_css_class(surface::POPOVER);
-        content.add_css_class(surface::SURFACE_POPOVER);
-        content.add_css_class(surface::WIDGET_MENU);
-        let popover_class = format!("{}-popover", self.widget_name);
-        content.add_css_class(&popover_class);
+        let content = self.build_content();
 
         // Re-cache if in reuse mode.
         if self.reuse_content.get() {
@@ -1255,7 +1356,7 @@ impl LayerShellPopover {
         }
 
         anim_shell.set_child(&content);
-        SurfaceStyleManager::global().apply_pango_attrs_all(&anim_shell);
+        SurfaceStyleManager::global().apply_pango_attrs_all(anim_shell);
 
         // Reposition after content updates while visible (e.g. notifications
         // list changing in-place). Do this in idle so GTK has a chance to
@@ -1276,185 +1377,80 @@ impl LayerShellPopover {
         // Mark as logically open immediately.
         self.logically_open.set(true);
 
-        // If we're currently animating a close, the window is still visible
-        // with content — just reverse the animation direction. No need to
-        // rebuild content, recreate click-catcher, etc.
-        let was_closing = {
-            let state = self.anim_state.borrow();
-            state.active && state.direction == AnimDirection::Closing
-        };
-
-        if was_closing {
-            // Content may have become stale during the close animation (e.g. a
-            // notification arrived while logically_open was false). Rebuild now
-            // so the user doesn't see outdated content when the reversal
-            // completes.
+        // Same output mid-close: reverse the running animation.
+        let window = self.ensure_window_shell();
+        if self
+            .anim
+            .can_reverse_on(&window, self.anchor_monitor.borrow().as_ref())
+        {
+            // Content may have gone stale while logically closed (e.g. a
+            // notification arrived); rebuild before the reversal completes.
             if self.content_dirty.take() {
                 self.rebuild_content();
             }
             self.fire_on_show();
-
-            // Use the CURRENT generation (set by hide()) so the existing tick
-            // callback stays valid — no new closure allocation needed.
-            let generation = self.anim_generation.get();
-            // Re-show click-catcher (hide() hid it).
-            let catcher = self.ensure_click_catcher();
-            if let Some(ref monitor) = *self.anchor_monitor.borrow() {
-                catcher.set_monitor(Some(monitor));
-            }
-            catcher.set_margin(popover_bar_edge(), calculate_bar_exclusive_zone());
-            catcher.set_visible(true);
-
-            // Restore keyboard mode (hide() set it to None).
-            if let Some(ref window) = *self.window.borrow() {
-                window.set_keyboard_mode(popover_keyboard_mode());
-            }
-
+            self.open_chrome(&window);
             // Anchor may have changed since the original open.
             self.update_position();
-
-            // Reverse into opening — tick callback picks up new direction.
-            self.start_animation(AnimDirection::Opening, generation);
-
-            // Install deferred Tab controller so keyboard nav activates on Tab.
-            self.prepare_keyboard_nav();
+            self.start_animation(AnimDirection::Opening, self.anim.generation());
+            self.chrome.prepare_keynav(&window);
             return;
         }
 
-        // Not mid-close — full open from scratch. If reused content was marked
-        // dirty while hidden, rebuild it before attaching instead of mutating
-        // the mapped content during on_show.
+        // Full open. If reused content was marked dirty while hidden, rebuild
+        // it before attaching instead of mutating the mapped content in on_show.
         let rebuild_cached_content = self.content_dirty.take();
-        // Bump generation to cancel any stale tick callbacks or idle callbacks.
-        let generation = self.anim_generation.get().wrapping_add(1);
-        self.anim_generation.set(generation);
+        let generation = self.anim.next_generation();
 
-        // If the window is somehow still visible (shouldn't happen with
-        // logically_open guard, but be defensive), hide it synchronously.
-        if self
-            .window
-            .borrow()
-            .as_ref()
-            .is_some_and(|w| w.is_visible())
-        {
-            // Snap-close without animation to avoid recursion.
-            if let Some(ref shell) = *self.anim_shell.borrow() {
-                snap_anim_shell(shell, 0.0, ANIM_SCALE_FROM);
-                shell.remove_child();
-            }
-            if let Some(ref window) = *self.window.borrow() {
-                window.set_visible(false);
-            }
+        // Fresh open; also drops a close still running on another output.
+        if window.is_visible() {
+            window.set_visible(false);
         }
 
-        let window = self.ensure_window_shell();
-
-        let anim_shell = self.ensure_anim_shell();
-
+        let anim_shell = self.anim.shell();
         anim_shell.remove_child();
 
-        // Get or build content. In reuse mode, the builder is called only once
-        // and the widget is cached for subsequent opens. This avoids per-cycle
-        // widget allocation which leaks memory in GTK4 for complex widgets.
-        let content = if self.reuse_content.get() {
-            if !rebuild_cached_content && let Some(ref cached) = *self.cached_content.borrow() {
-                cached.clone()
-            } else {
-                let fresh = (self.builder)();
-                fresh.add_css_class(surface::POPOVER);
-                fresh.add_css_class(surface::SURFACE_POPOVER);
-                fresh.add_css_class(surface::WIDGET_MENU);
-                let popover_class = format!("{}-popover", self.widget_name);
-                fresh.add_css_class(&popover_class);
+        // In reuse mode the builder runs once; per-cycle allocation leaks
+        // memory in GTK4 for complex widgets (e.g. Calendar).
+        let cached = self
+            .cached_content
+            .borrow()
+            .clone()
+            .filter(|_| self.reuse_content.get() && !rebuild_cached_content);
+        let content = cached.unwrap_or_else(|| {
+            let fresh = self.build_content();
+            if self.reuse_content.get() {
                 *self.cached_content.borrow_mut() = Some(fresh.clone());
-                fresh
             }
-        } else {
-            let fresh = (self.builder)();
-            fresh.add_css_class(surface::POPOVER);
-            fresh.add_css_class(surface::SURFACE_POPOVER);
-            fresh.add_css_class(surface::WIDGET_MENU);
-            let popover_class = format!("{}-popover", self.widget_name);
-            fresh.add_css_class(&popover_class);
             fresh
-        };
-
+        });
         anim_shell.set_child(&content);
 
         // Fire on_show callback (e.g. to refresh calendar to today's date).
         self.fire_on_show();
-
-        SurfaceStyleManager::global().apply_pango_attrs_all(&anim_shell);
+        SurfaceStyleManager::global().apply_pango_attrs_all(anim_shell);
 
         if let Some(ref monitor) = *self.anchor_monitor.borrow() {
             window.set_monitor(Some(monitor));
         }
+        self.open_chrome(&window);
 
-        let animations_enabled = ConfigManager::global().animations_enabled();
-
-        // Ensure the outer wrapper is set as the window's child (persists).
-        if window.child().is_none() {
-            let outer = GtkBox::new(Orientation::Vertical, 0);
-            outer.add_css_class(surface::POPOVER_WRAPPER);
-            outer.add_css_class(surface::WIDGET_MENU_WRAPPER);
-            outer.add_css_class(surface::NO_FOCUS);
-            SurfaceStyleManager::global().apply_shadow_margins(&outer, POPOVER_SHADOW_MARGIN);
-            outer.append(&anim_shell);
-            window.set_child(Some(&outer));
-            install_surface_height_freeze(&window, &anim_shell);
-        }
-
-        // Restore keyboard mode (hide() sets it to None).
-        window.set_keyboard_mode(popover_keyboard_mode());
-
-        // Show click-catcher (persistent, created lazily).
-        let catcher = self.ensure_click_catcher();
-        if let Some(ref monitor) = *self.anchor_monitor.borrow() {
-            catcher.set_monitor(Some(monitor));
-        }
-        catcher.set_margin(popover_bar_edge(), calculate_bar_exclusive_zone());
-        catcher.set_visible(true);
-
-        if animations_enabled {
-            // Set the shell to the hidden state — animation will grow in via tick.
-            anim_shell.set_opacity(0.0);
-            anim_shell.set_scale(ANIM_SCALE_FROM);
-
-            // Show window with opacity trick to avoid flicker during positioning.
-            window.set_opacity(0.0);
-            window.set_visible(true);
-            window.present();
-
-            // present() may assign auto-focus, so install after mapping to clear
-            // it and keep focus rings hidden until the first keynav press.
-            self.prepare_keyboard_nav();
-
-            // After window is mapped, update position and start the open animation.
+        if ConfigManager::global().animations_enabled() {
             let weak_self = Rc::downgrade(self);
-            let gen_rc = Rc::clone(&self.anim_generation);
-            glib::idle_add_local_once(move || {
-                if gen_rc.get() != generation {
-                    return;
-                }
+            self.anim.present_hidden_then(&window, generation, move || {
                 if let Some(popover) = weak_self.upgrade() {
                     popover.update_position();
-                    if let Some(ref window) = *popover.window.borrow() {
-                        window.set_opacity(1.0);
-                        CompositorManager::global().refresh_pointer_focus();
-                    }
                     popover.start_animation(AnimDirection::Opening, generation);
                 }
             });
         } else {
-            // Animations disabled: snap everything visible before mapping so a
-            // close/open cycle cannot leave the reused layer-shell surface
-            // transparent if GTK skips or delays the idle positioning pass.
-            snap_anim_shell(&anim_shell, 1.0, 1.0);
+            // Snap visible before mapping so a close/open cycle cannot leave
+            // the reused surface transparent if the idle pass is delayed.
+            self.anim.snap_open();
             window.set_opacity(1.0);
 
             // Position before map using GTK's natural size so the first visible
-            // frame is already placed correctly. The idle pass below still uses
-            // real allocation for final placement after map.
+            // frame is already placed; the idle pass refines with the real size.
             self.update_position_for_size(
                 window
                     .child()
@@ -1464,22 +1460,37 @@ impl LayerShellPopover {
             window.present();
             CompositorManager::global().refresh_pointer_focus();
 
-            // present() may assign auto-focus, so install after mapping to clear
-            // it and keep focus rings hidden until the first keynav press.
-            self.prepare_keyboard_nav();
-
-            // Still need idle update_position for correct margin calculation
-            // after the compositor has allocated the surface.
             let weak_self = Rc::downgrade(self);
             glib::idle_add_local_once(move || {
-                if let Some(popover) = weak_self.upgrade() {
-                    if !popover.logically_open.get() {
-                        return;
-                    }
+                if let Some(popover) = weak_self.upgrade()
+                    && popover.logically_open.get()
+                {
                     popover.update_position();
                 }
             });
         }
+
+        // present() may assign auto-focus; clear it after mapping.
+        self.chrome.prepare_keynav(&window);
+    }
+
+    fn open_chrome(self: &Rc<Self>, window: &ApplicationWindow) {
+        let weak_self = Rc::downgrade(self);
+        self.chrome
+            .open(window, self.anchor_monitor.borrow().as_ref(), move || {
+                if let Some(popover) = weak_self.upgrade() {
+                    popover.hide();
+                }
+            });
+    }
+
+    fn build_content(&self) -> gtk4::Widget {
+        let content = (self.builder)();
+        content.add_css_class(surface::POPOVER);
+        content.add_css_class(surface::SURFACE_POPOVER);
+        content.add_css_class(surface::WIDGET_MENU);
+        content.add_css_class(&format!("{}-popover", self.widget_name));
+        content
     }
 
     fn fire_on_show(&self) {
@@ -1491,8 +1502,8 @@ impl LayerShellPopover {
     /// Ensure the window shell exists, creating it lazily if needed.
     ///
     /// The shell includes the `ApplicationWindow`, layer-shell configuration,
-    /// and ESC key handler — but no content. Content is set by `show_internal()`
-    /// on each open.
+    /// ESC handler, and the persistent wrapper around the animation shell.
+    /// Content is set by `show_internal()` on each open.
     fn ensure_window_shell(self: &Rc<Self>) -> ApplicationWindow {
         if let Some(ref window) = *self.window.borrow() {
             return window.clone();
@@ -1505,10 +1516,7 @@ impl LayerShellPopover {
             .resizable(false)
             .build();
 
-        // CSS classes
         window.add_css_class(surface::LAYER_SHELL_POPOVER);
-
-        // Layer shell configuration.
         window.init_layer_shell();
         window.set_namespace(Some(&format!("vibepanel-{}-popover", self.widget_name)));
         window.set_layer(Layer::Top);
@@ -1516,95 +1524,34 @@ impl LayerShellPopover {
         configure_popover_layer_anchors(&window);
         window.set_keyboard_mode(popover_keyboard_mode());
 
-        // ESC key handler
-        {
-            let weak_self = Rc::downgrade(self);
-            setup_esc_handler(&window, move || {
-                if let Some(popover) = weak_self.upgrade() {
-                    popover.hide();
-                }
-            });
-        }
+        let outer = GtkBox::new(Orientation::Vertical, 0);
+        outer.add_css_class(surface::POPOVER_WRAPPER);
+        outer.add_css_class(surface::WIDGET_MENU_WRAPPER);
+        outer.add_css_class(surface::NO_FOCUS);
+        SurfaceStyleManager::global().apply_shadow_margins(&outer, SHADOW_MARGIN);
+        outer.append(self.anim.shell());
+        window.set_child(Some(&outer));
+        install_surface_height_freeze(&window, self.anim.shell());
 
-        // Apply blur on every map (first show and re-show). Close calls
-        // set_visible(false) which unmaps the surface, so connect_map fires
-        // again when the window is re-shown. The content-bounds resize watcher
-        // handles first-map readiness. On re-show the animation tick overwrites
-        // the full-size region with a scaled region within 1-2 frames.
-        //
-        // The else-branch removes any stale protocol object left from a
-        // previous map cycle.  This handles the case where blur was enabled
-        // when the popover was last shown, then disabled while the popover
-        // was hidden (unmapped).  `remove_blur_region` requires a mapped
-        // surface, so connect_map is the earliest reliable cleanup point.
-        //
-        // Known limitation: config changes to `theme.blur` or border radius
-        // while the popover is open take effect on next open, not immediately.
-        // Popovers grab focus so config edits are unlikely while open.
         let weak_self = Rc::downgrade(self);
-        window.connect_map(move |win| {
-            if ConfigManager::global().blur_enabled() {
-                if let Some(blur) =
-                    crate::services::background_effect::BackgroundEffectManager::global()
-                    && let Some(popover) = weak_self.upgrade()
-                    && let Some(anim_shell) = popover.anim_shell.borrow().as_ref().cloned()
-                {
-                    blur.apply_blur_surface(win, &anim_shell, || {
-                        ConfigManager::global().surface_border_radius() as i32
-                    });
-                }
-            } else if let Some(blur) =
-                crate::services::background_effect::BackgroundEffectManager::global()
-            {
-                blur.remove_blur_region(win);
-            }
-        });
-
-        *self.window.borrow_mut() = Some(window.clone());
-        window
-    }
-
-    /// Ensure the persistent animation shell exists, creating it lazily.
-    ///
-    /// The animation shell is a `ScaleBox` whose child (builder content) is
-    /// swapped on each show. It is **never destroyed** and carries no styling —
-    /// it is a pure transparent animation wrapper. Visual styles (background,
-    /// padding, border-radius) live on the content widget via CSS classes
-    /// resolved by the global stylesheet.
-    fn ensure_anim_shell(&self) -> ScaleBox {
-        if let Some(ref shell) = *self.anim_shell.borrow() {
-            return shell.clone();
-        }
-
-        let shell = ScaleBox::new();
-
-        // Start fully hidden (opacity 0, scale at starting value).
-        shell.set_opacity(0.0);
-        shell.set_scale(ANIM_SCALE_FROM);
-
-        *self.anim_shell.borrow_mut() = Some(shell.clone());
-        shell
-    }
-
-    /// Ensure the persistent click-catcher exists, creating it lazily.
-    ///
-    /// The click-catcher is shown/hidden each cycle rather than created/destroyed
-    /// to avoid per-cycle allocation of an `ApplicationWindow` + layer-shell surface.
-    fn ensure_click_catcher(self: &Rc<Self>) -> ApplicationWindow {
-        if let Some(ref catcher) = *self.click_catcher.borrow() {
-            return catcher.clone();
-        }
-
-        let bar_zone = calculate_bar_exclusive_zone();
-        let weak_self = Rc::downgrade(self);
-        let catcher = create_click_catcher(&self.app, bar_zone, move || {
+        setup_esc_handler(&window, move || {
             if let Some(popover) = weak_self.upgrade() {
                 popover.hide();
             }
         });
 
-        *self.click_catcher.borrow_mut() = Some(catcher.clone());
-        catcher
+        // Close unmaps the surface, so this runs on every show. On re-show the
+        // animation tick replaces the full-size region within 1-2 frames.
+        // Config changes to blur/radius while open apply on the next open.
+        let anim_shell = self.anim.shell().clone();
+        window.connect_map(move |win| {
+            sync_blur(win, Some(anim_shell.clone().upcast()), || {
+                ConfigManager::global().surface_border_radius() as i32
+            });
+        });
+
+        *self.window.borrow_mut() = Some(window.clone());
+        window
     }
 
     /// Start or reverse the open/close animation via a tick callback.
@@ -1613,38 +1560,23 @@ impl LayerShellPopover {
     /// close), the current progress is captured and the animation reverses from
     /// that point with proportional timing — no snapping.
     fn start_animation(&self, direction: AnimDirection, generation: u32) {
-        let anim_shell = self.anim_shell.borrow().as_ref().cloned();
-        let Some(anim_shell) = anim_shell else {
+        let Some(window) = self.window.borrow().as_ref().cloned() else {
             return;
         };
-
-        let window = self.window.borrow().as_ref().cloned();
-        let window_for_complete = window.as_ref().map(|w| w.downgrade());
-        let blur_content = anim_shell.clone().upcast::<gtk4::Widget>().downgrade();
         let on_close = self.on_close.borrow().clone();
+        let shell = self.anim.shell().downgrade();
 
-        run_popover_animation(
-            &anim_shell,
-            &self.anim_state,
-            &self.anim_generation,
-            generation,
+        self.anim.run(
             direction,
-            window.as_ref().map(|w| (w.downgrade(), blur_content)),
-            move |direction, shell| {
-                if direction == AnimDirection::Closing {
-                    // Close complete — remove content and hide window.
-                    snap_anim_shell(shell, 0.0, ANIM_SCALE_FROM);
+            generation,
+            &window,
+            self.anim.shell().upcast_ref(),
+            move || {
+                if let Some(shell) = shell.upgrade() {
                     shell.remove_child();
-                    if let Some(w) = window_for_complete.as_ref().and_then(|w| w.upgrade()) {
-                        w.set_visible(false);
-                    }
-                    // Fire on_close now that the popover is fully hidden.
-                    if let Some(ref cb) = on_close {
-                        cb();
-                    }
-                } else {
-                    // Open complete — ensure we're at exactly 1.0.
-                    snap_anim_shell(shell, 1.0, 1.0);
+                }
+                if let Some(ref cb) = on_close {
+                    cb();
                 }
             },
         );
@@ -1705,8 +1637,7 @@ impl LayerShellPopover {
                 );
                 window.set_margin(Edge::Right, right_margin);
             } else {
-                let fallback_margin =
-                    SurfaceStyleManager::global().shadow_margin(POPOVER_SHADOW_MARGIN);
+                let fallback_margin = SurfaceStyleManager::global().shadow_margin(SHADOW_MARGIN);
                 window.set_margin(Edge::Right, fallback_margin);
             }
         } else if anchor.y > 0 {
@@ -1728,8 +1659,7 @@ impl LayerShellPopover {
             );
             window.set_margin(Edge::Bottom, bottom_margin);
         } else {
-            let fallback_margin =
-                SurfaceStyleManager::global().shadow_margin(POPOVER_SHADOW_MARGIN);
+            let fallback_margin = SurfaceStyleManager::global().shadow_margin(SHADOW_MARGIN);
             window.set_margin(Edge::Bottom, fallback_margin);
         }
     }
@@ -1746,19 +1676,17 @@ impl Drop for LayerShellPopover {
         // If the popover was still open (or mid-animation) when destroyed,
         // fire on_close synchronously so consumers can clean up resources
         // (e.g. the system popover releases GPU polling).
-        if (self.logically_open.get() || self.anim_state.borrow().active)
+        if (self.logically_open.get() || self.anim.is_active())
             && let Some(ref cb) = *self.on_close.borrow()
         {
             cb();
         }
 
-        if let Some(catcher) = self.click_catcher.borrow_mut().take() {
-            catcher.close();
-        }
-        // Best-effort blur cleanup; primary removal happens at fade-start
-        // in hide().  May no-op if already unmapped.
+        self.chrome.destroy();
+        // Best-effort blur cleanup; primary removal happens when
+        // SurfaceAnimation::run starts the close. May no-op if already unmapped.
         // See BackgroundEffectManager::remove_blur_region docs.
-        if let Some(blur) = crate::services::background_effect::BackgroundEffectManager::global()
+        if let Some(blur) = BackgroundEffectManager::global()
             && let Some(ref window) = *self.window.borrow()
         {
             blur.remove_blur_region(window);
@@ -1811,5 +1739,19 @@ mod tests {
         assert_eq!(calculate_bar_exclusive_zone_for(32, 4, 12, 1.0), 52);
         assert_eq!(calculate_bar_exclusive_zone_for(32, 4, 12, 0.5), 52);
         assert_eq!(calculate_bar_exclusive_zone_for(32, 4, 12, 0.0), 48);
+    }
+
+    #[test]
+    fn popover_close_completes_at_cutoff_before_full_duration() {
+        let half_us = (ANIM_DURATION_MS * 500.0) as i64;
+        let mut state = AnimState::new_idle();
+        state.prepare(AnimDirection::Closing, 1, 0, 1.0);
+        assert!(!state.popover_is_complete(0));
+        assert!(!state.is_complete(half_us));
+        assert!(state.popover_is_complete(half_us));
+
+        let mut state = AnimState::new_idle();
+        state.prepare(AnimDirection::Opening, 1, 0, 0.0);
+        assert!(!state.popover_is_complete(half_us));
     }
 }

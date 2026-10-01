@@ -15,6 +15,10 @@ use vibepanel_core::config::BarPosition;
 
 use crate::styles::icon;
 
+/// Margin around layer-shell surfaces so the CSS `box-shadow` is not clipped
+/// at the surface boundary.
+pub const SHADOW_MARGIN: i32 = 8;
+
 // Thread-local singleton storage for SurfaceStyleManager
 thread_local! {
     static SURFACE_STYLES_INSTANCE: RefCell<Option<Rc<SurfaceStyleManager>>> = const { RefCell::new(None) };
