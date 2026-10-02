@@ -43,6 +43,7 @@ mod notifications_popover;
 pub(crate) use notifications_popover::compute_max_scroll_height;
 mod notifications_toast;
 mod osd;
+pub(crate) mod polkit_window;
 pub(crate) mod ripple;
 mod rounded_picture;
 pub(crate) mod scale_box;

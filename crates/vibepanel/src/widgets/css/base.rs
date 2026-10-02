@@ -258,6 +258,45 @@ label link:active {{
     font-size: var(--font-size-lg);
 }}
 
+.polkit-popover-title {{
+    font-size: var(--font-size-lg);
+    font-weight: 700;
+}}
+
+.popover.polkit-popover {{
+    padding: 24px;
+}}
+
+.polkit-popover-message {{
+    font-size: var(--font-size-md);
+}}
+
+.polkit-popover-info {{
+    font-size: var(--font-size-sm);
+}}
+
+.polkit-popover-badge {{
+    min-width: 64px;
+    min-height: 64px;
+    border-radius: var(--radius-widget-lg);
+    background: color-mix(in srgb, var(--color-accent-primary) 18%, transparent);
+    color: var(--color-accent-primary);
+}}
+/* .icon-root sets its own font-size, so size the glyph here. */
+.polkit-popover-badge > .icon-root {{
+    font-size: 28px;
+}}
+.polkit-popover-badge .icon {{
+    -gtk-icon-size: 28px;
+}}
+
+.popover .polkit-popover-actions > button {{
+    min-height: 34px;
+}}
+.popover .polkit-popover-actions > button label {{
+    margin: 0 14px;
+}}
+
 /* Popover/surface background */
 /* color-mix() uses CSS custom properties so per-widget `.popover` descendants can override
    --widget-background-color and have the mixed value recomputed via CSS scoping */
@@ -374,11 +413,14 @@ popover.widget-menu .popover.widget-menu-content {{
    color.  Rules must be self-contained (full outline shorthand) because
    transition:none at our priority (USER=800) blocks Adwaita's
    outline-width animation from 0→2px at THEME=200.
-   Scoped under .popover for specificity. */
+   Scoped under .popover for specificity.
+   Entry focus lives on the inner text node, so the entry itself only
+   matches :focus-within — which Adwaita paints blue. Programmatic focus
+   (grab_focus) never sets :focus-visible, hence :focus-within. */
 .popover button:focus-visible,
 .popover row:focus-visible,
 .popover switch:focus-visible,
-.popover entry:focus-visible {{
+.popover entry:focus-within {{
     outline: 2px solid var(--color-accent-primary);
     outline-offset: -2px;
     transition: none;
@@ -392,6 +434,36 @@ popover.widget-menu .popover.widget-menu-content {{
    doesn't flash blue when focus leaves. */
 .popover entry {{
     transition: none;
+}}
+/* Hover first: the equally specific :focus-within/:disabled chrome below
+   must win over it. */
+.popover entry:hover {{
+    background: var(--color-card-overlay-hover);
+    box-shadow: none;
+}}
+/* Override theme entry chrome in every state. */
+.popover entry,
+.popover entry:focus-within,
+.popover entry:disabled {{
+    background: var(--color-card-overlay);
+    background-image: none;
+    border: none;
+    box-shadow: none;
+    border-radius: var(--radius-card);
+    min-height: 34px;
+    padding: 0 10px;
+}}
+/* Same chrome as enabled, so dim the whole entry to read as disabled. */
+.popover entry:disabled {{
+    opacity: 0.5;
+}}
+/* GTK theme colors entries directly, bypassing .popover's color. */
+.popover entry > text {{
+    color: var(--color-foreground-primary);
+    caret-color: var(--color-foreground-primary);
+}}
+.popover entry > text > placeholder {{
+    color: var(--color-foreground-muted);
 }}
 
 /* Rows with inline action buttons delegate focus to the button.  GTK still
@@ -575,5 +647,19 @@ mod tests {
         assert!(css.contains(
             "scale > trough > slider {\n    border: none;\n    box-shadow: none;\n    background-image: none;\n}"
         ));
+    }
+
+    #[test]
+    fn entries_clear_gtk_theme_chrome() {
+        let css = css(false);
+
+        let hover = css
+            .find(".popover entry:hover {\n    background: var(--color-card-overlay-hover);")
+            .expect("entry hover rule");
+        let chrome = css
+            .find(".popover entry,\n.popover entry:focus-within,\n.popover entry:disabled {\n    background: var(--color-card-overlay);\n    background-image: none;\n    border: none;\n    box-shadow: none;")
+            .expect("entry chrome rule");
+        assert!(hover < chrome);
+        assert!(css.contains(".popover entry:disabled {\n    opacity: 0.5;\n}"));
     }
 }

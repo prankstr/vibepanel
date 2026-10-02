@@ -1048,6 +1048,33 @@ pub mod osd {
     pub const HORIZONTAL: &str = "osd-horizontal";
 }
 
+/// Polkit authentication popover classes.
+pub mod polkit {
+    /// Polkit popover card (`.polkit-popover`).
+    pub const POPOVER: &str = "polkit-popover";
+
+    /// Lock icon badge (`.polkit-popover-badge`).
+    pub const BADGE: &str = "polkit-popover-badge";
+
+    /// Title (`.polkit-popover-title`).
+    pub const TITLE: &str = "polkit-popover-title";
+
+    /// Action message from polkit (`.polkit-popover-message`).
+    pub const MESSAGE: &str = "polkit-popover-message";
+
+    /// "Authenticating as" line (`.polkit-popover-user`).
+    pub const USER: &str = "polkit-popover-user";
+
+    /// PAM error message (`.polkit-popover-error`).
+    pub const ERROR: &str = "polkit-popover-error";
+
+    /// PAM info message (`.polkit-popover-info`).
+    pub const INFO: &str = "polkit-popover-info";
+
+    /// Button row (`.polkit-popover-actions`).
+    pub const ACTIONS: &str = "polkit-popover-actions";
+}
+
 /// Battery popover classes.
 pub mod battery {
     /// Section title (`.vp-section-title`).

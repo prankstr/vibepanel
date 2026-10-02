@@ -123,8 +123,8 @@ pub fn sync_blur(
 }
 
 /// Standard blur lifecycle for standalone windows (OSD, toasts, media
-/// pop-out, Wi-Fi QR): apply on map, remove on unmap/destroy, follow theme
-/// changes. A theme change during an animated close briefly restores
+/// pop-out, Wi-Fi QR, polkit): apply on map, remove on unmap/destroy, follow
+/// theme changes. A theme change during an animated close briefly restores
 /// full-size blur.
 pub fn attach_blur_surface_lifecycle<W, C, R>(
     window: &W,

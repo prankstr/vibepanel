@@ -871,6 +871,10 @@ fn run_gtk_app(config: Config, config_source: Option<PathBuf>) -> ExitCode {
             crate::services::battery_alert::BatteryAlertController::global()
                 .configure(config_for_activate.battery_alert_config());
             debug!("Battery alert controller initialized");
+
+            widgets::polkit_window::install(app);
+            crate::services::polkit_agent::PolkitAgent::global()
+                .set_enabled(config_for_activate.polkit.enabled);
         }
 
         // Start config file watcher for live reload

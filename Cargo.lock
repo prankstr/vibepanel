@@ -2027,6 +2027,7 @@ dependencies = [
  "gtk4-layer-shell",
  "image",
  "libc",
+ "libloading",
  "libpulse-binding",
  "material-colors",
  "minreq",
