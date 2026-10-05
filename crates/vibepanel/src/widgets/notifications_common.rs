@@ -375,6 +375,14 @@ pub fn create_notification_body(
     }
 }
 
+/// App name, followed by the sender's site origin when a browser provides one.
+pub fn app_label_text(notification: &Notification) -> String {
+    match &notification.origin_name {
+        Some(origin) => format!("{} · {}", notification.app_name, origin),
+        None => notification.app_name.clone(),
+    }
+}
+
 /// Format a timestamp as a human-readable relative time.
 pub fn format_timestamp(timestamp: f64) -> String {
     let now = SystemTime::now()
@@ -769,6 +777,30 @@ mod tests {
     fn prewarm_waits_for_scroll_quiet_period() {
         assert!(!scroll_is_quiet(1_000_000, 1_149_999));
         assert!(scroll_is_quiet(1_000_000, 1_150_000));
+    }
+
+    #[test]
+    fn app_label_appends_origin_when_present() {
+        let mut n = Notification {
+            id: 1,
+            app_name: "Google Chrome".to_string(),
+            app_icon: String::new(),
+            summary: String::new(),
+            body: String::new(),
+            actions: Vec::new(),
+            urgency: 1,
+            timestamp: 0.0,
+            expire_timeout: -1,
+            desktop_entry: None,
+            origin_name: None,
+            image_path: None,
+            image_data: None,
+            transient: false,
+            close_toast_on_close: false,
+        };
+        assert_eq!(app_label_text(&n), "Google Chrome");
+        n.origin_name = Some("web.whatsapp.com".to_string());
+        assert_eq!(app_label_text(&n), "Google Chrome · web.whatsapp.com");
     }
 
     #[test]

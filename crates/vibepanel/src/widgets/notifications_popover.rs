@@ -24,7 +24,8 @@ use crate::styles::{button, card, color, notification as notif, surface};
 use super::css::DISMISS_ANIMATION_MS;
 use super::layer_shell_popover::popover_max_content_height;
 use super::notifications_common::{
-    POPOVER_WIDTH, create_notification_body, create_notification_image_widget, format_timestamp,
+    POPOVER_WIDTH, app_label_text, create_notification_body, create_notification_image_widget,
+    format_timestamp,
 };
 
 /// Callback type for closing the popover from within the content.
@@ -328,7 +329,7 @@ fn build_notification_row(
     // Top row: app name + timestamp
     let top_row = GtkBox::new(Orientation::Horizontal, 4);
 
-    let app_label = Label::new(Some(&notification.app_name));
+    let app_label = Label::new(Some(&app_label_text(notification)));
     app_label.add_css_class(notif::APP_NAME);
     app_label.add_css_class(color::MUTED);
     app_label.set_xalign(0.0);

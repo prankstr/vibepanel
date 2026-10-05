@@ -31,7 +31,7 @@ use crate::styles::{button, color, notification as notif};
 
 use super::notifications_common::{
     POPOVER_WIDTH, TOAST_EDGE_MARGIN, TOAST_ESTIMATED_HEIGHT, TOAST_GAP, TOAST_SIDE_MARGIN,
-    TOAST_TIMEOUT_CRITICAL_MS, TOAST_TIMEOUT_MS, create_notification_body,
+    TOAST_TIMEOUT_CRITICAL_MS, TOAST_TIMEOUT_MS, app_label_text, create_notification_body,
     create_notification_image_widget,
 };
 
@@ -515,7 +515,7 @@ fn build_toast_content(
     content.set_hexpand(true);
     content.add_css_class(notif::TOAST_CONTENT);
 
-    let app_label = Label::new(Some(&notification.app_name));
+    let app_label = Label::new(Some(&app_label_text(notification)));
     app_label.add_css_class(notif::TOAST_APP);
     app_label.add_css_class(color::MUTED);
     app_label.set_xalign(0.0);

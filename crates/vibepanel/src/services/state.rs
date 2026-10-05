@@ -68,6 +68,8 @@ pub struct PersistedNotification {
     pub timestamp: f64,
     pub expire_timeout: i32,
     pub desktop_entry: Option<String>,
+    #[serde(default)]
+    pub origin_name: Option<String>,
     pub image_path: Option<String>,
     // Note: image_data intentionally omitted (binary data, not suitable for JSON)
 }
