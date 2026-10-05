@@ -42,6 +42,7 @@ fn test_notification(urgency: u8) -> Notification {
         timestamp: 0.0,
         expire_timeout: 0,
         desktop_entry: None,
+        origin_name: None,
         image_path: None,
         image_data: None,
         transient: true,

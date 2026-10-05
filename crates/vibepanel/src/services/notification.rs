@@ -84,6 +84,8 @@ const CAPABILITIES: &[&str] = &[
     "actions",
     "persistence",
     "icon-static",
+    // Chromium sends the site origin as a hint instead of prefixing the body.
+    "x-kde-origin-name",
 ];
 
 /// Maximum number of notifications to keep in memory.
@@ -104,6 +106,8 @@ pub struct Notification {
     pub expire_timeout: i32, // ms, -1=default, 0=never
     /// Desktop entry ID from the "desktop-entry" hint (e.g. "org.telegram.desktop")
     pub desktop_entry: Option<String>,
+    /// Site origin from the "x-kde-origin-name" hint (e.g. "web.whatsapp.com")
+    pub origin_name: Option<String>,
     /// Optional image path hint (e.g. chat avatar path)
     pub image_path: Option<String>,
     /// Optional raw image data hint (e.g. freedesktop image-data)
@@ -141,6 +145,7 @@ impl Notification {
             timestamp: self.timestamp,
             expire_timeout: self.expire_timeout,
             desktop_entry: self.desktop_entry.clone(),
+            origin_name: self.origin_name.clone(),
             image_path: self.image_path.clone(),
         }
     }
@@ -159,6 +164,7 @@ impl From<PersistedNotification> for Notification {
             timestamp: p.timestamp,
             expire_timeout: p.expire_timeout,
             desktop_entry: p.desktop_entry,
+            origin_name: p.origin_name,
             image_path: p.image_path,
             image_data: None, // Binary data is not persisted
             transient: false, // Transient notifications are never persisted
@@ -711,6 +717,7 @@ impl NotificationService {
         let hints_variant = params.child_value(6);
         let mut urgency = URGENCY_NORMAL;
         let mut desktop_entry: Option<String> = None;
+        let mut origin_name: Option<String> = None;
         let mut image_path: Option<String> = None;
         let mut image_data: Option<NotificationImage> = None;
         let mut transient = false;
@@ -743,6 +750,14 @@ impl NotificationService {
                             let v = v.to_string();
                             if !v.is_empty() {
                                 desktop_entry = Some(v);
+                            }
+                        }
+                    }
+                    "x-kde-origin-name" => {
+                        if let Some(v) = actual_value.str() {
+                            let v = v.trim();
+                            if !v.is_empty() {
+                                origin_name = Some(v.to_string());
                             }
                         }
                     }
@@ -831,6 +846,7 @@ impl NotificationService {
             timestamp,
             expire_timeout,
             desktop_entry,
+            origin_name,
             image_path,
             image_data,
             transient,
@@ -1137,6 +1153,7 @@ mod tests {
             timestamp,
             expire_timeout: -1,
             desktop_entry: None,
+            origin_name: None,
             image_path: None,
             image_data: None,
             transient,
