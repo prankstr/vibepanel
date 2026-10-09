@@ -183,6 +183,10 @@ pub struct WorkspaceServiceSnapshot {
     /// Per-output workspace state for multi-monitor setups.
     /// Key is the output/monitor connector name (e.g., "eDP-1", "DP-1").
     pub per_output: HashMap<String, PerOutputWorkspaces>,
+    /// Whether `occupied` / `window_count` reflect real window data. When
+    /// false, widgets should show every listed workspace instead of
+    /// filtering by occupancy.
+    pub occupancy_known: bool,
 }
 
 /// Shared, process-wide workspace service.
@@ -332,6 +336,7 @@ impl WorkspaceService {
             window_counts: snapshot.window_counts.clone(),
             workspaces,
             per_output,
+            occupancy_known: snapshot.occupancy_known,
         }
     }
 }

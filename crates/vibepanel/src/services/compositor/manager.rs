@@ -11,6 +11,9 @@
 //! which schedules callbacks directly on the GTK main loop without polling. It maintains:
 //! - A single backend instance
 //! - Registered callbacks for workspace and window updates
+//! - Alongside a native backend, an optional ext-workspace overlay whose state
+//!   is merged over the backend's workspace state before it is published (see
+//!   `ext_workspace::overlay`). All consumers see the merged state.
 //!
 //! # Usage
 //!
@@ -32,12 +35,51 @@ use gtk4::glib;
 use tracing::{debug, info};
 use vibepanel_core::config::AdvancedConfig;
 
+use super::ext_workspace::overlay::{ExtOverlayState, ExtWorkspaceOverlay};
+use super::ext_workspace::{ExtWorkspaceClient, ModelCallback};
 use super::{
     BackendKind, CompositorBackend, KeyboardLayoutCallback, KeyboardLayoutInfo, WindowCallback,
     WindowInfo, WindowLayoutCallback, WindowLayoutSnapshot, WorkspaceCallback, WorkspaceMeta,
     WorkspaceSnapshot, factory,
 };
 use crate::services::callbacks::{CallbackId, Callbacks};
+
+/// Latest unprocessed workspace input from each source.
+///
+/// One slot per source, so a burst of updates from one source can never drop
+/// the latest update from the other before the idle callback runs.
+#[derive(Default)]
+struct PendingWorkspace {
+    native: Option<WorkspaceSnapshot>,
+    ext: Option<ExtWorkspaceOverlay>,
+}
+
+/// Coalesces workspace inputs from any thread into one main-loop idle.
+#[derive(Clone, Default)]
+struct WorkspaceInbox {
+    pending: Arc<Mutex<PendingWorkspace>>,
+    scheduled: Arc<AtomicBool>,
+}
+
+impl WorkspaceInbox {
+    fn push(&self, update: impl FnOnce(&mut PendingWorkspace)) {
+        update(&mut self.pending.lock().unwrap());
+        if !self.scheduled.swap(true, Ordering::SeqCst) {
+            let inbox = self.clone();
+            glib::idle_add_once(move || {
+                inbox.scheduled.store(false, Ordering::SeqCst);
+                let pending = std::mem::take(&mut *inbox.pending.lock().unwrap());
+                CompositorManager::global().handle_workspace_inputs(pending.native, pending.ext);
+            });
+        }
+    }
+}
+
+/// ext-workspace client plus the merge state it feeds.
+struct ExtOverlay {
+    client: ExtWorkspaceClient,
+    state: ExtOverlayState,
+}
 
 // Thread-local singleton storage for CompositorManager
 thread_local! {
@@ -52,7 +94,9 @@ pub struct CompositorManager {
     keyboard_layout_callbacks: Callbacks<KeyboardLayoutInfo>,
     window_layout_callbacks: Callbacks<WindowLayoutSnapshot>,
     window_list_callbacks: Callbacks<super::WindowListSnapshot>,
+    /// Effective (merged, if an overlay is active) workspace snapshot.
     last_workspace_snapshot: RefCell<Option<WorkspaceSnapshot>>,
+    ext_overlay: RefCell<Option<ExtOverlay>>,
     last_window_info: RefCell<Option<WindowInfo>>,
     last_keyboard_layout: RefCell<Option<KeyboardLayoutInfo>>,
     last_window_layouts: RefCell<Option<WindowLayoutSnapshot>>,
@@ -73,6 +117,7 @@ impl CompositorManager {
             window_layout_callbacks: Callbacks::new(),
             window_list_callbacks: Callbacks::new(),
             last_workspace_snapshot: RefCell::new(None),
+            ext_overlay: RefCell::new(None),
             last_window_info: RefCell::new(None),
             last_keyboard_layout: RefCell::new(None),
             last_window_layouts: RefCell::new(None),
@@ -124,6 +169,7 @@ impl CompositorManager {
                 window_layout_callbacks: Callbacks::new(),
                 window_list_callbacks: Callbacks::new(),
                 last_workspace_snapshot: RefCell::new(Some(snapshot)),
+                ext_overlay: RefCell::new(None),
                 last_window_info: RefCell::new(None),
                 last_keyboard_layout: RefCell::new(None),
                 last_window_layouts: RefCell::new(None),
@@ -151,6 +197,11 @@ impl CompositorManager {
         id
     }
 
+    /// Unregister a workspace callback by its ID.
+    pub fn unregister_workspace_callback(&self, id: CallbackId) -> bool {
+        self.workspace_callbacks.unregister(id)
+    }
+
     /// Register a callback for window focus changes.
     ///
     /// The callback will be immediately invoked with the current state if available.
@@ -169,8 +220,16 @@ impl CompositorManager {
         id
     }
 
-    /// Get the list of workspaces from the backend.
+    /// Get the list of workspaces (merged, if an ext-workspace overlay is active).
     pub fn list_workspaces(&self) -> Vec<WorkspaceMeta> {
+        if let Some(metas) = self
+            .ext_overlay
+            .borrow()
+            .as_ref()
+            .and_then(|overlay| overlay.state.metas())
+        {
+            return metas.to_vec();
+        }
         if let Some(ref backend) = *self.backend.borrow() {
             backend.list_workspaces()
         } else {
@@ -327,14 +386,69 @@ impl CompositorManager {
         }
     }
 
-    /// Handle a workspace update from the backend.
-    /// Called via glib::idle_add_once from the backend thread.
-    pub(crate) fn handle_workspace_update(&self, snapshot: WorkspaceSnapshot) {
-        // Store for new listeners
-        *self.last_workspace_snapshot.borrow_mut() = Some(snapshot.clone());
+    /// Handle coalesced workspace input from the backend and/or ext-workspace.
+    /// Called on the main loop via `WorkspaceInbox`.
+    fn handle_workspace_inputs(
+        &self,
+        native: Option<WorkspaceSnapshot>,
+        ext: Option<ExtWorkspaceOverlay>,
+    ) {
+        let snapshot = {
+            let mut overlay = self.ext_overlay.borrow_mut();
+            match overlay.as_mut() {
+                // Native backend alone: publish as-is.
+                None => match native {
+                    Some(snapshot) => snapshot,
+                    None => return,
+                },
+                Some(overlay) => {
+                    let mut changed = false;
+                    if let Some(snapshot) = native {
+                        // Metadata is read now, together with the snapshot, so
+                        // both describe the same moment.
+                        let metas = self
+                            .backend
+                            .borrow()
+                            .as_ref()
+                            .map(|b| b.list_workspaces())
+                            .unwrap_or_default();
+                        overlay.state.set_native(metas, snapshot);
+                        changed = true;
+                    }
+                    if let Some(ext) = ext {
+                        changed |= overlay.state.set_overlay(ext);
+                    }
+                    match overlay.state.snapshot() {
+                        Some(snapshot) if changed => snapshot.clone(),
+                        _ => return,
+                    }
+                }
+            }
+        };
 
-        // Dispatch to all registered callbacks
+        // Effective metadata is already installed (list_workspaces reads the
+        // overlay state), so listeners re-reading it see a matching pair.
+        *self.last_workspace_snapshot.borrow_mut() = Some(snapshot.clone());
         self.workspace_callbacks.notify(&snapshot);
+    }
+
+    /// Start merging ext-workspace state over a native backend, if offered.
+    fn start_ext_overlay(&self, inbox: &WorkspaceInbox) {
+        let inbox = inbox.clone();
+        let on_model: ModelCallback = Arc::new(move |model| {
+            let overlay = ExtWorkspaceOverlay::from_model(&model);
+            inbox.push(|pending| pending.ext = Some(overlay));
+        });
+        let Some(client) = ExtWorkspaceClient::start(on_model) else {
+            return;
+        };
+
+        let mut state = ExtOverlayState::default();
+        if let Some(ref backend) = *self.backend.borrow() {
+            state.set_native(backend.list_workspaces(), backend.get_workspace_snapshot());
+        }
+        info!("Merging ext-workspace state over the native backend");
+        *self.ext_overlay.borrow_mut() = Some(ExtOverlay { client, state });
     }
 
     /// Handle a window update from the backend.
@@ -378,7 +492,7 @@ impl CompositorManager {
         let backend_kind = BackendKind::from_str(&advanced_config.compositor);
 
         // Backends no longer filter by outputs - that's now handled at the widget level
-        let backend = factory::create_backend(backend_kind);
+        let (resolved_kind, backend) = factory::create_backend(backend_kind);
 
         info!(
             "CompositorManager using backend: {} (config: {})",
@@ -394,28 +508,10 @@ impl CompositorManager {
         // Without this, the first idle would see an inconsistent hybrid state: Event 1's
         // snapshot (old workspace list, new active) combined with Event 2's already-updated
         // workspace list read via list_workspaces(), causing the wrong indicator to be removed.
-        let pending_ws_snapshot: Arc<Mutex<Option<WorkspaceSnapshot>>> = Arc::new(Mutex::new(None));
-        let ws_idle_scheduled: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
-
+        let inbox = WorkspaceInbox::default();
         let on_workspace_update: WorkspaceCallback = Arc::new({
-            let pending = Arc::clone(&pending_ws_snapshot);
-            let scheduled = Arc::clone(&ws_idle_scheduled);
-            move |snapshot| {
-                // Always store the latest snapshot (overwrites any pending one)
-                *pending.lock().unwrap() = Some(snapshot);
-
-                // Only schedule one idle per batch of rapid-fire events
-                if !scheduled.swap(true, Ordering::SeqCst) {
-                    let pending = Arc::clone(&pending);
-                    let scheduled = Arc::clone(&scheduled);
-                    glib::idle_add_once(move || {
-                        scheduled.store(false, Ordering::SeqCst);
-                        if let Some(snapshot) = pending.lock().unwrap().take() {
-                            CompositorManager::global().handle_workspace_update(snapshot);
-                        }
-                    });
-                }
-            }
+            let inbox = inbox.clone();
+            move |snapshot| inbox.push(|pending| pending.native = Some(snapshot))
         });
 
         let on_window_update: WindowCallback = Arc::new(move |window_info| {
@@ -467,12 +563,28 @@ impl CompositorManager {
         *this.backend.borrow_mut() = Some(backend);
         *this.started.borrow_mut() = true;
 
+        // The ext-workspace backend already reports that state as primary data.
+        if resolved_kind != BackendKind::ExtWorkspace {
+            this.start_ext_overlay(&inbox);
+            if let Some(snapshot) = this
+                .ext_overlay
+                .borrow()
+                .as_ref()
+                .and_then(|overlay| overlay.state.snapshot().cloned())
+            {
+                *this.last_workspace_snapshot.borrow_mut() = Some(snapshot);
+            }
+        }
+
         debug!("CompositorManager initialized");
     }
 }
 
 impl Drop for CompositorManager {
     fn drop(&mut self) {
+        if let Some(overlay) = self.ext_overlay.borrow_mut().take() {
+            overlay.client.stop();
+        }
         if let Some(ref backend) = *self.backend.borrow() {
             backend.stop();
         }

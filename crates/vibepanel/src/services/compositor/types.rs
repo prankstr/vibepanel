@@ -73,7 +73,7 @@ pub struct PerOutputState {
 ///
 /// This represents the current state across all workspaces,
 /// updated atomically when the compositor signals changes.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceSnapshot {
     /// Currently active/focused workspace IDs.
     /// Most compositors have a single active workspace, but MangoWC
@@ -89,6 +89,24 @@ pub struct WorkspaceSnapshot {
     /// Per-output workspace state for multi-monitor setups.
     /// Key is the output/monitor connector name (e.g., "eDP-1", "DP-1").
     pub per_output: HashMap<String, PerOutputState>,
+    /// Whether `occupied_workspaces` / `window_counts` reflect real window
+    /// data. False for backends that cannot see windows (ext-workspace); the
+    /// workspace widget then shows every listed workspace instead of
+    /// filtering by occupancy. Defaults to `true`.
+    pub occupancy_known: bool,
+}
+
+impl Default for WorkspaceSnapshot {
+    fn default() -> Self {
+        Self {
+            active_workspace: HashSet::new(),
+            occupied_workspaces: HashSet::new(),
+            urgent_workspaces: HashSet::new(),
+            window_counts: HashMap::new(),
+            per_output: HashMap::new(),
+            occupancy_known: true,
+        }
+    }
 }
 
 /// Information about a focused window.
@@ -358,6 +376,12 @@ mod tests {
 
         assert_eq!(ws1, ws2);
         assert_ne!(ws1, ws3);
+    }
+
+    #[test]
+    fn test_workspace_snapshot_default_has_known_occupancy() {
+        // Native backends rely on this default; never derive it.
+        assert!(WorkspaceSnapshot::default().occupancy_known);
     }
 
     #[test]
