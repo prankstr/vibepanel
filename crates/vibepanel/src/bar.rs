@@ -826,6 +826,21 @@ pub(crate) fn collect_island_bounds(
     bar_box: &SectionedBar,
     native: &gtk4::Native,
 ) -> Vec<(i32, i32, i32, i32)> {
+    visible_islands(bar_box)
+        .iter()
+        .filter_map(|widget| widget.compute_bounds(native.upcast_ref::<gtk4::Widget>()))
+        .filter_map(|bounds| {
+            let x = bounds.x().round() as i32;
+            let y = bounds.y().round() as i32;
+            let w = bounds.width().round() as i32;
+            let h = bounds.height().round() as i32;
+            (w > 0 && h > 0).then_some((x, y, w, h))
+        })
+        .collect()
+}
+
+/// The visible `.widget-wrapper` islands in each visible section, in order.
+pub(crate) fn visible_islands(bar_box: &SectionedBar) -> Vec<gtk4::Widget> {
     use crate::styles::class;
     let mut result = Vec::new();
 
@@ -838,17 +853,8 @@ pub(crate) fn collect_island_bounds(
         }
         let mut child = section.first_child();
         while let Some(widget) = child {
-            if widget.is_visible()
-                && widget.has_css_class(class::WIDGET_WRAPPER)
-                && let Some(bounds) = widget.compute_bounds(native.upcast_ref::<gtk4::Widget>())
-            {
-                let x = bounds.x().round() as i32;
-                let y = bounds.y().round() as i32;
-                let w = bounds.width().round() as i32;
-                let h = bounds.height().round() as i32;
-                if w > 0 && h > 0 {
-                    result.push((x, y, w, h));
-                }
+            if widget.is_visible() && widget.has_css_class(class::WIDGET_WRAPPER) {
+                result.push(widget.clone());
             }
             child = widget.next_sibling();
         }

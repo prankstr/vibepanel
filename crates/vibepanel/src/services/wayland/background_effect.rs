@@ -52,6 +52,9 @@
 //! (e.g. popovers, Quick Settings), blur must be removed at fade start.
 //! Compositor-side blur renders independently of widget opacity — without
 //! removal, a blur rectangle remains visible through the fading surface.
+//! With GTK-native blur the same effect comes from fading an *ancestor* of
+//! the widget that pushes the blur nodes, which drops the region (see
+//! [`SnapshotBlur`]).
 //!
 //! ### Terminology
 //!
@@ -102,6 +105,171 @@ use crate::services::config_manager::ConfigManager;
 
 const BLUR_SURFACE_RESIZE_WATCHED_KEY: &str = "vibepanel-blur-surface-watched";
 const BLUR_SURFACE_ACTIVE_KEY: &str = "vibepanel-blur-surface-active";
+
+// ── Backend selection ───────────────────────────────────────────────────────
+
+/// First GTK release that binds `ext_background_effect_manager_v1` itself and
+/// creates an effect object for every `wl_surface` (GTK MR !10145). Creating a
+/// second object on the same surface is a fatal `background_effect_exists`
+/// protocol error, so the legacy path must never run on these versions.
+const NATIVE_BLUR_GTK_VERSION: (u32, u32, u32) = (4, 23, 3);
+
+/// Blur node radius for native blur. GTK only reports blur nodes with a radius
+/// of at least 20 to the compositor (`BACKGROUND_BLUR_THRESHOLD` in
+/// gsk/gskblurutils.c). The compositor decides the actual blur strength.
+const NATIVE_BLUR_RADIUS: f64 = 20.0;
+
+/// Which mechanism provides compositor background blur.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BlurBackend {
+    /// Not on Wayland, or the compositor lacks `ext_background_effect_manager_v1`.
+    Unsupported,
+    /// GTK < 4.23.3: vibepanel manages effect objects and regions itself.
+    Legacy,
+    /// GTK >= 4.23.3: GTK derives regions from blur nodes that
+    /// [`SnapshotBlur`] hosts push in `snapshot()`.
+    Native,
+}
+
+/// Whether the given GTK runtime version handles background effects natively.
+fn native_blur_supported(major: u32, minor: u32, micro: u32) -> bool {
+    (major, minor, micro) >= NATIVE_BLUR_GTK_VERSION
+}
+
+/// Detect the blur backend. Returns `None` when no display is available yet
+/// so the result is not cached prematurely.
+fn detect_blur_backend() -> Option<BlurBackend> {
+    let display = gtk4::gdk::Display::default()?;
+    let Ok(wayland_display) = display.downcast::<gdk4_wayland::WaylandDisplay>() else {
+        return Some(BlurBackend::Unsupported);
+    };
+    if !wayland_display.query_registry("ext_background_effect_manager_v1") {
+        return Some(BlurBackend::Unsupported);
+    }
+    let (major, minor, micro) = (
+        gtk4::major_version(),
+        gtk4::minor_version(),
+        gtk4::micro_version(),
+    );
+    let backend = if native_blur_supported(major, minor, micro) {
+        BlurBackend::Native
+    } else {
+        BlurBackend::Legacy
+    };
+    debug!("Blur backend: {backend:?} (GTK {major}.{minor}.{micro})");
+    Some(backend)
+}
+
+/// Runtime blur backend, decided by the loaded GTK version and compositor
+/// support. Must be called on the main thread after GTK init.
+fn blur_backend() -> BlurBackend {
+    thread_local! {
+        static BACKEND: std::cell::Cell<Option<BlurBackend>> = const { std::cell::Cell::new(None) };
+    }
+    BACKEND.with(|cell| {
+        if let Some(backend) = cell.get() {
+            return backend;
+        }
+        match detect_blur_backend() {
+            Some(backend) => {
+                cell.set(Some(backend));
+                backend
+            }
+            None => BlurBackend::Unsupported,
+        }
+    })
+}
+
+// ── Native snapshot blur ────────────────────────────────────────────────────
+
+/// Native-backend blur, pushed from a host widget's `snapshot()`.
+///
+/// GTK derives each surface's compositor blur region from blur nodes in its
+/// render tree. CSS `backdrop-filter` would produce those too, but GTK wraps its
+/// backdrop in a repeat node with non-empty bounds, so the GPU renderer renders
+/// and blurs an offscreen on every redraw even though the backdrop is empty.
+/// Pushing `copy -> blur -> paste` directly leaves the pasted backdrop empty:
+/// GTK skips the in-client blur and only reports the region.
+///
+/// A host must draw the blur before the blurred widget, so it is always an
+/// ancestor of that widget (a widget's own CSS background is drawn before its
+/// `snapshot()` runs and would otherwise end up in the backdrop).
+///
+/// An ancestor with opacity < 1 isolates the backdrop and drops the region,
+/// while opacity on the blurred widget itself keeps it. `SurfaceAnimation`
+/// relies on this: it fades the blurred child on open (blur from the first
+/// frame) and the `ScaleBox` host on close (blur dropped at fade start).
+#[derive(Default)]
+pub struct SnapshotBlur {
+    shapes: RefCell<Option<BlurShapes>>,
+    redraw_guard: RefCell<Option<crate::services::config_manager::ThemeCallbackGuard>>,
+}
+
+/// Rounded rects to blur, in the host widget's coordinates.
+pub type BlurShapes = Rc<dyn Fn(&gtk4::Widget) -> Vec<gtk4::gsk::RoundedRect>>;
+
+impl SnapshotBlur {
+    /// Set the shapes this host blurs and redraw it when the theme changes, so
+    /// toggling `theme.blur` takes effect on open surfaces.
+    pub fn set_shapes(&self, host: &impl IsA<gtk4::Widget>, shapes: BlurShapes) {
+        self.shapes.replace(Some(shapes));
+        let host = host.as_ref().downgrade();
+        let id = ConfigManager::global().on_theme_change(move || {
+            if let Some(host) = host.upgrade() {
+                host.queue_draw();
+            }
+        });
+        self.redraw_guard
+            .replace(Some(crate::services::config_manager::ThemeCallbackGuard(
+                id,
+            )));
+    }
+
+    /// Push the blur nodes. Call from the host's `snapshot()` before drawing
+    /// the blurred child, inside any transform the child should follow.
+    pub fn snapshot(&self, host: &impl IsA<gtk4::Widget>, snapshot: &gtk4::Snapshot) {
+        if blur_backend() != BlurBackend::Native || !ConfigManager::global().blur_enabled() {
+            return;
+        }
+        let Some(shapes) = self.shapes.borrow().clone() else {
+            return;
+        };
+        push_blur_nodes(snapshot, &shapes(host.as_ref()));
+    }
+}
+
+/// `widget`'s border box in `host` coordinates as a rounded rect. The radius
+/// is clamped to half the smaller side, matching the legacy region shape.
+pub fn rounded_bounds(
+    widget: &impl IsA<gtk4::Widget>,
+    host: &impl IsA<gtk4::Widget>,
+    radius: f32,
+) -> Option<gtk4::gsk::RoundedRect> {
+    let bounds = widget.compute_bounds(host)?;
+    if bounds.width() <= 0.0 || bounds.height() <= 0.0 {
+        return None;
+    }
+    let radius = radius.clamp(0.0, bounds.width().min(bounds.height()) / 2.0);
+    Some(gtk4::gsk::RoundedRect::from_rect(bounds, radius))
+}
+
+/// One copy for all shapes, so every paste replays only what was drawn before
+/// the host (nothing on vibepanel's transparent surfaces). A copy per shape
+/// would replay earlier shapes' blur nodes and make later backdrops non-empty.
+fn push_blur_nodes(snapshot: &gtk4::Snapshot, shapes: &[gtk4::gsk::RoundedRect]) {
+    if shapes.is_empty() {
+        return;
+    }
+    snapshot.push_copy();
+    for shape in shapes {
+        snapshot.push_rounded_clip(shape);
+        snapshot.push_blur(NATIVE_BLUR_RADIUS);
+        snapshot.append_paste(shape.bounds(), 0);
+        snapshot.pop(); // blur
+        snapshot.pop(); // clip
+    }
+    snapshot.pop(); // copy
+}
 
 /// Apply blur to a surface, or remove it when blur is disabled.
 ///
@@ -467,12 +635,20 @@ impl BackgroundEffectManager {
             .downcast::<gdk4_wayland::WaylandDisplay>()
             .ok()?;
 
-        // Quick check: does the compositor advertise this protocol at all?
-        if !wayland_display.query_registry("ext_background_effect_manager_v1") {
-            debug!(
-                "Compositor does not advertise ext_background_effect_manager_v1, blur hints disabled"
-            );
-            return None;
+        // Only the legacy backend creates effect objects. On GTK >= 4.23.3 GTK
+        // owns one per surface and a duplicate is a fatal protocol error.
+        match blur_backend() {
+            BlurBackend::Legacy => {}
+            BlurBackend::Native => {
+                debug!("GTK handles ext-background-effect natively, legacy blur service disabled");
+                return None;
+            }
+            BlurBackend::Unsupported => {
+                debug!(
+                    "Compositor does not advertise ext_background_effect_manager_v1, blur hints disabled"
+                );
+                return None;
+            }
         }
 
         debug!("ext_background_effect_manager_v1 found in registry, initializing blur service");
@@ -957,7 +1133,19 @@ impl BackgroundEffectManager {
 
 #[cfg(test)]
 mod tests {
-    use super::{compute_rounded_rect_rects, compute_rounded_rect_rects_with_corner_inset};
+    use super::{
+        compute_rounded_rect_rects, compute_rounded_rect_rects_with_corner_inset,
+        native_blur_supported,
+    };
+
+    #[test]
+    fn native_blur_version_gate() {
+        assert!(!native_blur_supported(4, 22, 9));
+        assert!(!native_blur_supported(4, 23, 2));
+        assert!(native_blur_supported(4, 23, 3));
+        assert!(native_blur_supported(4, 24, 1));
+        assert!(native_blur_supported(5, 0, 0));
+    }
 
     /// Helper: compute total pixel area covered by non-overlapping scanline rects.
     fn total_area(rects: &[(i32, i32, i32, i32)]) -> i64 {

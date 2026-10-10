@@ -6,13 +6,14 @@ use std::rc::Rc;
 use gtk4::glib;
 use gtk4::glib::clone;
 use gtk4::prelude::*;
-use gtk4::{Align, ApplicationWindow, Box as GtkBox, GestureDrag, Orientation, Window};
+use gtk4::{Align, Box as GtkBox, GestureDrag, Orientation, Window};
 
 use crate::services::background_effect::attach_blur_surface_lifecycle;
 use crate::services::callbacks::CallbackId;
 use crate::services::config_manager::{ConfigManager, ThemeCallbackGuard};
 use crate::services::media::MediaService;
 use crate::styles::{media, surface};
+use crate::widgets::blur_host::BlurWindow;
 use crate::widgets::media_components::{
     MediaViewController, build_album_art, build_media_controls, build_seek_section,
     build_track_info,
@@ -62,21 +63,12 @@ where
 {
     let media_service = MediaService::global();
 
-    let window = if let Some(app) = app {
-        ApplicationWindow::builder()
-            .application(app)
-            .decorated(false)
-            .resizable(false)
-            .deletable(true)
-            .build()
-            .upcast::<Window>()
-    } else {
-        Window::builder()
-            .decorated(false)
-            .resizable(false)
-            .deletable(true)
-            .build()
-    };
+    let blur_radius = || ConfigManager::global().surface_border_radius();
+    let window: Window = BlurWindow::new(blur_radius).upcast();
+    window.set_application(app);
+    window.set_decorated(false);
+    window.set_resizable(false);
+    window.set_deletable(true);
 
     window.add_css_class(media::WINDOW);
     window.set_title(Some("Media Player"));
@@ -249,7 +241,7 @@ where
     let theme_callback_guard = attach_blur_surface_lifecycle(
         &window,
         move |_| Some(main_box.clone().upcast::<gtk4::Widget>()),
-        || ConfigManager::global().surface_border_radius() as i32,
+        move || blur_radius() as i32,
     );
 
     // Disconnect media updates when the GTK window is destroyed.

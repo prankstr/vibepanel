@@ -1,5 +1,10 @@
 //! Visual-only, edge-directed bar transitions with stable hidden layout.
+//!
+//! On the native blur backend the BarSlide also hosts the bar's compositor
+//! blur (see [`SnapshotBlur`]): it is the nearest ancestor drawn before the
+//! bar's own background, and the blur slides with the bar.
 
+use crate::services::background_effect::{BlurShapes, SnapshotBlur};
 use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4::subclass::prelude::*;
@@ -15,6 +20,8 @@ mod imp {
         pub(super) progress: Cell<f64>,
         pub(super) position: Cell<BarPosition>,
         pub(super) child: glib::WeakRef<gtk4::Widget>,
+        /// Native-backend blur pushed behind the bar.
+        pub(super) blur: SnapshotBlur,
     }
 
     impl Default for BarSlide {
@@ -23,6 +30,7 @@ mod imp {
                 progress: Cell::default(),
                 position: Cell::new(BarPosition::Top),
                 child: glib::WeakRef::new(),
+                blur: SnapshotBlur::default(),
             }
         }
     }
@@ -84,6 +92,7 @@ mod imp {
             let widget = self.obj();
 
             if s >= 1.0 {
+                self.blur.snapshot(&*widget, snapshot);
                 widget.snapshot_child(&child, snapshot);
                 return;
             }
@@ -103,6 +112,7 @@ mod imp {
             snapshot.push_clip(&gtk4::graphene::Rect::new(0.0, 0.0, width, height));
             snapshot.save();
             snapshot.translate(&gtk4::graphene::Point::new(x.round(), y.round()));
+            self.blur.snapshot(&*widget, snapshot);
             widget.snapshot_child(&child, snapshot);
             snapshot.restore();
             snapshot.pop();
@@ -126,6 +136,11 @@ impl Default for BarSlide {
 impl BarSlide {
     pub fn new() -> Self {
         glib::Object::builder().build()
+    }
+
+    /// Set the shapes blurred behind the bar on the native blur backend.
+    pub fn set_blur_shapes(&self, shapes: BlurShapes) {
+        self.imp().blur.set_shapes(self, shapes);
     }
 
     pub fn set_progress(&self, progress: f64) {
