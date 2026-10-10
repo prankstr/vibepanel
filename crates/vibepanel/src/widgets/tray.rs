@@ -28,6 +28,7 @@ use crate::services::tray::{TrayItem, TrayMenuEntry, TrayPixmap, TrayService};
 use crate::styles::{button as btn, color, icon, surface, widget};
 use crate::widgets::WidgetConfig;
 use crate::widgets::base::{BaseWidget, configure_popover};
+use crate::widgets::blur_host::BlurPopover;
 use crate::widgets::warn_unknown_options;
 
 const DEFAULT_MAX_ICONS: usize = 12;
@@ -978,7 +979,8 @@ fn create_menu_popover(
     parent: &Widget,
     container: &GtkBox,
 ) -> Popover {
-    let popover = Popover::new();
+    let blur_radius = || ConfigManager::global().surface_border_radius();
+    let popover: Popover = BlurPopover::new(blur_radius).upcast();
     popover.set_parent(parent);
     popover.set_can_focus(false);
     configure_tray_popover(&popover);
@@ -1002,9 +1004,7 @@ fn create_menu_popover(
         if ConfigManager::global().blur_enabled()
             && let Some(blur) = BackgroundEffectManager::global()
         {
-            blur.apply_blur_surface(p, &container_for_blur, || {
-                ConfigManager::global().surface_border_radius() as i32
-            });
+            blur.apply_blur_surface(p, &container_for_blur, move || blur_radius() as i32);
         }
     });
 

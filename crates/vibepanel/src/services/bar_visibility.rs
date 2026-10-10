@@ -12,7 +12,7 @@ use vibepanel_core::config::{AutoHide, BarPosition};
 
 use crate::popover_tracker::PopoverTracker;
 use crate::sectioned_bar::{CenterPriorityLayout, SectionedBar};
-use crate::services::background_effect::BackgroundEffectManager;
+use crate::services::background_effect::{BackgroundEffectManager, rounded_bounds};
 use crate::services::callbacks::CallbackId;
 use crate::services::compositor::CompositorManager;
 use crate::services::compositor::visibility::{HideDecision, Rect, VisibilitySubscription};
@@ -240,6 +240,25 @@ impl BarVisibilityController {
         let overlay = gtk4::Overlay::new();
         let slide = crate::widgets::bar_slide::BarSlide::new();
         slide.set_position(config.bar.position());
+        let bar_for_blur = bar.downgrade();
+        slide.set_blur_shapes(Rc::new(move |host| {
+            let Some(bar) = bar_for_blur.upgrade() else {
+                return Vec::new();
+            };
+            let config = ConfigManager::global();
+            if config.bar_background_opacity() == 0.0 {
+                // Islands mode: blur each widget island, not the transparent bar.
+                let radius = config.widget_border_radius() as f32;
+                crate::bar::visible_islands(&bar)
+                    .iter()
+                    .filter_map(|island| rounded_bounds(island, host, radius))
+                    .collect()
+            } else {
+                rounded_bounds(&bar, host, config.bar_border_radius() as f32)
+                    .into_iter()
+                    .collect()
+            }
+        }));
         slide.set_child(&content);
         slide.set_progress(0.0);
         overlay.set_child(Some(&slide));

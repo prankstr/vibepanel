@@ -36,7 +36,7 @@ use std::rc::Rc;
 use vibepanel_core::config::BarPosition;
 
 use super::scale_box::ScaleBox;
-use crate::services::background_effect::{BackgroundEffectManager, sync_blur};
+use crate::services::background_effect::{BackgroundEffectManager, rounded_bounds, sync_blur};
 use crate::services::compositor::CompositorManager;
 use crate::services::config_manager::ConfigManager;
 use crate::services::surfaces::{SHADOW_MARGIN, SurfaceStyleManager};
@@ -207,10 +207,10 @@ impl AnimState {
 
 /// Apply the animation fade to the widget matching `direction`.
 ///
-/// GTK-native blur (GTK >= 4.23.3) is derived from the render tree: an
-/// opacity node *above* the `backdrop-filter` widget isolates its backdrop
-/// and drops the blur region, while opacity on the `backdrop-filter` widget
-/// itself sits inside its copy/paste pair and keeps it. So:
+/// GTK-native blur (GTK >= 4.23.3) is derived from the render tree. The
+/// ScaleBox pushes the blur nodes in front of its child: opacity on the
+/// ScaleBox isolates them and drops the blur region, while opacity on the child
+/// leaves them alone. So:
 ///
 /// - **Opening** fades the ScaleBox child (the blurred surface), keeping the
 ///   compositor blur at full strength from the first frame instead of popping
@@ -262,6 +262,17 @@ pub(crate) struct SurfaceAnimation {
 impl SurfaceAnimation {
     pub(crate) fn new() -> Self {
         let shell = ScaleBox::new();
+        shell.set_blur_shapes(std::rc::Rc::new(|host| {
+            let Some(shell) = host.downcast_ref::<ScaleBox>() else {
+                return Vec::new();
+            };
+            let radius = ConfigManager::global().surface_border_radius() as f32;
+            shell
+                .child()
+                .and_then(|child| rounded_bounds(&child, host, radius))
+                .into_iter()
+                .collect()
+        }));
         snap_anim_shell(&shell, 0.0, ANIM_SCALE_FROM);
         Self {
             shell,

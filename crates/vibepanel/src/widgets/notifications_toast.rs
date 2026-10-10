@@ -19,6 +19,7 @@ use tracing::debug;
 use crate::services::notification::{
     Notification, NotificationService, URGENCY_CRITICAL, URGENCY_LOW,
 };
+use crate::widgets::blur_host::BlurWindow;
 
 /// Type alias for toast notification callbacks.
 type ToastCallback = Rc<dyn Fn(u32)>;
@@ -173,12 +174,12 @@ impl NotificationToast {
         on_action: ToastActionCallback,
         on_height_measured: ToastCallback,
     ) -> Rc<Self> {
-        let window = Window::builder()
-            .application(context.app)
-            .decorated(false)
-            .resizable(false)
-            .default_width(POPOVER_WIDTH)
-            .build();
+        let blur_radius = || ConfigManager::global().surface_border_radius();
+        let window: Window = BlurWindow::new(blur_radius).upcast();
+        window.set_application(Some(context.app));
+        window.set_decorated(false);
+        window.set_resizable(false);
+        window.set_default_size(POPOVER_WIDTH, -1);
 
         window.add_css_class(notif::TOAST_WRAPPER);
 
@@ -252,7 +253,7 @@ impl NotificationToast {
         let theme_callback_guard = attach_blur_surface_lifecycle(
             &toast.window,
             |win: &Window| win.child(),
-            || ConfigManager::global().surface_border_radius() as i32,
+            move || blur_radius() as i32,
         );
         toast
             .theme_callback_guard

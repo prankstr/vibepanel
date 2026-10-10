@@ -17,6 +17,7 @@ pub(crate) mod bar_slide;
 mod base;
 mod battery;
 mod battery_popover;
+pub(crate) mod blur_host;
 mod calendar_popover;
 mod clock;
 mod cpu;

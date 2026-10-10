@@ -53,8 +53,8 @@
 //! Compositor-side blur renders independently of widget opacity — without
 //! removal, a blur rectangle remains visible through the fading surface.
 //! With GTK-native blur the same effect comes from fading an *ancestor* of
-//! the `backdrop-filter` widget, which drops the region (see
-//! [`native_blur_css`]).
+//! the widget that pushes the blur nodes, which drops the region (see
+//! [`SnapshotBlur`]).
 //!
 //! ### Terminology
 //!
@@ -114,20 +114,20 @@ const BLUR_SURFACE_ACTIVE_KEY: &str = "vibepanel-blur-surface-active";
 /// protocol error, so the legacy path must never run on these versions.
 const NATIVE_BLUR_GTK_VERSION: (u32, u32, u32) = (4, 23, 3);
 
-/// CSS blur length for native blur. GTK maps `blur(Npx)` to a blur node of
-/// radius `2N` and only reports regions with radius >= 20 to the compositor
-/// (`BACKGROUND_BLUR_THRESHOLD` in gsk/gskblurutils.c). The compositor decides
-/// the actual blur strength.
-const NATIVE_BLUR_CSS_LENGTH: &str = "10px";
+/// Blur node radius for native blur. GTK only reports blur nodes with a radius
+/// of at least 20 to the compositor (`BACKGROUND_BLUR_THRESHOLD` in
+/// gsk/gskblurutils.c). The compositor decides the actual blur strength.
+const NATIVE_BLUR_RADIUS: f64 = 20.0;
 
 /// Which mechanism provides compositor background blur.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BlurBackend {
+enum BlurBackend {
     /// Not on Wayland, or the compositor lacks `ext_background_effect_manager_v1`.
     Unsupported,
     /// GTK < 4.23.3: vibepanel manages effect objects and regions itself.
     Legacy,
-    /// GTK >= 4.23.3: GTK derives regions from CSS `backdrop-filter`.
+    /// GTK >= 4.23.3: GTK derives regions from blur nodes that
+    /// [`SnapshotBlur`] hosts push in `snapshot()`.
     Native,
 }
 
@@ -162,7 +162,7 @@ fn detect_blur_backend() -> Option<BlurBackend> {
 
 /// Runtime blur backend, decided by the loaded GTK version and compositor
 /// support. Must be called on the main thread after GTK init.
-pub fn blur_backend() -> BlurBackend {
+fn blur_backend() -> BlurBackend {
     thread_local! {
         static BACKEND: std::cell::Cell<Option<BlurBackend>> = const { std::cell::Cell::new(None) };
     }
@@ -180,40 +180,95 @@ pub fn blur_backend() -> BlurBackend {
     })
 }
 
-/// CSS that requests GTK-native background blur for every surface the legacy
-/// path covers. Only meaningful with [`BlurBackend::Native`].
+// ── Native snapshot blur ────────────────────────────────────────────────────
+
+/// Native-backend blur, pushed from a host widget's `snapshot()`.
 ///
-/// `island_mode` (bar `background_opacity == 0`) blurs each widget island
-/// instead of the bar background. Groups need no special case: `.widget`
-/// already carries `--radius-widget`, which bounds the blurred shape.
+/// GTK derives each surface's compositor blur region from blur nodes in its
+/// render tree. CSS `backdrop-filter` would produce those too, but GTK wraps its
+/// backdrop in a repeat node with non-empty bounds, so the GPU renderer renders
+/// and blurs an offscreen on every redraw even though the backdrop is empty.
+/// Pushing `copy -> blur -> paste` directly leaves the pasted backdrop empty:
+/// GTK skips the in-client blur and only reports the region.
 ///
-/// Note: an ancestor with opacity < 1 isolates the backdrop and drops the
-/// region, while opacity on the `backdrop-filter` widget itself keeps it.
-/// `SurfaceAnimation` relies on this: it fades the blurred child on open (blur
-/// from the first frame) and the `ScaleBox` on close (blur dropped at fade
-/// start).
-pub fn native_blur_css(island_mode: bool) -> String {
-    let bar_rules = if island_mode {
-        format!(
-            ".widget-wrapper > .widget {{ backdrop-filter: blur({len}); }}\n",
-            len = NATIVE_BLUR_CSS_LENGTH
-        )
-    } else {
-        format!(
-            "sectioned-bar.bar {{ backdrop-filter: blur({len}); }}\n",
-            len = NATIVE_BLUR_CSS_LENGTH
-        )
-    };
-    format!(
-        "/* Native compositor blur (GTK >= 4.23.3) */\n\
-         {bar_rules}\
-         scale-box > .vp-surface-popover,\n\
-         .tray-menu.vp-surface-popover,\n\
-         window.notification-toast-wrapper > .notification-toast,\n\
-         window.osd-wrapper > .osd,\n\
-         window.media-window > .media-content {{ backdrop-filter: blur({len}); }}\n",
-        len = NATIVE_BLUR_CSS_LENGTH
-    )
+/// A host must draw the blur before the blurred widget, so it is always an
+/// ancestor of that widget (a widget's own CSS background is drawn before its
+/// `snapshot()` runs and would otherwise end up in the backdrop).
+///
+/// An ancestor with opacity < 1 isolates the backdrop and drops the region,
+/// while opacity on the blurred widget itself keeps it. `SurfaceAnimation`
+/// relies on this: it fades the blurred child on open (blur from the first
+/// frame) and the `ScaleBox` host on close (blur dropped at fade start).
+#[derive(Default)]
+pub struct SnapshotBlur {
+    shapes: RefCell<Option<BlurShapes>>,
+    redraw_guard: RefCell<Option<crate::services::config_manager::ThemeCallbackGuard>>,
+}
+
+/// Rounded rects to blur, in the host widget's coordinates.
+pub type BlurShapes = Rc<dyn Fn(&gtk4::Widget) -> Vec<gtk4::gsk::RoundedRect>>;
+
+impl SnapshotBlur {
+    /// Set the shapes this host blurs and redraw it when the theme changes, so
+    /// toggling `theme.blur` takes effect on open surfaces.
+    pub fn set_shapes(&self, host: &impl IsA<gtk4::Widget>, shapes: BlurShapes) {
+        self.shapes.replace(Some(shapes));
+        let host = host.as_ref().downgrade();
+        let id = ConfigManager::global().on_theme_change(move || {
+            if let Some(host) = host.upgrade() {
+                host.queue_draw();
+            }
+        });
+        self.redraw_guard
+            .replace(Some(crate::services::config_manager::ThemeCallbackGuard(
+                id,
+            )));
+    }
+
+    /// Push the blur nodes. Call from the host's `snapshot()` before drawing
+    /// the blurred child, inside any transform the child should follow.
+    pub fn snapshot(&self, host: &impl IsA<gtk4::Widget>, snapshot: &gtk4::Snapshot) {
+        if blur_backend() != BlurBackend::Native || !ConfigManager::global().blur_enabled() {
+            return;
+        }
+        let Some(shapes) = self.shapes.borrow().clone() else {
+            return;
+        };
+        push_blur_nodes(snapshot, &shapes(host.as_ref()));
+    }
+}
+
+/// `widget`'s border box in `host` coordinates as a rounded rect. The radius
+/// is clamped to half the smaller side, matching the legacy region shape.
+pub fn rounded_bounds(
+    widget: &impl IsA<gtk4::Widget>,
+    host: &impl IsA<gtk4::Widget>,
+    radius: f32,
+) -> Option<gtk4::gsk::RoundedRect> {
+    let bounds = widget.compute_bounds(host)?;
+    if bounds.width() <= 0.0 || bounds.height() <= 0.0 {
+        return None;
+    }
+    let radius = radius.clamp(0.0, bounds.width().min(bounds.height()) / 2.0);
+    Some(gtk4::gsk::RoundedRect::from_rect(bounds, radius))
+}
+
+/// One copy for all shapes, so every paste replays only what was drawn before
+/// the host (nothing on vibepanel's transparent surfaces). A copy per shape
+/// would replay earlier shapes' blur nodes and make later backdrops non-empty.
+fn push_blur_nodes(snapshot: &gtk4::Snapshot, shapes: &[gtk4::gsk::RoundedRect]) {
+    if shapes.is_empty() {
+        return;
+    }
+    snapshot.push_copy();
+    for shape in shapes {
+        snapshot.push_rounded_clip(shape);
+        snapshot.push_blur(NATIVE_BLUR_RADIUS);
+        snapshot.append_paste(shape.bounds(), 0);
+        snapshot.pop(); // blur
+        snapshot.pop(); // clip
+    }
+    snapshot.pop(); // copy
 }
 
 /// Apply blur to a surface, or remove it when blur is disabled.
@@ -1079,7 +1134,7 @@ impl BackgroundEffectManager {
 #[cfg(test)]
 mod tests {
     use super::{
-        compute_rounded_rect_rects, compute_rounded_rect_rects_with_corner_inset, native_blur_css,
+        compute_rounded_rect_rects, compute_rounded_rect_rects_with_corner_inset,
         native_blur_supported,
     };
 
@@ -1090,34 +1145,6 @@ mod tests {
         assert!(native_blur_supported(4, 23, 3));
         assert!(native_blur_supported(4, 24, 1));
         assert!(native_blur_supported(5, 0, 0));
-    }
-
-    const SURFACE_SELECTORS: [&str; 5] = [
-        "scale-box > .vp-surface-popover",
-        ".tray-menu.vp-surface-popover",
-        "window.notification-toast-wrapper > .notification-toast",
-        "window.osd-wrapper > .osd",
-        "window.media-window > .media-content",
-    ];
-
-    #[test]
-    fn native_blur_css_island_mode_blurs_widgets() {
-        let css = native_blur_css(true);
-        assert!(css.contains(".widget-wrapper > .widget { backdrop-filter: blur(10px); }"));
-        assert!(!css.contains("sectioned-bar.bar"));
-        for sel in SURFACE_SELECTORS {
-            assert!(css.contains(sel), "missing surface selector {sel}");
-        }
-    }
-
-    #[test]
-    fn native_blur_css_opaque_bar_blurs_bar() {
-        let css = native_blur_css(false);
-        assert!(css.contains("sectioned-bar.bar { backdrop-filter: blur(10px); }"));
-        assert!(!css.contains(".widget-wrapper > .widget"));
-        for sel in SURFACE_SELECTORS {
-            assert!(css.contains(sel), "missing surface selector {sel}");
-        }
     }
 
     /// Helper: compute total pixel area covered by non-overlapping scanline rects.

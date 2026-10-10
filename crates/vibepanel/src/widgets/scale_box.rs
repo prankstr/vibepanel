@@ -17,7 +17,11 @@
 //! CSS `transform: scale()` transitions hit the same leak but offer no
 //! quantization hook, which is why the animation is driven from a tick
 //! callback instead of CSS.
+//!
+//! On the native blur backend the ScaleBox also hosts the surface's
+//! compositor blur (see [`SnapshotBlur`]), so the blur scales with the content.
 
+use crate::services::background_effect::{BlurShapes, SnapshotBlur};
 use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4::subclass::prelude::*;
@@ -38,6 +42,8 @@ mod imp {
         pub(super) scale: Cell<f64>,
         /// The single child widget.
         pub(super) child: glib::WeakRef<gtk4::Widget>,
+        /// Native-backend blur pushed behind the child.
+        pub(super) blur: SnapshotBlur,
     }
 
     impl Default for ScaleBox {
@@ -45,6 +51,7 @@ mod imp {
             Self {
                 scale: Cell::default(),
                 child: glib::WeakRef::new(),
+                blur: SnapshotBlur::default(),
             }
         }
     }
@@ -106,6 +113,7 @@ mod imp {
             let widget = self.obj();
 
             if s >= 1.0 {
+                self.blur.snapshot(&*widget, snapshot);
                 widget.snapshot_child(&child, snapshot);
                 return;
             }
@@ -122,6 +130,7 @@ mod imp {
                 cy * (1.0 - s as f32),
             ));
             snapshot.scale(s as f32, s as f32);
+            self.blur.snapshot(&*widget, snapshot);
             widget.snapshot_child(&child, snapshot);
             snapshot.restore();
         }
@@ -175,6 +184,11 @@ impl ScaleBox {
         let widget = child.as_ref();
         widget.set_parent(self);
         imp.child.set(Some(widget));
+    }
+
+    /// Set the shapes blurred behind the child on the native blur backend.
+    pub fn set_blur_shapes(&self, shapes: BlurShapes) {
+        self.imp().blur.set_shapes(self, shapes);
     }
 
     /// The current child widget, if any.

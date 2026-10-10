@@ -14,6 +14,7 @@ use crate::services::audio::{AudioService, valid_volume_percent};
 use crate::services::brightness::BrightnessService;
 use crate::services::callbacks::CallbackId;
 use crate::styles::{color, osd};
+use crate::widgets::blur_host::BlurWindow;
 
 use gtk4::gdk;
 use gtk4::glib;
@@ -242,11 +243,12 @@ impl OsdOverlay {
         let position = normalize_position(&osd_config.position);
         let timeout_ms = osd_config.timeout_ms;
 
-        let window = gtk4::Window::builder()
-            .application(app)
-            .decorated(false)
-            .resizable(false)
-            .build();
+        // Same as `--radius-widget-lg: calc(widget-radius * 2)` in theme CSS.
+        let blur_radius = || ConfigManager::global().widget_border_radius() * 2;
+        let window: gtk4::Window = BlurWindow::new(blur_radius).upcast();
+        window.set_application(Some(app));
+        window.set_decorated(false);
+        window.set_resizable(false);
 
         window.add_css_class(osd::WRAPPER);
 
@@ -270,10 +272,7 @@ impl OsdOverlay {
         let theme_callback_guard = attach_blur_surface_lifecycle(
             &window,
             |win: &gtk4::Window| win.child(),
-            || {
-                // Same as `--radius-widget-lg: calc(widget-radius * 2)` in theme CSS.
-                ConfigManager::global().widget_border_radius() as i32 * 2
-            },
+            move || blur_radius() as i32,
         );
 
         let overlay = Rc::new(Self {
