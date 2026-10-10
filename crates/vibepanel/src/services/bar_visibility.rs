@@ -663,7 +663,7 @@ impl BarVisibilityController {
             for &(x, y, w, h) in &rects {
                 let _ = region.union_rectangle(&gtk4::cairo::RectangleInt::new(x, y, w, h));
             }
-            surface.set_input_region(&region);
+            surface.set_input_region(Some(&region));
             // Popup state can change input without changing any visible pixels.
             self.window.queue_draw();
             *self.input_state.borrow_mut() = Some(rects);

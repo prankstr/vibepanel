@@ -13,7 +13,7 @@
 //! This is best-effort, fire-and-forget IPC. If the bar isn't running or
 //! the socket doesn't exist, the CLI silently continues.
 //!
-//! The listener uses glib::unix_fd_add_local() to watch the socket fd
+//! The listener uses glib_unix::unix_fd_add_local() to watch the socket fd
 //! on the GTK main loop - fully event-driven with zero polling.
 
 use std::cell::RefCell;
@@ -201,7 +201,7 @@ use gtk4::glib;
 
 /// Listener for panel IPC messages.
 ///
-/// Uses glib::unix_fd_add_local() to watch the socket fd on the GTK main loop.
+/// Uses glib_unix::unix_fd_add_local() to watch the socket fd on the GTK main loop.
 /// Fully event-driven - zero polling, zero background threads.
 pub struct IpcListener {
     /// The bound socket (must stay alive while listening).
@@ -259,8 +259,10 @@ impl IpcListener {
         // Set up fd watcher on the GTK main loop.
         // This fires whenever data is available on the socket.
         let listener_weak = Rc::downgrade(&listener);
-        let source_id =
-            glib::unix_fd_add_local(socket_fd, glib::IOCondition::IN, move |fd, _condition| {
+        let source_id = glib_unix::unix_fd_add_local(
+            socket_fd,
+            glib::IOCondition::IN,
+            move |fd, _condition| {
                 // Read all available messages (socket is non-blocking).
                 let mut buf = [0u8; 256];
                 loop {
@@ -294,7 +296,8 @@ impl IpcListener {
                 }
 
                 glib::ControlFlow::Continue
-            });
+            },
+        );
 
         listener.borrow_mut().source_id = Some(source_id);
 

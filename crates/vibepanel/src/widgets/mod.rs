@@ -50,6 +50,7 @@ pub(crate) mod scale_box;
 mod spacer;
 mod system_popover;
 mod taskbar;
+mod texture;
 mod tray;
 mod updates;
 mod updates_common;

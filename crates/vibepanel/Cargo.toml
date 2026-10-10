@@ -20,6 +20,8 @@ gtk4 = { workspace = true }
 pango = { workspace = true }
 gtk4-layer-shell = { workspace = true }
 gdk4-wayland = { workspace = true }
+glib-unix = { workspace = true }
+gio-unix = { workspace = true }
 wayland-client = { workspace = true }
 wayland-protocols = { workspace = true }
 notify = { workspace = true }

@@ -9,7 +9,7 @@ arch=('x86_64' 'aarch64')
 url="https://github.com/prankstr/vibepanel"
 license=('MIT')
 # systemd-libs provides libudev used by the brightness service.
-depends=('gtk4' 'gtk4-layer-shell' 'libpulse' 'upower' 'networkmanager' 'bluez' 'systemd-libs')
+depends=('gtk4>=1:4.22' 'gtk4-layer-shell' 'libpulse' 'upower' 'networkmanager' 'bluez' 'systemd-libs')
 makedepends=('git' 'cargo' 'rust' 'pkg-config')
 optdepends=('power-profiles-daemon: power profile switching in battery popover'
             'modemmanager: cellular/mobile network support'

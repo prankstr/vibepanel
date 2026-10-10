@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use gtk4::gdk;
-use gtk4::gdk_pixbuf::{Colorspace, Pixbuf};
+use gtk4::gdk_pixbuf::Pixbuf;
 use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4::{
@@ -745,10 +745,7 @@ fn normalize_pixbuf_to_rgba(pixbuf: &Pixbuf) -> Vec<u8> {
 
 /// Build a `gdk::Texture` from packed RGBA bytes and dimensions.
 fn texture_from_rgba_data(rgba_data: Vec<u8>, width: i32, height: i32) -> gdk::Texture {
-    let stride = width * 4;
-    let gbytes = glib::Bytes::from_owned(rgba_data);
-    let pixbuf = Pixbuf::from_bytes(&gbytes, Colorspace::Rgb, true, 8, width, height, stride);
-    gdk::Texture::for_pixbuf(&pixbuf)
+    super::texture::texture_from_rgba(rgba_data, width, height)
 }
 
 /// Decode a file-backed icon, run contrast adjustment, and return a texture.
