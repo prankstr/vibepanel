@@ -1418,7 +1418,16 @@ pub fn load_css(config: &Config) {
     // Use cached palettes from ConfigManager (avoids re-reading wallpaper image)
     let palette = ConfigManager::global().palette();
     let popover_palette = ConfigManager::global().popover_palette();
-    let css = generate_css(config, &palette, popover_palette.as_ref());
+    let mut css = generate_css(config, &palette, popover_palette.as_ref());
+
+    // GTK >= 4.23.3 derives compositor blur regions from `backdrop-filter`.
+    {
+        use crate::services::background_effect::{BlurBackend, blur_backend, native_blur_css};
+        if config.theme.blur && blur_backend() == BlurBackend::Native {
+            css.push('\n');
+            css.push_str(&native_blur_css(config.bar.background_opacity == 0.0));
+        }
+    }
 
     // Debug: print theme configuration
     debug!("Generated theme CSS:");

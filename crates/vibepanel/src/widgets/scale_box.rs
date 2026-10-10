@@ -177,6 +177,11 @@ impl ScaleBox {
         imp.child.set(Some(widget));
     }
 
+    /// The current child widget, if any.
+    pub fn child(&self) -> Option<gtk4::Widget> {
+        self.imp().child.upgrade()
+    }
+
     /// Remove the current child widget, if any.
     pub fn remove_child(&self) {
         if let Some(child) = self.imp().child.upgrade() {

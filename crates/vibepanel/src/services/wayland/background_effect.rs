@@ -52,6 +52,9 @@
 //! (e.g. popovers, Quick Settings), blur must be removed at fade start.
 //! Compositor-side blur renders independently of widget opacity — without
 //! removal, a blur rectangle remains visible through the fading surface.
+//! With GTK-native blur the same effect comes from fading an *ancestor* of
+//! the `backdrop-filter` widget, which drops the region (see
+//! [`native_blur_css`]).
 //!
 //! ### Terminology
 //!
@@ -102,6 +105,116 @@ use crate::services::config_manager::ConfigManager;
 
 const BLUR_SURFACE_RESIZE_WATCHED_KEY: &str = "vibepanel-blur-surface-watched";
 const BLUR_SURFACE_ACTIVE_KEY: &str = "vibepanel-blur-surface-active";
+
+// ── Backend selection ───────────────────────────────────────────────────────
+
+/// First GTK release that binds `ext_background_effect_manager_v1` itself and
+/// creates an effect object for every `wl_surface` (GTK MR !10145). Creating a
+/// second object on the same surface is a fatal `background_effect_exists`
+/// protocol error, so the legacy path must never run on these versions.
+const NATIVE_BLUR_GTK_VERSION: (u32, u32, u32) = (4, 23, 3);
+
+/// CSS blur length for native blur. GTK maps `blur(Npx)` to a blur node of
+/// radius `2N` and only reports regions with radius >= 20 to the compositor
+/// (`BACKGROUND_BLUR_THRESHOLD` in gsk/gskblurutils.c). The compositor decides
+/// the actual blur strength.
+const NATIVE_BLUR_CSS_LENGTH: &str = "10px";
+
+/// Which mechanism provides compositor background blur.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BlurBackend {
+    /// Not on Wayland, or the compositor lacks `ext_background_effect_manager_v1`.
+    Unsupported,
+    /// GTK < 4.23.3: vibepanel manages effect objects and regions itself.
+    Legacy,
+    /// GTK >= 4.23.3: GTK derives regions from CSS `backdrop-filter`.
+    Native,
+}
+
+/// Whether the given GTK runtime version handles background effects natively.
+fn native_blur_supported(major: u32, minor: u32, micro: u32) -> bool {
+    (major, minor, micro) >= NATIVE_BLUR_GTK_VERSION
+}
+
+/// Detect the blur backend. Returns `None` when no display is available yet
+/// so the result is not cached prematurely.
+fn detect_blur_backend() -> Option<BlurBackend> {
+    let display = gtk4::gdk::Display::default()?;
+    let Ok(wayland_display) = display.downcast::<gdk4_wayland::WaylandDisplay>() else {
+        return Some(BlurBackend::Unsupported);
+    };
+    if !wayland_display.query_registry("ext_background_effect_manager_v1") {
+        return Some(BlurBackend::Unsupported);
+    }
+    let (major, minor, micro) = (
+        gtk4::major_version(),
+        gtk4::minor_version(),
+        gtk4::micro_version(),
+    );
+    let backend = if native_blur_supported(major, minor, micro) {
+        BlurBackend::Native
+    } else {
+        BlurBackend::Legacy
+    };
+    debug!("Blur backend: {backend:?} (GTK {major}.{minor}.{micro})");
+    Some(backend)
+}
+
+/// Runtime blur backend, decided by the loaded GTK version and compositor
+/// support. Must be called on the main thread after GTK init.
+pub fn blur_backend() -> BlurBackend {
+    thread_local! {
+        static BACKEND: std::cell::Cell<Option<BlurBackend>> = const { std::cell::Cell::new(None) };
+    }
+    BACKEND.with(|cell| {
+        if let Some(backend) = cell.get() {
+            return backend;
+        }
+        match detect_blur_backend() {
+            Some(backend) => {
+                cell.set(Some(backend));
+                backend
+            }
+            None => BlurBackend::Unsupported,
+        }
+    })
+}
+
+/// CSS that requests GTK-native background blur for every surface the legacy
+/// path covers. Only meaningful with [`BlurBackend::Native`].
+///
+/// `island_mode` (bar `background_opacity == 0`) blurs each widget island
+/// instead of the bar background. Groups need no special case: `.widget`
+/// already carries `--radius-widget`, which bounds the blurred shape.
+///
+/// Note: an ancestor with opacity < 1 isolates the backdrop and drops the
+/// region, while opacity on the `backdrop-filter` widget itself keeps it.
+/// `SurfaceAnimation` relies on this: it fades the blurred child on open (blur
+/// from the first frame) and the `ScaleBox` on close (blur dropped at fade
+/// start).
+pub fn native_blur_css(island_mode: bool) -> String {
+    let bar_rules = if island_mode {
+        format!(
+            ".widget-wrapper > .widget {{ backdrop-filter: blur({len}); }}\n",
+            len = NATIVE_BLUR_CSS_LENGTH
+        )
+    } else {
+        format!(
+            "sectioned-bar.bar {{ backdrop-filter: blur({len}); }}\n",
+            len = NATIVE_BLUR_CSS_LENGTH
+        )
+    };
+    format!(
+        "/* Native compositor blur (GTK >= 4.23.3) */\n\
+         {bar_rules}\
+         scale-box > .vp-surface-popover,\n\
+         .tray-menu.vp-surface-popover,\n\
+         window.notification-toast-wrapper > .notification-toast,\n\
+         window.osd-wrapper > .osd,\n\
+         window.media-window > .media-content {{ backdrop-filter: blur({len}); }}\n",
+        len = NATIVE_BLUR_CSS_LENGTH
+    )
+}
 
 /// Apply blur to a surface, or remove it when blur is disabled.
 ///
@@ -467,12 +580,20 @@ impl BackgroundEffectManager {
             .downcast::<gdk4_wayland::WaylandDisplay>()
             .ok()?;
 
-        // Quick check: does the compositor advertise this protocol at all?
-        if !wayland_display.query_registry("ext_background_effect_manager_v1") {
-            debug!(
-                "Compositor does not advertise ext_background_effect_manager_v1, blur hints disabled"
-            );
-            return None;
+        // Only the legacy backend creates effect objects. On GTK >= 4.23.3 GTK
+        // owns one per surface and a duplicate is a fatal protocol error.
+        match blur_backend() {
+            BlurBackend::Legacy => {}
+            BlurBackend::Native => {
+                debug!("GTK handles ext-background-effect natively, legacy blur service disabled");
+                return None;
+            }
+            BlurBackend::Unsupported => {
+                debug!(
+                    "Compositor does not advertise ext_background_effect_manager_v1, blur hints disabled"
+                );
+                return None;
+            }
         }
 
         debug!("ext_background_effect_manager_v1 found in registry, initializing blur service");
@@ -957,7 +1078,47 @@ impl BackgroundEffectManager {
 
 #[cfg(test)]
 mod tests {
-    use super::{compute_rounded_rect_rects, compute_rounded_rect_rects_with_corner_inset};
+    use super::{
+        compute_rounded_rect_rects, compute_rounded_rect_rects_with_corner_inset, native_blur_css,
+        native_blur_supported,
+    };
+
+    #[test]
+    fn native_blur_version_gate() {
+        assert!(!native_blur_supported(4, 22, 9));
+        assert!(!native_blur_supported(4, 23, 2));
+        assert!(native_blur_supported(4, 23, 3));
+        assert!(native_blur_supported(4, 24, 1));
+        assert!(native_blur_supported(5, 0, 0));
+    }
+
+    const SURFACE_SELECTORS: [&str; 5] = [
+        "scale-box > .vp-surface-popover",
+        ".tray-menu.vp-surface-popover",
+        "window.notification-toast-wrapper > .notification-toast",
+        "window.osd-wrapper > .osd",
+        "window.media-window > .media-content",
+    ];
+
+    #[test]
+    fn native_blur_css_island_mode_blurs_widgets() {
+        let css = native_blur_css(true);
+        assert!(css.contains(".widget-wrapper > .widget { backdrop-filter: blur(10px); }"));
+        assert!(!css.contains("sectioned-bar.bar"));
+        for sel in SURFACE_SELECTORS {
+            assert!(css.contains(sel), "missing surface selector {sel}");
+        }
+    }
+
+    #[test]
+    fn native_blur_css_opaque_bar_blurs_bar() {
+        let css = native_blur_css(false);
+        assert!(css.contains("sectioned-bar.bar { backdrop-filter: blur(10px); }"));
+        assert!(!css.contains(".widget-wrapper > .widget"));
+        for sel in SURFACE_SELECTORS {
+            assert!(css.contains(sel), "missing surface selector {sel}");
+        }
+    }
 
     /// Helper: compute total pixel area covered by non-overlapping scanline rects.
     fn total_area(rects: &[(i32, i32, i32, i32)]) -> i64 {

@@ -205,8 +205,45 @@ impl AnimState {
     }
 }
 
+/// Apply the animation fade to the widget matching `direction`.
+///
+/// GTK-native blur (GTK >= 4.23.3) is derived from the render tree: an
+/// opacity node *above* the `backdrop-filter` widget isolates its backdrop
+/// and drops the blur region, while opacity on the `backdrop-filter` widget
+/// itself sits inside its copy/paste pair and keeps it. So:
+///
+/// - **Opening** fades the ScaleBox child (the blurred surface), keeping the
+///   compositor blur at full strength from the first frame instead of popping
+///   in when the fade completes.
+/// - **Closing** fades the ScaleBox itself, which drops the blur at fade start
+///   so it doesn't linger behind near-invisible content.
+///
+/// The other widget is reset to 1.0, so the visible result is identical and
+/// mid-flight reversals stay seamless. Without a child the shell carries the
+/// fade either way.
+fn set_anim_fade(shell: &ScaleBox, opacity: f64, direction: AnimDirection) {
+    match (direction, shell.child()) {
+        (AnimDirection::Opening, Some(child)) => {
+            shell.set_opacity(1.0);
+            child.set_opacity(opacity);
+        }
+        (_, child) => {
+            if let Some(child) = child {
+                child.set_opacity(1.0);
+            }
+            shell.set_opacity(opacity);
+        }
+    }
+}
+
+/// Effective fade across the shell and its child (see [`set_anim_fade`]).
+fn anim_fade(shell: &ScaleBox) -> f64 {
+    shell.opacity() * shell.child().map_or(1.0, |child| child.opacity())
+}
+
 fn snap_anim_shell(shell: &ScaleBox, opacity: f64, scale: f64) {
-    shell.set_opacity(opacity);
+    // Fully open or fully hidden: the shell carries the (trivial) fade.
+    set_anim_fade(shell, opacity, AnimDirection::Closing);
     shell.set_scale(scale);
 }
 
@@ -314,10 +351,12 @@ impl SurfaceAnimation {
 
     /// Animate towards `direction`, or snap when animations are disabled.
     ///
-    /// Closing removes blur first, since compositor blur does not fade with the
-    /// content. When a close completes, the window is hidden and `on_hidden`
-    /// runs. A close reversed with the same generation keeps its tick, which
-    /// then finishes the open instead.
+    /// Opening fades the shell's child so blur is present from the first frame;
+    /// closing fades the shell and removes blur first, since compositor blur
+    /// does not fade with the content (see [`set_anim_fade`]). When a close
+    /// completes, the window is hidden and `on_hidden` runs. A close reversed
+    /// with the same generation keeps its tick, which then finishes the open
+    /// instead.
     pub(crate) fn run(
         &self,
         direction: AnimDirection,
@@ -360,7 +399,7 @@ impl SurfaceAnimation {
             direction,
             generation,
             start_time_us,
-            self.shell.opacity(),
+            anim_fade(&self.shell),
         );
         // A running tick with this generation picks up the new direction.
         if !need_tick {
@@ -390,7 +429,7 @@ impl SurfaceAnimation {
                 )
             };
 
-            shell.set_opacity(progress);
+            set_anim_fade(shell, progress, direction);
             shell.set_scale(ANIM_SCALE_FROM + (1.0 - ANIM_SCALE_FROM) * progress);
 
             if direction == AnimDirection::Opening
