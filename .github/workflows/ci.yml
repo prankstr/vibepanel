@@ -8,6 +8,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: '-Dwarnings'
+  DEBIAN_FRONTEND: noninteractive
 
 jobs:
   fmt:
@@ -19,7 +20,7 @@ jobs:
 
   check:
     runs-on: ubuntu-latest
-    container: rust:trixie
+    container: ubuntu:26.04
     name: Clippy & Test
     steps:
       - uses: actions/checkout@v4
@@ -27,13 +28,21 @@ jobs:
         run: |
           apt-get update
           apt-get install -y \
+            build-essential \
+            ca-certificates \
+            curl \
+            git \
+            pkg-config \
             libgtk-4-dev \
             libgtk4-layer-shell-dev \
             libpulse-dev \
             libudev-dev \
             libdbus-1-dev \
             dbus-daemon
-          rustup component add clippy
+      - name: Install Rust
+        run: |
+          curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --component clippy
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -42,7 +51,7 @@ jobs:
 
   ui-regression-tests:
     runs-on: ubuntu-latest
-    container: rust:trixie
+    container: ubuntu:26.04
     name: UI Regression Tests
     steps:
       - uses: actions/checkout@v4
@@ -50,6 +59,11 @@ jobs:
         run: |
           apt-get update
           apt-get install -y \
+            build-essential \
+            ca-certificates \
+            curl \
+            git \
+            pkg-config \
             libgtk-4-dev \
             libgtk4-layer-shell-dev \
             libpulse-dev \
@@ -57,6 +71,10 @@ jobs:
             libdbus-1-dev \
             dbus-daemon \
             xvfb
+      - name: Install Rust
+        run: |
+          curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -65,7 +83,7 @@ jobs:
 
   layer-shell-tests:
     runs-on: ubuntu-latest
-    container: rust:trixie
+    container: ubuntu:26.04
     name: Layer-shell Tests (headless Sway)
     steps:
       - uses: actions/checkout@v4
@@ -73,6 +91,11 @@ jobs:
         run: |
           apt-get update
           apt-get install -y \
+            build-essential \
+            ca-certificates \
+            curl \
+            git \
+            pkg-config \
             libgtk-4-dev \
             libgtk4-layer-shell-dev \
             libpulse-dev \
@@ -82,6 +105,10 @@ jobs:
             sway \
             grim \
             python3
+      - name: Install Rust
+        run: |
+          curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}

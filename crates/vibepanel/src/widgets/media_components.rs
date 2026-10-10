@@ -907,7 +907,7 @@ fn load_texture_from_stream<S, F>(
         }
         match result {
             Ok(pixbuf) => {
-                picture.set_paintable(Some(&gtk4::gdk::Texture::for_pixbuf(&pixbuf)));
+                picture.set_paintable(Some(&super::texture::texture_for_pixbuf(&pixbuf)));
                 picture.set_visible(true);
                 on_success();
             }
@@ -940,7 +940,7 @@ fn load_texture_from_bytes<S, F>(
         None::<&gio::Cancellable>,
     ) {
         Ok(pixbuf) => {
-            picture.set_paintable(Some(&gtk4::gdk::Texture::for_pixbuf(&pixbuf)));
+            picture.set_paintable(Some(&super::texture::texture_for_pixbuf(&pixbuf)));
             picture.set_visible(true);
             on_success();
         }

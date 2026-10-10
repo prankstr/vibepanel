@@ -12,13 +12,13 @@ Source0:        %{url}/archive/v%{version}/%{name}-%{version}.tar.gz
 BuildRequires:  rust
 BuildRequires:  cargo
 BuildRequires:  gcc
-BuildRequires:  gtk4-devel
+BuildRequires:  gtk4-devel >= 4.22
 BuildRequires:  gtk4-layer-shell-devel
 BuildRequires:  pulseaudio-libs-devel
 BuildRequires:  systemd-devel
 BuildRequires:  dbus-devel
 
-Requires:       gtk4
+Requires:       gtk4 >= 4.22
 Requires:       gtk4-layer-shell
 Requires:       pulseaudio-libs
 Requires:       upower

@@ -64,7 +64,7 @@ fn install_event_dispatch<S: 'static>(
     let event_queue = Rc::downgrade(event_queue);
     let state = Rc::downgrade(state);
 
-    glib::unix_fd_add_local(raw_fd, glib::IOCondition::IN, move |_fd, _cond| {
+    glib_unix::unix_fd_add_local(raw_fd, glib::IOCondition::IN, move |_fd, _cond| {
         let (Some(event_queue), Some(state)) = (event_queue.upgrade(), state.upgrade()) else {
             return glib::ControlFlow::Break;
         };

@@ -24,7 +24,9 @@ use std::f64::consts::PI;
 use std::path::{Path, PathBuf};
 use std::rc::{Rc, Weak};
 
-use gtk4::gio::{AppInfo, DesktopAppInfo, prelude::*};
+use gio_unix::DesktopAppInfo;
+use gio_unix::prelude::*;
+use gtk4::gio::AppInfo;
 use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4::{IconTheme, Image, Label};

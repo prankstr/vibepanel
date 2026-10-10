@@ -484,39 +484,40 @@ impl BrightnessService {
         let this_weak = Rc::downgrade(self);
 
         // Watch the fd using glib's unix_fd_add_local - fires when udev events arrive.
-        let source_id = glib::unix_fd_add_local(fd, glib::IOCondition::IN, move |_fd, _cond| {
-            let this = match this_weak.upgrade() {
-                Some(t) => t,
-                None => return glib::ControlFlow::Break,
-            };
+        let source_id =
+            glib_unix::unix_fd_add_local(fd, glib::IOCondition::IN, move |_fd, _cond| {
+                let this = match this_weak.upgrade() {
+                    Some(t) => t,
+                    None => return glib::ControlFlow::Break,
+                };
 
-            // Read events from the monitor socket.
-            // We need to borrow the monitor to call receive().
-            let mut should_read = false;
-            if let Some(ref state) = *this.udev_monitor.borrow() {
-                // iter() yields events without blocking since fd is ready.
-                for event in state.socket.iter() {
-                    // Only care about "change" events on our device.
-                    if event.event_type() != udev::EventType::Change {
-                        continue;
-                    }
+                // Read events from the monitor socket.
+                // We need to borrow the monitor to call receive().
+                let mut should_read = false;
+                if let Some(ref state) = *this.udev_monitor.borrow() {
+                    // iter() yields events without blocking since fd is ready.
+                    for event in state.socket.iter() {
+                        // Only care about "change" events on our device.
+                        if event.event_type() != udev::EventType::Change {
+                            continue;
+                        }
 
-                    // Check if this is our backlight device.
-                    if let Some(name) = event.sysname().to_str()
-                        && name == device_name
-                    {
-                        should_read = true;
-                        // Don't break - drain all pending events.
+                        // Check if this is our backlight device.
+                        if let Some(name) = event.sysname().to_str()
+                            && name == device_name
+                        {
+                            should_read = true;
+                            // Don't break - drain all pending events.
+                        }
                     }
                 }
-            }
 
-            if should_read {
-                this.schedule_debounced_read();
-            }
+                if should_read {
+                    this.schedule_debounced_read();
+                }
 
-            glib::ControlFlow::Continue
-        });
+                glib::ControlFlow::Continue
+            });
 
         *self.udev_source_id.borrow_mut() = Some(source_id);
         debug!("BrightnessService: udev monitoring started for backlight subsystem");

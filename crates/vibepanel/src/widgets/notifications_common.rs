@@ -3,7 +3,6 @@
 //! This module contains constants and helper functions used by both
 //! notifications_toast.rs and notifications_popover.rs.
 
-use gtk4::gdk;
 use gtk4::gdk_pixbuf::Pixbuf;
 use gtk4::prelude::*;
 use gtk4::{
@@ -615,7 +614,7 @@ fn try_parse_tag(s: &str) -> Option<(String, usize, TagBalance)> {
 /// through the GTK main thread at full resolution.
 fn load_scaled_image_from_path(path: &str, size: i32) -> Image {
     if let Ok(pixbuf) = Pixbuf::from_file_at_scale(path, size, size, true) {
-        let texture = gdk::Texture::for_pixbuf(&pixbuf);
+        let texture = super::texture::texture_for_pixbuf(&pixbuf);
         let image = Image::from_paintable(Some(&texture));
         image.set_pixel_size(size);
         image
