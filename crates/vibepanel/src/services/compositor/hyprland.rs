@@ -42,7 +42,7 @@ pub struct HyprlandBackend {
     workspaces: Arc<RwLock<Vec<WorkspaceMeta>>>,
     callbacks: Mutex<Option<(WorkspaceCallback, WindowCallback)>>,
     monitor_workspaces: RwLock<HashMap<String, i32>>,
-    focused_monitor: RwLock<Option<String>>,
+    focused_monitor: Arc<RwLock<Option<String>>>,
     /// Callback for keyboard layout changes, set by CompositorManager.
     keyboard_layout_callback: Mutex<Option<KeyboardLayoutCallback>>,
     /// Current keyboard layout info.
@@ -65,7 +65,7 @@ impl HyprlandBackend {
             workspaces: Arc::new(RwLock::new(Self::default_workspaces())),
             callbacks: Mutex::new(None),
             monitor_workspaces: RwLock::new(HashMap::new()),
-            focused_monitor: RwLock::new(None),
+            focused_monitor: Arc::new(RwLock::new(None)),
             keyboard_layout_callback: Mutex::new(None),
             keyboard_layout: RwLock::new(None),
             main_keyboard_name: RwLock::new(None),
@@ -1162,6 +1162,8 @@ impl CompositorBackend for HyprlandBackend {
             .clone();
         // The manager-side backend uses this metadata for named workspace switching.
         let workspaces = Arc::clone(&self.workspaces);
+        // Shared so IPC popover dispatch can target the focused monitor.
+        let focused_monitor = Arc::clone(&self.focused_monitor);
         let kb_callback = self
             .keyboard_layout_callback
             .lock()
@@ -1185,7 +1187,7 @@ impl CompositorBackend for HyprlandBackend {
             workspaces,
             callbacks: Mutex::new(callbacks),
             monitor_workspaces: RwLock::new(HashMap::new()),
-            focused_monitor: RwLock::new(None),
+            focused_monitor,
             keyboard_layout_callback: Mutex::new(kb_callback),
             keyboard_layout: RwLock::new(None),
             main_keyboard_name: RwLock::new(None),
@@ -1237,6 +1239,10 @@ impl CompositorBackend for HyprlandBackend {
 
     fn get_focused_window(&self) -> Option<WindowInfo> {
         self.focused_window.read().clone()
+    }
+
+    fn get_focused_output(&self) -> Option<String> {
+        self.focused_monitor.read().clone()
     }
 
     fn switch_workspace(&self, workspace_id: i32) {

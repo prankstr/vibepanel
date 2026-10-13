@@ -244,6 +244,13 @@ pub trait CompositorBackend: Send + Sync {
     /// no window is focused or state is unknown.
     fn get_focused_window(&self) -> Option<WindowInfo>;
 
+    /// Get the connector name of the focused output (e.g., "DP-1").
+    ///
+    /// Default: `None` for backends that don't track output focus directly.
+    fn get_focused_output(&self) -> Option<String> {
+        None
+    }
+
     /// Switch to a workspace.
     ///
     /// Requests the compositor to activate the specified workspace.

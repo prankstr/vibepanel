@@ -201,6 +201,14 @@ impl CompositorManager {
         }
     }
 
+    /// Get the connector name of the focused output, if the backend tracks it.
+    pub fn get_focused_output(&self) -> Option<String> {
+        self.backend
+            .borrow()
+            .as_ref()
+            .and_then(|backend| backend.get_focused_output())
+    }
+
     /// Switch to a workspace.
     pub fn switch_workspace(&self, workspace_id: i32) {
         if let Some(ref backend) = *self.backend.borrow() {
