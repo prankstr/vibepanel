@@ -90,7 +90,8 @@ impl HyprlandBackend {
     }
 
     /// Create the event-thread instance. It shares `running` and all state
-    /// with `self`; only the socket paths and callbacks are copied.
+    /// with `self`; only the socket paths, callbacks and the
+    /// `supports_lua_dispatch` flag are copied.
     fn event_thread_instance(&self) -> Self {
         Self {
             running: Arc::clone(&self.running),
@@ -1327,19 +1328,30 @@ impl CompositorBackend for HyprlandBackend {
 
     fn switch_keyboard_layout_next(&self) {
         // `current` targets the keyboard last typed on, resolved by Hyprland
-        // at call time. Hyprland < 0.43 doesn't support it, so fall back to
-        // switching all keyboards.
+        // at call time. Hyprland < 0.43 doesn't support it (nor `all`), so
+        // fall back to the cached main keyboard by name. An error reply means
+        // nothing was switched, so retrying is safe; no reply may mean the
+        // command ran, so don't retry (it would switch twice).
         match self.send_command("switchxkblayout current next") {
             Some(response) if Self::response_is_ok(&response) => {
                 debug!("Switched keyboard layout for current keyboard");
             }
-            response => {
-                debug!(
-                    response = ?response.as_deref().map(str::trim),
-                    "switchxkblayout current failed, switching all keyboards"
-                );
-                let _ = self.send_command("switchxkblayout all next");
+            // An empty reply isn't an explicit error; the command may have run.
+            Some(response) if response.trim().is_empty() => {
+                warn!("switchxkblayout current: empty response from Hyprland");
             }
+            Some(response) => {
+                let main_keyboard = self.shared.main_keyboard_name.read().clone();
+                debug!(
+                    response = %response.trim(),
+                    keyboard = ?main_keyboard,
+                    "switchxkblayout current failed, trying cached main keyboard"
+                );
+                if let Some(name) = main_keyboard {
+                    let _ = self.send_command(&format!("switchxkblayout {name} next"));
+                }
+            }
+            None => warn!("switchxkblayout current: no response from Hyprland"),
         }
     }
 
