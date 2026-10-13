@@ -32,23 +32,45 @@ const RECONNECT_MAX_MS: u64 = 30000;
 const RECONNECT_MULTIPLIER: f64 = 1.5;
 const POINTER_FOCUS_REFRESH_DELAY: Duration = Duration::from_millis(50);
 
+/// State written by the event thread and read by the manager-side backend.
+struct SharedState {
+    workspace_snapshot: RwLock<WorkspaceSnapshot>,
+    focused_window: RwLock<Option<WindowInfo>>,
+    workspaces: RwLock<Vec<WorkspaceMeta>>,
+    monitor_workspaces: RwLock<HashMap<String, i32>>,
+    focused_monitor: RwLock<Option<String>>,
+    /// Hyprland monitor ID → connector name, used to resolve window outputs.
+    monitor_names: RwLock<HashMap<i64, String>>,
+    /// Current keyboard layout info.
+    keyboard_layout: RwLock<Option<KeyboardLayoutInfo>>,
+    /// Name of the main keyboard device (auto-detected from `hyprctl devices`).
+    main_keyboard_name: RwLock<Option<String>>,
+}
+
+impl Default for SharedState {
+    fn default() -> Self {
+        Self {
+            workspace_snapshot: RwLock::new(WorkspaceSnapshot::default()),
+            focused_window: RwLock::new(None),
+            workspaces: RwLock::new(HyprlandBackend::default_workspaces()),
+            monitor_workspaces: RwLock::new(HashMap::new()),
+            focused_monitor: RwLock::new(None),
+            monitor_names: RwLock::new(HashMap::new()),
+            keyboard_layout: RwLock::new(None),
+            main_keyboard_name: RwLock::new(None),
+        }
+    }
+}
+
 pub struct HyprlandBackend {
     running: Arc<AtomicBool>,
     event_thread: Mutex<Option<JoinHandle<()>>>,
     socket_path: RwLock<Option<String>>,
     event_socket_path: RwLock<Option<String>>,
-    workspace_snapshot: RwLock<WorkspaceSnapshot>,
-    focused_window: RwLock<Option<WindowInfo>>,
-    workspaces: Arc<RwLock<Vec<WorkspaceMeta>>>,
+    shared: Arc<SharedState>,
     callbacks: Mutex<Option<(WorkspaceCallback, WindowCallback)>>,
-    monitor_workspaces: RwLock<HashMap<String, i32>>,
-    focused_monitor: Arc<RwLock<Option<String>>>,
     /// Callback for keyboard layout changes, set by CompositorManager.
     keyboard_layout_callback: Mutex<Option<KeyboardLayoutCallback>>,
-    /// Current keyboard layout info.
-    keyboard_layout: RwLock<Option<KeyboardLayoutInfo>>,
-    /// Name of the main keyboard device (auto-detected from `hyprctl devices`).
-    main_keyboard_name: RwLock<Option<String>>,
     /// Whether this Hyprland instance supports the Lua dispatch API.
     supports_lua_dispatch: AtomicBool,
 }
@@ -60,16 +82,37 @@ impl HyprlandBackend {
             event_thread: Mutex::new(None),
             socket_path: RwLock::new(None),
             event_socket_path: RwLock::new(None),
-            workspace_snapshot: RwLock::new(WorkspaceSnapshot::default()),
-            focused_window: RwLock::new(None),
-            workspaces: Arc::new(RwLock::new(Self::default_workspaces())),
+            shared: Arc::new(SharedState::default()),
             callbacks: Mutex::new(None),
-            monitor_workspaces: RwLock::new(HashMap::new()),
-            focused_monitor: Arc::new(RwLock::new(None)),
             keyboard_layout_callback: Mutex::new(None),
-            keyboard_layout: RwLock::new(None),
-            main_keyboard_name: RwLock::new(None),
             supports_lua_dispatch: AtomicBool::new(false),
+        }
+    }
+
+    /// Create the event-thread instance. It shares `running` and all state
+    /// with `self`; only the socket paths and callbacks are copied.
+    fn event_thread_instance(&self) -> Self {
+        Self {
+            running: Arc::clone(&self.running),
+            event_thread: Mutex::new(None),
+            socket_path: RwLock::new(self.socket_path.read().clone()),
+            event_socket_path: RwLock::new(self.event_socket_path.read().clone()),
+            shared: Arc::clone(&self.shared),
+            callbacks: Mutex::new(
+                self.callbacks
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone(),
+            ),
+            keyboard_layout_callback: Mutex::new(
+                self.keyboard_layout_callback
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone(),
+            ),
+            supports_lua_dispatch: AtomicBool::new(
+                self.supports_lua_dispatch.load(Ordering::Relaxed),
+            ),
         }
     }
 
@@ -272,7 +315,7 @@ impl HyprlandBackend {
 
     fn update_workspace_metadata(&self, workspaces: &[Value]) -> bool {
         let new_workspaces = Self::workspace_meta_from_ipc(workspaces);
-        let mut current = self.workspaces.write();
+        let mut current = self.shared.workspaces.write();
         if *current == new_workspaces {
             return false;
         }
@@ -287,7 +330,8 @@ impl HyprlandBackend {
     }
 
     fn workspace_id_for_name(&self, name: &str) -> Option<i32> {
-        self.workspaces
+        self.shared
+            .workspaces
             .read()
             .iter()
             .find(|ws| ws.name == name)
@@ -295,7 +339,8 @@ impl HyprlandBackend {
     }
 
     fn has_workspace_metadata(&self, workspace_id: i32) -> bool {
-        self.workspaces
+        self.shared
+            .workspaces
             .read()
             .iter()
             .any(|ws| ws.id == workspace_id)
@@ -303,7 +348,7 @@ impl HyprlandBackend {
 
     fn workspace_switch_target(&self, workspace_id: i32) -> String {
         if workspace_id < 0 {
-            let workspaces = self.workspaces.read();
+            let workspaces = self.shared.workspaces.read();
             if let Some(ws) = workspaces.iter().find(|ws| ws.id == workspace_id) {
                 if ws.name.chars().any(char::is_whitespace) {
                     warn!(
@@ -446,13 +491,18 @@ impl HyprlandBackend {
         if let Some(monitors) = self.query_json("monitors")
             && let Some(monitors) = monitors.as_array()
         {
-            let mut monitor_ws = self.monitor_workspaces.write();
-            let mut focused_mon = self.focused_monitor.write();
+            let mut monitor_ws = self.shared.monitor_workspaces.write();
+            let mut focused_mon = self.shared.focused_monitor.write();
+            let mut monitor_names = self.shared.monitor_names.write();
             monitor_ws.clear();
+            monitor_names.clear();
             *focused_mon = None; // Reset before iterating to avoid stale state
 
             for mon in monitors {
                 let name = mon.get("name").and_then(|v| v.as_str());
+                if let (Some(id), Some(name)) = (mon.get("id").and_then(|v| v.as_i64()), name) {
+                    monitor_names.insert(id, name.to_string());
+                }
                 let active_ws_id = mon
                     .get("activeWorkspace")
                     .and_then(Self::workspace_id_from_snapshot);
@@ -490,9 +540,9 @@ impl HyprlandBackend {
         {
             self.update_workspace_metadata(workspaces);
 
-            let mut snapshot = self.workspace_snapshot.write();
-            let monitor_ws = self.monitor_workspaces.read();
-            let focused_mon = self.focused_monitor.read();
+            let mut snapshot = self.shared.workspace_snapshot.write();
+            let monitor_ws = self.shared.monitor_workspaces.read();
+            let focused_mon = self.shared.focused_monitor.read();
 
             snapshot.occupied_workspaces.clear();
             snapshot.window_counts.clear();
@@ -592,8 +642,8 @@ impl HyprlandBackend {
             kb_name, active_layout, layout_count
         );
 
-        *self.main_keyboard_name.write() = Some(kb_name);
-        *self.keyboard_layout.write() = Some(KeyboardLayoutInfo {
+        *self.shared.main_keyboard_name.write() = Some(kb_name);
+        *self.shared.keyboard_layout.write() = Some(KeyboardLayoutInfo {
             layout_name: active_layout,
             layout_count,
         });
@@ -612,9 +662,9 @@ impl HyprlandBackend {
         {
             let metadata_changed = self.update_workspace_metadata(workspaces);
 
-            let mut snapshot = self.workspace_snapshot.write();
-            let monitor_ws = self.monitor_workspaces.read();
-            let focused_mon = self.focused_monitor.read();
+            let mut snapshot = self.shared.workspace_snapshot.write();
+            let monitor_ws = self.shared.monitor_workspaces.read();
+            let focused_mon = self.shared.focused_monitor.read();
 
             // Track previous state to detect changes
             let previous_active = snapshot.active_workspace.clone();
@@ -713,7 +763,8 @@ impl HyprlandBackend {
         // TODO: When Hyprland list_windows support lands, replace workspace-level
         // urgency with address-based tracking so multiple urgent clients on the same
         // workspace survive focusing/viewing only one client.
-        self.workspace_snapshot
+        self.shared
+            .workspace_snapshot
             .write()
             .urgent_workspaces
             .remove(&ws_id)
@@ -728,9 +779,9 @@ impl HyprlandBackend {
     ///
     /// Returns true if state changed.
     fn update_active_workspace(&self, ws_id: i32) -> bool {
-        let focused_mon = self.focused_monitor.read().clone();
+        let focused_mon = self.shared.focused_monitor.read().clone();
 
-        let mut snapshot = self.workspace_snapshot.write();
+        let mut snapshot = self.shared.workspace_snapshot.write();
         let old_active = snapshot.active_workspace.clone();
         // Changed if: (a) new workspace wasn't already active, or (b) multiple were active
         let changed = !old_active.contains(&ws_id) || old_active.len() != 1;
@@ -747,7 +798,8 @@ impl HyprlandBackend {
             // Update per-monitor tracking to stay in sync
             if let Some(ref mon_name) = focused_mon {
                 // Update monitor_workspaces so focusedmon events see correct state
-                self.monitor_workspaces
+                self.shared
+                    .monitor_workspaces
                     .write()
                     .insert(mon_name.clone(), ws_id);
 
@@ -784,39 +836,64 @@ impl HyprlandBackend {
     /// Returns whether the window info changed and the freshly queried workspace ID.
     fn refresh_active_window(&self) -> (bool, Option<i32>) {
         if let Some(active_window) = self.query_json("activewindow") {
-            let title = active_window
-                .get("title")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let app_id = active_window
-                .get("class")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
             let workspace_id = active_window
                 .get("workspace")
                 .and_then(Self::workspace_id_from_snapshot);
-            let output = active_window
+
+            // Monitors can be added after the last fetch; refresh once on a miss.
+            let unknown_monitor = active_window
                 .get("monitor")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
+                .and_then(|v| v.as_i64())
+                .is_some_and(|id| !self.shared.monitor_names.read().contains_key(&id));
+            if unknown_monitor {
+                self.fetch_monitors();
+            }
 
-            let new_focused = WindowInfo {
-                title,
-                app_id,
-                output,
-            };
+            let new_focused =
+                Self::window_info_from_ipc(&active_window, &self.shared.monitor_names.read());
 
-            let mut focused = self.focused_window.write();
-            if focused.as_ref() != Some(&new_focused) {
-                *focused = Some(new_focused);
+            let mut focused = self.shared.focused_window.write();
+            if *focused != new_focused {
+                *focused = new_focused;
                 return (true, workspace_id);
             }
 
             return (false, workspace_id);
         }
         (false, None)
+    }
+
+    /// Parse `activewindow` JSON. Hyprland returns `{}` when no window is
+    /// focused, and reports the monitor as a numeric ID.
+    fn window_info_from_ipc(
+        window: &Value,
+        monitor_names: &HashMap<i64, String>,
+    ) -> Option<WindowInfo> {
+        let address = window.get("address").and_then(|v| v.as_str())?;
+        if address.is_empty() {
+            return None;
+        }
+
+        let title = window
+            .get("title")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let app_id = window
+            .get("class")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let output = window
+            .get("monitor")
+            .and_then(|v| v.as_i64())
+            .and_then(|id| monitor_names.get(&id).cloned());
+
+        Some(WindowInfo {
+            title,
+            app_id,
+            output,
+        })
     }
 
     /// Handle a Hyprland event line.
@@ -889,7 +966,7 @@ impl HyprlandBackend {
                             if let Some(ws) = client.get("workspace")
                                 && let Some(ws_id) = Self::workspace_id_from_snapshot(ws)
                             {
-                                let mut snapshot = self.workspace_snapshot.write();
+                                let mut snapshot = self.shared.workspace_snapshot.write();
                                 snapshot.urgent_workspaces.insert(ws_id);
                                 workspace_changed = true;
                             }
@@ -920,18 +997,19 @@ impl HyprlandBackend {
                 // focusedmon>>MONNAME,WORKSPACENAME
                 // Update focused monitor and global active workspace
                 if let Some((mon_name, ws_name)) = data.split_once(',') {
-                    *self.focused_monitor.write() = Some(mon_name.to_string());
+                    *self.shared.focused_monitor.write() = Some(mon_name.to_string());
 
                     // Update global active_workspace to this monitor's active workspace
-                    let cached_ws_id = self.monitor_workspaces.read().get(mon_name).copied();
+                    let cached_ws_id = self.shared.monitor_workspaces.read().get(mon_name).copied();
                     let event_ws_id = self.workspace_id_from_event_name(ws_name);
 
                     if let Some(ws_id) = event_ws_id.or(cached_ws_id) {
-                        self.monitor_workspaces
+                        self.shared
+                            .monitor_workspaces
                             .write()
                             .insert(mon_name.to_string(), ws_id);
 
-                        let mut snapshot = self.workspace_snapshot.write();
+                        let mut snapshot = self.shared.workspace_snapshot.write();
                         if !snapshot.active_workspace.contains(&ws_id)
                             || snapshot.active_workspace.len() != 1
                         {
@@ -958,6 +1036,7 @@ impl HyprlandBackend {
                 // activelayout>>KEYBOARD_NAME,LAYOUT_NAME
                 if let Some((kb_name, layout_name)) = data.split_once(',') {
                     let is_main = self
+                        .shared
                         .main_keyboard_name
                         .read()
                         .as_ref()
@@ -967,23 +1046,24 @@ impl HyprlandBackend {
                         let info = KeyboardLayoutInfo {
                             layout_name: layout_name.to_string(),
                             layout_count: self
+                                .shared
                                 .keyboard_layout
                                 .read()
                                 .as_ref()
                                 .and_then(|i| i.layout_count),
                         };
-                        *self.keyboard_layout.write() = Some(info);
+                        *self.shared.keyboard_layout.write() = Some(info);
                         keyboard_layout_changed = true;
                     } else {
-                        let previous = self.keyboard_layout.read().clone();
+                        let previous = self.shared.keyboard_layout.read().clone();
                         debug!(
                             event_keyboard = kb_name,
-                            cached_main_keyboard = ?*self.main_keyboard_name.read(),
+                            cached_main_keyboard = ?*self.shared.main_keyboard_name.read(),
                             "Refreshing keyboard layout after non-main activelayout event"
                         );
                         self.fetch_keyboard_layout();
                         keyboard_layout_changed =
-                            self.keyboard_layout.read().as_ref() != previous.as_ref();
+                            self.shared.keyboard_layout.read().as_ref() != previous.as_ref();
                     }
                 }
             }
@@ -1019,17 +1099,22 @@ impl HyprlandBackend {
             .unwrap_or_else(|e| e.into_inner())
             .as_ref()
         {
-            ws_cb(backend.workspace_snapshot.read().clone());
-            if let Some(ref win) = *backend.focused_window.read() {
-                win_cb(win.clone());
-            }
+            ws_cb(backend.shared.workspace_snapshot.read().clone());
+            win_cb(
+                backend
+                    .shared
+                    .focused_window
+                    .read()
+                    .clone()
+                    .unwrap_or_default(),
+            );
         }
         // Emit initial keyboard layout
         if let Some(ref kb_cb) = *backend
             .keyboard_layout_callback
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            && let Some(ref info) = *backend.keyboard_layout.read()
+            && let Some(ref info) = *backend.shared.keyboard_layout.read()
         {
             kb_cb(info.clone());
         }
@@ -1083,10 +1168,17 @@ impl HyprlandBackend {
                             .as_ref()
                         {
                             if ws_changed {
-                                ws_cb(backend.workspace_snapshot.read().clone());
+                                ws_cb(backend.shared.workspace_snapshot.read().clone());
                             }
-                            if win_changed && let Some(ref win) = *backend.focused_window.read() {
-                                win_cb(win.clone());
+                            if win_changed {
+                                win_cb(
+                                    backend
+                                        .shared
+                                        .focused_window
+                                        .read()
+                                        .clone()
+                                        .unwrap_or_default(),
+                                );
                             }
                         }
 
@@ -1095,7 +1187,7 @@ impl HyprlandBackend {
                                 .keyboard_layout_callback
                                 .lock()
                                 .unwrap_or_else(|e| e.into_inner())
-                            && let Some(ref info) = *backend.keyboard_layout.read()
+                            && let Some(ref info) = *backend.shared.keyboard_layout.read()
                         {
                             kb_cb(info.clone());
                         }
@@ -1152,49 +1244,7 @@ impl CompositorBackend for HyprlandBackend {
         *self.callbacks.lock().unwrap_or_else(|e| e.into_inner()) =
             Some((on_workspace_update, on_window_update));
 
-        // Clone the socket paths for the thread
-        let socket_path = self.socket_path.read().clone();
-        let event_socket_path = self.event_socket_path.read().clone();
-        let callbacks = self
-            .callbacks
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        // The manager-side backend uses this metadata for named workspace switching.
-        let workspaces = Arc::clone(&self.workspaces);
-        // Shared so IPC popover dispatch can target the focused monitor.
-        let focused_monitor = Arc::clone(&self.focused_monitor);
-        let kb_callback = self
-            .keyboard_layout_callback
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-
-        // Share the running flag with the thread so stop() works correctly
-        let running = Arc::clone(&self.running);
-
-        // Create Arc for shared access in thread
-        // Note: This is a separate instance for the thread, but socket_path is now
-        // also set on `self` so switch_workspace() works correctly.
-        // The `running` flag is shared so stop() can signal the thread to exit.
-        let backend = Arc::new(HyprlandBackend {
-            running,
-            event_thread: Mutex::new(None),
-            socket_path: RwLock::new(socket_path),
-            event_socket_path: RwLock::new(event_socket_path),
-            workspace_snapshot: RwLock::new(WorkspaceSnapshot::default()),
-            focused_window: RwLock::new(None),
-            workspaces,
-            callbacks: Mutex::new(callbacks),
-            monitor_workspaces: RwLock::new(HashMap::new()),
-            focused_monitor,
-            keyboard_layout_callback: Mutex::new(kb_callback),
-            keyboard_layout: RwLock::new(None),
-            main_keyboard_name: RwLock::new(None),
-            supports_lua_dispatch: AtomicBool::new(
-                self.supports_lua_dispatch.load(Ordering::Relaxed),
-            ),
-        });
+        let backend = Arc::new(self.event_thread_instance());
 
         // Start event loop thread
         let handle = thread::Builder::new()
@@ -1230,19 +1280,19 @@ impl CompositorBackend for HyprlandBackend {
     }
 
     fn list_workspaces(&self) -> Vec<WorkspaceMeta> {
-        self.workspaces.read().clone()
+        self.shared.workspaces.read().clone()
     }
 
     fn get_workspace_snapshot(&self) -> WorkspaceSnapshot {
-        self.workspace_snapshot.read().clone()
+        self.shared.workspace_snapshot.read().clone()
     }
 
     fn get_focused_window(&self) -> Option<WindowInfo> {
-        self.focused_window.read().clone()
+        self.shared.focused_window.read().clone()
     }
 
     fn get_focused_output(&self) -> Option<String> {
-        self.focused_monitor.read().clone()
+        self.shared.focused_monitor.read().clone()
     }
 
     fn switch_workspace(&self, workspace_id: i32) {
@@ -1272,11 +1322,11 @@ impl CompositorBackend for HyprlandBackend {
     }
 
     fn get_keyboard_layout(&self) -> Option<KeyboardLayoutInfo> {
-        self.keyboard_layout.read().clone()
+        self.shared.keyboard_layout.read().clone()
     }
 
     fn switch_keyboard_layout_next(&self) {
-        let main_kb = self.main_keyboard_name.read().clone();
+        let main_kb = self.shared.main_keyboard_name.read().clone();
         if let Some(kb_name) = main_kb {
             debug!("Switching keyboard layout for '{}'", kb_name);
             let _ = self.send_command(&format!("switchxkblayout {} next", kb_name));
@@ -1398,7 +1448,7 @@ mod tests {
     #[test]
     fn workspace_id_for_name_finds_named_workspace_id() {
         let backend = HyprlandBackend::new();
-        *backend.workspaces.write() = vec![WorkspaceMeta {
+        *backend.shared.workspaces.write() = vec![WorkspaceMeta {
             id: -1337,
             idx: -1,
             name: "web".to_string(),
@@ -1412,7 +1462,7 @@ mod tests {
     #[test]
     fn workspace_switch_target_formats_named_workspaces() {
         let backend = HyprlandBackend::new();
-        *backend.workspaces.write() = vec![WorkspaceMeta {
+        *backend.shared.workspaces.write() = vec![WorkspaceMeta {
             id: -1337,
             idx: -1,
             name: "web".to_string(),
@@ -1427,7 +1477,7 @@ mod tests {
     #[test]
     fn workspace_lua_target_quotes_named_workspaces() {
         let backend = HyprlandBackend::new();
-        *backend.workspaces.write() = vec![WorkspaceMeta {
+        *backend.shared.workspaces.write() = vec![WorkspaceMeta {
             id: -1337,
             idx: -1,
             name: "web".to_string(),
@@ -1482,7 +1532,7 @@ mod tests {
     #[test]
     fn has_workspace_metadata_checks_workspace_id() {
         let backend = HyprlandBackend::new();
-        *backend.workspaces.write() = vec![WorkspaceMeta {
+        *backend.shared.workspaces.write() = vec![WorkspaceMeta {
             id: -1337,
             idx: -1,
             name: "web".to_string(),
@@ -1496,7 +1546,7 @@ mod tests {
     #[test]
     fn focusedmon_uses_event_workspace_name_when_cache_missing() {
         let backend = HyprlandBackend::new();
-        *backend.workspaces.write() = vec![WorkspaceMeta {
+        *backend.shared.workspaces.write() = vec![WorkspaceMeta {
             id: -1337,
             idx: -1,
             name: "web".to_string(),
@@ -1505,41 +1555,89 @@ mod tests {
 
         backend.handle_event("focusedmon>>DP-1,name:web");
 
-        let snapshot = backend.workspace_snapshot.read();
+        let snapshot = backend.shared.workspace_snapshot.read();
         assert_eq!(snapshot.active_workspace, HashSet::from([-1337]));
         assert_eq!(
             snapshot.per_output.get("DP-1").unwrap().active_workspace,
             HashSet::from([-1337])
         );
-        assert_eq!(*backend.focused_monitor.read(), Some("DP-1".to_string()));
-        assert_eq!(backend.monitor_workspaces.read().get("DP-1"), Some(&-1337));
+        assert_eq!(
+            *backend.shared.focused_monitor.read(),
+            Some("DP-1".to_string())
+        );
+        assert_eq!(
+            backend.shared.monitor_workspaces.read().get("DP-1"),
+            Some(&-1337)
+        );
+    }
+
+    #[test]
+    fn event_thread_updates_are_visible_to_manager_side_backend() {
+        let backend = HyprlandBackend::new();
+        let event_thread = backend.event_thread_instance();
+
+        event_thread.handle_event("focusedmon>>DP-3,2");
+
+        assert_eq!(backend.get_focused_output(), Some("DP-3".to_string()));
+        assert_eq!(
+            backend.get_workspace_snapshot().active_workspace,
+            HashSet::from([2])
+        );
+    }
+
+    #[test]
+    fn window_info_resolves_monitor_id_to_connector() {
+        let monitor_names = HashMap::from([(0, "eDP-1".to_string()), (1, "DP-3".to_string())]);
+        let window = json!({
+            "address": "0x55d0c0ffee",
+            "title": "vibepanel",
+            "class": "com.mitchellh.ghostty",
+            "monitor": 1,
+        });
+
+        let info = HyprlandBackend::window_info_from_ipc(&window, &monitor_names).unwrap();
+
+        assert_eq!(info.title, "vibepanel");
+        assert_eq!(info.app_id, "com.mitchellh.ghostty");
+        assert_eq!(info.output, Some("DP-3".to_string()));
+    }
+
+    #[test]
+    fn window_info_is_none_without_focused_window() {
+        let monitor_names = HashMap::from([(0, "eDP-1".to_string())]);
+
+        assert!(HyprlandBackend::window_info_from_ipc(&json!({}), &monitor_names).is_none());
     }
 
     #[test]
     fn focusedmon_prefers_event_workspace_name_over_stale_cache() {
         let backend = HyprlandBackend::new();
-        *backend.workspaces.write() = vec![WorkspaceMeta {
+        *backend.shared.workspaces.write() = vec![WorkspaceMeta {
             id: -1337,
             idx: -1,
             name: "web".to_string(),
             output: None,
         }];
         backend
+            .shared
             .monitor_workspaces
             .write()
             .insert("DP-1".to_string(), 1);
 
         backend.handle_event("focusedmon>>DP-1,name:web");
 
-        let snapshot = backend.workspace_snapshot.read();
+        let snapshot = backend.shared.workspace_snapshot.read();
         assert_eq!(snapshot.active_workspace, HashSet::from([-1337]));
-        assert_eq!(backend.monitor_workspaces.read().get("DP-1"), Some(&-1337));
+        assert_eq!(
+            backend.shared.monitor_workspaces.read().get("DP-1"),
+            Some(&-1337)
+        );
     }
 
     #[test]
     fn workspace_event_resolves_prefixed_named_workspace() {
         let backend = HyprlandBackend::new();
-        *backend.workspaces.write() = vec![WorkspaceMeta {
+        *backend.shared.workspaces.write() = vec![WorkspaceMeta {
             id: -1337,
             idx: -1,
             name: "web".to_string(),
@@ -1548,20 +1646,21 @@ mod tests {
 
         backend.handle_event("workspace>>name:web");
 
-        let snapshot = backend.workspace_snapshot.read();
+        let snapshot = backend.shared.workspace_snapshot.read();
         assert_eq!(snapshot.active_workspace, HashSet::from([-1337]));
     }
 
     #[test]
     fn workspace_event_clears_matching_urgent_workspace() {
         let backend = HyprlandBackend::new();
-        *backend.workspaces.write() = vec![WorkspaceMeta {
+        *backend.shared.workspaces.write() = vec![WorkspaceMeta {
             id: 2,
             idx: 2,
             name: "2".to_string(),
             output: None,
         }];
         backend
+            .shared
             .workspace_snapshot
             .write()
             .urgent_workspaces
@@ -1569,7 +1668,7 @@ mod tests {
 
         let (workspace_changed, _, _) = backend.handle_event("workspace>>2");
 
-        let snapshot = backend.workspace_snapshot.read();
+        let snapshot = backend.shared.workspace_snapshot.read();
         assert!(workspace_changed);
         assert_eq!(snapshot.active_workspace, HashSet::from([2]));
         assert!(!snapshot.urgent_workspaces.contains(&2));
@@ -1579,6 +1678,7 @@ mod tests {
     fn clear_urgent_workspace_removes_matching_workspace() {
         let backend = HyprlandBackend::new();
         backend
+            .shared
             .workspace_snapshot
             .write()
             .urgent_workspaces
@@ -1587,6 +1687,7 @@ mod tests {
         assert!(backend.clear_urgent_workspace(4));
         assert!(
             !backend
+                .shared
                 .workspace_snapshot
                 .read()
                 .urgent_workspaces
@@ -1597,8 +1698,8 @@ mod tests {
     #[test]
     fn activelayout_main_keyboard_updates_layout_from_event() {
         let backend = HyprlandBackend::new();
-        *backend.main_keyboard_name.write() = Some("keyboard-a".to_string());
-        *backend.keyboard_layout.write() = Some(KeyboardLayoutInfo {
+        *backend.shared.main_keyboard_name.write() = Some("keyboard-a".to_string());
+        *backend.shared.keyboard_layout.write() = Some(KeyboardLayoutInfo {
             layout_name: "English (US)".to_string(),
             layout_count: Some(2),
         });
@@ -1607,7 +1708,13 @@ mod tests {
 
         assert!(keyboard_changed);
         assert_eq!(
-            backend.keyboard_layout.read().as_ref().unwrap().layout_name,
+            backend
+                .shared
+                .keyboard_layout
+                .read()
+                .as_ref()
+                .unwrap()
+                .layout_name,
             "German"
         );
     }
@@ -1615,7 +1722,7 @@ mod tests {
     #[test]
     fn workspacev2_event_resolves_prefixed_named_workspace() {
         let backend = HyprlandBackend::new();
-        *backend.workspaces.write() = vec![WorkspaceMeta {
+        *backend.shared.workspaces.write() = vec![WorkspaceMeta {
             id: -1337,
             idx: -1,
             name: "web".to_string(),
@@ -1624,7 +1731,7 @@ mod tests {
 
         backend.handle_event("workspacev2>>-1337,name:web");
 
-        let snapshot = backend.workspace_snapshot.read();
+        let snapshot = backend.shared.workspace_snapshot.read();
         assert_eq!(snapshot.active_workspace, HashSet::from([-1337]));
     }
 }
