@@ -1326,14 +1326,20 @@ impl CompositorBackend for HyprlandBackend {
     }
 
     fn switch_keyboard_layout_next(&self) {
-        let main_kb = self.shared.main_keyboard_name.read().clone();
-        if let Some(kb_name) = main_kb {
-            debug!("Switching keyboard layout for '{}'", kb_name);
-            let _ = self.send_command(&format!("switchxkblayout {} next", kb_name));
-        } else {
-            // Fallback: try "all" which switches all keyboards
-            debug!("No main keyboard detected, switching all keyboards");
-            let _ = self.send_command("switchxkblayout all next");
+        // `current` targets the keyboard last typed on, resolved by Hyprland
+        // at call time. Hyprland < 0.43 doesn't support it, so fall back to
+        // switching all keyboards.
+        match self.send_command("switchxkblayout current next") {
+            Some(response) if Self::response_is_ok(&response) => {
+                debug!("Switched keyboard layout for current keyboard");
+            }
+            response => {
+                debug!(
+                    response = ?response.as_deref().map(str::trim),
+                    "switchxkblayout current failed, switching all keyboards"
+                );
+                let _ = self.send_command("switchxkblayout all next");
+            }
         }
     }
 
