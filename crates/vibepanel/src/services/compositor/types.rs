@@ -139,7 +139,8 @@ pub struct WindowLayoutSnapshot {
 pub type WorkspaceCallback = Arc<dyn Fn(WorkspaceSnapshot) + Send + Sync>;
 
 /// Callback type for focused window updates.
-/// Receives `WindowInfo::default()` when no window is focused.
+/// Receives an empty `WindowInfo` when no window is focused; backends may set
+/// its `output` to the focused monitor so only that bar clears.
 pub type WindowCallback = Arc<dyn Fn(WindowInfo) + Send + Sync>;
 
 /// Callback type for keyboard layout updates.

@@ -853,6 +853,13 @@ impl HyprlandBackend {
             let new_focused =
                 Self::window_info_from_ipc(&active_window, &self.shared.monitor_names.read());
 
+            // With no focused window, the empty update is scoped to the focused
+            // monitor. Query it now rather than trusting `focusedmon` to have
+            // arrived first.
+            if new_focused.is_none() {
+                self.fetch_monitors();
+            }
+
             let mut focused = self.shared.focused_window.write();
             if *focused != new_focused {
                 *focused = new_focused;
@@ -894,6 +901,16 @@ impl HyprlandBackend {
             title,
             app_id,
             output,
+        })
+    }
+
+    /// Focused window for the window callback. With nothing focused, the
+    /// empty update carries the focused monitor so only that bar clears.
+    fn window_update(&self) -> WindowInfo {
+        let focused = self.shared.focused_window.read().clone();
+        focused.unwrap_or_else(|| WindowInfo {
+            output: self.shared.focused_monitor.read().clone(),
+            ..Default::default()
         })
     }
 
@@ -949,7 +966,8 @@ impl HyprlandBackend {
                 }
             }
             "createworkspace" | "createworkspacev2" | "destroyworkspace" | "destroyworkspacev2"
-            | "renameworkspace" | "closewindow" | "movewindow" => {
+            | "renameworkspace" | "closewindow" | "monitoradded" | "monitoraddedv2"
+            | "monitorremoved" | "monitorremovedv2" => {
                 workspace_changed = self.refresh_occupied();
             }
             "openwindow" => {
@@ -999,6 +1017,15 @@ impl HyprlandBackend {
                 // Update focused monitor and global active workspace
                 if let Some((mon_name, ws_name)) = data.split_once(',') {
                     *self.shared.focused_monitor.write() = Some(mon_name.to_string());
+                    // With no focused window, refresh before emitting: the new
+                    // monitor may have a window whose `activewindow` event hasn't
+                    // arrived yet, and emitting the empty title first would flicker.
+                    // Always emit: fetch_monitors() may already have cached this
+                    // monitor without notifying, and duplicate clears are harmless.
+                    if self.shared.focused_window.read().is_none() {
+                        self.refresh_active_window();
+                        window_changed = true;
+                    }
 
                     // Update global active_workspace to this monitor's active workspace
                     let cached_ws_id = self.shared.monitor_workspaces.read().get(mon_name).copied();
@@ -1029,9 +1056,11 @@ impl HyprlandBackend {
                     }
                 }
             }
-            "moveworkspace" | "moveworkspacev2" => {
-                // Workspace moved to different monitor - refresh all state
+            "movewindow" | "moveworkspace" | "moveworkspacev2" => {
+                // The focused window may have changed monitor while keeping
+                // focus, which emits no `activewindow`; refresh its output.
                 workspace_changed = self.refresh_occupied();
+                window_changed = self.refresh_active_window().0;
             }
             "activelayout" => {
                 // activelayout>>KEYBOARD_NAME,LAYOUT_NAME
@@ -1101,14 +1130,7 @@ impl HyprlandBackend {
             .as_ref()
         {
             ws_cb(backend.shared.workspace_snapshot.read().clone());
-            win_cb(
-                backend
-                    .shared
-                    .focused_window
-                    .read()
-                    .clone()
-                    .unwrap_or_default(),
-            );
+            win_cb(backend.window_update());
         }
         // Emit initial keyboard layout
         if let Some(ref kb_cb) = *backend
@@ -1172,14 +1194,7 @@ impl HyprlandBackend {
                                 ws_cb(backend.shared.workspace_snapshot.read().clone());
                             }
                             if win_changed {
-                                win_cb(
-                                    backend
-                                        .shared
-                                        .focused_window
-                                        .read()
-                                        .clone()
-                                        .unwrap_or_default(),
-                                );
+                                win_cb(backend.window_update());
                             }
                         }
 
@@ -1601,6 +1616,34 @@ mod tests {
             backend.get_workspace_snapshot().active_workspace,
             HashSet::from([2])
         );
+    }
+
+    #[test]
+    fn empty_window_update_follows_focused_monitor() {
+        let backend = HyprlandBackend::new();
+
+        let (_, window_changed, _) = backend.handle_event("focusedmon>>DP-3,2");
+        assert!(window_changed);
+        assert_eq!(backend.window_update().output, Some("DP-3".to_string()));
+        assert!(backend.window_update().title.is_empty());
+
+        // Repeats still emit: a monitor refresh may have cached it silently.
+        let (_, window_changed, _) = backend.handle_event("focusedmon>>DP-3,2");
+        assert!(window_changed);
+
+        // fetch_monitors() (via refresh_occupied) already moved the cache to DP-1.
+        *backend.shared.focused_monitor.write() = Some("DP-1".to_string());
+        let (_, window_changed, _) = backend.handle_event("focusedmon>>DP-1,3");
+        assert!(window_changed);
+        assert_eq!(backend.window_update().output, Some("DP-1".to_string()));
+
+        *backend.shared.focused_window.write() = Some(WindowInfo {
+            title: "t".to_string(),
+            app_id: "a".to_string(),
+            output: Some("DP-3".to_string()),
+        });
+        let (_, window_changed, _) = backend.handle_event("focusedmon>>DP-1,3");
+        assert!(!window_changed);
     }
 
     #[test]
