@@ -480,14 +480,14 @@ pub fn build_wifi_details(
     // Store mobile row reference for dynamic updates
     *state.mobile.row.borrow_mut() = Some(mobile_row);
 
-    // Wi-Fi switch row: "Wi-Fi" label + switch + scan button
+    // Wi-Fi header row: "Wi-Fi" label + spacer + scan button + switch
     // The label+switch are only visible when a non-WiFi device is present, but scan button always visible
     let wifi_switch_row = GtkBox::new(Orientation::Horizontal, 8);
     wifi_switch_row.add_css_class(qs::NETWORK_SECTION_ROW);
     // Disable baseline alignment to prevent GTK baseline issues with Switch widget
     wifi_switch_row.set_baseline_position(gtk4::BaselinePosition::Center);
 
-    // Wi-Fi label + switch (only visible when a non-WiFi device is present)
+    // Wi-Fi label (only visible when a non-WiFi device is present)
     let wifi_label = Label::new(Some("Wi-Fi"));
     wifi_label.add_css_class(color::PRIMARY);
     wifi_label.add_css_class(qs::NETWORK_SECTION_LABEL);
@@ -495,22 +495,23 @@ pub fn build_wifi_details(
     wifi_label.set_visible(snapshot.has_non_wifi_device());
     wifi_switch_row.append(&wifi_label);
 
-    let wifi_switch = Switch::new();
-    wifi_switch.set_valign(gtk4::Align::Center);
-    wifi_switch.set_active(snapshot.wifi_enabled().unwrap_or(false));
-    wifi_switch.set_visible(snapshot.has_non_wifi_device());
-    wifi_switch_row.append(&wifi_switch);
-
-    // Spacer to push scan button to the right
+    // Spacer to push scan button and switch to the right
     let spacer = GtkBox::new(Orientation::Horizontal, 0);
     spacer.set_hexpand(true);
     wifi_switch_row.append(&spacer);
 
     // Scan button (always visible)
-    let scan_button = ScanButton::new(|| {
+    let scan_button = ScanButton::new("Scan", || {
         NetworkService::global().scan();
     });
     wifi_switch_row.append(scan_button.widget());
+
+    // Wi-Fi switch (only visible when a non-WiFi device is present)
+    let wifi_switch = Switch::new();
+    wifi_switch.set_valign(gtk4::Align::Center);
+    wifi_switch.set_active(snapshot.wifi_enabled().unwrap_or(false));
+    wifi_switch.set_visible(snapshot.has_non_wifi_device());
+    wifi_switch_row.append(&wifi_switch);
 
     container.append(&wifi_switch_row);
 
@@ -801,6 +802,10 @@ fn build_mobile_row(state: &Rc<NetworkCardState>, snapshot: &NetworkSnapshot) ->
     header_label.set_valign(gtk4::Align::Center);
     header_row.append(&header_label);
 
+    let spacer = GtkBox::new(Orientation::Horizontal, 0);
+    spacer.set_hexpand(true);
+    header_row.append(&spacer);
+
     let mobile_switch = Switch::new();
     mobile_switch.set_valign(gtk4::Align::Center);
     let mobile_enabled = snapshot.mobile_enabled().unwrap_or(false);
@@ -826,10 +831,6 @@ fn build_mobile_row(state: &Rc<NetworkCardState>, snapshot: &NetworkSnapshot) ->
         });
     }
     header_row.append(&mobile_switch);
-
-    let spacer = GtkBox::new(Orientation::Horizontal, 0);
-    spacer.set_hexpand(true);
-    header_row.append(&spacer);
 
     container.append(&header_row);
 

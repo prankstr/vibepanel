@@ -357,11 +357,8 @@ pub mod qs {
     /// Scan/refresh button (`.qs-scan-button`).
     pub const SCAN_BUTTON: &str = "qs-scan-button";
 
-    /// Scan label (`.qs-scan-label`).
-    pub const SCAN_LABEL: &str = "qs-scan-label";
-
-    /// Scan spinner (`.qs-scan-spinner`).
-    pub const SCAN_SPINNER: &str = "qs-scan-spinner";
+    /// Scan/refresh icon (`.qs-scan-icon`).
+    pub const SCAN_ICON: &str = "qs-scan-icon";
 
     /// Network section header row container (`.qs-network-section-row`).
     pub const NETWORK_SECTION_ROW: &str = "qs-network-section-row";

@@ -354,6 +354,9 @@ fn material_symbol_lookup(icon_name: &str) -> Option<&'static str> {
         // Loading / progress spinner
         "process-working-symbolic" => "progress_activity",
 
+        // Scan / refresh action
+        "view-refresh-symbolic" => "refresh",
+
         // Mango window layouts (always rendered as Material Symbols)
         "mango-layout-tile" => "auto_awesome_mosaic",
         "mango-layout-scroller" => "view_array",
@@ -1040,6 +1043,13 @@ pub fn gtk_icon_candidates(logical: &str) -> &'static [&'static str] {
             "emblem-synchronizing-symbolic",
         ],
 
+        // Scan / refresh action
+        "view-refresh-symbolic" => &[
+            "view-refresh-symbolic",
+            "view-refresh",
+            "emblem-synchronizing-symbolic",
+        ],
+
         // Calendar navigation
         "calendar-today" => &[
             "calendar-today-symbolic",
@@ -1397,8 +1407,8 @@ impl Clone for IconBackend {
 /// Cairo-drawn spinning arc widget for loading/connecting indicators.
 ///
 /// Draws a 270° arc that rotates smoothly at ~30fps, inheriting its color
-/// from the CSS foreground of a specified widget. Used by both `IconHandle`
-/// (for inline icon spinners) and `ScanButton` (for scan-in-progress).
+/// from the CSS foreground of a specified widget. Used by `IconHandle` for
+/// inline icon spinners (e.g., `ScanButton` while scanning).
 ///
 /// The spinner is created hidden and must be appended to a container.
 /// Call [`start`](CairoSpinner::start) / [`stop`](CairoSpinner::stop) to
@@ -1408,6 +1418,8 @@ pub struct CairoSpinner {
     area: gtk4::DrawingArea,
     /// Current rotation angle (radians), shared with the draw function.
     angle: Rc<Cell<f64>>,
+    /// Arc diameter in pixels; `0.0` means fill the drawing area.
+    diameter: Rc<Cell<f64>>,
     /// Active timer source, if the animation is running.
     source: RefCell<Option<glib::SourceId>>,
 }
@@ -1420,47 +1432,32 @@ impl CairoSpinner {
     ///
     /// The returned spinner is hidden and must be appended to a container by the caller.
     pub fn new(color_source: &impl IsA<gtk4::Widget>) -> Self {
-        Self::build(Some(color_source.as_ref().downgrade()))
-    }
-
-    /// Create a spinner that reads its foreground color from its own CSS.
-    ///
-    /// Use this when the spinner's `DrawingArea` has CSS classes that set its
-    /// color directly (e.g., `.qs-scan-spinner { color: @accent_color; }`).
-    pub fn new_self_colored() -> Self {
-        Self::build(None)
-    }
-
-    /// Shared construction logic.
-    ///
-    /// When `external_source` is `Some`, the color is read from that widget.
-    /// When `None`, the color is read from the DrawingArea itself.
-    fn build(external_source: Option<glib::WeakRef<gtk4::Widget>>) -> Self {
+        let color_source = color_source.as_ref().downgrade();
         let area = gtk4::DrawingArea::new();
         area.set_halign(gtk4::Align::Center);
         area.set_valign(gtk4::Align::Center);
         area.set_visible(false);
 
         let angle: Rc<Cell<f64>> = Rc::new(Cell::new(0.0));
+        let diameter: Rc<Cell<f64>> = Rc::new(Cell::new(0.0));
 
         let angle_ref = angle.clone();
-        area.set_draw_func(move |area, cr, width, height| {
+        let diameter_ref = diameter.clone();
+        area.set_draw_func(move |_, cr, width, height| {
             let w = width as f64;
             let h = height as f64;
             let cx = w / 2.0;
             let cy = h / 2.0;
-            let radius = (w.min(h) / 2.0) - 1.5;
+            let d = diameter_ref.get();
+            let d = if d > 0.0 { d.min(w.min(h)) } else { w.min(h) };
+            let radius = (d / 2.0) - 1.5;
             if radius <= 0.0 {
                 return;
             }
             let line_width = (radius * 0.22).max(1.5);
 
-            // Read color from external source if provided, otherwise from self.
-            let color_widget: Option<gtk4::Widget> = match &external_source {
-                Some(weak) => weak.upgrade(),
-                None => Some(area.clone().upcast()),
-            };
-            let (r, g, b, a) = color_widget
+            let (r, g, b, a) = color_source
+                .upgrade()
                 .map(|w| {
                     let c = w.color();
                     (
@@ -1485,6 +1482,7 @@ impl CairoSpinner {
         Self {
             area,
             angle,
+            diameter,
             source: RefCell::new(None),
         }
     }
@@ -1494,10 +1492,16 @@ impl CairoSpinner {
         &self.area
     }
 
-    /// Set the spinner content size (width and height in pixels).
-    pub fn set_size(&self, size: i32) {
-        self.area.set_content_width(size);
-        self.area.set_content_height(size);
+    /// Set the drawing area size and the arc diameter (in pixels).
+    ///
+    /// The arc is drawn centered in the area, so sizing the area to match
+    /// the widget it replaces keeps the spinner exactly on that widget's
+    /// center, even when the diameter is smaller than the area.
+    pub fn set_geometry(&self, width: i32, height: i32, diameter: f64) {
+        self.area.set_content_width(width);
+        self.area.set_content_height(height);
+        self.diameter.set(diameter);
+        self.area.queue_draw();
     }
 
     /// Start the spinning animation (~30fps).
@@ -1692,10 +1696,11 @@ impl IconHandleInner {
             backend.widget().set_visible(false);
             drop(backend);
 
-            let raw = (rw.min(rh) as f64 * 0.75).round() as i32;
-            let size = raw.max(10);
+            // Size the drawing area to the full icon box so the arc is
+            // centered exactly where the icon was drawn.
+            let diameter = (rw.min(rh) as f64 * 0.75).round().max(10.0);
             if let Some(spinner) = self.spinner.borrow().as_ref() {
-                spinner.set_size(size);
+                spinner.set_geometry(rw.max(1), rh.max(1), diameter);
                 spinner.start();
             }
         } else {
@@ -2156,13 +2161,13 @@ impl IconsService {
             r#"
 /* Material Symbols - just font family and ligatures */
 .material-symbol {{
-    font-family: '{}', 'Material Symbols Rounded', sans-serif;
+    font-family: '{family}', 'Material Symbols Rounded', sans-serif;
     font-feature-settings: 'liga' 1;
-    font-variation-settings: 'wght' {};
+    font-variation-settings: 'wght' {weight};
     font-size: inherit;
 }}
 "#,
-            MATERIAL_FONT_FAMILY, weight
+            family = MATERIAL_FONT_FAMILY,
         );
 
         let provider = gtk4::CssProvider::new();

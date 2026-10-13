@@ -5,7 +5,7 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use crate::services::icons::{CairoSpinner, IconHandle, IconsService};
+use crate::services::icons::{IconHandle, IconsService};
 use crate::styles::{button, color, icon, qs, row, state};
 use crate::widgets::base::add_ripple_to_row;
 use crate::widgets::layer_shell_popover::animate_reveal;
@@ -644,76 +644,51 @@ pub fn create_qs_list_box() -> ListBox {
     list_box
 }
 
-/// Self-contained scan button widget with spinner state.
+/// Self-contained scan/refresh icon button with spinner state.
 ///
 /// This provides a consistent scan/refresh button used by Wi-Fi, Bluetooth,
-/// and other cards. It handles:
-/// - Button and label styling
-/// - Spinner shown during active state (label hidden)
-/// - Automatic state management
-///
-/// The spinner is a Cairo-drawn rotating arc that inherits the CSS foreground
-/// color, providing a consistent appearance across all icon themes.
+/// and Updates cards. It shows a refresh icon (from the configured icon
+/// theme) and swaps it for a Cairo-drawn spinner while active.
 ///
 /// # CSS Classes Applied
 ///
 /// - `.qs-scan-button` on the button
-/// - `.qs-scan-label` and `.vp-primary` on the label
-/// - `.qs-scan-spinner` on the spinner drawing area
+/// - `.qs-scan-icon` and `.vp-primary` on the icon
 pub struct ScanButton {
     button: Button,
-    label: Label,
-    spinner: CairoSpinner,
+    icon: IconHandle,
     /// Whether the button had keyboard-navigated focus when it was made
     /// insensitive (i.e. `focus_visible` was active on the window).
     had_keyboard_focus: Cell<bool>,
 }
 
 impl ScanButton {
-    /// Create a new scan button with default label ("Scan").
+    /// Create a new scan button.
     ///
-    /// The `on_click` callback is invoked when the button is clicked.
-    pub fn new<F>(on_click: F) -> Rc<Self>
-    where
-        F: Fn() + 'static,
-    {
-        Self::with_label("Scan", on_click)
-    }
-
-    /// Create a new scan button with custom label.
-    ///
-    /// - `label_text`: Label when not scanning (e.g., "Refresh")
+    /// - `tooltip`: Tooltip text describing the action (e.g., "Scan", "Refresh")
     /// - `on_click`: Callback invoked when the button is clicked
-    pub fn with_label<F>(label_text: &str, on_click: F) -> Rc<Self>
+    pub fn new<F>(tooltip: &str, on_click: F) -> Rc<Self>
     where
         F: Fn() + 'static,
     {
         let button = crate::widgets::base::vp_button();
         button.add_css_class(qs::SCAN_BUTTON);
         button.set_has_frame(false);
-        button.set_halign(Align::Start);
+        button.set_valign(Align::Center);
+        button.set_tooltip_text(Some(tooltip));
 
-        let content = GtkBox::new(Orientation::Horizontal, 6);
-
-        let label = Label::new(Some(label_text));
-        label.add_css_class(qs::SCAN_LABEL);
-        label.add_css_class(color::PRIMARY);
-        content.append(&label);
-
-        // Shared Cairo spinner
-        let spinner = CairoSpinner::new_self_colored();
-        spinner.set_size(12);
-        spinner.widget().add_css_class(qs::SCAN_SPINNER);
-
-        content.append(spinner.widget());
-        button.set_child(Some(&content));
+        let icon = IconsService::global()
+            .create_icon("view-refresh-symbolic", &[qs::SCAN_ICON, color::PRIMARY]);
+        let icon_widget = icon.widget();
+        icon_widget.set_halign(Align::Center);
+        icon_widget.set_valign(Align::Center);
+        button.set_child(Some(&icon_widget));
 
         button.connect_clicked(move |_| on_click());
 
         Rc::new(Self {
             button,
-            label,
-            spinner,
+            icon,
             had_keyboard_focus: Cell::new(false),
         })
     }
@@ -750,17 +725,13 @@ impl ScanButton {
 
     /// Update active/scanning state.
     ///
-    /// When `active` is true, hides label and shows spinner.  When false,
-    /// hides spinner and shows idle text.  If the button had
-    /// keyboard-navigated focus before scanning started, focus is restored
-    /// automatically and `focus_visible` is re-enabled on the window.
+    /// When `active` is true, replaces the icon with a spinner.  When false,
+    /// restores the icon.  If the button had keyboard-navigated focus before
+    /// scanning started, focus is restored automatically and `focus_visible`
+    /// is re-enabled on the window.
     pub fn set_scanning(&self, active: bool) {
-        if active {
-            self.label.set_visible(false);
-            self.spinner.start();
-        } else {
-            self.spinner.stop();
-            self.label.set_visible(true);
+        self.icon.set_spinning(active);
+        if !active {
             // Restore focus if the button had keyboard-nav focus before it
             // was made insensitive.  We also re-enable focus_visible since
             // GTK may have cleared it when focus was lost.

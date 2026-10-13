@@ -107,29 +107,40 @@ window.qs-wifi-qr-window {{
 }}
 
 .qs-network-section .qs-network-connection-row {{
-    /* Override .qs-row margin, keep horizontal margin for alignment */
-    margin-top: 8px;
+    /* Override .qs-row margin, keep horizontal margin for alignment.
+       Top margin matches .qs-row so the header-to-row gap equals Wi-Fi's. */
+    margin-top: 3px;
     margin-bottom: 0;
     margin-left: 0;
     margin-right: 0;
 }}
 
-/* Network section header row in expanded details */
-.qs-network-section-row {{
-    padding: 0 8px;
+/* Section header rows in expanded details share a fixed height so rows
+   with and without a scan button line up identically */
+.qs-network-section-row,
+.qs-bt-controls-row,
+.qs-updates-header-row {{
+    min-height: calc(var(--icon-size) * 1.75);
     margin-top: 8px;
     margin-bottom: -4px;
+}}
+
+.qs-network-section-row,
+.qs-bt-controls-row {{
+    padding: 0 8px;
 }}
 
 .qs-network-section-label {{
     font-size: var(--font-size);
 }}
 
-/* Network section switch styling - accent colored track when on */
+/* Network section switch styling - compact pill sized to the section label,
+   accent colored track when on */
 .qs-network-section-row switch {{
-    /* Switch track: rounder than slider to contain it */
-    border-radius: calc(var(--slider-radius-thick) * 2.5);
-    margin-top: 2px;
+    border-radius: 9999px;
+    padding: 2px;
+    min-height: 0;
+    margin: 0;
 }}
 
 .qs-network-section-row switch:checked {{
@@ -141,24 +152,26 @@ window.qs-wifi-qr-window {{
     background-color: var(--color-accent-primary);
 }}
 
-.qs-network-section-row switch slider {{
-    border-radius: calc(var(--slider-radius-thick) * 1.5);
-    min-width: calc(var(--slider-height-thick) * 1.2);
-    min-height: calc(var(--slider-height-thick) * 1.2);
+/* The switch's on/off state images otherwise impose a ~16px minimum
+   height regardless of the slider size */
+.qs-network-section-row switch image {{
+    -gtk-icon-size: calc(var(--font-size) * 0.5);
+    min-height: 0;
+    min-width: 0;
+    margin: 0;
+    padding: 0;
 }}
 
-/* Bluetooth controls row in expanded details */
-.qs-bt-controls-row {{
-    padding: 0 8px;
-    margin-top: 8px;
-    margin-bottom: -4px;
+.qs-network-section-row switch slider {{
+    border-radius: 9999px;
+    margin: 0;
+    min-width: calc(var(--font-size) * 0.85);
+    min-height: calc(var(--font-size) * 0.85);
 }}
 
 /* Updates header row in expanded details (refresh button + last check) */
 .qs-updates-header-row {{
     padding: 0 0 0 8px;
-    margin-top: 8px;
-    margin-bottom: -4px;
 }}
 
 /* Generic disabled state placeholder (used by Bluetooth, Network, etc.) */
@@ -313,29 +326,22 @@ window.qs-wifi-qr-window {{
     font-size: 20px;
 }}
 
+/* Scan/refresh icon button */
+/* Slightly smaller than the header row so the hover background stays
+   within the row (which has a negative bottom margin) */
 .qs-scan-button {{
-    margin-bottom: 4px;
-    min-height: 0;
-    /* Extra-round pill shape for small action button */
-    border-radius: calc(var(--radius-pill) * 1.3);
-}}
-
-/* Padding moves to content margin inside the ripple overlay so the
-   DrawingArea fills the button edge-to-edge.  Exclude the ripple
-   DrawingArea itself so it stays edge-to-edge inside the Overlay. */
-.qs-scan-button > overlay > *:not(.vp-ripple-overlay) {{
-    margin: 2px 8px;
+    min-width: calc(var(--icon-size) * 1.6);
+    min-height: calc(var(--icon-size) * 1.6);
+    padding: 0;
+    border-radius: var(--radius-widget);
 }}
 
 .qs-scan-button:hover {{
     background: var(--color-card-overlay-hover);
 }}
 
-/* Scan spinner - small inline spinner */
-.qs-scan-spinner {{
-    min-width: 12px;
-    min-height: 12px;
-    color: var(--color-accent-primary);
+.qs-scan-button .qs-scan-icon {{
+    font-size: calc(var(--icon-size) * 1.1);
 }}
 
 /* Chevron animation */

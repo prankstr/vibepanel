@@ -145,7 +145,7 @@ pub fn build_bluetooth_details(state: &Rc<BluetoothCardState>) -> BluetoothDetai
     controls_row.append(&spacer);
 
     // Scan button
-    let scan_button = ScanButton::new(|| {
+    let scan_button = ScanButton::new("Scan", || {
         BluetoothService::global().scan_for_devices();
     });
 

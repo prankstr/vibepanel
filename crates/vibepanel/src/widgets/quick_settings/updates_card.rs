@@ -156,7 +156,7 @@ pub fn build_updates_details(state: &Rc<UpdatesCardState>) -> UpdatesDetailsResu
     *state.last_check_label.borrow_mut() = Some(last_check_label);
 
     // Refresh button (right side, matching wifi/bluetooth scan button position)
-    let refresh_btn = ScanButton::with_label("Refresh", || {
+    let refresh_btn = ScanButton::new("Refresh", || {
         debug!("Updates: refresh button clicked");
         UpdatesService::global().refresh();
     });

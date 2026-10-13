@@ -78,6 +78,7 @@ radio_button_unchecked
 rainy
 rainy_light
 rectangle
+refresh
 repeat
 restart_alt
 settings_ethernet
