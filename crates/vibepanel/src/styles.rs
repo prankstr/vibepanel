@@ -255,6 +255,9 @@ pub mod state {
     /// Muted/disabled audio state (`.muted`).
     pub const MUTED: &str = "muted";
 
+    /// Scan/refresh in progress (`.scanning`).
+    pub const SCANNING: &str = "scanning";
+
     /// Service unavailable state (`.service-unavailable`).
     pub const SERVICE_UNAVAILABLE: &str = "service-unavailable";
 

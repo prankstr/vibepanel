@@ -654,6 +654,7 @@ pub fn create_qs_list_box() -> ListBox {
 ///
 /// - `.qs-scan-button` on the button
 /// - `.qs-scan-icon` and `.vp-primary` on the icon
+/// - `.scanning` on the button while active
 pub struct ScanButton {
     button: Button,
     icon: IconHandle,
@@ -730,6 +731,11 @@ impl ScanButton {
     /// scanning started, focus is restored automatically and `focus_visible`
     /// is re-enabled on the window.
     pub fn set_scanning(&self, active: bool) {
+        if active {
+            self.button.add_css_class(state::SCANNING);
+        } else {
+            self.button.remove_css_class(state::SCANNING);
+        }
         self.icon.set_spinning(active);
         if !active {
             // Restore focus if the button had keyboard-nav focus before it

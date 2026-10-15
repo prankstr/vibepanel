@@ -344,6 +344,10 @@ window.qs-wifi-qr-window {{
     font-size: calc(var(--icon-size) * 1.1);
 }}
 
+.qs-scan-button.scanning .qs-scan-icon {{
+    color: var(--color-accent-primary);
+}}
+
 /* Chevron animation */
 .qs-toggle-more-icon {{
     {qs_transition}
