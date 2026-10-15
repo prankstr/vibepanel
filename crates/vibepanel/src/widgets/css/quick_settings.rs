@@ -327,12 +327,11 @@ window.qs-wifi-qr-window {{
     font-size: 20px;
 }}
 
-/* Scan/refresh icon button */
-/* Slightly smaller than the header row so the hover background stays
-   within the row (which has a negative bottom margin) */
+/* Scan/refresh icon button: sized by icon margins (~1.6x icon-size) so the
+   footprint matches across icon themes. */
 .qs-scan-button {{
-    min-width: calc(var(--icon-size) * 1.6);
-    min-height: calc(var(--icon-size) * 1.6);
+    min-width: 0;
+    min-height: 0;
     padding: 0;
     border-radius: var(--radius-widget);
 }}
@@ -341,9 +340,18 @@ window.qs-wifi-qr-window {{
     background: var(--color-card-overlay-hover);
 }}
 
-.qs-scan-button .qs-scan-icon {{
+.qs-scan-button .icon-root.qs-scan-icon {{
     font-size: calc(var(--icon-size) * 1.1);
-    -gtk-icon-size: calc(var(--icon-size) * 1.1);
+    margin: calc(var(--icon-size) * 0.14) calc(var(--icon-size) * 0.25);
+    /* Optical nudge: glyph renders 1px high at the default size */
+    margin-top: calc(var(--icon-size) * 0.14 + 1px);
+    margin-bottom: calc(var(--icon-size) * 0.14 - 1px);
+}}
+
+/* GTK icons fill more of their box; draw smaller, pad to the same footprint. */
+.qs-scan-button image.qs-scan-icon {{
+    -gtk-icon-size: calc(var(--icon-size) * 0.85);
+    margin: calc(var(--icon-size) * 0.235) calc(var(--icon-size) * 0.125);
 }}
 
 .qs-scan-button.scanning .qs-scan-icon {{
