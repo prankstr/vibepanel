@@ -343,9 +343,12 @@ window.qs-wifi-qr-window {{
 .qs-scan-button .icon-root.qs-scan-icon {{
     font-size: calc(var(--icon-size) * 1.1);
     margin: calc(var(--icon-size) * 0.14) calc(var(--icon-size) * 0.25);
-    /* Optical nudge: glyph renders 1px high at the default size */
-    margin-top: calc(var(--icon-size) * 0.14 + 1px);
-    margin-bottom: calc(var(--icon-size) * 0.14 - 1px);
+}}
+
+/* Optical nudge: Material glyph renders 1px high at the default size.
+   Transform keeps GTK icons and the spinner centered. */
+.qs-scan-button .material-symbol-refresh {{
+    transform: translateY(1px);
 }}
 
 /* GTK icons fill more of their box; draw smaller, pad to the same footprint. */
