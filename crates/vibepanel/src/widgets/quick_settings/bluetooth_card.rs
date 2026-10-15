@@ -61,6 +61,8 @@ pub struct BluetoothCardState {
     pub base: ExpandableCardBase,
     /// Bluetooth scan button (self-contained with animation).
     pub scan_button: RefCell<Option<Rc<ScanButton>>>,
+    /// Header row holding the scan button (hidden when powered off).
+    controls_row: RefCell<Option<GtkBox>>,
     /// Guard to prevent feedback loop when programmatically updating toggle.
     pub updating_toggle: Cell<bool>,
     /// Cached user input for auth (preserved across list rebuilds).
@@ -77,6 +79,7 @@ impl BluetoothCardState {
         Self {
             base: ExpandableCardBase::new(),
             scan_button: RefCell::new(None),
+            controls_row: RefCell::new(None),
             updating_toggle: Cell::new(false),
             auth_input: Rc::new(RefCell::new(String::new())),
             auth_request_id: RefCell::new(None),
@@ -134,10 +137,13 @@ pub struct BluetoothDetailsResult {
 /// Build the Bluetooth details section with scan button and device list.
 pub fn build_bluetooth_details(state: &Rc<BluetoothCardState>) -> BluetoothDetailsResult {
     let container = GtkBox::new(Orientation::Vertical, 0);
+    let snapshot = BluetoothService::global().snapshot();
 
-    // Controls row: spacer + Scan button (right-aligned, matching Wi-Fi layout)
+    // Controls row: spacer + Scan button (right-aligned, matching Wi-Fi layout).
+    // Hidden when powered off so the row's min-height doesn't leave a gap.
     let controls_row = GtkBox::new(Orientation::Horizontal, 8);
     controls_row.add_css_class(qs::BT_CONTROLS_ROW);
+    controls_row.set_visible(snapshot.powered);
 
     // Spacer to push scan button to the right
     let spacer = GtkBox::new(Orientation::Horizontal, 0);
@@ -151,6 +157,7 @@ pub fn build_bluetooth_details(state: &Rc<BluetoothCardState>) -> BluetoothDetai
 
     controls_row.append(scan_button.widget());
     container.append(&controls_row);
+    *state.controls_row.borrow_mut() = Some(controls_row);
 
     // Device list
     let list_box = create_qs_list_box();
@@ -164,7 +171,6 @@ pub fn build_bluetooth_details(state: &Rc<BluetoothCardState>) -> BluetoothDetai
     container.append(&scroller);
 
     // Populate with current Bluetooth state
-    let snapshot = BluetoothService::global().snapshot();
     populate_bluetooth_list(&list_box, &snapshot, state);
 
     BluetoothDetailsResult {
@@ -810,9 +816,11 @@ pub fn on_bluetooth_changed(state: &BluetoothCardState, snapshot: &BluetoothSnap
         set_subtitle_active(label, snapshot.connected_devices > 0);
     }
 
-    // Update scan button: hide when powered off, show otherwise
+    // Hide the whole header row when powered off (scan button is its only content)
+    if let Some(row) = state.controls_row.borrow().as_ref() {
+        row.set_visible(snapshot.powered);
+    }
     if let Some(scan_btn) = state.scan_button.borrow().as_ref() {
-        scan_btn.set_visible(snapshot.powered);
         scan_btn.set_sensitive(snapshot.has_adapter && !snapshot.scanning);
         scan_btn.set_scanning(snapshot.scanning);
     }

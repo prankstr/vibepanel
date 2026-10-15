@@ -115,7 +115,7 @@ window.qs-wifi-qr-window {{
     margin-right: 0;
 }}
 
-/* Section header rows in expanded details share a fixed height so rows
+/* Section header rows in expanded details share a minimum height so rows
    with and without a scan button line up identically */
 .qs-network-section-row,
 .qs-bt-controls-row,
@@ -134,10 +134,11 @@ window.qs-wifi-qr-window {{
     font-size: var(--font-size);
 }}
 
-/* Network section switch styling - compact pill sized to the section label,
-   accent colored track when on */
+/* Network section switch styling - compact switch sized to the section label,
+   accent colored track when on. Track rounder than slider to contain it;
+   both scale with the widget border radius setting. */
 .qs-network-section-row switch {{
-    border-radius: 9999px;
+    border-radius: calc(var(--slider-radius-thick) * 2);
     padding: 2px;
     min-height: 0;
     margin: 0;
@@ -163,7 +164,7 @@ window.qs-wifi-qr-window {{
 }}
 
 .qs-network-section-row switch slider {{
-    border-radius: 9999px;
+    border-radius: calc(var(--slider-radius-thick) * 1.3);
     margin: 0;
     min-width: calc(var(--font-size) * 0.85);
     min-height: calc(var(--font-size) * 0.85);
@@ -342,6 +343,7 @@ window.qs-wifi-qr-window {{
 
 .qs-scan-button .qs-scan-icon {{
     font-size: calc(var(--icon-size) * 1.1);
+    -gtk-icon-size: calc(var(--icon-size) * 1.1);
 }}
 
 .qs-scan-button.scanning .qs-scan-icon {{

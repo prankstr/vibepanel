@@ -481,9 +481,11 @@ pub fn build_wifi_details(
     *state.mobile.row.borrow_mut() = Some(mobile_row);
 
     // Wi-Fi header row: "Wi-Fi" label + spacer + scan button + switch
-    // The label+switch are only visible when a non-WiFi device is present, but scan button always visible
+    // The label+switch are only visible when a non-WiFi device is present and the
+    // scan button only while Wi-Fi is enabled; the row hides when all are hidden.
     let wifi_switch_row = GtkBox::new(Orientation::Horizontal, 8);
     wifi_switch_row.add_css_class(qs::NETWORK_SECTION_ROW);
+    wifi_switch_row.set_visible(wifi_header_visible(&snapshot));
     // Disable baseline alignment to prevent GTK baseline issues with Switch widget
     wifi_switch_row.set_baseline_position(gtk4::BaselinePosition::Center);
 
@@ -500,7 +502,7 @@ pub fn build_wifi_details(
     spacer.set_hexpand(true);
     wifi_switch_row.append(&spacer);
 
-    // Scan button (always visible)
+    // Scan button (visible while Wi-Fi is enabled, see update_scan_ui)
     let scan_button = ScanButton::new("Scan", || {
         NetworkService::global().scan();
     });
@@ -1642,6 +1644,13 @@ pub fn update_subtitle(state: &NetworkCardState, snapshot: &NetworkSnapshot) {
     }
 }
 
+/// Whether the Wi-Fi header row has any visible content: the label and switch
+/// (shown with a non-WiFi device) or the scan button (shown while Wi-Fi is on).
+/// Hiding it otherwise keeps the row's min-height from leaving an empty gap.
+fn wifi_header_visible(snapshot: &NetworkSnapshot) -> bool {
+    snapshot.has_non_wifi_device() || snapshot.wifi_enabled().unwrap_or(false)
+}
+
 /// Update the scan button UI and animate while scanning.
 pub fn update_scan_ui(state: &NetworkCardState, snapshot: &NetworkSnapshot) {
     let scanning = snapshot.scanning();
@@ -1869,6 +1878,9 @@ pub fn on_network_changed(
     }
 
     // Update Wi-Fi label and switch visibility (only show when alternative network device present)
+    if let Some(row) = state.wifi_switch_row.borrow().as_ref() {
+        row.set_visible(wifi_header_visible(snapshot));
+    }
     if let Some(wifi_label) = state.wifi_label.borrow().as_ref() {
         wifi_label.set_visible(snapshot.has_non_wifi_device());
     }

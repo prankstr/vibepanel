@@ -1418,7 +1418,7 @@ pub struct CairoSpinner {
     area: gtk4::DrawingArea,
     /// Current rotation angle (radians), shared with the draw function.
     angle: Rc<Cell<f64>>,
-    /// Arc diameter in pixels; `0.0` means fill the drawing area.
+    /// Arc diameter in pixels, clamped to the drawing area; set via `set_geometry`.
     diameter: Rc<Cell<f64>>,
     /// Active timer source, if the animation is running.
     source: RefCell<Option<glib::SourceId>>,
@@ -1428,7 +1428,7 @@ impl CairoSpinner {
     /// Create a spinner that reads its foreground color from `color_source`.
     ///
     /// The `color_source` widget is used to resolve the CSS `color` property
-    /// (e.g., the parent container or the DrawingArea itself).
+    /// (e.g., the parent container).
     ///
     /// The returned spinner is hidden and must be appended to a container by the caller.
     pub fn new(color_source: &impl IsA<gtk4::Widget>) -> Self {
@@ -1448,8 +1448,7 @@ impl CairoSpinner {
             let h = height as f64;
             let cx = w / 2.0;
             let cy = h / 2.0;
-            let d = diameter_ref.get();
-            let d = if d > 0.0 { d.min(w.min(h)) } else { w.min(h) };
+            let d = diameter_ref.get().min(w.min(h));
             let radius = (d / 2.0) - 1.5;
             if radius <= 0.0 {
                 return;
