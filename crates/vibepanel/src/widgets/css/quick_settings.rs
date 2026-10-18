@@ -535,6 +535,12 @@ window.qs-wifi-qr-window {{
 
 .qs-audio-row-disabled scale trough highlight {{
     background-color: var(--color-foreground-muted);
+    background-image: none;
+}}
+
+.qs-audio-row-disabled scale slider {{
+    background-color: var(--color-foreground-muted);
+    box-shadow: none;
 }}
 
 /* Audio hint text - color via vp-muted */
