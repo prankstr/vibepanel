@@ -595,7 +595,7 @@ button:hover {{
     background-color: var(--color-accent-primary);
     border-radius: var(--slider-knob-radius);
     border: none;
-    box-shadow: none;
+    box-shadow: inset 0 0 0 2px var(--color-accent-slider, var(--color-accent-primary));
     {slider_transition}
 }}
 .slider-row scale slider:active {{

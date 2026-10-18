@@ -37,9 +37,7 @@
 //! ```
 
 use gtk4::prelude::*;
-use gtk4::{
-    Box as GtkBox, Button, CssProvider, Label, ListBoxRow, Orientation, Scale, ToggleButton,
-};
+use gtk4::{Box as GtkBox, Button, Label, ListBoxRow, Orientation, Scale, ToggleButton};
 
 use crate::services::icons::{IconHandle, IconsService};
 use crate::styles::color;
@@ -191,7 +189,6 @@ impl AccentSlider {
         let slider = Scale::with_range(Orientation::Horizontal, self.min, self.max, self.step);
         slider.set_hexpand(true);
         slider.set_draw_value(false);
-        apply_accent_styling(&slider);
 
         AccentSliderResult { slider }
     }
@@ -1049,40 +1046,6 @@ impl ListRow {
             subtitle: label_result.subtitle,
         }
     }
-}
-
-/// Apply accent color styling to a slider's internal widgets.
-///
-/// This hooks into the slider's `realize` signal to directly style the
-/// highlight and slider (knob) widgets, ensuring accent colors work
-/// even with GTK themes that override them.
-fn apply_accent_styling(scale: &Scale) {
-    scale.connect_realize(|scale| {
-        let accent = "var(--color-accent-slider, var(--color-accent-primary))";
-        // Use high priority to override GTK theme styles
-        let priority = u32::MAX / 2;
-
-        // Traverse: scale -> trough -> {highlight, slider}
-        let Some(trough) = scale.first_child() else {
-            return;
-        };
-        let mut child = trough.first_child();
-        while let Some(w) = child {
-            let css = match w.css_name().as_str() {
-                "highlight" => format!("highlight {{ background-image: image({accent}); }}"),
-                "slider" => format!("slider {{ box-shadow: inset 0 0 0 2px {accent}; }}"),
-                _ => {
-                    child = w.next_sibling();
-                    continue;
-                }
-            };
-            let provider = CssProvider::new();
-            provider.load_from_string(&css);
-            #[allow(deprecated)]
-            w.style_context().add_provider(&provider, priority);
-            child = w.next_sibling();
-        }
-    });
 }
 
 #[cfg(test)]
