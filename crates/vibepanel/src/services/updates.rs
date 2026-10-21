@@ -402,10 +402,7 @@ fn run_update_check(pm: PackageManager, report_status: &dyn Fn(String)) -> Check
 fn check_dnf_updates(report_status: &dyn Fn(String)) -> CheckResult {
     // Phase 1: Refresh repo metadata (this is the slow, network-bound part)
     report_status(tr!("Refreshing dnf cache..."));
-    match Command::new("dnf")
-        .args(["makecache", "--refresh"])
-        .output()
-    {
+    match dnf_command().args(["makecache", "--refresh"]).output() {
         Ok(output) if !output.status.success() => {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return CheckResult {
@@ -424,17 +421,27 @@ fn check_dnf_updates(report_status: &dyn Fn(String)) -> CheckResult {
 
     // Phase 2: Check for available upgrades against fresh cache
     report_status(tr!("Checking for upgrades..."));
-    let output = Command::new("dnf").args(["upgrade", "--assumeno"]).output();
+    let output = dnf_command().args(["upgrade", "--assumeno"]).output();
 
     match output {
         Ok(output) => {
-            // dnf upgrade --assumeno returns exit code 1 when it aborts
-            // due to user declining, which is expected behavior
             let stdout = String::from_utf8_lossy(&output.stdout);
-            let updates_by_repo = parse_dnf_upgrade_output(&stdout);
+
+            // --assumeno exits 1 after declining a transaction, so that alone isn't a failure.
+            if !output.status.success() && !stdout.contains("Transaction Summary:") {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let reason = stderr.lines().rev().find(|l| !l.trim().is_empty());
+                return CheckResult {
+                    updates_by_repo: HashMap::new(),
+                    error: Some(format!(
+                        "dnf upgrade failed: {}",
+                        reason.unwrap_or("unknown error").trim()
+                    )),
+                };
+            }
 
             CheckResult {
-                updates_by_repo,
+                updates_by_repo: parse_dnf_upgrade_output(&stdout),
                 error: None,
             }
         }
@@ -443,6 +450,13 @@ fn check_dnf_updates(report_status: &dyn Fn(String)) -> CheckResult {
             error: Some(format!("Failed to run dnf: {}", e)),
         },
     }
+}
+
+/// `dnf` with English output, since the parser matches dnf's section headings.
+fn dnf_command() -> Command {
+    let mut cmd = Command::new("dnf");
+    cmd.env("LC_ALL", "C.UTF-8");
+    cmd
 }
 
 /// Parse DNF upgrade --assumeno output.
@@ -460,49 +474,37 @@ fn check_dnf_updates(report_status: &dyn Fn(String)) -> CheckResult {
 /// ```
 ///
 /// We parse the "Upgrading:" section to extract package names and repos.
-/// Lines starting with "  replacing" are skipped (they show what's being replaced).
+/// Sections can follow each other without a blank line, so any unindented
+/// heading ends it.
 fn parse_dnf_upgrade_output(output: &str) -> HashMap<String, Vec<UpdateInfo>> {
     let mut by_repo: HashMap<String, Vec<UpdateInfo>> = HashMap::new();
     let mut in_upgrading_section = false;
 
     for line in output.lines() {
-        // Check if we've entered the "Upgrading:" section
-        if line.starts_with("Upgrading:") && !line.contains("package") {
-            in_upgrading_section = true;
+        let trimmed = line.trim();
+
+        if trimmed.is_empty() {
+            in_upgrading_section = false;
             continue;
         }
 
-        // Check if we've left the upgrading section (empty line or new section)
-        if in_upgrading_section {
-            let trimmed = line.trim();
+        if !line.starts_with(char::is_whitespace) && trimmed.ends_with(':') {
+            in_upgrading_section = trimmed == "Upgrading:";
+            continue;
+        }
 
-            // End of section markers
-            if trimmed.is_empty()
-                || trimmed.starts_with("Transaction Summary:")
-                || trimmed.starts_with("Installing:")
-                || trimmed.starts_with("Removing:")
-                || trimmed.starts_with("Downgrading:")
-                || trimmed.starts_with("Reinstalling:")
-            {
-                in_upgrading_section = false;
-                continue;
-            }
+        if !in_upgrading_section || trimmed.starts_with("replacing") {
+            continue;
+        }
 
-            // Skip "replacing" lines (they start with more indentation)
-            if trimmed.starts_with("replacing") {
-                continue;
-            }
+        // Parse package line: "package-name  arch  version  repo  size"
+        let parts: Vec<&str> = trimmed.split_whitespace().collect();
+        if parts.len() >= 4 {
+            let name = parts[0].to_string();
+            let repo = parts[3].to_string();
 
-            // Parse package line: "package-name  arch  version  repo  size"
-            let parts: Vec<&str> = trimmed.split_whitespace().collect();
-            if parts.len() >= 4 {
-                let name = parts[0].to_string();
-                // Repository is the 4th column (index 3)
-                let repo = parts[3].to_string();
-
-                let update = UpdateInfo { name };
-                by_repo.entry(repo).or_default().push(update);
-            }
+            let update = UpdateInfo { name };
+            by_repo.entry(repo).or_default().push(update);
         }
     }
 
@@ -753,6 +755,22 @@ Operation aborted by the user.
         let fedora = &result["fedora"];
         assert_eq!(fedora.len(), 1);
         assert_eq!(fedora[0].name, "mesa-libGL");
+    }
+
+    #[test]
+    fn test_parse_dnf_upgrade_output_ignores_adjacent_sections() {
+        let output = r#"
+Upgrading:
+ fzf                      aarch64 0:0.74.5-1.fc44   updates         4.9 MiB
+   replacing fzf          aarch64 0:0.74.4-1.fc44   updates         4.9 MiB
+Skipping packages with conflicts:
+ chezmoi                  aarch64 2.73.0-1.fc44     updates        38.0 MiB
+"#;
+
+        let result = parse_dnf_upgrade_output(output);
+
+        let names: Vec<&str> = result.values().flatten().map(|u| u.name.as_str()).collect();
+        assert_eq!(names, ["fzf"]);
     }
 
     #[test]
