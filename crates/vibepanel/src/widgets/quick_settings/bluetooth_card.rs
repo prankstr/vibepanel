@@ -464,6 +464,7 @@ fn build_auth_row(auth_request: &BluetoothAuthRequest, state: &BluetoothCardStat
         }
     };
     let auth_label = Label::new(Some(&label_text));
+    auth_label.add_css_class(color::PRIMARY);
     auth_label.set_xalign(0.0);
     auth_box.append(&auth_label);
 

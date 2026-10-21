@@ -576,6 +576,7 @@ fn build_vpn_auth_box(state: &Rc<VpnCardState>) {
     auth_box.set_visible(false);
 
     let auth_label = Label::new(Some(""));
+    auth_label.add_css_class(color::PRIMARY);
     auth_label.set_xalign(0.0);
     auth_label.set_wrap(true);
     auth_label.set_wrap_mode(gtk4::pango::WrapMode::WordChar);

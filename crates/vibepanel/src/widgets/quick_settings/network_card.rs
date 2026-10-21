@@ -549,6 +549,7 @@ pub fn build_wifi_details(state: &Rc<NetworkCardState>) -> NetworkDetailsResult 
     pwd_box.set_visible(false);
 
     let pwd_label = Label::new(Some(""));
+    pwd_label.add_css_class(color::PRIMARY);
     pwd_label.set_xalign(0.0);
     pwd_box.append(&pwd_label);
 
