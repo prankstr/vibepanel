@@ -327,6 +327,8 @@ pub(super) struct WifiInternal {
     /// Attempt NM reported activated while the device doesn't show it connected
     /// yet; its row stays "Connecting" until it does.
     pub(super) settling_attempt: Cell<Option<u64>>,
+    /// Attempt in which the user last submitted a password at a prompt.
+    pub(super) answered_attempt: Cell<Option<u64>>,
     /// Deadline of the current activation, pushed back while a prompt is open.
     activation_deadline: RefCell<Option<wifi::ActivationDeadline>>,
 }
@@ -357,6 +359,7 @@ impl WifiInternal {
             secret_to_save: RefCell::new(None),
             activation_deadline: RefCell::new(None),
             settling_attempt: Cell::new(None),
+            answered_attempt: Cell::new(None),
         }
     }
 }
@@ -552,6 +555,11 @@ impl NmService {
                 self.extend_wifi_activation(
                     crate::services::nm_secret_agent::AUTH_TIMEOUT + Duration::from_secs(5),
                 );
+                // NM's iwd backend flags every PSK request as REQUEST_NEW once the
+                // profile has been used, so only call it a retry ("Wrong password")
+                // if the user already answered a prompt in this attempt.
+                request.is_retry &=
+                    self.wifi.answered_attempt.get() == Some(self.wifi.attempt.get());
                 // A retry within the attempt keeps its "Save password" choice.
                 request.save_ticked =
                     self.wifi

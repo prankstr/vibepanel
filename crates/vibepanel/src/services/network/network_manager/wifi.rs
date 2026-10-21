@@ -894,6 +894,9 @@ impl NmService {
             secret: secret.to_string(),
         });
         if NmSecretAgent::submit_wifi_secret(&request, secret) {
+            self.wifi
+                .answered_attempt
+                .set(Some(self.wifi.attempt.get()));
             self.wifi.secret_to_save.replace(prompted);
             self.extend_wifi_activation(WIFI_ACTIVATION_TIMEOUT);
         }
