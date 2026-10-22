@@ -124,6 +124,7 @@ impl CavaService {
                 "[general]\n\
                  bars = {NUM_BARS}\n\
                  framerate = {FRAMERATE}\n\
+                 sleep_timer = 1\n\
                  [output]\n\
                  method = raw\n\
                  raw_target = /dev/stdout\n\
