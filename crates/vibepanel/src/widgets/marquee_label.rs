@@ -22,6 +22,8 @@ use tracing::debug;
 
 /// Scroll speed. Labels are placed at whole pixels, so the timer ticks once per pixel.
 const SCROLL_PIXELS_PER_SECOND: u64 = 21;
+pub(crate) const TICK_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(1000 / SCROLL_PIXELS_PER_SECOND);
 /// Gap between repeated text when scrolling (in pixels).
 const SCROLL_GAP: f64 = 50.0;
 
@@ -41,6 +43,8 @@ struct MarqueeState {
     container_width: f64,
     /// Animation timer source ID.
     timer_id: Option<SourceId>,
+    /// Set when a shared clock drives scrolling instead of `timer_id`; called to request ticks.
+    external_clock: Option<Rc<dyn Fn()>>,
     /// Current text to detect changes.
     current_text: String,
 }
@@ -55,6 +59,7 @@ impl Default for MarqueeState {
             text_width: 0.0,
             container_width: 0.0,
             timer_id: None,
+            external_clock: None,
             current_text: String::new(),
         }
     }
@@ -385,6 +390,21 @@ impl MarqueeLabel {
         state.borrow_mut().paused = paused;
         resume_animation(&state, &self.container);
     }
+
+    /// Let a shared clock drive scrolling through [`advance`](Self::advance) instead of
+    /// the label's own timer; `request_ticks` is called whenever the label needs to scroll.
+    /// Call before the label is shown: a running internal timer isn't handed over.
+    pub fn set_external_clock(&self, request_ticks: impl Fn() + 'static) {
+        let state = self.container.state();
+        state.borrow_mut().external_clock = Some(Rc::new(request_ticks));
+        resume_animation(&state, &self.container);
+    }
+
+    /// Scroll one pixel when driven by an external clock. Returns false when
+    /// there's nothing to scroll.
+    pub fn advance(&self) -> bool {
+        step(&self.container.state(), &self.container)
+    }
 }
 
 impl Default for MarqueeLabel {
@@ -441,37 +461,48 @@ fn check_and_start_scroll(
     }
 }
 
-/// Start the animation timer.
+/// Start the animation timer, or ask the external clock for ticks.
 fn start_animation(state: &Rc<RefCell<MarqueeState>>, container: &MarqueeContainer) {
+    let external_clock = state.borrow().external_clock.clone();
+    if let Some(request_ticks) = external_clock {
+        request_ticks();
+        return;
+    }
+
     let state_for_closure = state.clone();
     let container = container.clone();
 
-    let id = glib::timeout_add_local(
-        std::time::Duration::from_millis(1000 / SCROLL_PIXELS_PER_SECOND),
-        move || {
-            let mut s = state_for_closure.borrow_mut();
-
-            // Paused or off screen: stop, keeping the offset. set_paused and map restart it.
-            if !s.scrolling || s.paused || !container.is_mapped() {
-                s.timer_id = None;
-                return glib::ControlFlow::Break;
-            }
-
-            s.offset += 1.0;
-
-            // Seamless loop - reset when we've scrolled the full distance
-            if s.offset >= s.scroll_distance {
-                s.offset = 0.0;
-                debug!("Marquee: loop reset");
-            }
-
-            container.queue_allocate();
-
+    let id = glib::timeout_add_local(TICK_INTERVAL, move || {
+        if step(&state_for_closure, &container) {
             glib::ControlFlow::Continue
-        },
-    );
+        } else {
+            state_for_closure.borrow_mut().timer_id = None;
+            glib::ControlFlow::Break
+        }
+    });
 
     state.borrow_mut().timer_id = Some(id);
+}
+
+/// Scroll one pixel. Returns false when paused or off screen, keeping the offset;
+/// set_paused and map restart the animation.
+fn step(state: &Rc<RefCell<MarqueeState>>, container: &MarqueeContainer) -> bool {
+    let mut s = state.borrow_mut();
+    if !s.scrolling || s.paused || !container.is_mapped() {
+        return false;
+    }
+
+    s.offset += 1.0;
+
+    // Seamless loop - reset when we've scrolled the full distance
+    if s.offset >= s.scroll_distance {
+        s.offset = 0.0;
+        debug!("Marquee: loop reset");
+    }
+
+    drop(s);
+    container.queue_allocate();
+    true
 }
 
 /// Restart a stopped animation if the text still needs to scroll.

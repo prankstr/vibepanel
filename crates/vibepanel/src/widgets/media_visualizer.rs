@@ -4,7 +4,8 @@
 //! connection, smoothing, and tick-callback lifecycle:
 //!
 //! - [`MediaVisualizer`] — blob that morphs around album art (popover/window).
-//! - [`BarVisualizer`] — thin waveform underline for the bar widget.
+//! - [`BarVisualizer`] — thin waveform underline for the bar widget, or a ring
+//!   around the play button on vertical bars.
 
 use std::cell::{Cell, RefCell};
 use std::f64::consts::{FRAC_PI_2, FRAC_PI_4, PI};
@@ -42,13 +43,15 @@ enum State {
 /// Shared animation state for cava-driven visualizers.
 ///
 /// While playing, smoothing and redraws happen directly in the cava callback
-/// (already fires at 60fps) — no tick callback needed. A tick callback is
-/// only used for the brief pause-decay animation.
+/// (already fires at 60fps), except while a media clock redraws instead. A tick
+/// callback is only used for the brief pause-decay animation.
 struct AnimatedBarsInner {
     bars: Rc<RefCell<[f64; NUM_BARS]>>,
     target_bars: Rc<RefCell<[f64; NUM_BARS]>>,
     state: Rc<Cell<State>>,
     cava_callback_id: Rc<RefCell<Option<CallbackId>>>,
+    /// Set while a media clock redraws, so cava frames only update the bars.
+    clock_driven: Rc<Cell<bool>>,
     /// Bumped to cancel stale tick callbacks.
     generation: Rc<Cell<u64>>,
     /// Only redraw every N-th cava frame (1 = every frame).
@@ -69,6 +72,7 @@ impl AnimatedBars {
                 target_bars: Rc::new(RefCell::new([0.0; NUM_BARS])),
                 state: Rc::new(Cell::new(State::Inactive)),
                 cava_callback_id: Rc::new(RefCell::new(None)),
+                clock_driven: Rc::new(Cell::new(false)),
                 generation: Rc::new(Cell::new(0)),
                 redraw_divisor: redraw_divisor.max(1),
                 frame_counter: Rc::new(Cell::new(0)),
@@ -76,8 +80,7 @@ impl AnimatedBars {
         }
     }
 
-    /// Start animating. Connects to cava; smoothing + redraw happen in the
-    /// cava callback directly.
+    /// Start animating. Connects to cava.
     fn start(&self, da: &DrawingArea) {
         if self.inner.state.get() == State::Playing {
             return;
@@ -105,6 +108,7 @@ impl AnimatedBars {
         let da_clone = da.clone();
         let frame_counter = self.inner.frame_counter.clone();
         let divisor = self.inner.redraw_divisor;
+        let clock_driven = self.inner.clock_driven.clone();
         let cava_id = cava.connect(move |snapshot| {
             if snapshot.running {
                 let mut targets = target_bars.borrow_mut();
@@ -116,7 +120,7 @@ impl AnimatedBars {
             }
             let count = frame_counter.get().wrapping_add(1);
             frame_counter.set(count);
-            if count.is_multiple_of(divisor) {
+            if count.is_multiple_of(divisor) && !clock_driven.get() {
                 da_clone.queue_draw();
             }
         });
@@ -357,7 +361,9 @@ fn button_ring_size() -> i32 {
     core_size + 2 * (BLOB_CLIP_INSET + BUTTON_RING_MAX_DISPLACEMENT) as i32
 }
 
-/// Thin waveform underline for the bar widget.
+/// Thin waveform underline for the bar widget, or a ring around the play button
+/// on vertical bars. While a title scrolls, the underline is redrawn by a
+/// [`MediaClock`](super::media_clock::MediaClock) instead of by cava.
 #[derive(Clone)]
 pub struct BarVisualizer {
     drawing_area: DrawingArea,
@@ -448,6 +454,18 @@ impl BarVisualizer {
 
     pub fn stop(&self) {
         self.anim.stop(&self.drawing_area);
+    }
+
+    /// Let a media clock redraw instead of cava, so redraws share its frames.
+    pub fn set_clock_driven(&self, driven: bool) {
+        self.anim.inner.clock_driven.set(driven);
+    }
+
+    /// Redraw with the latest bars while playing.
+    pub fn redraw(&self) {
+        if self.anim.inner.state.get() == State::Playing {
+            self.drawing_area.queue_draw();
+        }
     }
 }
 
