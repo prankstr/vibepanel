@@ -427,10 +427,15 @@ fn update_window_buttons(
     is_vertical: bool,
     output_id: Option<&str>,
 ) {
+    // Skip our media pop-out (its app ID is the program name set in main).
+    let own_app_id = gtk4::glib::prgname();
     let mut windows: Vec<_> = snapshot
         .windows
         .iter()
         .filter(|win| {
+            if own_app_id.as_deref() == Some(win.app_id.as_str()) {
+                return false;
+            }
             if !config.show_scratchpad_windows && win.is_scratchpad {
                 return false;
             }

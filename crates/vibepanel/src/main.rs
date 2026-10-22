@@ -657,6 +657,9 @@ fn run_gtk_app(config: Config, config_source: Option<PathBuf>) -> ExitCode {
     // This must happen after ConfigManager but before GTK widgets are created
     CompositorManager::init_global(&config.advanced);
 
+    // GTK uses this as the media pop-out's app ID, which the taskbar filters on.
+    gtk4::glib::set_prgname(Some("vibepanel"));
+
     let app = Application::builder()
         .application_id("io.github.vibepanel")
         .flags(gtk4::gio::ApplicationFlags::NON_UNIQUE)
