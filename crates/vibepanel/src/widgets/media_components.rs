@@ -107,26 +107,13 @@ impl MediaViewController {
             .set_paused(snapshot.playback_status != PlaybackStatus::Playing);
 
         // Paused and Stopped both decay to a static border rather than
-        // hiding, to avoid blink during track switches.
-        // Stop cava entirely only when the bar widget would hide.
-        let should_stop = !snapshot.available
-            || (snapshot.playback_status == PlaybackStatus::Stopped && !has_metadata);
-        if should_stop {
-            if let Some(ref viz) = self.visualizer {
-                viz.stop();
-            }
-        } else {
-            match snapshot.playback_status {
-                PlaybackStatus::Playing => {
-                    if let Some(ref viz) = self.visualizer {
-                        viz.start();
-                    }
-                }
-                PlaybackStatus::Paused | PlaybackStatus::Stopped => {
-                    if let Some(ref viz) = self.visualizer {
-                        viz.pause();
-                    }
-                }
+        // hiding, to avoid blink during track switches. cava stops by itself
+        // once no visualizer is listening.
+        if let Some(ref viz) = self.visualizer {
+            if snapshot.available && snapshot.playback_status == PlaybackStatus::Playing {
+                viz.start();
+            } else {
+                viz.pause();
             }
         }
     }

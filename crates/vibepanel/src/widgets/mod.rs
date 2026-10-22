@@ -31,6 +31,7 @@ pub mod layer_shell_popover;
 mod mango_layout;
 mod marquee_label;
 mod media;
+mod media_clock;
 mod media_components;
 mod media_popover;
 mod media_visualizer;

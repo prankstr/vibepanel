@@ -18,8 +18,11 @@ use crate::services::callbacks::{CallbackId, Callbacks};
 /// Number of frequency bars to request from cava.
 pub const NUM_BARS: usize = 24;
 
-/// Cava output framerate.
-const FRAMERATE: u32 = 60;
+/// Cava output framerate. The visualizers' redraw divisors assume this rate.
+const FRAMERATE: u32 = 30;
+
+/// Keep cava running this long without listeners, so a pause between tracks doesn't restart it.
+const IDLE_STOP_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Snapshot of the current cava audio spectrum state.
 #[derive(Clone, Copy, Debug, Default)]
@@ -35,6 +38,7 @@ pub struct CavaService {
     callbacks: Callbacks<CavaSnapshot>,
     stop_flag: RefCell<Option<Arc<AtomicBool>>>,
     child_pid: RefCell<Option<u32>>,
+    idle_stop: RefCell<Option<glib::SourceId>>,
     cava_available: Cell<bool>,
     config_written: Cell<bool>,
     generation: Cell<u64>,
@@ -54,6 +58,7 @@ impl CavaService {
             callbacks: Callbacks::new(),
             stop_flag: RefCell::new(None),
             child_pid: RefCell::new(None),
+            idle_stop: RefCell::new(None),
             cava_available: Cell::new(available),
             config_written: Cell::new(false),
             generation: Cell::new(0),
@@ -73,13 +78,28 @@ impl CavaService {
     where
         F: Fn(&CavaSnapshot) + 'static,
     {
+        if let Some(id) = self.idle_stop.take() {
+            id.remove();
+        }
         let id = self.callbacks.register(callback);
         self.callbacks.notify_single(id, &self.snapshot.borrow());
         id
     }
 
+    /// Unregister a callback. Stops cava once nothing has listened for [`IDLE_STOP_DELAY`].
     pub fn disconnect(&self, id: CallbackId) -> bool {
-        self.callbacks.unregister(id)
+        let removed = self.callbacks.unregister(id);
+        if removed && self.callbacks.is_empty() && self.idle_stop.borrow().is_none() {
+            let id = glib::timeout_add_local_once(IDLE_STOP_DELAY, || {
+                let cava = CavaService::global();
+                cava.idle_stop.take();
+                if cava.callbacks.is_empty() {
+                    cava.stop();
+                }
+            });
+            *self.idle_stop.borrow_mut() = Some(id);
+        }
+        removed
     }
 
     pub fn available(&self) -> bool {
@@ -104,6 +124,7 @@ impl CavaService {
                 "[general]\n\
                  bars = {NUM_BARS}\n\
                  framerate = {FRAMERATE}\n\
+                 sleep_timer = 1\n\
                  [output]\n\
                  method = raw\n\
                  raw_target = /dev/stdout\n\
@@ -156,7 +177,7 @@ impl CavaService {
     }
 
     /// Stop the cava subprocess if running.
-    pub fn stop(&self) {
+    fn stop(&self) {
         let stop_flag = self.stop_flag.borrow_mut().take();
         if let Some(flag) = stop_flag {
             flag.store(true, Ordering::Relaxed);
