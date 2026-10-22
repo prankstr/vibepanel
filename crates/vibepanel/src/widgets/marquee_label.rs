@@ -5,7 +5,7 @@
 //!
 //! Features:
 //! - Automatic scroll detection based on text vs container width
-//! - Smooth scrolling animation with configurable speed
+//! - Smooth scrolling animation
 //! - Seamless loop scrolling with configurable gap
 //!
 //! Implementation uses a custom GtkWidget subclass to properly control size
@@ -20,11 +20,8 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use tracing::debug;
 
-/// Default scroll speed in pixels per tick (60 FPS).
-/// 0.35 = ~21 pixels per second, smooth and readable.
-const DEFAULT_SCROLL_SPEED: f64 = 0.35;
-/// Animation tick interval in milliseconds (~60 FPS).
-const TICK_INTERVAL_MS: u32 = 16;
+/// Scroll speed. Labels are placed at whole pixels, so the timer ticks once per pixel.
+const SCROLL_PIXELS_PER_SECOND: u64 = 21;
 /// Gap between repeated text when scrolling (in pixels).
 const SCROLL_GAP: f64 = 50.0;
 
@@ -42,8 +39,6 @@ struct MarqueeState {
     text_width: f64,
     /// Width of the container.
     container_width: f64,
-    /// Scroll speed in pixels per tick.
-    scroll_speed: f64,
     /// Animation timer source ID.
     timer_id: Option<SourceId>,
     /// Current text to detect changes.
@@ -59,7 +54,6 @@ impl Default for MarqueeState {
             scroll_distance: 0.0,
             text_width: 0.0,
             container_width: 0.0,
-            scroll_speed: DEFAULT_SCROLL_SPEED,
             timer_id: None,
             current_text: String::new(),
         }
@@ -453,7 +447,7 @@ fn start_animation(state: &Rc<RefCell<MarqueeState>>, container: &MarqueeContain
     let container = container.clone();
 
     let id = glib::timeout_add_local(
-        std::time::Duration::from_millis(TICK_INTERVAL_MS as u64),
+        std::time::Duration::from_millis(1000 / SCROLL_PIXELS_PER_SECOND),
         move || {
             let mut s = state_for_closure.borrow_mut();
 
@@ -463,7 +457,7 @@ fn start_animation(state: &Rc<RefCell<MarqueeState>>, container: &MarqueeContain
                 return glib::ControlFlow::Break;
             }
 
-            s.offset += s.scroll_speed;
+            s.offset += 1.0;
 
             // Seamless loop - reset when we've scrolled the full distance
             if s.offset >= s.scroll_distance {
@@ -492,13 +486,6 @@ fn resume_animation(state: &Rc<RefCell<MarqueeState>>, container: &MarqueeContai
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_default_config() {
-        const _: () = assert!(DEFAULT_SCROLL_SPEED > 0.0);
-        const _: () = assert!(TICK_INTERVAL_MS > 0);
-        const _: () = assert!(SCROLL_GAP > 0.0);
-    }
 
     #[test]
     fn test_marquee_state_default() {
