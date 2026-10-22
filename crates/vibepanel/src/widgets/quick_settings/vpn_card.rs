@@ -347,11 +347,21 @@ pub fn populate_vpn_list(state: &Rc<VpnCardState>, list_box: &ListBox, snapshot:
         if conn.autoconnect {
             extra_parts.push(tr!("Autoconnect"));
         }
-        // Show VPN type
-        if conn.vpn_type == "wireguard" {
-            extra_parts.push("WireGuard".to_string());
-        } else if conn.vpn_type == "vpn" {
-            extra_parts.push("OpenVPN".to_string());
+        let type_label = match conn.vpn_type.as_str() {
+            "wireguard" => "WireGuard",
+            "openvpn" => "OpenVPN",
+            "openconnect" => "OpenConnect",
+            "l2tp" => "L2TP",
+            "pptp" => "PPTP",
+            "vpnc" => "Cisco VPN",
+            "strongswan" | "libreswan" => "IPsec",
+            "fortisslvpn" => "Fortinet",
+            "sstp" => "SSTP",
+            "vpn" => "",
+            other => other,
+        };
+        if !type_label.is_empty() {
+            extra_parts.push(type_label.to_string());
         }
 
         let icon_color = if conn.active {
