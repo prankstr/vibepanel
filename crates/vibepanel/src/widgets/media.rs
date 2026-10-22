@@ -1046,8 +1046,12 @@ fn update_widgets_from_snapshot_impl(ctx: &WidgetUpdateContext<'_>, snapshot: &M
             snapshot.available, snapshot.playback_status, has_metadata,
         );
 
-        // Don't change visibility if popped out - the pop-out window handles display
+        // Don't change visibility if popped out - the pop-out window handles display.
+        // Still pause the hidden bar's waveform so it doesn't keep cava running.
         if is_popout_open() {
+            if let Some(v) = ctx.bar_visualizer {
+                v.pause();
+            }
             return;
         }
 
@@ -1070,13 +1074,13 @@ fn update_widgets_from_snapshot_impl(ctx: &WidgetUpdateContext<'_>, snapshot: &M
             glib::timeout_add_local_once(Duration::from_millis(HIDE_GRACE_PERIOD_MS), move || {
                 *pending_hide.borrow_mut() = None;
 
+                if let Some(v) = bar_viz.as_ref() {
+                    v.pause();
+                }
+
                 // Re-check: don't hide if a pop-out opened in the meantime
                 if is_popout_open() {
                     return;
-                }
-
-                if let Some(v) = bar_viz.as_ref() {
-                    v.stop();
                 }
 
                 perform_hide(

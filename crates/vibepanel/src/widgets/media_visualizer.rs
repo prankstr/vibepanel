@@ -199,12 +199,6 @@ impl AnimatedBars {
             glib::ControlFlow::Continue
         });
     }
-
-    /// Full stop: pause then kill the cava subprocess.
-    fn stop(&self, da: &DrawingArea) {
-        self.pause(da);
-        CavaService::global().stop();
-    }
 }
 
 impl Drop for AnimatedBarsInner {
@@ -333,10 +327,6 @@ impl MediaVisualizer {
     pub fn pause(&self) {
         self.anim.pause(&self.drawing_area);
     }
-
-    pub fn stop(&self) {
-        self.anim.stop(&self.drawing_area);
-    }
 }
 
 // ============================================================================
@@ -450,10 +440,6 @@ impl BarVisualizer {
 
     pub fn pause(&self) {
         self.anim.pause(&self.drawing_area);
-    }
-
-    pub fn stop(&self) {
-        self.anim.stop(&self.drawing_area);
     }
 
     /// Let a media clock redraw instead of cava, so redraws share its frames.
