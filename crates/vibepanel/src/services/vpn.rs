@@ -41,7 +41,7 @@ const IFACE_ACTIVE: &str = "org.freedesktop.NetworkManager.Connection.Active";
 /// D-Bus properties interface.
 const IFACE_PROPS: &str = "org.freedesktop.DBus.Properties";
 
-const VPN_TYPES: &[&str] = &["wireguard", "vpn"]; // "vpn" is OpenVPN in NM
+const VPN_TYPES: &[&str] = &["wireguard", "vpn"];
 
 /// Delay before refreshing connection state after activation signal.
 const STATE_REFRESH_DELAY_MS: u64 = 50;
@@ -84,7 +84,7 @@ pub struct VpnConnection {
     pub state: VpnState,
     /// Whether autoconnect is enabled.
     pub autoconnect: bool,
-    /// VPN type ("wireguard" or "vpn"/OpenVPN).
+    /// "wireguard", or the VPN plugin name such as "openvpn" or "openconnect".
     pub vpn_type: String,
 }
 
@@ -931,6 +931,13 @@ impl VpnService {
             let autoconnect =
                 Self::get_bool_from_dict(&conn_section, "autoconnect").unwrap_or(false);
 
+            // Plugin VPNs share the "vpn" type; the plugin is the last part of
+            // vpn.service-type, e.g. "org.freedesktop.NetworkManager.openconnect".
+            let vpn_type = Self::get_dict_section(&settings_dict, "vpn")
+                .and_then(|vpn| Self::get_string_from_dict(&vpn, "service-type"))
+                .and_then(|service| service.rsplit('.').next().map(str::to_string))
+                .unwrap_or(conn_type);
+
             // Check if active and get state.
             let (active, state) = active_map
                 .get(&uuid)
@@ -943,7 +950,7 @@ impl VpnService {
                 active,
                 state,
                 autoconnect,
-                vpn_type: conn_type,
+                vpn_type,
             });
         }
 
@@ -1126,7 +1133,7 @@ pub(crate) mod tests {
                 active: false,
                 state: VpnState::Deactivated,
                 autoconnect: false,
-                vpn_type: "vpn".into(),
+                vpn_type: "openvpn".into(),
             }],
             active_vpn_paths: Vec::new(),
         }
