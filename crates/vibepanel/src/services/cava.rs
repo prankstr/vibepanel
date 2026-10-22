@@ -18,8 +18,8 @@ use crate::services::callbacks::{CallbackId, Callbacks};
 /// Number of frequency bars to request from cava.
 pub const NUM_BARS: usize = 24;
 
-/// Cava output framerate.
-const FRAMERATE: u32 = 60;
+/// Cava output framerate. The visualizers' redraw divisors assume this rate.
+const FRAMERATE: u32 = 30;
 
 /// Keep cava running this long without listeners, so a pause between tracks doesn't restart it.
 const IDLE_STOP_DELAY: std::time::Duration = std::time::Duration::from_secs(2);

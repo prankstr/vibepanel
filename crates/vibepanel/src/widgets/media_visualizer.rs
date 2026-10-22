@@ -43,7 +43,7 @@ enum State {
 /// Shared animation state for cava-driven visualizers.
 ///
 /// While playing, smoothing and redraws happen directly in the cava callback
-/// (already fires at 60fps), except while a media clock redraws instead. A tick
+/// (fires at cava's framerate), except while a media clock redraws instead. A tick
 /// callback is only used for the brief pause-decay animation.
 struct AnimatedBarsInner {
     bars: Rc<RefCell<[f64; NUM_BARS]>>,
@@ -371,7 +371,7 @@ impl BarVisualizer {
         drawing_area.add_css_class(media::BAR_VISUALIZER);
         drawing_area.add_css_class(color::ACCENT);
 
-        let anim = AnimatedBars::new(3);
+        let anim = AnimatedBars::new(2);
 
         let bars_for_draw = anim.inner.bars.clone();
         drawing_area.set_draw_func(move |da, cr, width, height| {
@@ -405,7 +405,7 @@ impl BarVisualizer {
         drawing_area.add_css_class(media::BAR_VISUALIZER);
         drawing_area.add_css_class(color::ACCENT);
 
-        let anim = AnimatedBars::new(2);
+        let anim = AnimatedBars::new(1);
 
         let bars_for_draw = anim.inner.bars.clone();
         let radius_percent =
