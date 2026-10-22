@@ -26,7 +26,7 @@
 //! ```
 //!
 //! Supported keys: `signal` (0-100), `operator` (string),
-//! `tech` (2g|edge|3g|hspa|hspa+|lte|lte+|5g).
+//! `tech` (2g|edge|3g|hspa|hspa+|lte|lte-m|5g).
 //!
 //! # Quick usage
 //!
@@ -168,7 +168,7 @@ fn parse_tech(s: &str) -> u32 {
         "hspa" => hspa,
         "hspa+" => MM_ACCESS_TECH_HSPA_PLUS,
         "lte" => MM_ACCESS_TECH_LTE,
-        "lte+" => MM_ACCESS_TECH_LTE_CAT_M,
+        "lte-m" => MM_ACCESS_TECH_LTE_CAT_M,
         "5g" => MM_ACCESS_TECH_NR5G,
         _ => MM_ACCESS_TECH_LTE,
     }

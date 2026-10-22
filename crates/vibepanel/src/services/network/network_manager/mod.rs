@@ -85,6 +85,7 @@ fn system_dbus_proxy_sync(
 #[cfg(debug_assertions)]
 const DEBUG_MOBILE_MOCK_FILE: &str = "/tmp/vibepanel-debug-mobile";
 
+// Bit values from `MMModemAccessTechnology` in ModemManager-enums.h.
 const MM_ACCESS_TECH_GSM: u32 = 1 << 1;
 const MM_ACCESS_TECH_GSM_COMPACT: u32 = 1 << 2;
 const MM_ACCESS_TECH_GPRS: u32 = 1 << 3;
@@ -92,11 +93,12 @@ const MM_ACCESS_TECH_EDGE: u32 = 1 << 4;
 const MM_ACCESS_TECH_UMTS: u32 = 1 << 5;
 const MM_ACCESS_TECH_HSDPA: u32 = 1 << 6;
 const MM_ACCESS_TECH_HSUPA: u32 = 1 << 7;
-const MM_ACCESS_TECH_HSPA_PLUS: u32 = 1 << 8;
+const MM_ACCESS_TECH_HSPA: u32 = 1 << 8;
+const MM_ACCESS_TECH_HSPA_PLUS: u32 = 1 << 9;
 const MM_ACCESS_TECH_LTE: u32 = 1 << 14;
 const MM_ACCESS_TECH_NR5G: u32 = 1 << 15;
-const MM_ACCESS_TECH_LTE_CAT_M: u32 = 1 << 19;
-const MM_ACCESS_TECH_LTE_NB_IOT: u32 = 1 << 20;
+const MM_ACCESS_TECH_LTE_CAT_M: u32 = 1 << 16;
+const MM_ACCESS_TECH_LTE_NB_IOT: u32 = 1 << 17;
 
 // ── Data types ───────────────────────────────────────────────────────
 
