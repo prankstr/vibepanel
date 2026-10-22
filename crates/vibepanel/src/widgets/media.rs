@@ -784,7 +784,7 @@ impl MediaWidget {
                 .map(|v| v.clamp(0.0, 1.0))
                 .unwrap_or(1.0);
 
-            let handle = create_media_window(None, popout_opacity, on_close);
+            let handle = create_media_window(popout_opacity, on_close);
             handle.show();
 
             // Store in global state

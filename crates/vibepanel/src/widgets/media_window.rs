@@ -53,11 +53,7 @@ impl MediaWindowHandle {
 }
 
 /// Create a new media pop-out window (not shown by default).
-pub fn create_media_window<G>(
-    app: Option<&gtk4::Application>,
-    opacity: f64,
-    on_close: G,
-) -> MediaWindowHandle
+pub fn create_media_window<G>(opacity: f64, on_close: G) -> MediaWindowHandle
 where
     G: Fn() + 'static,
 {
@@ -65,7 +61,6 @@ where
 
     let blur_radius = || ConfigManager::global().surface_border_radius();
     let window: Window = BlurWindow::new(blur_radius).upcast();
-    window.set_application(app);
     window.set_decorated(false);
     window.set_resizable(false);
     window.set_deletable(true);
