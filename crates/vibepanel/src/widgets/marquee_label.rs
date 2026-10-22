@@ -119,6 +119,11 @@ mod imp {
     }
 
     impl WidgetImpl for MarqueeContainer {
+        fn map(&self) {
+            self.parent_map();
+            resume_animation(&self.state, &self.obj());
+        }
+
         fn measure(&self, orientation: gtk4::Orientation, for_size: i32) -> (i32, i32, i32, i32) {
             let label = self.label.borrow();
             let Some(label) = label.as_ref() else {
@@ -383,8 +388,8 @@ impl MarqueeLabel {
     /// which resets to the beginning). Resuming continues from the same offset.
     pub fn set_paused(&self, paused: bool) {
         let state = self.container.state();
-        let mut s = state.borrow_mut();
-        s.paused = paused;
+        state.borrow_mut().paused = paused;
+        resume_animation(&state, &self.container);
     }
 }
 
@@ -429,10 +434,8 @@ fn check_and_start_scroll(
             text_width, container_width, s.scroll_distance
         );
 
-        if s.timer_id.is_none() {
-            drop(s);
-            start_animation(state, container);
-        }
+        drop(s);
+        resume_animation(state, container);
     } else {
         s.scrolling = false;
         s.offset = 0.0;
@@ -454,14 +457,10 @@ fn start_animation(state: &Rc<RefCell<MarqueeState>>, container: &MarqueeContain
         move || {
             let mut s = state_for_closure.borrow_mut();
 
-            if !s.scrolling {
+            // Paused or off screen: stop, keeping the offset. set_paused and map restart it.
+            if !s.scrolling || s.paused || !container.is_mapped() {
                 s.timer_id = None;
                 return glib::ControlFlow::Break;
-            }
-
-            // When paused, keep the timer alive but freeze the scroll position
-            if s.paused {
-                return glib::ControlFlow::Continue;
             }
 
             s.offset += s.scroll_speed;
@@ -472,15 +471,22 @@ fn start_animation(state: &Rc<RefCell<MarqueeState>>, container: &MarqueeContain
                 debug!("Marquee: loop reset");
             }
 
-            if container.is_mapped() {
-                container.queue_allocate();
-            }
+            container.queue_allocate();
 
             glib::ControlFlow::Continue
         },
     );
 
     state.borrow_mut().timer_id = Some(id);
+}
+
+/// Restart a stopped animation if the text still needs to scroll.
+fn resume_animation(state: &Rc<RefCell<MarqueeState>>, container: &MarqueeContainer) {
+    let s = state.borrow();
+    if s.scrolling && !s.paused && s.timer_id.is_none() && container.is_mapped() {
+        drop(s);
+        start_animation(state, container);
+    }
 }
 
 #[cfg(test)]
