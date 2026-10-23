@@ -11,11 +11,11 @@ use tracing::warn;
 use super::{
     IFACE_ACTIVE_CONN, IFACE_SETTINGS, IFACE_SETTINGS_CONN, MM_ACCESS_TECH_EDGE,
     MM_ACCESS_TECH_GPRS, MM_ACCESS_TECH_GSM, MM_ACCESS_TECH_GSM_COMPACT, MM_ACCESS_TECH_HSDPA,
-    MM_ACCESS_TECH_HSPA_PLUS, MM_ACCESS_TECH_HSUPA, MM_ACCESS_TECH_LTE, MM_ACCESS_TECH_LTE_CAT_M,
-    MM_ACCESS_TECH_LTE_NB_IOT, MM_ACCESS_TECH_NR5G, MM_ACCESS_TECH_UMTS, MM_MODEM_3GPP_IFACE,
-    MM_MODEM_IFACE, MM_PATH, MM_SERVICE, MOBILE_REFRESH_DEBOUNCE_MS, NM_IFACE, NM_PATH, NM_SERVICE,
-    NM_SETTINGS_PATH, NmService, NmUpdate, OBJECT_MANAGER_IFACE, send_nm_update,
-    system_dbus_proxy_sync,
+    MM_ACCESS_TECH_HSPA, MM_ACCESS_TECH_HSPA_PLUS, MM_ACCESS_TECH_HSUPA, MM_ACCESS_TECH_LTE,
+    MM_ACCESS_TECH_LTE_CAT_M, MM_ACCESS_TECH_LTE_NB_IOT, MM_ACCESS_TECH_NR5G, MM_ACCESS_TECH_UMTS,
+    MM_MODEM_3GPP_IFACE, MM_MODEM_IFACE, MM_PATH, MM_SERVICE, MOBILE_REFRESH_DEBOUNCE_MS, NM_IFACE,
+    NM_PATH, NM_SERVICE, NM_SETTINGS_PATH, NmService, NmUpdate, OBJECT_MANAGER_IFACE,
+    send_nm_update, system_dbus_proxy_sync,
 };
 use crate::services::network::objpath_to_string;
 
@@ -671,13 +671,12 @@ pub(super) fn resolve_mobile_connecting(
 
 /// Convert MM access technology bit flags to a compact label.
 pub(super) fn access_technology_label(bits: u32) -> &'static str {
-    let hspa = MM_ACCESS_TECH_HSDPA | MM_ACCESS_TECH_HSUPA;
+    let hspa = MM_ACCESS_TECH_HSDPA | MM_ACCESS_TECH_HSUPA | MM_ACCESS_TECH_HSPA;
+    let lte = MM_ACCESS_TECH_LTE | MM_ACCESS_TECH_LTE_CAT_M | MM_ACCESS_TECH_LTE_NB_IOT;
 
     if bits & MM_ACCESS_TECH_NR5G != 0 {
         "5G"
-    } else if bits & (MM_ACCESS_TECH_LTE_CAT_M | MM_ACCESS_TECH_LTE_NB_IOT) != 0 {
-        "LTE+"
-    } else if bits & MM_ACCESS_TECH_LTE != 0 {
+    } else if bits & lte != 0 {
         "LTE"
     } else if bits & MM_ACCESS_TECH_HSPA_PLUS != 0 {
         "HSPA+"
@@ -704,9 +703,9 @@ mod tests {
     }
 
     #[test]
-    fn access_technology_lte_plus() {
-        assert_eq!(access_technology_label(MM_ACCESS_TECH_LTE_CAT_M), "LTE+");
-        assert_eq!(access_technology_label(MM_ACCESS_TECH_LTE_NB_IOT), "LTE+");
+    fn access_technology_lte_iot_variants() {
+        assert_eq!(access_technology_label(MM_ACCESS_TECH_LTE_CAT_M), "LTE");
+        assert_eq!(access_technology_label(MM_ACCESS_TECH_LTE_NB_IOT), "LTE");
     }
 
     #[test]
@@ -727,6 +726,7 @@ mod tests {
         );
         // Single HSDPA bit also counts as HSPA.
         assert_eq!(access_technology_label(MM_ACCESS_TECH_HSDPA), "HSPA");
+        assert_eq!(access_technology_label(MM_ACCESS_TECH_HSPA), "HSPA");
     }
 
     #[test]
@@ -764,6 +764,13 @@ mod tests {
         assert_eq!(
             access_technology_label(MM_ACCESS_TECH_LTE | MM_ACCESS_TECH_UMTS),
             "LTE"
+        );
+        // HSPA+ beats HSPA.
+        assert_eq!(
+            access_technology_label(
+                MM_ACCESS_TECH_HSPA_PLUS | MM_ACCESS_TECH_HSPA | MM_ACCESS_TECH_HSDPA
+            ),
+            "HSPA+"
         );
     }
 
