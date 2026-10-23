@@ -477,6 +477,8 @@ impl SurfaceAnimation {
 /// the first keynav key (Tab, arrows, Home, End).
 #[derive(Default)]
 pub(crate) struct BarPopoverChrome {
+    /// Only exists while the popover is open: a hidden fullscreen surface
+    /// keeps its GPU buffers, which across all popovers added up to ~1 GiB.
     catcher: RefCell<Option<ApplicationWindow>>,
     keynav: Rc<RefCell<Option<EventControllerKey>>>,
 }
@@ -487,8 +489,10 @@ impl BarPopoverChrome {
         self.catcher.borrow().clone()
     }
 
-    /// Show the click-catcher (created lazily) and grab the keyboard.
-    /// `on_dismiss` is only used when the catcher is first created.
+    /// Show the click-catcher (created if needed) and grab the keyboard.
+    ///
+    /// Must run before `window` maps on a fresh open: surfaces on the same
+    /// layer stack in map order, and the catcher has to end up underneath.
     pub(crate) fn open(
         &self,
         window: &ApplicationWindow,
@@ -523,8 +527,10 @@ impl BarPopoverChrome {
         if let Some(controller) = self.keynav.borrow_mut().take() {
             window.remove_controller(&controller);
         }
-        if let Some(ref catcher) = *self.catcher.borrow() {
+        if let Some(catcher) = self.catcher.borrow_mut().take() {
+            // close() can run from the catcher's own click handler.
             catcher.set_visible(false);
+            glib::idle_add_local_once(move || catcher.close());
         }
         clear_surface_height_freeze(window);
         window.set_keyboard_mode(KeyboardMode::None);
@@ -869,11 +875,14 @@ where
 
     catcher.set_margin(popover_bar_edge(), bar_zone);
 
-    // Content - add CSS class to the child widget for background styling.
-    // Without a buffer some compositors (mango) let clicks pass through.
+    // Without a buffer some compositors (mango) let clicks pass through. A 1×1
+    // child is enough for GTK to commit a full-size buffer; filling the window
+    // would make cairo paint and upload every pixel on each open. Clicks reach
+    // the gesture on the window either way.
     let overlay = transparent_buffer();
-    overlay.set_hexpand(true);
-    overlay.set_vexpand(true);
+    overlay.set_size_request(1, 1);
+    overlay.set_halign(gtk4::Align::Start);
+    overlay.set_valign(gtk4::Align::Start);
     overlay.add_css_class(class::CLICK_CATCHER); // Apply background to child
     catcher.set_child(Some(&overlay));
 
@@ -1350,7 +1359,7 @@ impl LayerShellPopover {
 
     /// Show the popover at the given anchor position.
     ///
-    /// Reuses all persistent shells (window, animation, click-catcher) and
+    /// Reuses the persistent shells (window, animation) and
     /// builds fresh content.
     pub fn show_at(self: &Rc<Self>, anchor: PopoverAnchor, monitor: Option<Monitor>) {
         self.anchor.set(anchor);

@@ -327,6 +327,68 @@ fn run_layer_shell_popover_on_show_reversal_contract() {
     flush_gtk();
 }
 
+fn run_layer_shell_click_catcher_lifetime_contract() {
+    let Some(context) = layer_shell_context_or_skip() else {
+        return;
+    };
+
+    apply_layer_shell_config(&layer_shell_test_config(), true);
+    let popover = LayerShellPopover::new(&context.app, "contract", || {
+        gtk4::Label::new(Some("contract popover")).upcast::<gtk4::Widget>()
+    });
+    let anchor = PopoverAnchor { x: 160, y: 160 };
+
+    popover.show_at(anchor, Some(context.monitor.clone()));
+    flush_gtk();
+    let catcher = popover
+        .test_click_catcher()
+        .expect("an open popover has a click-catcher");
+
+    // The catcher's content is tiny; clicks elsewhere must still reach the
+    // window's dismiss gesture.
+    let (width, height) = (catcher.width(), catcher.height());
+    assert!(width > 1 && height > 1, "catcher should span the output");
+    let picked = catcher
+        .pick(
+            f64::from(width) / 2.0,
+            f64::from(height) / 2.0,
+            gtk4::PickFlags::DEFAULT,
+        )
+        .expect("a click inside the catcher hits a widget");
+    assert_eq!(picked, catcher.clone().upcast::<gtk4::Widget>());
+
+    // A hidden catcher would keep its fullscreen GPU buffers.
+    popover.hide();
+    flush_gtk();
+    assert!(popover.test_click_catcher().is_none());
+    assert!(
+        !context
+            .app
+            .windows()
+            .iter()
+            .any(|w| w == catcher.upcast_ref::<gtk4::Window>())
+    );
+
+    popover.show_at(anchor, Some(context.monitor.clone()));
+    flush_gtk();
+    let reopened = popover
+        .test_click_catcher()
+        .expect("reopening creates a new click-catcher");
+    assert_ne!(reopened, catcher);
+
+    if let Ok(pointer) = std::env::var("VIBEPANEL_TEST_POINTER") {
+        // Far from both the popover and the catcher's 1×1 content.
+        std::fs::write(&pointer, "1000 600 click").unwrap();
+        wait_for_bar_contract(|| popover.test_click_catcher().is_none());
+    }
+
+    popover.hide();
+    if let Some(window) = popover.test_window() {
+        window.close();
+    }
+    flush_gtk();
+}
+
 fn run_layer_shell_popover_offset_contract(position: &str, background_opacity: f64) {
     let Some(context) = layer_shell_context_or_skip() else {
         return;
@@ -1275,6 +1337,11 @@ layer_shell_contract_tests!(
         test_layer_shell_popover_on_show_reversal,
         "popover.on-show-reversal",
         run_layer_shell_popover_on_show_reversal_contract()
+    ),
+    (
+        test_layer_shell_click_catcher_lifetime,
+        "popover.click-catcher-lifetime",
+        run_layer_shell_click_catcher_lifetime_contract()
     ),
     (
         test_layer_shell_popover_offset_top,
