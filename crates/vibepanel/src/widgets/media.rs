@@ -10,7 +10,7 @@ use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4::{Image, Overlay};
 use std::cell::RefCell;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::time::Duration;
 use tr::tr;
 use tracing::{debug, trace, warn};
@@ -37,9 +37,17 @@ use crate::widgets::{WidgetConfig, warn_unknown_options};
 // This allows the popout to survive widget recreation during config reloads.
 thread_local! {
     static POPOUT_HANDLE: RefCell<Option<MediaWindowHandle>> = const { RefCell::new(None) };
-    // Reference to the current widget container, updated when widget is recreated.
-    // Used by the popout close callback to restore visibility of the correct widget.
-    static POPOUT_WIDGET_CONTAINER: RefCell<Option<gtk4::Box>> = const { RefCell::new(None) };
+    // Every live media widget, one per bar. The pop-out stands in for all of
+    // them, so opening it hides each one and closing it restores each one.
+    static MEDIA_WIDGETS: RefCell<Vec<Weak<CallbackWidgetRefs>>> = const { RefCell::new(Vec::new()) };
+}
+
+fn for_each_media_widget(f: impl Fn(&CallbackWidgetRefs)) {
+    let widgets: Vec<_> =
+        MEDIA_WIDGETS.with(|w| w.borrow().iter().filter_map(Weak::upgrade).collect());
+    for refs in &widgets {
+        f(refs);
+    }
 }
 
 /// Default template: album art, then artist - title, then controls.
@@ -433,7 +441,6 @@ struct WidgetUpdateContext<'a> {
 }
 
 /// Owned version of widget references for use in callbacks.
-#[derive(Clone)]
 struct CallbackWidgetRefs {
     container: gtk4::Box,
     status_icon: Option<IconHandle>,
@@ -692,16 +699,8 @@ impl MediaWidget {
         // This handles config reloads where the popout should survive.
         let popout_already_open = is_popout_open();
 
-        // Register this widget's container globally so the popout close callback
-        // can restore visibility even after widget recreation.
-        POPOUT_WIDGET_CONTAINER.with(|c| {
-            *c.borrow_mut() = Some(base.widget().clone());
-        });
-
-        // If popout is already open, hide the bar widget and update opacity from current config.
+        // If popout is already open, update its opacity from the current config.
         if popout_already_open {
-            base.widget().set_visible(false);
-
             // Update opacity on existing window
             let popout_opacity = ConfigManager::global()
                 .get_widget_option("media", "popout_opacity")
@@ -750,27 +749,18 @@ impl MediaWidget {
                 return;
             }
 
-            // Hide the bar widget
-            POPOUT_WIDGET_CONTAINER.with(|c| {
-                if let Some(container) = c.borrow().as_ref() {
-                    container.set_visible(false);
-                }
-            });
+            for_each_media_widget(|refs| refs.container.set_visible(false));
 
-            // Create the on_close callback for when the window closes.
-            // This uses the global POPOUT_WIDGET_CONTAINER to restore the correct
-            // widget even if it was recreated during a config reload.
+            // Restores whichever widgets exist at close time, which may have
+            // been recreated by a config reload while the pop-out was open.
             let on_close = move || {
-                // Clear the global handle
                 POPOUT_HANDLE.with(|h| {
                     *h.borrow_mut() = None;
                 });
 
-                // Show the current widget container (may be different from original)
-                POPOUT_WIDGET_CONTAINER.with(|c| {
-                    if let Some(container) = c.borrow().as_ref() {
-                        container.set_visible(true);
-                    }
+                let snapshot = MediaService::global().snapshot();
+                for_each_media_widget(|refs| {
+                    update_widgets_from_snapshot_impl(&refs.as_context(), &snapshot);
                 });
 
                 let mut persisted = state::load();
@@ -892,7 +882,7 @@ impl MediaWidget {
         // Vertical bars have no titles, so the clock never runs there and the ring redraws itself.
         let clock = MediaClock::new(text_labels.clone(), bar_visualizer.clone());
 
-        let widget_refs = CallbackWidgetRefs {
+        let widget_refs = Rc::new(CallbackWidgetRefs {
             container: base.widget().clone(),
             status_icon: status_icon.clone(),
             player_icon: player_icon.clone(),
@@ -905,7 +895,12 @@ impl MediaWidget {
             art_state: art_state.clone(),
             pending_hide,
             bar_visualizer: bar_visualizer.clone(),
-        };
+        });
+        MEDIA_WIDGETS.with(|w| {
+            let mut w = w.borrow_mut();
+            w.retain(|weak| weak.strong_count() > 0);
+            w.push(Rc::downgrade(&widget_refs));
+        });
 
         // Start hidden — the media callback will show the widget once a player is active.
         // We call perform directly instead of update_widgets_from_snapshot_impl
@@ -920,6 +915,10 @@ impl MediaWidget {
             widget_refs.art_fallback_icon.as_ref(),
             widget_refs.controls.as_ref(),
         );
+        // perform_hide shows the container when empty_text is set.
+        if popout_already_open {
+            widget_refs.container.set_visible(false);
+        }
 
         let pending_hide_for_drop = widget_refs.pending_hide.clone();
         let art_state_for_drop = widget_refs.art_state.clone();
