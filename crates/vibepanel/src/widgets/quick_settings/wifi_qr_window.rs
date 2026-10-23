@@ -1,4 +1,4 @@
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use gtk4::gdk::{self, Monitor};
@@ -26,7 +26,9 @@ const QR_QUIET_ZONE_MODULES: usize = 4;
 
 pub struct WifiQrWindow {
     window: ApplicationWindow,
-    backdrop: ApplicationWindow,
+    /// Created on show and destroyed on hide: a hidden fullscreen surface
+    /// would keep its GPU buffers for as long as Quick Settings lives.
+    backdrop: RefCell<Option<ApplicationWindow>>,
     anim: SurfaceAnimation,
     card: GtkBox,
     _theme_callback_guard: ThemeCallbackGuard,
@@ -114,24 +116,16 @@ impl WifiQrWindow {
             || ConfigManager::global().surface_border_radius() as i32,
         );
 
-        let modal = Rc::new_cyclic(|modal_weak: &std::rc::Weak<Self>| {
-            let modal_weak = modal_weak.clone();
-            let backdrop = create_click_catcher(app, 0, move || {
-                if let Some(modal) = modal_weak.upgrade() {
-                    modal.hide();
-                }
-            });
-            Self {
-                window,
-                backdrop,
-                anim,
-                card: card.clone(),
-                _theme_callback_guard: theme_callback_guard,
-                password_controls,
-                body,
-                ssid_label,
-                fetch_generation: Cell::new(0),
-            }
+        let modal = Rc::new(Self {
+            window,
+            backdrop: RefCell::new(None),
+            anim,
+            card: card.clone(),
+            _theme_callback_guard: theme_callback_guard,
+            password_controls,
+            body,
+            ssid_label,
+            fetch_generation: Cell::new(0),
         });
 
         {
@@ -168,9 +162,25 @@ impl WifiQrWindow {
             self.window.set_visible(false);
             self.window.set_monitor(monitor);
         }
-        self.backdrop.set_monitor(monitor);
+        let backdrop = self
+            .backdrop
+            .borrow_mut()
+            .get_or_insert_with(|| {
+                let app = self
+                    .window
+                    .application()
+                    .expect("Wi-Fi QR window must have an application");
+                let modal_weak = Rc::downgrade(self);
+                create_click_catcher(&app, 0, move || {
+                    if let Some(modal) = modal_weak.upgrade() {
+                        modal.hide();
+                    }
+                })
+            })
+            .clone();
+        backdrop.set_monitor(monitor);
         self.window.set_keyboard_mode(popover_keyboard_mode());
-        self.backdrop.present();
+        backdrop.present();
         if reversing {
             self.start_animation(AnimDirection::Opening, self.anim.generation());
         } else {
@@ -203,7 +213,11 @@ impl WifiQrWindow {
         self.fetch_generation
             .set(self.fetch_generation.get().wrapping_add(1));
         self.window.set_keyboard_mode(KeyboardMode::None);
-        self.backdrop.set_visible(false);
+        if let Some(backdrop) = self.backdrop.borrow_mut().take() {
+            // hide() can run from the backdrop's own click handler.
+            backdrop.set_visible(false);
+            glib::idle_add_local_once(move || backdrop.close());
+        }
         let generation = self.anim.next_generation();
         self.start_animation(AnimDirection::Closing, generation);
     }
@@ -307,7 +321,9 @@ impl WifiQrWindow {
 impl Drop for WifiQrWindow {
     fn drop(&mut self) {
         self.window.close();
-        self.backdrop.close();
+        if let Some(backdrop) = self.backdrop.borrow_mut().take() {
+            backdrop.close();
+        }
     }
 }
 
