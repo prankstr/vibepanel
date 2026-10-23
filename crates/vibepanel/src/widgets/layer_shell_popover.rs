@@ -875,11 +875,14 @@ where
 
     catcher.set_margin(popover_bar_edge(), bar_zone);
 
-    // Content - add CSS class to the child widget for background styling.
-    // Without a buffer some compositors (mango) let clicks pass through.
+    // Without a buffer some compositors (mango) let clicks pass through. A 1×1
+    // child is enough for GTK to commit a full-size buffer; filling the window
+    // would make cairo paint and upload every pixel on each open. Clicks reach
+    // the gesture on the window either way.
     let overlay = transparent_buffer();
-    overlay.set_hexpand(true);
-    overlay.set_vexpand(true);
+    overlay.set_size_request(1, 1);
+    overlay.set_halign(gtk4::Align::Start);
+    overlay.set_valign(gtk4::Align::Start);
     overlay.add_css_class(class::CLICK_CATCHER); // Apply background to child
     catcher.set_child(Some(&overlay));
 

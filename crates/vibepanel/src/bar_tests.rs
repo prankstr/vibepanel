@@ -344,6 +344,19 @@ fn run_layer_shell_click_catcher_lifetime_contract() {
         .test_click_catcher()
         .expect("an open popover has a click-catcher");
 
+    // The catcher's content is tiny; clicks elsewhere must still reach the
+    // window's dismiss gesture.
+    let (width, height) = (catcher.width(), catcher.height());
+    assert!(width > 1 && height > 1, "catcher should span the output");
+    let picked = catcher
+        .pick(
+            f64::from(width) / 2.0,
+            f64::from(height) / 2.0,
+            gtk4::PickFlags::DEFAULT,
+        )
+        .expect("a click inside the catcher hits a widget");
+    assert_eq!(picked, catcher.clone().upcast::<gtk4::Widget>());
+
     // A hidden catcher would keep its fullscreen GPU buffers.
     popover.hide();
     flush_gtk();
@@ -362,6 +375,12 @@ fn run_layer_shell_click_catcher_lifetime_contract() {
         .test_click_catcher()
         .expect("reopening creates a new click-catcher");
     assert_ne!(reopened, catcher);
+
+    if let Ok(pointer) = std::env::var("VIBEPANEL_TEST_POINTER") {
+        // Far from both the popover and the catcher's 1×1 content.
+        std::fs::write(&pointer, "1000 600 click").unwrap();
+        wait_for_bar_contract(|| popover.test_click_catcher().is_none());
+    }
 
     popover.hide();
     if let Some(window) = popover.test_window() {
