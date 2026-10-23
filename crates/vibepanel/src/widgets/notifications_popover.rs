@@ -19,7 +19,6 @@ use crate::services::icons::IconsService;
 use crate::services::notification::{
     Notification, NotificationService, URGENCY_CRITICAL, URGENCY_LOW,
 };
-use crate::services::tooltip::TooltipManager;
 use crate::styles::{button, card, color, notification as notif, surface};
 
 use super::css::DISMISS_ANIMATION_MS;
@@ -112,7 +111,6 @@ fn build_header(on_close: Option<ClosePopoverCallback>) -> GtkBox {
     header.append(&title);
 
     let service = NotificationService::global();
-    let tooltip_manager = TooltipManager::global();
     let icons = IconsService::global();
 
     // Mute toggle button (always visible)
@@ -135,14 +133,11 @@ fn build_header(on_close: Option<ClosePopoverCallback>) -> GtkBox {
     mute_icon_widget.set_halign(Align::Center);
     mute_icon_widget.set_valign(Align::Center);
     mute_btn.set_child(Some(&mute_icon_widget));
-    tooltip_manager.set_styled_tooltip(
-        &mute_btn,
-        &if is_muted {
-            tr!("Unmute notifications")
-        } else {
-            tr!("Mute notifications")
-        },
-    );
+    mute_btn.set_tooltip_text(Some(&if is_muted {
+        tr!("Unmute notifications")
+    } else {
+        tr!("Mute notifications")
+    }));
 
     // Store icon handle in RefCell for the click handler
     let mute_icon_handle = Rc::new(RefCell::new(mute_icon_handle));
@@ -150,8 +145,6 @@ fn build_header(on_close: Option<ClosePopoverCallback>) -> GtkBox {
 
     mute_btn.connect_clicked(move |btn| {
         let service = NotificationService::global();
-        let tooltip_manager = TooltipManager::global();
-        tooltip_manager.cancel_and_hide();
         service.toggle_muted();
 
         // Update icon and tooltip
@@ -161,14 +154,11 @@ fn build_header(on_close: Option<ClosePopoverCallback>) -> GtkBox {
         } else {
             "notifications"
         });
-        tooltip_manager.set_styled_tooltip(
-            btn,
-            &if is_muted {
-                tr!("Unmute notifications")
-            } else {
-                tr!("Mute notifications")
-            },
-        );
+        btn.set_tooltip_text(Some(&if is_muted {
+            tr!("Unmute notifications")
+        } else {
+            tr!("Mute notifications")
+        }));
     });
 
     header.append(&mute_btn);
@@ -182,7 +172,7 @@ fn build_header(on_close: Option<ClosePopoverCallback>) -> GtkBox {
         clear_btn.set_focus_on_click(false);
         clear_btn.add_css_class(surface::POPOVER_ICON_BTN);
         clear_btn.set_valign(Align::Start);
-        tooltip_manager.set_styled_tooltip(&clear_btn, &tr!("Clear all notifications"));
+        clear_btn.set_tooltip_text(Some(&tr!("Clear all notifications")));
 
         let clear_icon =
             icons.create_icon("user-trash-symbolic", &[color::PRIMARY, notif::HEADER_ICON]);
@@ -192,7 +182,6 @@ fn build_header(on_close: Option<ClosePopoverCallback>) -> GtkBox {
         clear_btn.set_child(Some(&clear_icon_widget));
 
         clear_btn.connect_clicked(move |_| {
-            TooltipManager::global().cancel_and_hide();
             NotificationService::global().close_all();
             // Close popover after clearing all - user is done with notifications
             if let Some(ref close_cb) = on_close {
