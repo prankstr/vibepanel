@@ -210,21 +210,29 @@ impl UpdatesService {
         self.callbacks.notify(&snapshot_clone);
     }
 
-    /// Set the check interval in seconds.
-    ///
-    /// Takes effect on the next timer cycle.
-    pub fn set_check_interval(&self, seconds: u64) {
+    /// Set the check interval in seconds, restarting the periodic timer if
+    /// one is running.
+    pub fn set_check_interval(self: &Rc<Self>, seconds: u64) {
         let seconds = seconds.max(MIN_CHECK_INTERVAL);
-        self.check_interval.set(seconds);
+        if self.check_interval.replace(seconds) == seconds {
+            return;
+        }
         debug!("UpdatesService: check interval set to {}s", seconds);
+
+        let old_timer = self.timer_source.borrow_mut().take();
+        if let Some(source_id) = old_timer {
+            source_id.remove();
+            Self::schedule_periodic_checks(self);
+        }
     }
 
     /// Start periodic update checks.
     fn start_periodic_checks(this: &Rc<Self>) {
-        // Do an initial check
         this.check_updates_async();
+        Self::schedule_periodic_checks(this);
+    }
 
-        // Schedule periodic checks
+    fn schedule_periodic_checks(this: &Rc<Self>) {
         let this_weak = Rc::downgrade(this);
         let interval = this.check_interval.get();
 
