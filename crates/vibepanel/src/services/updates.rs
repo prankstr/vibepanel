@@ -358,6 +358,10 @@ impl UpdatesService {
 }
 
 fn is_online(net: &NetworkSnapshot) -> bool {
+    // IWD can't see wired links, so assume online.
+    if matches!(net, NetworkSnapshot::Iwd(_)) {
+        return true;
+    }
     net.connected() || net.wired_connected() || net.mobile_active()
 }
 
