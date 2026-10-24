@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.1](https://github.com/prankstr/vibepanel/compare/v0.17.0...v0.17.1) (2026-10-24)
+
+
+### Bug Fixes
+
+* **battery:** use low_threshold for the low battery style ([5ab986a](https://github.com/prankstr/vibepanel/commit/5ab986a7750ffa8635b698b643e97d36e56c23cb))
+* **icons:** improve GTK icon fallbacks and live theme switching ([#277](https://github.com/prankstr/vibepanel/issues/277)) ([5bfdbaf](https://github.com/prankstr/vibepanel/commit/5bfdbaf05850c1e53a355ce12fcbff811b37be6f))
+* **icons:** render Bluetooth trackpad device icons correctly ([#261](https://github.com/prankstr/vibepanel/issues/261)) ([47f4120](https://github.com/prankstr/vibepanel/commit/47f4120df13aab2c15b5d2bf5cf60ef402af2b48))
+* **media:** hide the media widget on every monitor while the pop-out is open ([#272](https://github.com/prankstr/vibepanel/issues/272)) ([7214b3e](https://github.com/prankstr/vibepanel/commit/7214b3ed13e4c3608c535146a0a4bf7eb416132e))
+* **network:** prompt for Wi-Fi passwords requested by NetworkManager ([#260](https://github.com/prankstr/vibepanel/issues/260)) ([39d8ac1](https://github.com/prankstr/vibepanel/commit/39d8ac154b1d6783279fe3dd276657de5e84046a))
+* **network:** show the correct mobile network type ([#270](https://github.com/prankstr/vibepanel/issues/270)) ([77cebb9](https://github.com/prankstr/vibepanel/commit/77cebb94752f0e54144be5c2357f14c216408357))
+* **notifications:** keep toasts with a timeout of 0 until dismissed ([5ab986a](https://github.com/prankstr/vibepanel/commit/5ab986a7750ffa8635b698b643e97d36e56c23cb))
+* **popover:** allow the click-catcher be tinted from CSS again ([5ab986a](https://github.com/prankstr/vibepanel/commit/5ab986a7750ffa8635b698b643e97d36e56c23cb))
+* **quick_settings:** allow restyling sliders from style.css ([#264](https://github.com/prankstr/vibepanel/issues/264)) ([2757998](https://github.com/prankstr/vibepanel/commit/27579987e10f6be95608b3753db04727a7f8fea1))
+* **quick_settings:** grey out disabled audio sliders ([2757998](https://github.com/prankstr/vibepanel/commit/27579987e10f6be95608b3753db04727a7f8fea1))
+* **taskbar:** hide VibePanel's own windows such as the media pop-out ([#267](https://github.com/prankstr/vibepanel/issues/267)) ([e8fda68](https://github.com/prankstr/vibepanel/commit/e8fda68100304540c49693dcacda8189da2d0cf3))
+* **updates:** count dnf upgrades correctly in any locale ([#265](https://github.com/prankstr/vibepanel/issues/265)) ([81becaa](https://github.com/prankstr/vibepanel/commit/81becaa199e76501dec7cde8a1b33638c08faf44))
+* **updates:** respect check_interval and check on startup ([#274](https://github.com/prankstr/vibepanel/issues/274)) ([cef0ccd](https://github.com/prankstr/vibepanel/commit/cef0ccd090b67249e54591622f8e105ca964b9a0))
+* **vpn:** show the actual VPN type instead of always OpenVPN ([#266](https://github.com/prankstr/vibepanel/issues/266)) ([25c9e4a](https://github.com/prankstr/vibepanel/commit/25c9e4a731187c8a482ea10c95c6ac96f023ab10))
+
+
+### Performance Improvements
+
+* cut redundant work in system polling, icons and VPN ([#275](https://github.com/prankstr/vibepanel/issues/275)) ([8250e2e](https://github.com/prankstr/vibepanel/commit/8250e2e210e3790187feb68845a9c9eb310bd279))
+* **layer-shell:** destroy click-catcher on close ([#271](https://github.com/prankstr/vibepanel/issues/271)) ([a9a7cff](https://github.com/prankstr/vibepanel/commit/a9a7cff24475bfa3d5c97a18ae36179dcc085603))
+* **media:** wake the CPU and compositor less while media plays ([#269](https://github.com/prankstr/vibepanel/issues/269)) ([4ee5ccb](https://github.com/prankstr/vibepanel/commit/4ee5ccbb224fe8644959e6900354950b4333bb38))
+
 ## [0.17.0](https://github.com/prankstr/vibepanel/compare/v0.16.1...v0.17.0) (2026-10-17)
 
 
