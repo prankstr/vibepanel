@@ -743,9 +743,10 @@ impl VpnService {
                             None,
                             gio::DBusSignalFlags::NONE,
                             move |signal| {
-                                // Check if ActiveConnections changed.
-                                if let Some(iface_name) = signal.parameters.child_value(0).str()
-                                    && iface_name == NM_IFACE
+                                let params = signal.parameters;
+                                if params.child_value(0).str() == Some(NM_IFACE)
+                                    && glib::VariantDict::new(Some(&params.child_value(1)))
+                                        .contains("ActiveConnections")
                                 {
                                     send_vpn_update(VpnUpdate::RequestRefresh);
                                 }
