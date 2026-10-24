@@ -400,12 +400,6 @@ pub struct NetworkCardState {
     pub wifi_failed_clear_source: Rc<RefCell<Option<glib::SourceId>>>,
     /// Separate from Wi-Fi so simultaneous failures are cleared independently.
     pub mobile_failed_clear_source: Rc<RefCell<Option<glib::SourceId>>>,
-    /// Keeps the connecting WiFi row's `IconHandle` alive so the spinner
-    /// timer isn't killed when the handle goes out of scope in `populate_wifi_list`.
-    /// Without this, the `Rc<IconHandleInner>` drops at end of the loop body,
-    /// which drops the `CairoSpinner`, which cancels the animation timer — leaving
-    /// the spinner DrawingArea visible but frozen.
-    pub wifi_connecting_icon: RefCell<Option<IconHandle>>,
 }
 
 impl NetworkCardState {
@@ -432,7 +426,6 @@ impl NetworkCardState {
             mobile: MobileRowState::new(),
             wifi_failed_clear_source: Rc::new(RefCell::new(None)),
             mobile_failed_clear_source: Rc::new(RefCell::new(None)),
-            wifi_connecting_icon: RefCell::new(None),
         }
     }
 }
@@ -1094,9 +1087,6 @@ pub fn populate_wifi_list(
 
     clear_list_box(list_box);
 
-    // Drop any previously-stored connecting icon handle (its row was just removed).
-    *state.wifi_connecting_icon.borrow_mut() = None;
-
     // Check if Wi-Fi is disabled (or no Wi-Fi device exists)
     let wifi_enabled = snapshot.wifi_enabled().unwrap_or(false);
     let has_wifi = snapshot.has_wifi_device();
@@ -1173,12 +1163,9 @@ pub fn populate_wifi_list(
 
         let leading_icon: gtk4::Widget = if is_connecting {
             // Connecting: show a spinner in place of the signal icon.
-            // Store the handle in state so the Rc<IconHandleInner> stays alive —
-            // if it drops, the CairoSpinner timer is cancelled and the spinner freezes.
             let icon_handle =
                 icons.create_icon(strength_icon_name, &[icon::TEXT, row::QS_ICON, icon_color]);
             icon_handle.set_spinning(true);
-            *state.wifi_connecting_icon.borrow_mut() = Some(icon_handle.clone());
             icon_handle.widget()
         } else if icons.uses_material() && needs_overlay {
             // Create base icon (full signal, dimmed)

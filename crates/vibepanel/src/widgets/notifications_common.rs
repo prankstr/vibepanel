@@ -747,15 +747,11 @@ fn create_notification_icon(app_icon: &str, app_name: &str, desktop_entry: Optio
     }
 
     if let Some(logical_icon) = notification_logical_icon_name(&icon_name) {
-        let handle = IconsService::global().create_icon(logical_icon, &[]);
-        let widget = handle.widget();
+        let widget = IconsService::global()
+            .create_icon(logical_icon, &[])
+            .widget();
         widget.set_size_request(NOTIFICATION_ICON_SIZE, NOTIFICATION_ICON_SIZE);
         widget.add_css_class(notif::BATTERY_ICON);
-        // Keep the handle alive so the icon can survive theme backend rebuilds
-        // while the notification row/toast is still visible.
-        unsafe {
-            widget.set_data("vibepanel-notification-icon-handle", handle);
-        }
         return widget;
     }
 
