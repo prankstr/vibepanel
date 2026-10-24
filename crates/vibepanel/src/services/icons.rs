@@ -1807,6 +1807,9 @@ impl IconHandle {
     /// icon_handle.set_icon("battery-missing");
     /// ```
     pub fn set_icon(&self, name: &str) {
+        if *self.inner.logical_name.borrow() == name {
+            return;
+        }
         self.inner.apply_icon(name);
     }
 
@@ -2086,13 +2089,17 @@ impl IconsService {
             spinning: Cell::new(false),
         });
 
-        // Register for live reload
-        self.handles.borrow_mut().push(Rc::downgrade(&inner));
+        // Register for live reload, dropping handles of destroyed icons.
+        {
+            let mut handles = self.handles.borrow_mut();
+            handles.retain(|weak| weak.strong_count() > 0);
+            handles.push(Rc::downgrade(&inner));
+        }
 
         let handle = IconHandle { inner };
 
         // Set the initial icon
-        handle.set_icon(name);
+        handle.inner.apply_icon(name);
 
         handle
     }
