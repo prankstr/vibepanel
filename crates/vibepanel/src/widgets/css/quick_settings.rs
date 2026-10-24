@@ -40,11 +40,6 @@ window.qs-wifi-qr-window {{
     font-weight: 700;
 }}
 
-/* Click catcher overlay */
-.vp-click-catcher {{
-    background: var(--color-click-catcher-overlay);
-}}
-
 /* Cards */
 .vp-card {{
     background: var(--color-card-overlay);

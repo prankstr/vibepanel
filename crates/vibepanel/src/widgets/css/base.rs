@@ -54,6 +54,11 @@ window.layer-shell-click-catcher {{
     background: transparent;
 }}
 
+/* Popover click catchers can be tinted; the auto-hide reveal strip can't. */
+window.layer-shell-click-catcher.vp-click-catcher {{
+    background: var(--color-click-catcher-overlay);
+}}
+
 /* 
  * Icon sizing strategy:
  * - .material-symbol uses font-size: inherit (set in icons.rs)
