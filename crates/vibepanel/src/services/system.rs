@@ -549,6 +549,9 @@ pub struct SystemService {
     /// Reusable sysinfo System instance.
     sys: RefCell<System>,
 
+    /// Core count, which doesn't change at runtime.
+    cpu_core_count: usize,
+
     /// Reusable sysinfo Networks instance.
     networks: RefCell<Networks>,
 
@@ -582,7 +585,7 @@ impl SystemService {
         // Create System with specific refresh kinds for efficiency
         let sys = System::new_with_specifics(
             RefreshKind::nothing()
-                .with_cpu(CpuRefreshKind::everything())
+                .with_cpu(CpuRefreshKind::nothing().with_cpu_usage())
                 .with_memory(MemoryRefreshKind::everything()),
         );
 
@@ -591,6 +594,7 @@ impl SystemService {
 
         // Create Components instance for temperature sensors
         let components = Components::new_with_refreshed_list();
+        let cpu_core_count = sys.physical_core_count().unwrap_or(sys.cpus().len());
         let service = Rc::new(Self {
             snapshot: RefCell::new(SystemSnapshot::unknown()),
             history: RefCell::new(VecDeque::with_capacity(SYSTEM_HISTORY_SAMPLES)),
@@ -598,6 +602,7 @@ impl SystemService {
             callbacks: Callbacks::new(),
             timer_source: RefCell::new(None),
             sys: RefCell::new(sys),
+            cpu_core_count,
             networks: RefCell::new(networks),
             components: RefCell::new(components),
             disk_counters: RefCell::new(HashMap::new()),
@@ -790,7 +795,7 @@ impl SystemService {
         let mut components = self.components.borrow_mut();
 
         // Refresh CPU and memory data
-        sys.refresh_cpu_all();
+        sys.refresh_cpu_usage();
         sys.refresh_memory();
 
         // Refresh network data
@@ -809,7 +814,6 @@ impl SystemService {
 
         // Per-core usage
         let cpu_per_core: Vec<f32> = cpus.iter().map(|cpu| cpu.cpu_usage()).collect();
-        let cpu_core_count = sys.physical_core_count().unwrap_or(cpus.len());
 
         // CPU temperature - find the most relevant sensor
         // Common labels: "Package id 0", "Tctl", "CPU", "Core 0", "k10temp Tctl", etc.
@@ -855,7 +859,7 @@ impl SystemService {
             available: true,
             cpu_usage,
             cpu_per_core,
-            cpu_core_count,
+            cpu_core_count: self.cpu_core_count,
             cpu_temp,
             memory_used,
             memory_total,
