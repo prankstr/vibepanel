@@ -297,7 +297,8 @@ impl NotificationToast {
     fn schedule_timeout(self: &Rc<Self>, notification: &Notification) {
         let timeout_ms = if notification.urgency == URGENCY_CRITICAL {
             TOAST_TIMEOUT_CRITICAL_MS
-        } else if notification.expire_timeout > 0 {
+        } else if notification.expire_timeout >= 0 {
+            // 0 means "never expire" in the notification spec.
             notification.expire_timeout as u32
         } else {
             TOAST_TIMEOUT_MS
