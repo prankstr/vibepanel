@@ -23,7 +23,7 @@ use gtk4::glib::{self, SourceId};
 use tracing::{debug, info, warn};
 
 use super::callbacks::{CallbackId, Callbacks};
-use super::network::NetworkService;
+use super::network::{NetworkService, NetworkSnapshot};
 
 /// Default check interval in seconds (1 hour).
 const DEFAULT_CHECK_INTERVAL: u64 = 3600;
@@ -116,6 +116,8 @@ pub struct UpdatesService {
     callbacks: Callbacks<UpdatesSnapshot>,
     check_interval: Cell<u64>,
     timer_source: RefCell<Option<SourceId>>,
+    /// Network subscription for a scheduled check that was skipped offline.
+    network_wait: RefCell<Option<CallbackId>>,
     /// Prevent concurrent checks.
     check_in_progress: Cell<bool>,
 }
@@ -127,6 +129,7 @@ impl UpdatesService {
             callbacks: Callbacks::new(),
             check_interval: Cell::new(DEFAULT_CHECK_INTERVAL),
             timer_source: RefCell::new(None),
+            network_wait: RefCell::new(None),
             check_in_progress: Cell::new(false),
         });
 
@@ -186,8 +189,7 @@ impl UpdatesService {
         if !self.snapshot.borrow().available {
             return;
         }
-        let net = NetworkService::global().snapshot();
-        if !net.connected() && !net.wired_connected() && !net.mobile_active() {
+        if !is_online(&NetworkService::global().snapshot()) {
             let mut snapshot = self.snapshot.borrow_mut();
             snapshot.error = Some("Offline — check skipped".to_string());
             let clone = snapshot.clone();
@@ -210,27 +212,35 @@ impl UpdatesService {
         self.callbacks.notify(&snapshot_clone);
     }
 
-    /// Set the check interval in seconds.
-    ///
-    /// Takes effect on the next timer cycle.
-    pub fn set_check_interval(&self, seconds: u64) {
+    /// Set the check interval in seconds, restarting the periodic timer if
+    /// one is running.
+    pub fn set_check_interval(self: &Rc<Self>, seconds: u64) {
         let seconds = seconds.max(MIN_CHECK_INTERVAL);
-        self.check_interval.set(seconds);
+        if self.check_interval.replace(seconds) == seconds {
+            return;
+        }
         debug!("UpdatesService: check interval set to {}s", seconds);
+
+        let old_timer = self.timer_source.borrow_mut().take();
+        if let Some(source_id) = old_timer {
+            source_id.remove();
+            Self::schedule_periodic_checks(self);
+        }
     }
 
     /// Start periodic update checks.
     fn start_periodic_checks(this: &Rc<Self>) {
-        // Do an initial check
-        this.check_updates_async();
+        Self::run_scheduled_check(this);
+        Self::schedule_periodic_checks(this);
+    }
 
-        // Schedule periodic checks
+    fn schedule_periodic_checks(this: &Rc<Self>) {
         let this_weak = Rc::downgrade(this);
         let interval = this.check_interval.get();
 
         let source_id = glib::timeout_add_seconds_local(interval as u32, move || {
             if let Some(this) = this_weak.upgrade() {
-                this.check_updates_async();
+                Self::run_scheduled_check(&this);
                 glib::ControlFlow::Continue
             } else {
                 glib::ControlFlow::Break
@@ -238,6 +248,33 @@ impl UpdatesService {
         });
 
         *this.timer_source.borrow_mut() = Some(source_id);
+    }
+
+    /// Run a startup or timer check, or defer it until the network is up.
+    ///
+    /// The network state is loaded asynchronously, so at startup it reads as
+    /// offline even when it isn't.
+    fn run_scheduled_check(this: &Rc<Self>) {
+        if is_online(&NetworkService::global().snapshot()) {
+            this.check_updates_async();
+            return;
+        }
+        if this.network_wait.borrow().is_some() {
+            return;
+        }
+        debug!("UpdatesService: offline, checking once the network is up");
+
+        let this_weak = Rc::downgrade(this);
+        let id = NetworkService::global().connect(move |net| {
+            if is_online(net)
+                && let Some(this) = this_weak.upgrade()
+                && let Some(id) = this.network_wait.take()
+            {
+                NetworkService::global().unsubscribe(id);
+                this.check_updates_async();
+            }
+        });
+        *this.network_wait.borrow_mut() = Some(id);
     }
 
     /// Perform an async update check in a background thread.
@@ -248,9 +285,7 @@ impl UpdatesService {
             return;
         }
 
-        // Skip if offline
-        let net = NetworkService::global().snapshot();
-        if !net.connected() && !net.wired_connected() && !net.mobile_active() {
+        if !is_online(&NetworkService::global().snapshot()) {
             debug!("UpdatesService: offline, skipping update check");
             return;
         }
@@ -320,6 +355,14 @@ impl UpdatesService {
         drop(snapshot);
         self.callbacks.notify(&snapshot_clone);
     }
+}
+
+fn is_online(net: &NetworkSnapshot) -> bool {
+    // IWD can't see wired links, so assume online.
+    if matches!(net, NetworkSnapshot::Iwd(_)) {
+        return true;
+    }
+    net.connected() || net.wired_connected() || net.mobile_active()
 }
 
 impl Drop for UpdatesService {
