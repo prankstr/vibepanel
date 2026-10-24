@@ -584,10 +584,10 @@ pub fn gtk_icon_candidates(logical: &str) -> &'static [&'static str] {
             "audio-volume-high",
             "audio-volume-medium-symbolic",
         ],
-        "audio-volume-muted" => &["audio-volume-muted", "audio-volume-muted-symbolic"],
-        "audio-volume-low" => &["audio-volume-low", "audio-volume-low-symbolic"],
-        "audio-volume-medium" => &["audio-volume-medium", "audio-volume-medium-symbolic"],
-        "audio-volume-high" => &["audio-volume-high", "audio-volume-high-symbolic"],
+        "audio-volume-muted" => &["audio-volume-muted-symbolic", "audio-volume-muted"],
+        "audio-volume-low" => &["audio-volume-low-symbolic", "audio-volume-low"],
+        "audio-volume-medium" => &["audio-volume-medium-symbolic", "audio-volume-medium"],
+        "audio-volume-high" => &["audio-volume-high-symbolic", "audio-volume-high"],
 
         // Microphone sensitivity (for quick settings mic slider)
         "microphone-sensitivity-muted-symbolic" => &[
@@ -713,8 +713,8 @@ pub fn gtk_icon_candidates(logical: &str) -> &'static [&'static str] {
             "network-connect",
         ],
         "network-wired" => &[
-            "network-wired",
             "network-wired-symbolic",
+            "network-wired",
             "network-wired-activated",
             "preferences-system-network-ethernet",
         ],
@@ -831,8 +831,16 @@ pub fn gtk_icon_candidates(logical: &str) -> &'static [&'static str] {
             "input-touchpad",
             "input-mouse-symbolic",
         ],
-        "input-gaming" => &["input-gaming-symbolic", "input-gaming"],
-        "input-gaming-symbolic" => &["input-gaming-symbolic", "input-gaming"],
+        "input-gaming" => &[
+            "input-gaming-symbolic",
+            "input-gamepad-symbolic",
+            "input-gaming",
+        ],
+        "input-gaming-symbolic" => &[
+            "input-gaming-symbolic",
+            "input-gamepad-symbolic",
+            "input-gaming",
+        ],
         "phone" => &["phone-symbolic", "phone", "smartphone-symbolic"],
         "phone-symbolic" => &["phone-symbolic", "phone", "smartphone-symbolic"],
         "computer" => &["computer-symbolic", "computer"],
@@ -1001,24 +1009,30 @@ pub fn gtk_icon_candidates(logical: &str) -> &'static [&'static str] {
             &["media-playlist-shuffle-symbolic", "media-playlist-shuffle"]
         }
         // System monitor icons (CPU, RAM, GPU, disk, load)
-        // CPU: rocket/performance concept
+        // CPU: processor chip where available (Breeze ships it as
+        // show-gpu-effects-symbolic), else a performance concept
         "cpu-symbolic" => &[
             "cpu-symbolic",
+            "show-gpu-effects-symbolic",
             "speedometer-symbolic",
             "power-profile-performance-symbolic",
             "application-x-executable-symbolic",
             "system-run-symbolic",
         ],
+        // Memory: prefer the spec's `media-flash` so RAM doesn't share the disk icon
         "ram-symbolic" => &[
             "ram-symbolic",
             "memory-symbolic",
+            "media-flash-symbolic",
             "drive-harddisk-symbolic",
             "system-run-symbolic",
         ],
         "video-display-symbolic" => &[
             "video-display-symbolic",
-            "video-display",
+            // Themes without video-display-symbolic (e.g. Breeze) ship a monitor here
+            "monitor-symbolic",
             "computer-symbolic",
+            "video-display",
             "computer",
         ],
         "disk-symbolic" => &[
@@ -1588,7 +1602,10 @@ impl Drop for CairoSpinner {
 /// child widget can be swapped when switching between Material and GTK themes.
 struct IconHandleInner {
     /// Stable root container exposed to widgets. The backend widget is a child.
-    root: gtk4::Box,
+    ///
+    /// Held weakly: the root owns this struct (via qdata, see `create_icon`),
+    /// so a strong reference here would be a cycle.
+    root: glib::WeakRef<gtk4::Box>,
     /// The concrete backend widget (Label or Image).
     backend: RefCell<IconBackend>,
     /// The last logical icon name set via `set_icon`.
@@ -1605,6 +1622,10 @@ struct IconHandleInner {
 }
 
 impl IconHandleInner {
+    fn root(&self) -> Option<gtk4::Box> {
+        self.root.upgrade()
+    }
+
     /// Update the displayed icon using the current backend.
     fn apply_icon(&self, name: &str) {
         *self.logical_name.borrow_mut() = name.to_string();
@@ -1654,9 +1675,13 @@ impl IconHandleInner {
             return;
         }
 
+        let Some(root) = self.root() else {
+            return;
+        };
+
         // Remove all children from the root container (backend + possible spinner)
-        while let Some(child) = self.root.first_child() {
-            self.root.remove(&child);
+        while let Some(child) = root.first_child() {
+            root.remove(&child);
         }
         if let Some(spinner) = self.spinner.borrow_mut().take() {
             spinner.stop_animation_only();
@@ -1673,7 +1698,7 @@ impl IconHandleInner {
         }
 
         // Add the new child to the root container
-        self.root.append(&new_backend.widget());
+        root.append(&new_backend.widget());
 
         // Update the backend
         *self.backend.borrow_mut() = new_backend;
@@ -1690,9 +1715,11 @@ impl IconHandleInner {
     /// Lazily create the shared `CairoSpinner`, appending it to the root container.
     fn ensure_spinner(&self) {
         let mut opt = self.spinner.borrow_mut();
-        if opt.is_none() {
-            let spinner = CairoSpinner::new(&self.root);
-            self.root.append(spinner.widget());
+        if opt.is_none()
+            && let Some(root) = self.root()
+        {
+            let spinner = CairoSpinner::new(&root);
+            root.append(spinner.widget());
             *opt = Some(spinner);
         }
     }
@@ -1703,12 +1730,15 @@ impl IconHandleInner {
     /// spinning arc. This avoids font glyph rotation issues with Material
     /// Symbols and provides a consistent spinner across all icon backends.
     fn apply_spinning(&self, active: bool) {
+        let Some(root) = self.root() else {
+            return;
+        };
         let backend = self.backend.borrow();
         if active {
             self.ensure_spinner();
 
-            let mut rw = self.root.width();
-            let mut rh = self.root.height();
+            let mut rw = root.width();
+            let mut rh = root.height();
 
             if rw == 0 || rh == 0 {
                 let (_, nat_w, _, _) = backend.widget().measure(gtk4::Orientation::Horizontal, -1);
@@ -1717,7 +1747,7 @@ impl IconHandleInner {
                 rh = nat_h;
             }
 
-            self.root.set_size_request(rw, rh);
+            root.set_size_request(rw, rh);
             backend.widget().set_visible(false);
             drop(backend);
 
@@ -1732,11 +1762,14 @@ impl IconHandleInner {
             if let Some(spinner) = self.spinner.borrow().as_ref() {
                 spinner.stop();
             }
-            self.root.set_size_request(-1, -1);
+            root.set_size_request(-1, -1);
             backend.widget().set_visible(true);
         }
     }
 }
+
+/// GObject data key under which an icon's root widget owns its `IconHandleInner`.
+const ICON_HANDLE_DATA_KEY: &str = "vibepanel-icon-handle";
 
 /// A handle to an icon widget, allowing updates without direct GTK access.
 ///
@@ -1745,12 +1778,21 @@ impl IconHandleInner {
 /// - GTK theme: `gtk4::Image` using the system icon theme  
 /// - Fallback: `gtk4::Label` showing the icon name as text
 ///
+/// The icon's state is owned by its root widget, so callers may keep only
+/// `widget()` and drop the handle; the icon still follows theme changes for as
+/// long as the widget lives. Don't store the handle on its own widget (e.g. via
+/// `set_data`) or capture it in a closure connected to the widget's own
+/// signals: the handle holds the widget strongly, so either is a leak cycle.
+///
 /// Call `set_icon` to change the displayed icon. The handle supports live
 /// theme switching - when `IconsService::reconfigure` is called, all existing
 /// handles automatically update to reflect the new theme.
 #[derive(Clone)]
 pub struct IconHandle {
     inner: Rc<IconHandleInner>,
+    /// Strong reference keeping the root (and thus `inner`) alive while the
+    /// handle exists.
+    root: gtk4::Box,
 }
 
 impl IconHandle {
@@ -1765,7 +1807,7 @@ impl IconHandle {
     /// The internal backend widget (Label or Image) may change when the icon
     /// theme is reconfigured, but this container remains stable.
     pub fn widget(&self) -> gtk4::Widget {
-        self.inner.root.clone().upcast()
+        self.root.clone().upcast()
     }
 
     /// Add a CSS class to the backend widget.
@@ -1775,7 +1817,7 @@ impl IconHandle {
     /// is recreated).
     pub fn add_css_class(&self, class: &str) {
         self.inner.backend.borrow().widget().add_css_class(class);
-        self.inner.root.add_css_class(class);
+        self.root.add_css_class(class);
         self.inner
             .dynamic_classes
             .borrow_mut()
@@ -1788,7 +1830,7 @@ impl IconHandle {
     /// set, so it won't be reapplied on theme switches.
     pub fn remove_css_class(&self, class: &str) {
         self.inner.backend.borrow().widget().remove_css_class(class);
-        self.inner.root.remove_css_class(class);
+        self.root.remove_css_class(class);
         self.inner.dynamic_classes.borrow_mut().remove(class);
     }
 
@@ -2080,7 +2122,7 @@ impl IconsService {
         root.append(&backend.widget());
 
         let inner = Rc::new(IconHandleInner {
-            root,
+            root: root.downgrade(),
             backend: RefCell::new(backend),
             logical_name: RefCell::new(String::new()),
             css_classes: RefCell::new(css_classes.iter().map(|s| s.to_string()).collect()),
@@ -2096,7 +2138,16 @@ impl IconsService {
             handles.push(Rc::downgrade(&inner));
         }
 
-        let handle = IconHandle { inner };
+        // Tie the handle state to the widget's lifetime. Many callers keep only
+        // `handle.widget()` and drop the handle; without this the inner state
+        // would be freed, its weak entry in `handles` would die, and the icon
+        // would no longer follow GTK icon theme changes.
+        // SAFETY: the key is private to this module and always stores this type.
+        unsafe {
+            root.set_data::<Rc<IconHandleInner>>(ICON_HANDLE_DATA_KEY, inner.clone());
+        }
+
+        let handle = IconHandle { inner, root };
 
         // Set the initial icon
         handle.inner.apply_icon(name);
@@ -2834,39 +2885,47 @@ mod tests {
         assert!(service.uses_material());
     }
 
-    // Font Map Reset Tests
+    // UI regression tests (need a GTK display)
     //
-    // Reproduce against a running bar with: `touch ~/.local/share/fonts`.
+    // Font map resets: reproduce against a running bar with
+    // `touch ~/.local/share/fonts`.
 
-    fn run_icons_font_map_subprocess(test_case: &str) {
+    fn run_icons_ui_subprocess(test_case: &str) {
         run_ignored_contract_subprocess(
-            "icons_font_map_runner",
-            "VIBEPANEL_ICONS_FONT_MAP_TEST",
+            "icons_ui_runner",
+            "VIBEPANEL_ICONS_UI_TEST",
             test_case,
-            "icons font map test",
+            "icons UI test",
         );
     }
 
     #[test]
     #[ignore = "UI regression test: requires a GTK display; run under Xvfb"]
     fn test_ui_regression_icons_font_map_watch() {
-        run_icons_font_map_subprocess("icons.font_map_watch");
+        run_icons_ui_subprocess("icons.font_map_watch");
     }
 
     #[test]
     #[ignore = "UI regression test: requires a GTK display; run under Xvfb"]
     fn test_ui_regression_icons_re_register_font() {
-        run_icons_font_map_subprocess("icons.re_register_font");
+        run_icons_ui_subprocess("icons.re_register_font");
     }
 
     #[test]
-    #[ignore = "internal runner for the icons font map wrappers"]
-    fn icons_font_map_runner() {
-        match std::env::var("VIBEPANEL_ICONS_FONT_MAP_TEST").as_deref() {
+    #[ignore = "UI regression test: requires a GTK display; run under Xvfb"]
+    fn test_ui_regression_icons_state_outlives_dropped_handle() {
+        run_icons_ui_subprocess("icons.handle_lifetime");
+    }
+
+    #[test]
+    #[ignore = "internal runner for the icons UI regression wrappers"]
+    fn icons_ui_runner() {
+        match std::env::var("VIBEPANEL_ICONS_UI_TEST").as_deref() {
             Ok("icons.font_map_watch") => run_test_font_map_watch(),
             Ok("icons.re_register_font") => run_test_re_register_font(),
-            Ok(other) => panic!("unknown icons font map test: {other}"),
-            Err(_) => eprintln!("skipping icons font map test: no test case selected"),
+            Ok("icons.handle_lifetime") => run_test_handle_lifetime(),
+            Ok(other) => panic!("unknown icons UI test: {other}"),
+            Err(_) => eprintln!("skipping icons UI test: no test case selected"),
         }
     }
 
@@ -2895,6 +2954,52 @@ mod tests {
         let gtk_service = IconsService::new("Adwaita".to_string(), 400);
         gtk_service.handle_font_map_change(&font_map);
         assert!(!gtk_service.uses_material());
+    }
+
+    /// Callers often keep only `handle.widget()`. The icon must still be
+    /// reapplied on theme changes, and must be freed with its widget.
+    fn run_test_handle_lifetime() {
+        if !init_gtk_or_skip(
+            "icons handle lifetime test",
+            Some("VIBEPANEL_UI_REGRESSION_REQUIRED"),
+        ) {
+            return;
+        }
+
+        let service = IconsService::new("gtk".to_string(), 400);
+        let widget = service.create_icon("video-display-symbolic", &[]).widget();
+
+        let live = |s: &IconsService| {
+            s.handles
+                .borrow()
+                .iter()
+                .filter(|w| w.strong_count() > 0)
+                .count()
+        };
+        assert_eq!(
+            live(&service),
+            1,
+            "dropping the handle must not orphan the icon"
+        );
+
+        // The orphaned icon must still follow backend changes. Text avoids
+        // depending on the Material font being installed.
+        service.handles.borrow()[0]
+            .upgrade()
+            .unwrap()
+            .rebuild_backend(IconBackendKind::Text);
+        let root = widget.downcast_ref::<gtk4::Box>().unwrap();
+        assert!(
+            root.first_child().is_some_and(|c| c.is::<Label>()),
+            "backend rebuild must reach an icon whose handle was dropped"
+        );
+
+        drop(widget);
+        assert_eq!(
+            live(&service),
+            0,
+            "icon state must be freed with its widget"
+        );
     }
 
     fn run_test_re_register_font() {
