@@ -366,7 +366,8 @@ fn widgets_need_rebuild(old: &WidgetsConfig, new: &WidgetsConfig) -> bool {
     probe.popover_background_opacity = old.popover_background_opacity;
     probe.outline = old.outline;
 
-    // Battery alert policy is owned by BatteryAlertController, not bar widgets.
+    // Battery alert policy is owned by BatteryAlertController, not bar widgets
+    // (low_threshold also styles the widget, so it is kept).
     strip_battery_alert_options(&mut old);
     strip_battery_alert_options(&mut probe);
     old != probe
@@ -374,7 +375,7 @@ fn widgets_need_rebuild(old: &WidgetsConfig, new: &WidgetsConfig) -> bool {
 
 fn strip_battery_alert_options(config: &mut WidgetsConfig) {
     let remove_entry = if let Some(options) = config.widget_configs.get_mut("battery") {
-        for key in ["alerts", "low_threshold", "critical_threshold"] {
+        for key in ["alerts", "critical_threshold"] {
             options.options.remove(key);
         }
         options == &WidgetOptions::default()
@@ -1946,7 +1947,6 @@ mod tests {
             WidgetOptions {
                 options: [
                     ("alerts".to_string(), toml::Value::Boolean(false)),
-                    ("low_threshold".to_string(), toml::Value::Integer(30)),
                     ("critical_threshold".to_string(), toml::Value::Integer(10)),
                 ]
                 .into_iter()
@@ -1959,6 +1959,16 @@ mod tests {
         assert!(changes.widgets);
         assert!(changes.any());
         assert!(!changes.rebuild_bars());
+
+        // low_threshold also sets the widget's low style.
+        let mut low = new.clone();
+        low.widgets
+            .widget_configs
+            .get_mut("battery")
+            .unwrap()
+            .options
+            .insert("low_threshold".to_string(), toml::Value::Integer(30));
+        assert!(ConfigSectionChanges::between(&new, &low).rebuild_bars());
 
         new.widgets
             .widget_configs

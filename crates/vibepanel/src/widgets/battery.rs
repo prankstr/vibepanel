@@ -12,7 +12,7 @@
 use gtk4::Label;
 use gtk4::prelude::*;
 use tr::tr;
-use vibepanel_core::config::WidgetEntry;
+use vibepanel_core::config::{DEFAULT_BATTERY_LOW_THRESHOLD, WidgetEntry};
 
 use crate::services::battery::{
     BatteryService, BatterySnapshot, STATE_CHARGING, STATE_FULLY_CHARGED, battery_icon_name,
@@ -44,6 +44,8 @@ pub struct BatteryConfig {
     pub show_percentage: bool,
     /// Whether to show an icon.
     pub show_icon: bool,
+    /// Percentage at or below which the widget gets the low style.
+    pub low_threshold: u32,
 }
 
 impl WidgetConfig for BatteryConfig {
@@ -72,9 +74,17 @@ impl WidgetConfig for BatteryConfig {
             .and_then(|v| v.as_bool())
             .unwrap_or(DEFAULT_SHOW_ICON);
 
+        let low_threshold = entry
+            .options
+            .get("low_threshold")
+            .and_then(|v| v.as_integer())
+            .and_then(|v| u32::try_from(v).ok())
+            .unwrap_or(DEFAULT_BATTERY_LOW_THRESHOLD);
+
         Self {
             show_percentage,
             show_icon,
+            low_threshold,
         }
     }
 }
@@ -84,6 +94,7 @@ impl Default for BatteryConfig {
         Self {
             show_percentage: DEFAULT_SHOW_PERCENTAGE,
             show_icon: DEFAULT_SHOW_ICON,
+            low_threshold: DEFAULT_BATTERY_LOW_THRESHOLD,
         }
     }
 }
@@ -142,6 +153,7 @@ impl BatteryWidget {
             &percentage_label,
             config.show_percentage,
             config.show_icon,
+            config.low_threshold,
             ConfigManager::global().bar_position().is_vertical(),
             false,
             None,
@@ -155,6 +167,7 @@ impl BatteryWidget {
             let percentage_label = percentage_label.clone();
             let show_percentage = config.show_percentage;
             let show_icon = config.show_icon;
+            let low_threshold = config.low_threshold;
             let is_vertical = ConfigManager::global().bar_position().is_vertical();
             let controller_for_cb = controller_cell.clone();
 
@@ -165,6 +178,7 @@ impl BatteryWidget {
                     &percentage_label,
                     show_percentage,
                     show_icon,
+                    low_threshold,
                     is_vertical,
                     snapshot.available,
                     snapshot.percent,
@@ -226,6 +240,7 @@ fn update_widgets_from_state_impl(
     percentage_label: &Label,
     show_percentage: bool,
     show_icon: bool,
+    low_threshold: u32,
     is_vertical: bool,
     available: bool,
     percent: Option<f64>,
@@ -263,7 +278,7 @@ fn update_widgets_from_state_impl(
     // and for the charging icon glyph. When the charger is connected, the icon should
     // reflect that state visually with both color and the charging variant icon.
     let plugged_in = matches!(state, Some(STATE_CHARGING) | Some(STATE_FULLY_CHARGED));
-    let low = matches!(rounded_opt, Some(p) if p <= 20);
+    let low = matches!(rounded_opt, Some(p) if u32::from(p) <= low_threshold);
 
     // Update CSS state classes via IconHandle methods (survives theme switches).
     icon_handle.remove_css_class(widget::BATTERY_CHARGING);

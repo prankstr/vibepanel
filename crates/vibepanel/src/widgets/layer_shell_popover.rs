@@ -883,7 +883,6 @@ where
     overlay.set_size_request(1, 1);
     overlay.set_halign(gtk4::Align::Start);
     overlay.set_valign(gtk4::Align::Start);
-    overlay.add_css_class(class::CLICK_CATCHER); // Apply background to child
     catcher.set_child(Some(&overlay));
 
     // Click handler
