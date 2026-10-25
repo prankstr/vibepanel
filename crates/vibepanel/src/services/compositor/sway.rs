@@ -25,7 +25,7 @@ use tracing::{debug, error, trace, warn};
 
 use super::{
     CompositorBackend, KeyboardLayoutCallback, KeyboardLayoutInfo, WindowCallback, WindowInfo,
-    WorkspaceCallback, WorkspaceMeta, WorkspaceSnapshot,
+    WorkspaceCallback, WorkspaceMeta, WorkspaceSnapshot, synthetic_id_for_name,
 };
 
 // i3 IPC constants
@@ -54,27 +54,6 @@ const DEFAULT_WORKSPACE_COUNT: i32 = 10;
 
 /// Reject IPC payloads larger than this to guard against bogus length fields.
 const MAX_IPC_PAYLOAD: usize = 64 * 1024 * 1024; // 64 MB
-
-/// Map a named workspace string to a stable synthetic i32 ID.
-///
-/// Sway assigns `num: -1` to all named workspaces, so they lack a unique numeric
-/// identity. This function produces a deterministic ID from the name using FNV-1a,
-/// mapped into [-2_000_000_000, -1_000_000_001] to avoid collisions with:
-///   - Positive values and 0 (numbered workspaces)
-///   - -1 (Sway's sentinel for named workspaces)
-///   - Values near i32::MIN (used as stop signal by MangoWC backend)
-fn synthetic_id_for_name(name: &str) -> i32 {
-    // FNV-1a 32-bit
-    let mut hash: u32 = 0x811c_9dc5;
-    for byte in name.as_bytes() {
-        hash ^= *byte as u32;
-        hash = hash.wrapping_mul(0x0100_0193);
-    }
-    // Map into range [-2_000_000_000, -1_000_000_001] (999_999_000 values)
-    let range: u32 = 999_999_000;
-    let offset = (hash % range) as i32;
-    -2_000_000_000 + offset
-}
 
 pub(super) fn ipc_send(
     stream: &mut UnixStream,

@@ -31,8 +31,9 @@ use std::sync::Arc;
 pub struct WorkspaceMeta {
     /// Stable unique identifier.
     /// - For Niri: the compositor's internal workspace ID (u64 cast to i32).
-    /// - For Hyprland: the compositor's workspace ID, including negative IDs
-    ///   assigned to named workspaces.
+    /// - For Hyprland: the workspace number. Named workspaces use Hyprland's
+    ///   negative ID on older versions and a synthetic negative ID on newer
+    ///   ones, which don't report an ID.
     /// - For MangoWC: same as `idx` (sequential 1-based tag index).
     pub id: i32,
     /// Meaningful user-facing numeric index when one exists.
@@ -137,6 +138,28 @@ pub struct WindowLayoutSnapshot {
     pub active_output: Option<String>,
     /// Layout state keyed by output connector name.
     pub per_output: HashMap<String, WindowLayoutInfo>,
+}
+
+/// Map a named workspace to a stable synthetic i32 ID.
+///
+/// Sway gives all named workspaces `num: -1`, and newer Hyprland gives them
+/// no ID at all, so they lack a unique numeric identity. This produces a
+/// deterministic ID from the name using FNV-1a, mapped into
+/// [-2_000_000_000, -1_000_000_001] to avoid collisions with:
+///   - Positive values and 0 (numbered workspaces)
+///   - -1 (Sway's sentinel for named workspaces)
+///   - Values near i32::MIN (used as stop signal by MangoWC backend)
+pub(super) fn synthetic_id_for_name(name: &str) -> i32 {
+    // FNV-1a 32-bit
+    let mut hash: u32 = 0x811c_9dc5;
+    for byte in name.as_bytes() {
+        hash ^= *byte as u32;
+        hash = hash.wrapping_mul(0x0100_0193);
+    }
+    // Map into range [-2_000_000_000, -1_000_000_001] (999_999_000 values)
+    let range: u32 = 999_999_000;
+    let offset = (hash % range) as i32;
+    -2_000_000_000 + offset
 }
 
 /// Callback type for workspace state updates.

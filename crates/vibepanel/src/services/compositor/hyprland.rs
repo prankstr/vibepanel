@@ -6,7 +6,7 @@
 //!
 //! Reference: https://wiki.hyprland.org/IPC/
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::env;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
@@ -21,7 +21,7 @@ use tracing::{debug, error, info, trace, warn};
 
 use super::{
     CompositorBackend, KeyboardLayoutCallback, KeyboardLayoutInfo, WindowCallback, WindowInfo,
-    WorkspaceCallback, WorkspaceMeta, WorkspaceSnapshot,
+    WorkspaceCallback, WorkspaceMeta, WorkspaceSnapshot, synthetic_id_for_name,
 };
 
 /// Default workspaces for Hyprland (dynamic workspaces, but we expose 1-10).
@@ -37,7 +37,8 @@ struct SharedState {
     workspace_snapshot: RwLock<WorkspaceSnapshot>,
     focused_window: RwLock<Option<WindowInfo>>,
     workspaces: RwLock<Vec<WorkspaceMeta>>,
-    monitor_workspaces: RwLock<HashMap<String, i32>>,
+    /// Named workspace ID → Hyprland address, used for switching.
+    named_addresses: RwLock<HashMap<i32, String>>,
     focused_monitor: RwLock<Option<String>>,
     /// Hyprland monitor ID → connector name, used to resolve window outputs.
     monitor_names: RwLock<HashMap<i64, String>>,
@@ -53,13 +54,33 @@ impl Default for SharedState {
             workspace_snapshot: RwLock::new(WorkspaceSnapshot::default()),
             focused_window: RwLock::new(None),
             workspaces: RwLock::new(HyprlandBackend::default_workspaces()),
-            monitor_workspaces: RwLock::new(HashMap::new()),
+            named_addresses: RwLock::new(HashMap::new()),
             focused_monitor: RwLock::new(None),
             monitor_names: RwLock::new(HashMap::new()),
             keyboard_layout: RwLock::new(None),
             main_keyboard_name: RwLock::new(None),
         }
     }
+}
+
+/// A regular workspace parsed from Hyprland IPC.
+#[derive(Debug, PartialEq)]
+struct WorkspaceRef {
+    id: i32,
+    /// Display name.
+    name: String,
+    /// Stable identity used to address the workspace in dispatches.
+    address: String,
+}
+
+/// Workspace state rebuilt from one `monitors` and `workspaces` query pair.
+#[derive(Debug, Default)]
+struct HyprlandState {
+    snapshot: WorkspaceSnapshot,
+    workspaces: Vec<WorkspaceMeta>,
+    named_addresses: HashMap<i32, String>,
+    focused_monitor: Option<String>,
+    monitor_names: HashMap<i64, String>,
 }
 
 pub struct HyprlandBackend {
@@ -244,121 +265,113 @@ impl HyprlandBackend {
             .collect()
     }
 
-    fn workspace_identity(id: Option<i64>, raw_name: &str) -> Option<(i32, String)> {
-        if raw_name.starts_with("special:") {
-            return None;
-        }
+    /// Parse a workspace object from `monitors`, `clients` or `workspaces`.
+    ///
+    /// Hyprland 0.56 and older send `{id, name}`, with negative IDs for named
+    /// and special workspaces. Newer versions send `{address, type, name}`
+    /// and include `id` only for numbered workspaces; `name` is then only the
+    /// display name and `address` the stable identity.
+    ///
+    /// Numbered workspaces keep their number as ID. Named workspaces keep
+    /// Hyprland's negative ID on older versions; newer versions have none, so
+    /// they get a hash of their address, which survives renames. Special
+    /// workspaces are skipped.
+    fn parse_workspace(workspace: &Value) -> Option<WorkspaceRef> {
+        let name = workspace.get("name").and_then(Value::as_str).unwrap_or("");
+        let id = workspace
+            .get("id")
+            .and_then(Value::as_i64)
+            .and_then(|id| i32::try_from(id).ok());
 
-        // Hyprland reserves 0 as invalid/no workspace; valid numeric workspaces
-        // are positive and named workspaces use negative compositor-assigned IDs.
-        if let Some(id) = id.and_then(|id| i32::try_from(id).ok())
-            && id != 0
-        {
-            // Hyprland IPC normally returns bare names (`web`). Accept the
-            // dispatcher form (`name:web`) defensively because callers use it
-            // when switching to named workspaces.
-            let name = if let Some(name) = raw_name.strip_prefix("name:")
-                && !name.is_empty()
-            {
-                name.to_string()
-            } else if raw_name.is_empty() {
+        if let Some(id) = id.filter(|id| *id > 0) {
+            let name = if name.is_empty() {
                 id.to_string()
             } else {
-                raw_name.to_string()
+                name.to_string()
             };
-            return Some((id, name));
+            return Some(WorkspaceRef {
+                id,
+                name,
+                address: id.to_string(),
+            });
         }
 
-        None
+        if let Some(address) = workspace.get("address").and_then(Value::as_str) {
+            if address.is_empty()
+                || workspace.get("type").and_then(Value::as_str) == Some("special")
+            {
+                return None;
+            }
+            return Some(WorkspaceRef {
+                id: synthetic_id_for_name(address),
+                name: if name.is_empty() { address } else { name }.to_string(),
+                address: address.to_string(),
+            });
+        }
+
+        // Older Hyprland: 0 and -1 mean no workspace, and special workspaces
+        // are only recognisable by name.
+        let id = id.filter(|id| *id < -1)?;
+        if name.starts_with("special:") {
+            return None;
+        }
+        // Hyprland IPC normally returns bare names (`web`). Accept the
+        // dispatcher form (`name:web`) defensively.
+        let name = name.strip_prefix("name:").unwrap_or(name);
+        if name.is_empty() {
+            return None;
+        }
+        Some(WorkspaceRef {
+            id,
+            name: name.to_string(),
+            address: name.to_string(),
+        })
     }
 
-    fn workspace_identity_from_ipc(workspace: &Value) -> Option<(i32, String)> {
-        let raw_name = workspace.get("name").and_then(|v| v.as_str()).unwrap_or("");
-        let id = workspace.get("id").and_then(|v| v.as_i64());
-        Self::workspace_identity(id, raw_name)
+    fn workspace_id(workspace: &Value) -> Option<i32> {
+        Self::parse_workspace(workspace).map(|ws| ws.id)
     }
 
-    fn workspace_meta_from_ipc(workspaces: &[Value]) -> Vec<WorkspaceMeta> {
-        let mut merged: HashMap<i32, WorkspaceMeta> = Self::default_workspaces()
+    /// Merge existing workspaces with the default 1-10, numbered first by
+    /// number, then named ones in creation order.
+    fn workspace_meta(workspaces: &[(WorkspaceRef, i64)]) -> Vec<WorkspaceMeta> {
+        let meta = |ws: &WorkspaceRef| WorkspaceMeta {
+            id: ws.id,
+            idx: if ws.id > 0 { ws.id } else { -1 },
+            name: ws.name.clone(),
+            output: None,
+        };
+        let mut numbered: BTreeMap<i32, WorkspaceMeta> = Self::default_workspaces()
             .into_iter()
             .map(|ws| (ws.id, ws))
             .collect();
-
-        for ws in workspaces {
-            let Some((id, name)) = Self::workspace_identity_from_ipc(ws) else {
-                continue;
-            };
-            merged.insert(
-                id,
-                WorkspaceMeta {
-                    id,
-                    // Positive IDs are user-facing numeric workspaces. Negative
-                    // IDs belong to truly named workspaces and are Hyprland
-                    // internals, so they have no meaningful numeric index.
-                    idx: if id > 0 { id } else { -1 },
-                    name,
-                    output: None,
-                },
-            );
+        let mut named = Vec::new();
+        for (ws, order) in workspaces {
+            if ws.id > 0 {
+                numbered.insert(ws.id, meta(ws));
+            } else {
+                named.push((*order, ws));
+            }
         }
+        named.sort_by_key(|(order, _)| *order);
 
-        let mut workspaces: Vec<_> = merged.into_values().collect();
-        workspaces.sort_by(|a, b| match (a.id > 0, b.id > 0) {
-            (true, true) => a.id.cmp(&b.id),
-            (true, false) => std::cmp::Ordering::Less,
-            (false, true) => std::cmp::Ordering::Greater,
-            // Hyprland assigns named workspace IDs downward from -1337; values
-            // closer to zero were created earlier and should appear first.
-            (false, false) => b.id.cmp(&a.id),
-        });
-        workspaces
-    }
-
-    fn update_workspace_metadata(&self, workspaces: &[Value]) -> bool {
-        let new_workspaces = Self::workspace_meta_from_ipc(workspaces);
-        let mut current = self.shared.workspaces.write();
-        if *current == new_workspaces {
-            return false;
-        }
-        *current = new_workspaces;
-        true
-    }
-
-    fn workspace_id_from_snapshot(workspace: &Value) -> Option<i32> {
-        let raw_name = workspace.get("name").and_then(|v| v.as_str()).unwrap_or("");
-        let id = workspace.get("id").and_then(|v| v.as_i64());
-        Self::workspace_identity(id, raw_name).map(|(id, _)| id)
-    }
-
-    fn workspace_id_for_name(&self, name: &str) -> Option<i32> {
-        self.shared
-            .workspaces
-            .read()
-            .iter()
-            .find(|ws| ws.name == name)
-            .map(|ws| ws.id)
-    }
-
-    fn has_workspace_metadata(&self, workspace_id: i32) -> bool {
-        self.shared
-            .workspaces
-            .read()
-            .iter()
-            .any(|ws| ws.id == workspace_id)
+        numbered
+            .into_values()
+            .chain(named.into_iter().map(|(_, ws)| meta(ws)))
+            .collect()
     }
 
     fn workspace_switch_target(&self, workspace_id: i32) -> String {
         if workspace_id < 0 {
-            let workspaces = self.shared.workspaces.read();
-            if let Some(ws) = workspaces.iter().find(|ws| ws.id == workspace_id) {
-                if ws.name.chars().any(char::is_whitespace) {
+            if let Some(address) = self.shared.named_addresses.read().get(&workspace_id) {
+                if address.chars().any(char::is_whitespace) {
                     warn!(
                         "Hyprland named workspace {:?} contains whitespace; switching may fail \
                          if Hyprland does not accept the raw name in workspace dispatch",
-                        ws.name
+                        address
                     );
                 }
-                return format!("name:{}", ws.name);
+                return format!("name:{address}");
             }
             warn!("No Hyprland workspace found for named workspace id {workspace_id}");
         }
@@ -484,116 +497,136 @@ impl HyprlandBackend {
         });
     }
 
-    /// Fetch monitor information from Hyprland.
+    /// Build workspace state from `j/monitors` and `j/workspaces`.
     ///
-    /// Updates `monitor_workspaces` with each monitor's active workspace,
-    /// and `focused_monitor` with the currently focused monitor name.
-    fn fetch_monitors(&self) {
-        if let Some(monitors) = self.query_json("monitors")
-            && let Some(monitors) = monitors.as_array()
-        {
-            let mut monitor_ws = self.shared.monitor_workspaces.write();
-            let mut focused_mon = self.shared.focused_monitor.write();
-            let mut monitor_names = self.shared.monitor_names.write();
-            monitor_ws.clear();
-            monitor_names.clear();
-            *focused_mon = None; // Reset before iterating to avoid stale state
+    /// Hyprland's JSON has no urgency, so the urgent set is left empty and
+    /// carried over by `apply_state`.
+    fn build_state(monitors: &[Value], workspaces: &[Value]) -> HyprlandState {
+        let mut state = HyprlandState::default();
+        let snapshot = &mut state.snapshot;
 
-            for mon in monitors {
-                let name = mon.get("name").and_then(|v| v.as_str());
-                if let (Some(id), Some(name)) = (mon.get("id").and_then(|v| v.as_i64()), name) {
-                    monitor_names.insert(id, name.to_string());
-                }
-                let active_ws_id = mon
-                    .get("activeWorkspace")
-                    .and_then(Self::workspace_id_from_snapshot);
-                let is_focused = mon
-                    .get("focused")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-
-                if let (Some(name), Some(ws_id)) = (name, active_ws_id) {
-                    monitor_ws.insert(name.to_string(), ws_id);
-                    if is_focused {
-                        *focused_mon = Some(name.to_string());
-                    }
+        for mon in monitors {
+            let Some(name) = mon.get("name").and_then(Value::as_str) else {
+                continue;
+            };
+            if let Some(id) = mon.get("id").and_then(Value::as_i64) {
+                state.monitor_names.insert(id, name.to_string());
+            }
+            let focused = mon.get("focused").and_then(Value::as_bool).unwrap_or(false);
+            if focused {
+                state.focused_monitor = Some(name.to_string());
+            }
+            let per_output = snapshot.per_output.entry(name.to_string()).or_default();
+            if let Some(ws_id) = mon.get("activeWorkspace").and_then(Self::workspace_id) {
+                per_output.active_workspace.insert(ws_id);
+                if focused {
+                    snapshot.active_workspace.insert(ws_id);
                 }
             }
-
-            trace!(
-                "fetch_monitors: {} monitors, focused={:?}",
-                monitor_ws.len(),
-                *focused_mon
-            );
-        } else {
-            warn!("fetch_monitors: failed to query monitors from Hyprland");
         }
+
+        let mut refs = Vec::with_capacity(workspaces.len());
+        for (position, ws) in workspaces.iter().enumerate() {
+            let Some(ws_ref) = Self::parse_workspace(ws) else {
+                continue;
+            };
+            let id = ws_ref.id;
+            if id < 0 {
+                state.named_addresses.insert(id, ws_ref.address.clone());
+            }
+            // Older Hyprland counts named workspace IDs down from -1337, while
+            // newer Hyprland lists workspaces in creation order.
+            let order = if ws.get("address").and_then(Value::as_str).is_some() {
+                position as i64
+            } else {
+                -i64::from(id)
+            };
+            refs.push((ws_ref, order));
+
+            let Some(windows) = ws.get("windows").and_then(Value::as_u64) else {
+                continue;
+            };
+            let windows = windows as u32;
+            snapshot.window_counts.insert(id, windows);
+            if windows > 0 {
+                snapshot.occupied_workspaces.insert(id);
+            }
+            if let Some(mon_name) = ws.get("monitor").and_then(Value::as_str) {
+                let per_output = snapshot.per_output.entry(mon_name.to_string()).or_default();
+                per_output.window_counts.insert(id, windows);
+                if windows > 0 {
+                    per_output.occupied_workspaces.insert(id);
+                }
+            }
+        }
+
+        state.workspaces = Self::workspace_meta(&refs);
+        state
+    }
+
+    /// Store a rebuilt state. Returns true if the workspace snapshot or
+    /// metadata changed.
+    fn apply_state(&self, state: HyprlandState) -> bool {
+        let HyprlandState {
+            mut snapshot,
+            workspaces,
+            named_addresses,
+            focused_monitor,
+            monitor_names,
+        } = state;
+        *self.shared.named_addresses.write() = named_addresses;
+        *self.shared.focused_monitor.write() = focused_monitor;
+        *self.shared.monitor_names.write() = monitor_names;
+
+        let metadata_changed = {
+            let mut current = self.shared.workspaces.write();
+            let changed = *current != workspaces;
+            if changed {
+                *current = workspaces;
+            }
+            changed
+        };
+
+        let mut current = self.shared.workspace_snapshot.write();
+        // Urgency only arrives as events. Keep it while the workspace has
+        // windows, and treat switching to the workspace as acknowledging it.
+        snapshot.urgent_workspaces = current
+            .urgent_workspaces
+            .iter()
+            .copied()
+            .filter(|id| {
+                snapshot.occupied_workspaces.contains(id)
+                    && (!snapshot.active_workspace.contains(id)
+                        || current.active_workspace.contains(id))
+            })
+            .collect();
+        let snapshot_changed = *current != snapshot;
+        if snapshot_changed {
+            *current = snapshot;
+        }
+
+        metadata_changed || snapshot_changed
+    }
+
+    /// Re-query monitors and workspaces and store the result.
+    /// Returns true if the workspace snapshot or metadata changed.
+    fn refresh_workspaces(&self) -> bool {
+        let monitors = self.query_json("monitors");
+        let workspaces = self.query_json("workspaces");
+        let (Some(monitors), Some(workspaces)) = (
+            monitors.as_ref().and_then(Value::as_array),
+            workspaces.as_ref().and_then(Value::as_array),
+        ) else {
+            warn!("Failed to query Hyprland monitors or workspaces");
+            return false;
+        };
+        self.apply_state(Self::build_state(monitors, workspaces))
     }
 
     /// Fetch initial state from Hyprland.
     fn fetch_initial_state(&self) {
-        // Fetch monitors first to know per-output active workspaces
-        self.fetch_monitors();
-
-        // Fetch workspaces (occupied state and window counts)
-        if let Some(workspaces) = self.query_json("workspaces")
-            && let Some(workspaces) = workspaces.as_array()
-        {
-            self.update_workspace_metadata(workspaces);
-
-            let mut snapshot = self.shared.workspace_snapshot.write();
-            let monitor_ws = self.shared.monitor_workspaces.read();
-            let focused_mon = self.shared.focused_monitor.read();
-
-            snapshot.occupied_workspaces.clear();
-            snapshot.window_counts.clear();
-            snapshot.per_output.clear();
-
-            // Initialize per_output entries for all known monitors
-            for (mon_name, &active_ws) in monitor_ws.iter() {
-                let per_output = snapshot.per_output.entry(mon_name.clone()).or_default();
-                per_output.active_workspace.insert(active_ws);
-            }
-
-            for ws in workspaces {
-                let id = Self::workspace_id_from_snapshot(ws);
-                let windows = ws.get("windows").and_then(|v| v.as_i64());
-                let monitor = ws.get("monitor").and_then(|v| v.as_str());
-
-                if let (Some(id), Some(windows)) = (id, windows) {
-                    let windows = windows as u32;
-
-                    // Update global state
-                    snapshot.window_counts.insert(id, windows);
-                    if windows > 0 {
-                        snapshot.occupied_workspaces.insert(id);
-                    }
-
-                    // Update per-output state
-                    if let Some(mon_name) = monitor {
-                        let per_output =
-                            snapshot.per_output.entry(mon_name.to_string()).or_default();
-                        per_output.window_counts.insert(id, windows);
-                        if windows > 0 {
-                            per_output.occupied_workspaces.insert(id);
-                        }
-                    }
-                }
-            }
-
-            // Set global active workspace from focused monitor
-            // This should always succeed on initial fetch since we just queried monitors
-            if let Some(ref focused) = *focused_mon
-                && let Some(&active_ws) = monitor_ws.get(focused)
-            {
-                snapshot.active_workspace.clear();
-                snapshot.active_workspace.insert(active_ws);
-            }
-        }
-
-        // Fetch active window (including its monitor)
-        self.refresh_active_window();
-
+        self.refresh_workspaces();
+        self.refresh_active_window(true);
         debug!("Fetched initial Hyprland state");
     }
 
@@ -650,117 +683,9 @@ impl HyprlandBackend {
         });
     }
 
-    /// Refresh occupied workspaces and window counts from Hyprland.
-    ///
-    /// Also updates per-output state and monitor tracking.
-    /// Returns true if occupied workspaces OR active workspace changed.
-    fn refresh_occupied(&self) -> bool {
-        // Refresh monitors first to get current per-output active workspaces
-        self.fetch_monitors();
-
-        if let Some(workspaces) = self.query_json("workspaces")
-            && let Some(workspaces) = workspaces.as_array()
-        {
-            let metadata_changed = self.update_workspace_metadata(workspaces);
-
-            let mut snapshot = self.shared.workspace_snapshot.write();
-            let monitor_ws = self.shared.monitor_workspaces.read();
-            let focused_mon = self.shared.focused_monitor.read();
-
-            // Track previous state to detect changes
-            let previous_active = snapshot.active_workspace.clone();
-            let old_occupied = snapshot.occupied_workspaces.clone();
-            let old_urgent = snapshot.urgent_workspaces.clone();
-            let old_per_output = snapshot.per_output.clone();
-
-            snapshot.occupied_workspaces.clear();
-            snapshot.window_counts.clear();
-            snapshot.per_output.clear();
-
-            // Initialize per_output entries for all known monitors
-            for (mon_name, &active_ws) in monitor_ws.iter() {
-                let per_output = snapshot.per_output.entry(mon_name.clone()).or_default();
-                per_output.active_workspace.insert(active_ws);
-            }
-
-            for ws in workspaces {
-                let id = Self::workspace_id_from_snapshot(ws);
-                let windows = ws.get("windows").and_then(|v| v.as_i64());
-                let monitor = ws.get("monitor").and_then(|v| v.as_str());
-
-                if let (Some(id), Some(windows)) = (id, windows) {
-                    let windows = windows as u32;
-
-                    // Update global state
-                    snapshot.window_counts.insert(id, windows);
-                    if windows > 0 {
-                        snapshot.occupied_workspaces.insert(id);
-                    }
-
-                    // Update per-output state
-                    if let Some(mon_name) = monitor {
-                        let per_output =
-                            snapshot.per_output.entry(mon_name.to_string()).or_default();
-                        per_output.window_counts.insert(id, windows);
-                        if windows > 0 {
-                            per_output.occupied_workspaces.insert(id);
-                        }
-                    }
-                }
-            }
-
-            // Set global active workspace from focused monitor, or preserve previous
-            // if monitor lookup fails (e.g., during rapid workspace switches)
-            if let Some(ref focused) = *focused_mon
-                && let Some(&active_ws) = monitor_ws.get(focused)
-            {
-                snapshot.active_workspace.clear();
-                snapshot.active_workspace.insert(active_ws);
-            } else if snapshot.active_workspace.is_empty() {
-                // Restore previous active workspace if we couldn't determine current
-                snapshot.active_workspace = previous_active.clone();
-            }
-
-            let occupied_changed = snapshot.occupied_workspaces != old_occupied;
-            let active_changed = snapshot.active_workspace != previous_active;
-            let per_output_changed = snapshot.per_output != old_per_output;
-
-            let occupied_workspaces = snapshot.occupied_workspaces.clone();
-            snapshot
-                .urgent_workspaces
-                .retain(|ws_id| occupied_workspaces.contains(ws_id));
-            let urgent_changed = snapshot.urgent_workspaces != old_urgent;
-
-            if metadata_changed
-                || occupied_changed
-                || active_changed
-                || per_output_changed
-                || urgent_changed
-            {
-                trace!(
-                    "refresh_occupied: metadata_changed={}, occupied_changed={}, active_changed={} ({:?} -> {:?}), per_output_changed={}, urgent_changed={}",
-                    metadata_changed,
-                    occupied_changed,
-                    active_changed,
-                    previous_active,
-                    snapshot.active_workspace,
-                    per_output_changed,
-                    urgent_changed
-                );
-            }
-
-            return metadata_changed
-                || occupied_changed
-                || active_changed
-                || per_output_changed
-                || urgent_changed;
-        }
-        false
-    }
-
     fn clear_urgent_workspace(&self, ws_id: i32) -> bool {
         // Hyprland exposes urgency as an event only, not in clients/workspaces JSON.
-        // Treat viewing the workspace as acknowledging workspace-level urgency.
+        // Treat focusing a window on the workspace as acknowledging workspace-level urgency.
         // TODO: When Hyprland list_windows support lands, replace workspace-level
         // urgency with address-based tracking so multiple urgent clients on the same
         // workspace survive focusing/viewing only one client.
@@ -771,104 +696,41 @@ impl HyprlandBackend {
             .remove(&ws_id)
     }
 
-    /// Update active workspace for the focused monitor.
-    ///
-    /// Called when workspace/workspacev2 events fire. Updates:
-    /// - Global `active_workspace`
-    /// - `monitor_workspaces` for the focused monitor
-    /// - `per_output[focused_monitor].active_workspace`
-    ///
-    /// Returns true if state changed.
-    fn update_active_workspace(&self, ws_id: i32) -> bool {
-        let focused_mon = self.shared.focused_monitor.read().clone();
+    /// Refresh the focused window from `activewindow`. Pass `workspaces_fresh`
+    /// when the caller has just called `refresh_workspaces`.
+    /// Returns (window_changed, workspace_changed).
+    fn refresh_active_window(&self, workspaces_fresh: bool) -> (bool, bool) {
+        let Some(active_window) = self.query_json("activewindow") else {
+            return (false, false);
+        };
 
-        let mut snapshot = self.shared.workspace_snapshot.write();
-        let old_active = snapshot.active_workspace.clone();
-        // Changed if: (a) new workspace wasn't already active, or (b) multiple were active
-        let changed = !old_active.contains(&ws_id) || old_active.len() != 1;
+        let parse =
+            || Self::window_info_from_ipc(&active_window, &self.shared.monitor_names.read());
+        let mut new_focused = parse();
+        let unknown_monitor = active_window
+            .get("monitor")
+            .and_then(Value::as_i64)
+            .is_some_and(|id| !self.shared.monitor_names.read().contains_key(&id));
 
-        trace!(
-            "update_active_workspace: ws_id={}, old_active={:?}, focused_mon={:?}, changed={}",
-            ws_id, old_active, focused_mon, changed
-        );
-
-        if changed {
-            snapshot.active_workspace.clear();
-            snapshot.active_workspace.insert(ws_id);
-
-            // Update per-monitor tracking to stay in sync
-            if let Some(ref mon_name) = focused_mon {
-                // Update monitor_workspaces so focusedmon events see correct state
-                self.shared
-                    .monitor_workspaces
-                    .write()
-                    .insert(mon_name.clone(), ws_id);
-
-                // Update per_output active workspace (create entry if needed)
-                let per_output = snapshot.per_output.entry(mon_name.clone()).or_default();
-                per_output.active_workspace.clear();
-                per_output.active_workspace.insert(ws_id);
-            } else {
-                warn!(
-                    "update_active_workspace: focused_mon is None, per_output NOT updated! \
-                     Global active_workspace set to {}, but per_output entries unchanged.",
-                    ws_id
-                );
-            }
+        // Monitors can be added after the last rebuild. With no focused window,
+        // the empty update is scoped to the focused monitor, so query it now
+        // rather than trusting `focusedmon` to have arrived first.
+        let mut workspace_changed = false;
+        if !workspaces_fresh && (unknown_monitor || new_focused.is_none()) {
+            workspace_changed = self.refresh_workspaces();
+            new_focused = parse();
         }
 
-        changed
-    }
-
-    fn workspace_id_from_event_name(&self, workspace_name: &str) -> Option<i32> {
-        let name = workspace_name
-            .strip_prefix("name:")
-            .unwrap_or(workspace_name);
-
-        name.parse::<i64>()
-            .ok()
-            .and_then(|id| i32::try_from(id).ok())
-            .or_else(|| self.workspace_id_for_name(name))
-    }
-
-    /// Refresh active window info from Hyprland.
-    ///
-    /// Queries `activewindow` JSON and updates `focused_window`.
-    /// Returns whether the window info changed and the freshly queried workspace ID.
-    fn refresh_active_window(&self) -> (bool, Option<i32>) {
-        if let Some(active_window) = self.query_json("activewindow") {
-            let workspace_id = active_window
-                .get("workspace")
-                .and_then(Self::workspace_id_from_snapshot);
-
-            // Monitors can be added after the last fetch; refresh once on a miss.
-            let unknown_monitor = active_window
-                .get("monitor")
-                .and_then(|v| v.as_i64())
-                .is_some_and(|id| !self.shared.monitor_names.read().contains_key(&id));
-            if unknown_monitor {
-                self.fetch_monitors();
-            }
-
-            let new_focused =
-                Self::window_info_from_ipc(&active_window, &self.shared.monitor_names.read());
-
-            // With no focused window, the empty update is scoped to the focused
-            // monitor. Query it now rather than trusting `focusedmon` to have
-            // arrived first.
-            if new_focused.is_none() {
-                self.fetch_monitors();
-            }
-
-            let mut focused = self.shared.focused_window.write();
-            if *focused != new_focused {
-                *focused = new_focused;
-                return (true, workspace_id);
-            }
-
-            return (false, workspace_id);
+        if let Some(ws_id) = active_window.get("workspace").and_then(Self::workspace_id) {
+            workspace_changed |= self.clear_urgent_workspace(ws_id);
         }
-        (false, None)
+
+        let mut focused = self.shared.focused_window.write();
+        let window_changed = *focused != new_focused;
+        if window_changed {
+            *focused = new_focused;
+        }
+        (window_changed, workspace_changed)
     }
 
     /// Parse `activewindow` JSON. Hyprland returns `{}` when no window is
@@ -934,47 +796,36 @@ impl HyprlandBackend {
         let mut window_changed = false;
         let mut keyboard_layout_changed = false;
 
+        // Hyprland sends most events twice, as v1 and v2. Their payloads aren't
+        // used, so handle only the v1 name, which every version sends.
         match event {
-            "workspace" => {
-                // workspace>>ID or workspace>>NAME
-                if let Some(ws_id) = self.workspace_id_from_event_name(data) {
-                    if !self.has_workspace_metadata(ws_id) {
-                        workspace_changed |= self.refresh_occupied();
-                    }
-                    workspace_changed |= self.update_active_workspace(ws_id);
-                    workspace_changed |= self.clear_urgent_workspace(ws_id);
-                } else {
-                    // Named workspace - refetch state
-                    debug!(
-                        "workspace event: named workspace '{}', refetching state",
-                        data
-                    );
-                    self.fetch_initial_state();
-                    workspace_changed = true;
+            "workspace" | "createworkspace" | "destroyworkspace" | "renameworkspace"
+            | "changeworkspaceid" | "openwindow" | "closewindow" | "monitoradded"
+            | "monitorremoved" => {
+                workspace_changed = self.refresh_workspaces();
+            }
+            "focusedmon" => {
+                workspace_changed = self.refresh_workspaces();
+                // With no focused window, refresh before emitting: the new
+                // monitor may have a window whose `activewindow` event hasn't
+                // arrived yet, and emitting the empty title first would flicker.
+                // Always emit: the focused window stays `None`, but the empty
+                // update has to move to the newly focused monitor.
+                if self.shared.focused_window.read().is_none() {
+                    workspace_changed |= self.refresh_active_window(true).1;
+                    window_changed = true;
                 }
             }
-            "workspacev2" => {
-                // workspacev2>>ID,NAME
-                if let Some((id_str, name)) = data.split_once(',')
-                    && let Some(ws_id) = self
-                        .workspace_id_from_event_name(id_str)
-                        .or_else(|| self.workspace_id_from_event_name(name))
-                {
-                    if !self.has_workspace_metadata(ws_id) {
-                        workspace_changed |= self.refresh_occupied();
-                    }
-                    workspace_changed |= self.update_active_workspace(ws_id);
-                    workspace_changed |= self.clear_urgent_workspace(ws_id);
-                }
+            "movewindow" | "moveworkspace" => {
+                // The focused window may have changed monitor while keeping
+                // focus, which emits no `activewindow`; refresh its output.
+                workspace_changed = self.refresh_workspaces();
+                let (win, ws) = self.refresh_active_window(true);
+                window_changed = win;
+                workspace_changed |= ws;
             }
-            "createworkspace" | "createworkspacev2" | "destroyworkspace" | "destroyworkspacev2"
-            | "renameworkspace" | "closewindow" | "monitoradded" | "monitoraddedv2"
-            | "monitorremoved" | "monitorremovedv2" => {
-                workspace_changed = self.refresh_occupied();
-            }
-            "openwindow" => {
-                // openwindow>>ADDRESS,WORKSPACE,CLASS,TITLE
-                workspace_changed = self.refresh_occupied();
+            "activewindow" => {
+                (window_changed, workspace_changed) = self.refresh_active_window(false);
             }
             "urgent" => {
                 // urgent>>WINDOW_ADDRESS
@@ -985,84 +836,15 @@ impl HyprlandBackend {
                         let addr = client.get("address").and_then(|v| v.as_str()).unwrap_or("");
                         if addr == data || addr == format!("0x{}", data) {
                             if let Some(ws) = client.get("workspace")
-                                && let Some(ws_id) = Self::workspace_id_from_snapshot(ws)
+                                && let Some(ws_id) = Self::workspace_id(ws)
                             {
                                 let mut snapshot = self.shared.workspace_snapshot.write();
-                                snapshot.urgent_workspaces.insert(ws_id);
-                                workspace_changed = true;
+                                workspace_changed = snapshot.urgent_workspaces.insert(ws_id);
                             }
                             break;
                         }
                     }
                 }
-            }
-            "activewindow" => {
-                // activewindow>>CLASS,TITLE
-                // Query full window info from Hyprland for consistency
-                let (changed, workspace_id) = self.refresh_active_window();
-                window_changed = changed;
-                if let Some(ws_id) = workspace_id {
-                    workspace_changed |= self.clear_urgent_workspace(ws_id);
-                }
-            }
-            "activewindowv2" => {
-                // activewindowv2>>ADDRESS
-                // Query the window info from Hyprland
-                let (changed, workspace_id) = self.refresh_active_window();
-                window_changed = changed;
-                if let Some(ws_id) = workspace_id {
-                    workspace_changed |= self.clear_urgent_workspace(ws_id);
-                }
-            }
-            "focusedmon" => {
-                // focusedmon>>MONNAME,WORKSPACENAME
-                // Update focused monitor and global active workspace
-                if let Some((mon_name, ws_name)) = data.split_once(',') {
-                    *self.shared.focused_monitor.write() = Some(mon_name.to_string());
-                    // With no focused window, refresh before emitting: the new
-                    // monitor may have a window whose `activewindow` event hasn't
-                    // arrived yet, and emitting the empty title first would flicker.
-                    // Always emit: fetch_monitors() may already have cached this
-                    // monitor without notifying, and duplicate clears are harmless.
-                    if self.shared.focused_window.read().is_none() {
-                        self.refresh_active_window();
-                        window_changed = true;
-                    }
-
-                    // Update global active_workspace to this monitor's active workspace
-                    let cached_ws_id = self.shared.monitor_workspaces.read().get(mon_name).copied();
-                    let event_ws_id = self.workspace_id_from_event_name(ws_name);
-
-                    if let Some(ws_id) = event_ws_id.or(cached_ws_id) {
-                        self.shared
-                            .monitor_workspaces
-                            .write()
-                            .insert(mon_name.to_string(), ws_id);
-
-                        let mut snapshot = self.shared.workspace_snapshot.write();
-                        if !snapshot.active_workspace.contains(&ws_id)
-                            || snapshot.active_workspace.len() != 1
-                        {
-                            snapshot.active_workspace.clear();
-                            snapshot.active_workspace.insert(ws_id);
-                            // Also update per_output active workspace.
-                            let per_output =
-                                snapshot.per_output.entry(mon_name.to_string()).or_default();
-                            per_output.active_workspace.clear();
-                            per_output.active_workspace.insert(ws_id);
-                            workspace_changed = true;
-                        }
-                        workspace_changed |= snapshot.urgent_workspaces.remove(&ws_id);
-                    } else {
-                        workspace_changed = self.refresh_occupied();
-                    }
-                }
-            }
-            "movewindow" | "moveworkspace" | "moveworkspacev2" => {
-                // The focused window may have changed monitor while keeping
-                // focus, which emits no `activewindow`; refresh its output.
-                workspace_changed = self.refresh_occupied();
-                window_changed = self.refresh_active_window().0;
             }
             "activelayout" => {
                 // activelayout>>KEYBOARD_NAME,LAYOUT_NAME
@@ -1389,14 +1171,20 @@ mod tests {
     use serde_json::json;
     use std::collections::HashSet;
 
-    #[test]
-    fn workspace_meta_from_ipc_merges_names_with_defaults() {
-        let ipc = vec![
-            json!({ "id": 2, "name": "web", "windows": 1, "monitor": "DP-1" }),
-            json!({ "id": 11, "name": "chat", "windows": 0, "monitor": "HDMI-A-1" }),
-        ];
+    fn meta(workspaces: Value) -> Vec<WorkspaceMeta> {
+        state(json!([]), workspaces).workspaces
+    }
 
-        let workspaces = HyprlandBackend::workspace_meta_from_ipc(&ipc);
+    fn named_id(address: &str) -> i32 {
+        synthetic_id_for_name(address)
+    }
+
+    #[test]
+    fn workspace_meta_merges_names_with_defaults() {
+        let workspaces = meta(json!([
+            { "id": 2, "name": "web", "windows": 1, "monitor": "DP-1" },
+            { "id": 11, "name": "chat", "windows": 0, "monitor": "HDMI-A-1" }
+        ]));
 
         assert_eq!(workspaces.iter().find(|ws| ws.id == 1).unwrap().name, "1");
         assert_eq!(workspaces.iter().find(|ws| ws.id == 2).unwrap().name, "web");
@@ -1408,103 +1196,124 @@ mod tests {
     }
 
     #[test]
-    fn workspace_meta_from_ipc_skips_special_workspaces() {
-        let ipc = vec![
+    fn parse_workspace_skips_special_workspaces() {
+        for special in [
             json!({ "id": -99, "name": "special:magic" }),
-            json!({ "id": 4, "name": "" }),
-        ];
-
-        let workspaces = HyprlandBackend::workspace_meta_from_ipc(&ipc);
-
-        assert!(workspaces.iter().all(|ws| ws.name != "special:magic"));
-        assert_eq!(workspaces.iter().find(|ws| ws.id == 4).unwrap().name, "4");
+            json!({ "address": "special:magic", "type": "special", "name": "special:magic" }),
+        ] {
+            assert_eq!(HyprlandBackend::parse_workspace(&special), None);
+        }
     }
 
     #[test]
-    fn workspace_meta_from_ipc_preserves_named_workspace_ids_without_display_index() {
-        let ipc = vec![json!({
-            "id": -1337,
-            "name": "name:web",
-            "windows": 0,
-            "monitor": "DP-1"
-        })];
+    fn parse_workspace_reads_numbered_workspaces_in_both_formats() {
+        let legacy = json!({ "id": 4, "name": "Discord" });
+        let current = json!({ "address": "4", "id": 4, "type": "normal", "name": "Discord" });
 
-        let workspaces = HyprlandBackend::workspace_meta_from_ipc(&ipc);
-        let web = workspaces.iter().find(|ws| ws.name == "web").unwrap();
-
-        assert_eq!(web.id, -1337);
-        assert_eq!(web.idx, -1);
+        for ws in [legacy, current] {
+            let parsed = HyprlandBackend::parse_workspace(&ws).unwrap();
+            assert_eq!(parsed.id, 4);
+            assert_eq!(parsed.name, "Discord");
+            assert_eq!(parsed.address, "4");
+        }
         assert_eq!(
-            HyprlandBackend::workspace_id_from_snapshot(&ipc[0]),
-            Some(web.id)
+            HyprlandBackend::parse_workspace(&json!({ "id": 4, "name": "" }))
+                .unwrap()
+                .name,
+            "4"
         );
     }
 
     #[test]
-    fn workspace_meta_from_ipc_preserves_numbered_workspace_index() {
-        let ipc = vec![json!({
-            "id": 4,
-            "name": "Discord",
-            "windows": 1,
-            "monitor": "DP-1"
-        })];
+    fn parse_workspace_keeps_hyprland_named_ids_on_older_versions() {
+        let legacy = json!({ "id": -1337, "name": "web" });
+        let prefixed = json!({ "id": -1337, "name": "name:web" });
 
-        let workspaces = HyprlandBackend::workspace_meta_from_ipc(&ipc);
-        let discord = workspaces.iter().find(|ws| ws.id == 4).unwrap();
-
-        assert_eq!(discord.name, "Discord");
-        assert_eq!(discord.idx, 4);
+        for ws in [legacy, prefixed] {
+            let parsed = HyprlandBackend::parse_workspace(&ws).unwrap();
+            assert_eq!(parsed.id, -1337);
+            assert_eq!(parsed.name, "web");
+            assert_eq!(parsed.address, "web");
+        }
     }
 
     #[test]
-    fn workspace_meta_from_ipc_sorts_numbered_before_named_by_id() {
-        let ipc = vec![
-            json!({ "id": -1337, "name": "name:web" }),
-            json!({ "id": 2, "name": "2" }),
-            json!({ "id": -1338, "name": "name:chat" }),
+    fn parse_workspace_hashes_named_addresses_on_newer_versions() {
+        let current = json!({ "address": "web", "type": "normal", "name": "web" });
+
+        let parsed = HyprlandBackend::parse_workspace(&current).unwrap();
+        assert_eq!(parsed.id, named_id("web"));
+        assert_eq!(parsed.name, "web");
+        assert_eq!(parsed.address, "web");
+    }
+
+    #[test]
+    fn parse_workspace_keeps_named_id_across_renames() {
+        // Newer Hyprland renames only the display name.
+        let renamed = json!({ "address": "web", "type": "normal", "name": "Browser" });
+
+        let parsed = HyprlandBackend::parse_workspace(&renamed).unwrap();
+        assert_eq!(parsed.id, named_id("web"));
+        assert_eq!(parsed.name, "Browser");
+        assert_eq!(parsed.address, "web");
+    }
+
+    #[test]
+    fn parse_workspace_rejects_missing_workspaces() {
+        for none in [
+            json!({ "id": 0, "name": "" }),
+            json!({ "id": -1, "name": "" }),
+            json!({ "address": "", "type": "", "name": "" }),
+            json!({}),
+        ] {
+            assert_eq!(HyprlandBackend::parse_workspace(&none), None);
+        }
+    }
+
+    #[test]
+    fn workspace_meta_has_no_display_index_for_named_workspaces() {
+        let workspaces = meta(json!([{ "address": "web", "type": "normal", "name": "web" }]));
+        let web = workspaces.iter().find(|ws| ws.name == "web").unwrap();
+
+        assert_eq!(web.id, named_id("web"));
+        assert_eq!(web.idx, -1);
+    }
+
+    #[test]
+    fn workspace_meta_sorts_numbered_before_named_in_creation_order() {
+        let expected = [
+            "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "12", "web", "Chat", "mail",
         ];
+        // Older Hyprland: named IDs count down from -1337 as they're created.
+        let legacy = meta(json!([
+            { "id": -1339, "name": "mail" },
+            { "id": 12, "name": "12" },
+            { "id": -1337, "name": "web" },
+            { "id": -1338, "name": "Chat" }
+        ]));
+        // Newer Hyprland: workspaces are listed in creation order.
+        let current = meta(json!([
+            { "address": "web", "type": "normal", "name": "web" },
+            { "address": "12", "id": 12, "type": "normal", "name": "12" },
+            { "address": "Chat", "type": "normal", "name": "Chat" },
+            { "address": "mail", "type": "normal", "name": "mail" }
+        ]));
 
-        let workspaces = HyprlandBackend::workspace_meta_from_ipc(&ipc);
-        let workspace_10_pos = workspaces.iter().position(|ws| ws.id == 10).unwrap();
-        let first_named_pos = workspaces.iter().position(|ws| ws.id == -1337).unwrap();
-        let second_named_pos = workspaces.iter().position(|ws| ws.id == -1338).unwrap();
-
-        assert!(workspace_10_pos < first_named_pos);
-        assert!(first_named_pos < second_named_pos);
-
-        let named_ids: Vec<_> = workspaces
-            .iter()
-            .filter(|ws| ws.id < 0)
-            .map(|ws| ws.id)
-            .collect();
-        assert_eq!(named_ids, vec![-1337, -1338]);
+        for workspaces in [legacy, current] {
+            let names: Vec<_> = workspaces.iter().map(|ws| ws.name.as_str()).collect();
+            assert_eq!(names, expected);
+        }
     }
 
     #[test]
-    fn workspace_id_for_name_finds_named_workspace_id() {
+    fn workspace_switch_target_uses_named_workspace_address() {
         let backend = HyprlandBackend::new();
-        *backend.shared.workspaces.write() = vec![WorkspaceMeta {
-            id: -1337,
-            idx: -1,
-            name: "web".to_string(),
-            output: None,
-        }];
+        backend.apply_state(state(
+            json!([]),
+            json!([{ "address": "web", "type": "normal", "name": "Browser" }]),
+        ));
 
-        assert_eq!(backend.workspace_id_for_name("web"), Some(-1337));
-        assert_eq!(backend.workspace_id_for_name("chat"), None);
-    }
-
-    #[test]
-    fn workspace_switch_target_formats_named_workspaces() {
-        let backend = HyprlandBackend::new();
-        *backend.shared.workspaces.write() = vec![WorkspaceMeta {
-            id: -1337,
-            idx: -1,
-            name: "web".to_string(),
-            output: None,
-        }];
-
-        assert_eq!(backend.workspace_switch_target(-1337), "name:web");
+        assert_eq!(backend.workspace_switch_target(named_id("web")), "name:web");
         assert_eq!(backend.workspace_switch_target(3), "3");
         assert_eq!(backend.workspace_switch_target(-9999), "-9999");
     }
@@ -1512,12 +1321,7 @@ mod tests {
     #[test]
     fn workspace_lua_target_quotes_named_workspaces() {
         let backend = HyprlandBackend::new();
-        *backend.shared.workspaces.write() = vec![WorkspaceMeta {
-            id: -1337,
-            idx: -1,
-            name: "web".to_string(),
-            output: None,
-        }];
+        backend.apply_state(state(json!([]), json!([{ "id": -1337, "name": "web" }])));
 
         assert_eq!(backend.workspace_lua_target(-1337), "\"name:web\"");
         assert_eq!(backend.workspace_lua_target(3), "3");
@@ -1565,91 +1369,6 @@ mod tests {
     }
 
     #[test]
-    fn has_workspace_metadata_checks_workspace_id() {
-        let backend = HyprlandBackend::new();
-        *backend.shared.workspaces.write() = vec![WorkspaceMeta {
-            id: -1337,
-            idx: -1,
-            name: "web".to_string(),
-            output: None,
-        }];
-
-        assert!(backend.has_workspace_metadata(-1337));
-        assert!(!backend.has_workspace_metadata(-1338));
-    }
-
-    #[test]
-    fn focusedmon_uses_event_workspace_name_when_cache_missing() {
-        let backend = HyprlandBackend::new();
-        *backend.shared.workspaces.write() = vec![WorkspaceMeta {
-            id: -1337,
-            idx: -1,
-            name: "web".to_string(),
-            output: None,
-        }];
-
-        backend.handle_event("focusedmon>>DP-1,name:web");
-
-        let snapshot = backend.shared.workspace_snapshot.read();
-        assert_eq!(snapshot.active_workspace, HashSet::from([-1337]));
-        assert_eq!(
-            snapshot.per_output.get("DP-1").unwrap().active_workspace,
-            HashSet::from([-1337])
-        );
-        assert_eq!(
-            *backend.shared.focused_monitor.read(),
-            Some("DP-1".to_string())
-        );
-        assert_eq!(
-            backend.shared.monitor_workspaces.read().get("DP-1"),
-            Some(&-1337)
-        );
-    }
-
-    #[test]
-    fn event_thread_updates_are_visible_to_manager_side_backend() {
-        let backend = HyprlandBackend::new();
-        let event_thread = backend.event_thread_instance();
-
-        event_thread.handle_event("focusedmon>>DP-3,2");
-
-        assert_eq!(backend.get_focused_output(), Some("DP-3".to_string()));
-        assert_eq!(
-            backend.get_workspace_snapshot().active_workspace,
-            HashSet::from([2])
-        );
-    }
-
-    #[test]
-    fn empty_window_update_follows_focused_monitor() {
-        let backend = HyprlandBackend::new();
-
-        let (_, window_changed, _) = backend.handle_event("focusedmon>>DP-3,2");
-        assert!(window_changed);
-        assert_eq!(backend.window_update().output, Some("DP-3".to_string()));
-        assert!(backend.window_update().title.is_empty());
-
-        // Repeats still emit: a monitor refresh may have cached it silently.
-        let (_, window_changed, _) = backend.handle_event("focusedmon>>DP-3,2");
-        assert!(window_changed);
-
-        // fetch_monitors() (via refresh_occupied) already moved the cache to DP-1.
-        *backend.shared.focused_monitor.write() = Some("DP-1".to_string());
-        let (_, window_changed, _) = backend.handle_event("focusedmon>>DP-1,3");
-        assert!(window_changed);
-        assert_eq!(backend.window_update().output, Some("DP-1".to_string()));
-
-        *backend.shared.focused_window.write() = Some(WindowInfo {
-            title: "t".to_string(),
-            app_id: "a".to_string(),
-            output: Some("DP-3".to_string()),
-            focused: true,
-        });
-        let (_, window_changed, _) = backend.handle_event("focusedmon>>DP-1,3");
-        assert!(!window_changed);
-    }
-
-    #[test]
     fn window_info_resolves_monitor_id_to_connector() {
         let monitor_names = HashMap::from([(0, "eDP-1".to_string()), (1, "DP-3".to_string())]);
         let window = json!({
@@ -1671,71 +1390,6 @@ mod tests {
         let monitor_names = HashMap::from([(0, "eDP-1".to_string())]);
 
         assert!(HyprlandBackend::window_info_from_ipc(&json!({}), &monitor_names).is_none());
-    }
-
-    #[test]
-    fn focusedmon_prefers_event_workspace_name_over_stale_cache() {
-        let backend = HyprlandBackend::new();
-        *backend.shared.workspaces.write() = vec![WorkspaceMeta {
-            id: -1337,
-            idx: -1,
-            name: "web".to_string(),
-            output: None,
-        }];
-        backend
-            .shared
-            .monitor_workspaces
-            .write()
-            .insert("DP-1".to_string(), 1);
-
-        backend.handle_event("focusedmon>>DP-1,name:web");
-
-        let snapshot = backend.shared.workspace_snapshot.read();
-        assert_eq!(snapshot.active_workspace, HashSet::from([-1337]));
-        assert_eq!(
-            backend.shared.monitor_workspaces.read().get("DP-1"),
-            Some(&-1337)
-        );
-    }
-
-    #[test]
-    fn workspace_event_resolves_prefixed_named_workspace() {
-        let backend = HyprlandBackend::new();
-        *backend.shared.workspaces.write() = vec![WorkspaceMeta {
-            id: -1337,
-            idx: -1,
-            name: "web".to_string(),
-            output: None,
-        }];
-
-        backend.handle_event("workspace>>name:web");
-
-        let snapshot = backend.shared.workspace_snapshot.read();
-        assert_eq!(snapshot.active_workspace, HashSet::from([-1337]));
-    }
-
-    #[test]
-    fn workspace_event_clears_matching_urgent_workspace() {
-        let backend = HyprlandBackend::new();
-        *backend.shared.workspaces.write() = vec![WorkspaceMeta {
-            id: 2,
-            idx: 2,
-            name: "2".to_string(),
-            output: None,
-        }];
-        backend
-            .shared
-            .workspace_snapshot
-            .write()
-            .urgent_workspaces
-            .insert(2);
-
-        let (workspace_changed, _, _) = backend.handle_event("workspace>>2");
-
-        let snapshot = backend.shared.workspace_snapshot.read();
-        assert!(workspace_changed);
-        assert_eq!(snapshot.active_workspace, HashSet::from([2]));
-        assert!(!snapshot.urgent_workspaces.contains(&2));
     }
 
     #[test]
@@ -1783,19 +1437,286 @@ mod tests {
         );
     }
 
-    #[test]
-    fn workspacev2_event_resolves_prefixed_named_workspace() {
+    fn state(monitors: Value, workspaces: Value) -> HyprlandState {
+        HyprlandBackend::build_state(monitors.as_array().unwrap(), workspaces.as_array().unwrap())
+    }
+
+    /// Fake command socket that answers `j/<name>` with the matching JSON and
+    /// records each command it receives. Removes the socket file on drop.
+    struct FakeSocket {
+        path: std::path::PathBuf,
+        commands: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl Drop for FakeSocket {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+
+    fn backend_with_fake_socket(
+        test: &str,
+        responses: Vec<(&'static str, Value)>,
+    ) -> (HyprlandBackend, FakeSocket) {
+        use std::os::unix::net::UnixListener;
+
+        let path =
+            std::env::temp_dir().join(format!("vp-hyprland-{}-{test}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let listener = UnixListener::bind(&path).expect("bind test Hyprland socket");
+        let commands = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&commands);
+        let responses: HashMap<String, String> = responses
+            .into_iter()
+            .map(|(name, value)| (format!("j/{name}"), value.to_string()))
+            .collect();
+        thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut buf = [0u8; 1024];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let command = String::from_utf8_lossy(&buf[..n]).to_string();
+                let response = responses.get(&command).cloned().unwrap_or_default();
+                recorded.lock().unwrap().push(command);
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+
         let backend = HyprlandBackend::new();
-        *backend.shared.workspaces.write() = vec![WorkspaceMeta {
-            id: -1337,
-            idx: -1,
-            name: "web".to_string(),
-            output: None,
-        }];
+        *backend.socket_path.write() = Some(path.to_string_lossy().into_owned());
+        (backend, FakeSocket { path, commands })
+    }
 
-        backend.handle_event("workspacev2>>-1337,name:web");
+    fn two_monitors(focused_active: i32, other_active: i32) -> Value {
+        json!([
+            {"id": 0, "name": "DP-1", "focused": true,
+             "activeWorkspace": {"id": focused_active, "name": focused_active.to_string()}},
+            {"id": 1, "name": "HDMI-A-1", "focused": false,
+             "activeWorkspace": {"id": other_active, "name": other_active.to_string()}}
+        ])
+    }
 
-        let snapshot = backend.shared.workspace_snapshot.read();
-        assert_eq!(snapshot.active_workspace, HashSet::from([-1337]));
+    #[test]
+    fn build_state_tracks_active_workspace_per_output() {
+        let state = state(two_monitors(2, 5), json!([]));
+
+        assert_eq!(state.focused_monitor.as_deref(), Some("DP-1"));
+        assert_eq!(state.snapshot.active_workspace, HashSet::from([2]));
+        assert_eq!(
+            state.snapshot.per_output["DP-1"].active_workspace,
+            HashSet::from([2])
+        );
+        assert_eq!(
+            state.snapshot.per_output["HDMI-A-1"].active_workspace,
+            HashSet::from([5])
+        );
+        assert_eq!(state.monitor_names[&1], "HDMI-A-1");
+    }
+
+    #[test]
+    fn build_state_counts_windows_per_output() {
+        let state = state(
+            two_monitors(1, 5),
+            json!([
+                {"id": 1, "name": "1", "monitor": "DP-1", "windows": 2},
+                {"id": 3, "name": "3", "monitor": "DP-1", "windows": 0},
+                {"id": 5, "name": "5", "monitor": "HDMI-A-1", "windows": 1}
+            ]),
+        );
+
+        let snapshot = &state.snapshot;
+        assert_eq!(snapshot.occupied_workspaces, HashSet::from([1, 5]));
+        assert_eq!(snapshot.window_counts[&3], 0);
+        assert_eq!(
+            snapshot.per_output["DP-1"].occupied_workspaces,
+            HashSet::from([1])
+        );
+        assert_eq!(snapshot.per_output["HDMI-A-1"].window_counts[&5], 1);
+    }
+
+    #[test]
+    fn apply_state_reports_only_real_changes() {
+        let backend = HyprlandBackend::new();
+        let workspaces = json!([{"id": 1, "name": "1", "monitor": "DP-1", "windows": 1}]);
+
+        assert!(backend.apply_state(state(two_monitors(1, 5), workspaces.clone())));
+        assert!(!backend.apply_state(state(two_monitors(1, 5), workspaces.clone())));
+        assert!(backend.apply_state(state(two_monitors(2, 5), workspaces)));
+        assert_eq!(
+            backend.get_workspace_snapshot().active_workspace,
+            HashSet::from([2])
+        );
+    }
+
+    #[test]
+    fn apply_state_clears_urgency_when_workspace_becomes_active() {
+        let backend = HyprlandBackend::new();
+        let workspaces = json!([
+            {"id": 1, "name": "1", "monitor": "DP-1", "windows": 1},
+            {"id": 2, "name": "2", "monitor": "DP-1", "windows": 1}
+        ]);
+        backend.apply_state(state(two_monitors(1, 5), workspaces.clone()));
+        backend
+            .shared
+            .workspace_snapshot
+            .write()
+            .urgent_workspaces
+            .extend([1, 2]);
+
+        // Urgency survives rebuilds that don't switch to the workspace.
+        backend.apply_state(state(two_monitors(1, 5), workspaces.clone()));
+        assert_eq!(
+            backend.get_workspace_snapshot().urgent_workspaces,
+            HashSet::from([1, 2])
+        );
+
+        assert!(backend.apply_state(state(two_monitors(2, 5), workspaces)));
+        assert_eq!(
+            backend.get_workspace_snapshot().urgent_workspaces,
+            HashSet::from([1])
+        );
+    }
+
+    #[test]
+    fn apply_state_drops_urgency_for_empty_workspaces() {
+        let backend = HyprlandBackend::new();
+        backend
+            .shared
+            .workspace_snapshot
+            .write()
+            .urgent_workspaces
+            .insert(3);
+
+        backend.apply_state(state(
+            two_monitors(1, 5),
+            json!([{"id": 3, "name": "3", "monitor": "DP-1", "windows": 0}]),
+        ));
+
+        assert!(
+            backend
+                .get_workspace_snapshot()
+                .urgent_workspaces
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn event_thread_updates_are_visible_to_manager_side_backend() {
+        let backend = HyprlandBackend::new();
+        let event_thread = backend.event_thread_instance();
+
+        event_thread.apply_state(state(two_monitors(2, 5), json!([])));
+
+        assert_eq!(backend.get_focused_output(), Some("DP-1".to_string()));
+        assert_eq!(
+            backend.get_workspace_snapshot().active_workspace,
+            HashSet::from([2])
+        );
+    }
+
+    #[test]
+    fn empty_window_update_follows_focused_monitor() {
+        let backend = HyprlandBackend::new();
+        backend.apply_state(state(two_monitors(2, 5), json!([])));
+
+        let (_, window_changed, _) = backend.handle_event("focusedmon>>DP-1,2");
+        assert!(window_changed);
+        assert_eq!(backend.window_update().output, Some("DP-1".to_string()));
+        assert!(backend.window_update().title.is_empty());
+
+        *backend.shared.focused_window.write() = Some(WindowInfo {
+            title: "t".to_string(),
+            app_id: "a".to_string(),
+            output: Some("DP-1".to_string()),
+            focused: true,
+        });
+        let (_, window_changed, _) = backend.handle_event("focusedmon>>DP-1,2");
+        assert!(!window_changed);
+    }
+
+    #[test]
+    fn v2_event_twins_do_not_trigger_queries() {
+        let (backend, socket) = backend_with_fake_socket(
+            "v2-twins",
+            vec![
+                ("monitors", two_monitors(2, 5)),
+                ("workspaces", json!([])),
+                ("activewindow", json!({"address": "0xabc", "monitor": 0})),
+            ],
+        );
+
+        for line in [
+            "workspace>>2",
+            "workspacev2>>2,2",
+            "activewindow>>class,title",
+            "activewindowv2>>abc",
+            "createworkspacev2>>2,2",
+            "destroyworkspacev2>>2,2",
+            "moveworkspacev2>>2,2,DP-1",
+            "monitoraddedv2>>1,DP-1,desc",
+            "monitorremovedv2>>1,DP-1,desc",
+        ] {
+            backend.handle_event(line);
+        }
+
+        assert_eq!(
+            *socket.commands.lock().unwrap(),
+            ["j/monitors", "j/workspaces", "j/activewindow"]
+        );
+        assert_eq!(
+            backend.get_workspace_snapshot().active_workspace,
+            HashSet::from([2])
+        );
+    }
+
+    #[test]
+    fn focusedmon_without_focused_window_rebuilds_once() {
+        let (backend, socket) = backend_with_fake_socket(
+            "focusedmon-rebuild",
+            vec![
+                ("monitors", two_monitors(2, 5)),
+                ("workspaces", json!([])),
+                ("activewindow", json!({})),
+            ],
+        );
+
+        backend.handle_event("focusedmon>>DP-1,2");
+
+        assert_eq!(
+            *socket.commands.lock().unwrap(),
+            ["j/monitors", "j/workspaces", "j/activewindow"]
+        );
+    }
+
+    #[test]
+    fn events_track_named_workspaces_without_ids() {
+        let web = json!({ "address": "web", "type": "normal", "name": "web" });
+        let (backend, _socket) = backend_with_fake_socket(
+            "named-without-ids",
+            vec![
+                (
+                    "monitors",
+                    json!([{ "id": 0, "name": "DP-1", "focused": true,
+                             "activeWorkspace": web,
+                             "specialWorkspace": { "address": "", "type": "", "name": "" } }]),
+                ),
+                (
+                    "workspaces",
+                    json!([{ "address": "web", "type": "normal", "name": "web",
+                             "monitor": "DP-1", "windows": 1 }]),
+                ),
+            ],
+        );
+
+        let (workspace_changed, _, _) = backend.handle_event("workspace>>web");
+
+        assert!(workspace_changed);
+        let snapshot = backend.get_workspace_snapshot();
+        assert_eq!(snapshot.active_workspace, HashSet::from([named_id("web")]));
+        assert_eq!(
+            snapshot.occupied_workspaces,
+            HashSet::from([named_id("web")])
+        );
+        assert!(backend.list_workspaces().iter().any(|ws| ws.name == "web"));
+        assert_eq!(backend.workspace_switch_target(named_id("web")), "name:web");
     }
 }

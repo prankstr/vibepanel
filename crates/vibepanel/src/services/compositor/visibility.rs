@@ -539,6 +539,21 @@ fn niri_scene(workspaces: &Value, windows: &Value, overview: bool) -> Option<Sna
     Some(scene)
 }
 
+/// Identity of a Hyprland workspace object: its `type` and `address` on newer
+/// Hyprland, which omits `id` for named and special workspaces, else its `id`.
+/// The type matters because a normal and a special workspace can share an
+/// address. An empty address or ID 0 means no workspace.
+fn hyprland_workspace_key(workspace: &Value) -> Option<String> {
+    match workspace["address"].as_str() {
+        Some(address) => (!address.is_empty())
+            .then(|| format!("{}:{address}", workspace["type"].as_str().unwrap_or(""))),
+        None => workspace["id"]
+            .as_i64()
+            .filter(|id| *id != 0)
+            .map(|id| id.to_string()),
+    }
+}
+
 fn hyprland_scene(monitors: &Value, clients: &Value) -> Option<Snapshot> {
     let monitors = monitors.as_array()?;
     let clients = clients.as_array()?;
@@ -546,19 +561,17 @@ fn hyprland_scene(monitors: &Value, clients: &Value) -> Option<Snapshot> {
     for monitor in monitors {
         let name = monitor["name"].as_str()?;
         let id = monitor["id"].as_i64()?;
-        let active = monitor["activeWorkspace"]["id"].as_i64()?;
-        let special = monitor["specialWorkspace"]["id"]
-            .as_i64()
-            .filter(|id| *id != 0);
+        let active = hyprland_workspace_key(&monitor["activeWorkspace"])?;
+        let special = hyprland_workspace_key(&monitor["specialWorkspace"]);
         let origin = monitor["x"].as_f64().zip(monitor["y"].as_f64());
         let mut output = OutputWindows::default();
         for client in clients.iter().filter(|c| c["monitor"].as_i64() == Some(id)) {
             if client["mapped"].as_bool() == Some(false) || flag(client, "hidden") {
                 continue;
             }
-            let ws = client["workspace"]["id"].as_i64();
+            let ws = hyprland_workspace_key(&client["workspace"]);
             if !flag(client, "pinned")
-                && ws != Some(active)
+                && ws.as_ref() != Some(&active)
                 && !(special.is_some() && ws == special)
             {
                 if ws.is_none() {
@@ -918,6 +931,34 @@ mod tests {
             "pinned":true,"at":[450,0],"size":[100,100]}]);
         assert_eq!(
             hyprland_scene(&monitors, &pinned).unwrap()["A"].decision(&[bar()]),
+            HideDecision::Hide
+        );
+    }
+
+    #[test]
+    fn hyprland_matches_workspaces_by_address_without_ids() {
+        // Newer Hyprland omits `id` for named and special workspaces.
+        let monitors = json!([{"name":"A","id":0,"x":0,"y":0,
+            "width":1920,"height":1080,"scale":1.0,"transform":0,
+            "activeWorkspace":{"address":"web","type":"normal","name":"web"},
+            "specialWorkspace":{"address":"","type":"","name":""}}]);
+        let tiled = |address: &str| {
+            json!([{"monitor":0,"floating":false,
+                "workspace":{"address":address,"type":"normal","name":address}}])
+        };
+
+        let scene = hyprland_scene(&monitors, &tiled("web")).unwrap();
+        assert!(scene["A"].tiled);
+        assert!(!scene["A"].incomplete);
+        assert!(!hyprland_scene(&monitors, &tiled("chat")).unwrap()["A"].tiled);
+
+        let mut monitors = monitors;
+        monitors[0]["specialWorkspace"] =
+            json!({"address":"special:magic","type":"special","name":"special:magic"});
+        let floater = json!([{"monitor":0,"floating":true,"at":[450,0],"size":[100,100],
+            "workspace":{"address":"special:magic","type":"special","name":"special:magic"}}]);
+        assert_eq!(
+            hyprland_scene(&monitors, &floater).unwrap()["A"].decision(&[bar()]),
             HideDecision::Hide
         );
     }
