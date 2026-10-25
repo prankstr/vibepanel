@@ -30,10 +30,34 @@ const RECONNECT_INITIAL_MS: u64 = 1000;
 const RECONNECT_MAX_MS: u64 = 30000;
 const RECONNECT_MULTIPLIER: f64 = 1.5;
 
-/// (workspace_changed, window_changed, keyboard_layout_changed)
-type Changes = (bool, bool, bool);
+/// Which parts of the state an event changed.
+#[derive(Debug, Clone, Copy)]
+struct Changes {
+    workspaces: bool,
+    windows: bool,
+    keyboard_layout: bool,
+}
 
-const UNCHANGED: Changes = (false, false, false);
+impl Changes {
+    const NONE: Self = Self {
+        workspaces: false,
+        windows: false,
+        keyboard_layout: false,
+    };
+    const WINDOWS: Self = Self {
+        windows: true,
+        ..Self::NONE
+    };
+    const WORKSPACES_AND_WINDOWS: Self = Self {
+        workspaces: true,
+        windows: true,
+        ..Self::NONE
+    };
+    const KEYBOARD_LAYOUT: Self = Self {
+        keyboard_layout: true,
+        ..Self::NONE
+    };
+}
 
 /// Niri's state as reported by the event stream. Everything the panel shows
 /// is derived from it on demand.
@@ -46,7 +70,7 @@ struct NiriState {
     keyboard_layout_idx: Option<usize>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct WorkspaceData {
     id: u64,
     idx: i32,
@@ -62,7 +86,7 @@ struct WorkspaceData {
     active_window_id: Option<u64>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct WindowData {
     id: u64,
     title: String,
@@ -83,14 +107,13 @@ pub struct NiriBackend {
     event_thread: Mutex<Option<JoinHandle<()>>>,
     socket_path: RwLock<Option<String>>,
     state: Arc<RwLock<NiriState>>,
-    callbacks: Mutex<Option<(WorkspaceCallback, WindowCallback)>>,
     keyboard_layout_callback: Mutex<Option<KeyboardLayoutCallback>>,
     window_list_callback: Mutex<Option<super::WindowListCallback>>,
 }
 
-/// Callbacks used by the event thread.
 struct Callbacks {
-    workspace: Option<(WorkspaceCallback, WindowCallback)>,
+    workspace: WorkspaceCallback,
+    window: WindowCallback,
     keyboard_layout: Option<KeyboardLayoutCallback>,
     window_list: Option<super::WindowListCallback>,
 }
@@ -140,23 +163,21 @@ fn parse_window(window: &Value) -> Option<WindowData> {
     })
 }
 
-/// Extract `pos_in_scrolling_layout` from a niri window layout.
 fn parse_layout_position(layout: &Value) -> Option<(i32, i32)> {
     let pos = layout.get("pos_in_scrolling_layout")?.as_array()?;
     Some((pos.first()?.as_i64()? as i32, pos.get(1)?.as_i64()? as i32))
 }
 
 impl NiriState {
-    /// Apply one event-stream event.
     fn apply(&mut self, event: &Value) -> Changes {
         let Some((kind, data)) = event.as_object().and_then(|obj| obj.iter().next()) else {
-            return UNCHANGED;
+            return Changes::NONE;
         };
 
         match kind.as_str() {
             "WorkspacesChanged" => {
                 let Some(workspaces) = data.get("workspaces").and_then(Value::as_array) else {
-                    return UNCHANGED;
+                    return Changes::NONE;
                 };
                 self.workspaces = workspaces
                     .iter()
@@ -164,14 +185,14 @@ impl NiriState {
                     .map(|ws| (ws.id, ws))
                     .collect();
                 // Workspaces may have moved between outputs.
-                (true, true, false)
+                Changes::WORKSPACES_AND_WINDOWS
             }
             "WorkspaceActivated" => {
                 let Some(id) = u64_field(data, "id") else {
-                    return UNCHANGED;
+                    return Changes::NONE;
                 };
                 let Some(output) = self.workspaces.get(&id).map(|ws| ws.output.clone()) else {
-                    return UNCHANGED;
+                    return Changes::NONE;
                 };
                 let focused = bool_field(data, "focused");
                 let mut changed = false;
@@ -184,38 +205,45 @@ impl NiriState {
                         changed |= update(&mut ws.is_focused, activated);
                     }
                 }
-                (changed, true, false)
+                Changes {
+                    workspaces: changed,
+                    windows: true,
+                    ..Changes::NONE
+                }
             }
             "WorkspaceUrgencyChanged" => {
                 let urgent = bool_field(data, "urgent");
                 let changed = u64_field(data, "id")
                     .and_then(|id| self.workspaces.get_mut(&id))
                     .is_some_and(|ws| update(&mut ws.is_urgent, urgent));
-                (changed, false, false)
+                Changes {
+                    workspaces: changed,
+                    ..Changes::NONE
+                }
             }
             "WorkspaceActiveWindowChanged" => {
                 let Some(ws) =
                     u64_field(data, "workspace_id").and_then(|id| self.workspaces.get_mut(&id))
                 else {
-                    return UNCHANGED;
+                    return Changes::NONE;
                 };
                 ws.active_window_id = u64_field(data, "active_window_id");
-                (false, true, false)
+                Changes::WINDOWS
             }
             "WindowsChanged" => {
                 let Some(windows) = data.get("windows").and_then(Value::as_array) else {
-                    return UNCHANGED;
+                    return Changes::NONE;
                 };
                 self.windows = windows
                     .iter()
                     .filter_map(parse_window)
                     .map(|win| (win.id, win))
                     .collect();
-                (true, true, false)
+                Changes::WORKSPACES_AND_WINDOWS
             }
             "WindowOpenedOrChanged" => {
                 let Some(mut window) = data.get("window").and_then(parse_window) else {
-                    return UNCHANGED;
+                    return Changes::NONE;
                 };
                 if window.dragging
                     && let Some(prev) = self.windows.get(&window.id)
@@ -232,13 +260,16 @@ impl NiriState {
                 let previous = self.windows.insert(window.id, window);
                 // Window counts change when a window opens or moves.
                 let moved = previous.is_none_or(|prev| prev.workspace_id != workspace_id);
-                (moved, true, false)
+                Changes {
+                    workspaces: moved,
+                    windows: true,
+                    ..Changes::NONE
+                }
             }
             "WindowLayoutsChanged" => {
                 let Some(changes) = data.get("changes").and_then(Value::as_array) else {
-                    return UNCHANGED;
+                    return Changes::NONE;
                 };
-                // Each change is a [window_id, layout] pair.
                 for change in changes {
                     if let Some([id, layout, ..]) = change.as_array().map(Vec::as_slice)
                         && let Some(win) = id.as_u64().and_then(|id| self.windows.get_mut(&id))
@@ -249,32 +280,35 @@ impl NiriState {
                         }
                     }
                 }
-                (false, true, false)
+                Changes::WINDOWS
             }
             "WindowClosed" => {
                 let Some(id) = u64_field(data, "id") else {
-                    return UNCHANGED;
+                    return Changes::NONE;
                 };
                 self.windows.remove(&id);
-                (true, true, false)
+                Changes::WORKSPACES_AND_WINDOWS
             }
             "WindowFocusChanged" => {
                 let id = u64_field(data, "id");
                 for win in self.windows.values_mut() {
                     win.is_focused = Some(win.id) == id;
                 }
-                (false, true, false)
+                Changes::WINDOWS
             }
             "WindowUrgencyChanged" => {
                 let urgent = bool_field(data, "urgent");
                 let changed = u64_field(data, "id")
                     .and_then(|id| self.windows.get_mut(&id))
                     .is_some_and(|win| update(&mut win.is_urgent, urgent));
-                (false, changed, false)
+                Changes {
+                    windows: changed,
+                    ..Changes::NONE
+                }
             }
             "KeyboardLayoutsChanged" => {
                 let Some(layouts) = data.get("keyboard_layouts") else {
-                    return UNCHANGED;
+                    return Changes::NONE;
                 };
                 self.keyboard_layout_names = layouts
                     .get("names")
@@ -288,16 +322,16 @@ impl NiriState {
                     .unwrap_or_default();
                 self.keyboard_layout_idx =
                     Some(u64_field(layouts, "current_idx").unwrap_or(0) as usize);
-                (false, false, true)
+                Changes::KEYBOARD_LAYOUT
             }
             "KeyboardLayoutSwitched" => {
                 let Some(idx) = u64_field(data, "idx") else {
-                    return UNCHANGED;
+                    return Changes::NONE;
                 };
                 self.keyboard_layout_idx = Some(idx as usize);
-                (false, false, true)
+                Changes::KEYBOARD_LAYOUT
             }
-            _ => UNCHANGED,
+            _ => Changes::NONE,
         }
     }
 
@@ -305,10 +339,10 @@ impl NiriState {
         self.workspaces.get(&workspace_id?)?.output.as_ref()
     }
 
-    /// Workspaces ordered by output, then position.
+    /// Workspaces ordered by output, then position, with those without an
+    /// output last.
     fn workspace_list(&self) -> Vec<WorkspaceMeta> {
         let mut workspaces: Vec<&WorkspaceData> = self.workspaces.values().collect();
-        // Workspaces without an output sort last.
         workspaces.sort_by_key(|ws| (ws.output.is_none(), &ws.output, ws.idx, ws.id));
         workspaces
             .into_iter()
@@ -410,13 +444,12 @@ impl NiriState {
 
     fn window_list(&self) -> Vec<super::Window> {
         let mut windows: Vec<&WindowData> = self.windows.values().collect();
-        // Sort by output name, then workspace index, then layout position.
-        // This mirrors the workspace order so multi-monitor taskbars with
-        // filter_by_output=false group windows by monitor first.
-        windows.sort_by_cached_key(|win| {
+        // Mirror the workspace order, so multi-monitor taskbars with
+        // filter_by_output = false group windows by monitor first.
+        windows.sort_by_key(|win| {
             let ws = win.workspace_id.and_then(|id| self.workspaces.get(&id));
             (
-                ws.and_then(|ws| ws.output.clone()).unwrap_or_default(),
+                ws.and_then(|ws| ws.output.as_ref()),
                 ws.map_or(i32::MAX, |ws| ws.idx),
                 win.layout_position.unwrap_or((i32::MAX, i32::MAX)),
                 // The window that slides into a dragged window's slot gets
@@ -462,7 +495,6 @@ impl NiriBackend {
             event_thread: Mutex::new(None),
             socket_path: RwLock::new(None),
             state: Arc::new(RwLock::new(NiriState::default())),
-            callbacks: Mutex::new(None),
             keyboard_layout_callback: Mutex::new(None),
             window_list_callback: Mutex::new(None),
         }
@@ -470,13 +502,7 @@ impl NiriBackend {
 
     /// Send a JSON request to Niri and get the response.
     fn send_request(&self, request: &Value) -> Option<Value> {
-        let socket_path = self.socket_path.read();
-        let socket_path = socket_path.as_ref()?;
-        Self::send_request_static(socket_path, request)
-    }
-
-    /// Send a JSON request to Niri (static version for use without &self).
-    fn send_request_static(socket_path: &str, request: &Value) -> Option<Value> {
+        let socket_path = self.socket_path.read().clone()?;
         let mut stream = match UnixStream::connect(socket_path) {
             Ok(s) => s,
             Err(e) => {
@@ -516,27 +542,27 @@ impl NiriBackend {
     /// Send the changed parts of the state to the callbacks. The lock is
     /// released before any callback runs.
     fn emit(state: &RwLock<NiriState>, callbacks: &Callbacks, changes: Changes) {
-        let (ws_changed, win_changed, kb_changed) = changes;
         let (snapshot, per_output, windows, keyboard_layout) = {
             let state = state.read();
             (
-                ws_changed.then(|| state.snapshot()),
-                win_changed.then(|| state.per_output_windows()),
+                changes.workspaces.then(|| state.snapshot()),
+                changes.windows.then(|| state.per_output_windows()),
                 // Workspace changes can affect taskbar ordering and separator
                 // labels, which resolve workspace IDs to idx/name metadata.
-                (ws_changed || win_changed).then(|| state.window_list()),
-                kb_changed.then(|| state.keyboard_layout()).flatten(),
+                (changes.workspaces || changes.windows).then(|| state.window_list()),
+                changes
+                    .keyboard_layout
+                    .then(|| state.keyboard_layout())
+                    .flatten(),
             )
         };
 
-        if let Some((ws_cb, win_cb)) = &callbacks.workspace {
-            if let Some(snapshot) = snapshot {
-                ws_cb(snapshot);
-            }
-            // Emit every output, including empty info for outputs with no window.
-            for info in per_output.into_iter().flat_map(HashMap::into_values) {
-                win_cb(info);
-            }
+        if let Some(snapshot) = snapshot {
+            (callbacks.workspace)(snapshot);
+        }
+        // Emit every output, including empty info for outputs with no window.
+        for info in per_output.into_iter().flat_map(HashMap::into_values) {
+            (callbacks.window)(info);
         }
         if let Some(wl_cb) = &callbacks.window_list
             && let Some(windows) = windows
@@ -689,15 +715,11 @@ impl CompositorBackend for NiriBackend {
         };
         *self.socket_path.write() = Some(socket_path.clone());
 
-        // Store callbacks for potential later use
-        *self.callbacks.lock().unwrap_or_else(|e| e.into_inner()) =
-            Some((on_workspace_update.clone(), on_window_update.clone()));
-
-        // Clone state and running flag for the thread
         let running = Arc::clone(&self.running);
         let state = Arc::clone(&self.state);
         let callbacks = Callbacks {
-            workspace: Some((on_workspace_update, on_window_update)),
+            workspace: on_workspace_update,
+            window: on_window_update,
             keyboard_layout: self
                 .keyboard_layout_callback
                 .lock()
@@ -848,6 +870,8 @@ impl Drop for NiriBackend {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::AtomicUsize;
+
     use super::*;
 
     fn window(id: u64, ws: u64, title: &str, focused: bool) -> serde_json::Value {
@@ -889,27 +913,21 @@ mod tests {
     /// hides workspace 4 with window Y.
     fn setup() -> NiriState {
         let mut state = NiriState::default();
-        apply(
-            &mut state,
-            serde_json::json!({"WorkspacesChanged": {"workspaces": [
-                workspace(1, "DP-1", true, true, Some(4)),
-                workspace(2, "DP-1", false, false, None),
-                workspace(3, "DP-2", true, false, Some(10)),
-                workspace(4, "DP-2", false, false, Some(11)),
-            ]}}),
-        );
-        apply(
-            &mut state,
-            serde_json::json!({"WindowsChanged": {"windows": [
-                window(1, 1, "A1", false),
-                window(2, 1, "A2", false),
-                window(3, 1, "A3", false),
-                window(4, 1, "B", true),
-                window(5, 1, "A5", false),
-                window(10, 3, "X", false),
-                window(11, 4, "Y", false),
-            ]}}),
-        );
+        state.apply(&serde_json::json!({"WorkspacesChanged": {"workspaces": [
+            workspace(1, "DP-1", true, true, Some(4)),
+            workspace(2, "DP-1", false, false, None),
+            workspace(3, "DP-2", true, false, Some(10)),
+            workspace(4, "DP-2", false, false, Some(11)),
+        ]}}));
+        state.apply(&serde_json::json!({"WindowsChanged": {"windows": [
+            window(1, 1, "A1", false),
+            window(2, 1, "A2", false),
+            window(3, 1, "A3", false),
+            window(4, 1, "B", true),
+            window(5, 1, "A5", false),
+            window(10, 3, "X", false),
+            window(11, 4, "Y", false),
+        ]}}));
         state
     }
 
@@ -919,27 +937,20 @@ mod tests {
         assert_eq!(shown_focused(&state), "B");
 
         // A layer-shell surface (e.g. a popover) takes the keyboard.
-        let (_, changed, _) = apply(
-            &mut state,
-            serde_json::json!({"WindowFocusChanged": {"id": null}}),
-        );
+        let changed = state
+            .apply(&serde_json::json!({"WindowFocusChanged": {"id": null}}))
+            .windows;
         assert!(changed);
         assert_eq!(shown(&state, "DP-1"), ("B".to_string(), true));
 
         // The title still updates while the popover has focus.
-        apply(
-            &mut state,
-            serde_json::json!({"WindowOpenedOrChanged": {
-                "window": window(4, 1, "B renamed", false)
-            }}),
-        );
+        state.apply(&serde_json::json!({"WindowOpenedOrChanged": {
+            "window": window(4, 1, "B renamed", false)
+        }}));
         assert_eq!(shown_focused(&state), "B renamed");
 
         // Focus returns to the window.
-        apply(
-            &mut state,
-            serde_json::json!({"WindowFocusChanged": {"id": 4}}),
-        );
+        state.apply(&serde_json::json!({"WindowFocusChanged": {"id": 4}}));
         assert_eq!(shown_focused(&state), "B renamed");
     }
 
@@ -949,32 +960,19 @@ mod tests {
         assert_eq!(shown(&state, "DP-2"), ("X".to_string(), false));
 
         // An active-window change on a hidden workspace leaves DP-2 alone.
-        apply(
-            &mut state,
-            serde_json::json!({"WorkspaceActiveWindowChanged": {
-                "workspace_id": 4, "active_window_id": 11
-            }}),
-        );
+        state.apply(&serde_json::json!({"WorkspaceActiveWindowChanged": {
+            "workspace_id": 4, "active_window_id": 11
+        }}));
         assert_eq!(shown(&state, "DP-2"), ("X".to_string(), false));
     }
 
     #[test]
     fn empty_workspace_clears_the_title() {
         let mut state = setup();
-        apply(
-            &mut state,
-            serde_json::json!({"WorkspaceActivated": {"id": 2, "focused": true}}),
-        );
-        apply(
-            &mut state,
-            serde_json::json!({"WindowFocusChanged": {"id": null}}),
-        );
+        state.apply(&serde_json::json!({"WorkspaceActivated": {"id": 2, "focused": true}}));
+        state.apply(&serde_json::json!({"WindowFocusChanged": {"id": null}}));
 
         assert_eq!(shown(&state, "DP-1"), (String::new(), true));
-    }
-
-    fn apply(state: &mut NiriState, event: serde_json::Value) -> (bool, bool, bool) {
-        state.apply(&event)
     }
 
     fn window_ids(state: &NiriState) -> Vec<u64> {
@@ -1017,11 +1015,9 @@ mod tests {
     fn window_counts_follow_moves_and_closes() {
         let mut state = setup();
 
-        let (ws_changed, _, _) = apply(
-            &mut state,
-            serde_json::json!({"WindowOpenedOrChanged": {"window": window(5, 2, "A5", false)}}),
-        );
-        assert!(ws_changed);
+        let moved =
+            serde_json::json!({"WindowOpenedOrChanged": {"window": window(5, 2, "A5", false)}});
+        assert!(state.apply(&moved).workspaces);
         assert_eq!(
             state.snapshot().window_counts,
             counts([(1, 4), (2, 1), (3, 1), (4, 1)])
@@ -1030,108 +1026,82 @@ mod tests {
         // A new window changes the counts; a title change doesn't.
         let opened =
             serde_json::json!({"WindowOpenedOrChanged": {"window": window(6, 2, "C", false)}});
-        assert!(apply(&mut state, opened).0);
+        assert!(state.apply(&opened).workspaces);
         let renamed =
             serde_json::json!({"WindowOpenedOrChanged": {"window": window(6, 2, "C2", false)}});
-        assert!(!apply(&mut state, renamed).0);
+        assert!(!state.apply(&renamed).workspaces);
         assert_eq!(state.snapshot().window_counts[&2], 2);
-        apply(&mut state, serde_json::json!({"WindowClosed": {"id": 6}}));
+        state.apply(&serde_json::json!({"WindowClosed": {"id": 6}}));
 
-        let (ws_changed, win_changed, _) =
-            apply(&mut state, serde_json::json!({"WindowClosed": {"id": 10}}));
-        assert!(ws_changed && win_changed);
+        let changes = state.apply(&serde_json::json!({"WindowClosed": {"id": 10}}));
+        assert!(changes.workspaces && changes.windows);
         let snapshot = state.snapshot();
         assert_eq!(snapshot.window_counts[&3], 0);
         assert_eq!(snapshot.per_output["DP-2"].window_counts[&3], 0);
         assert_eq!(window_ids(&state), vec![1, 2, 3, 4, 5, 11]);
     }
 
-    #[test]
-    fn dragged_window_keeps_its_workspace() {
-        let mut state = setup();
-
-        let mut dragged = window(5, 1, "A5", false);
+    fn drag(state: &mut NiriState, id: u64) {
+        let mut dragged = window(id, 1, "dragged", false);
         dragged["workspace_id"] = serde_json::Value::Null;
-        let (ws_changed, _, _) = apply(
-            &mut state,
-            serde_json::json!({"WindowOpenedOrChanged": {"window": dragged}}),
-        );
-        assert!(!ws_changed);
+        let lifted = serde_json::json!({"WindowOpenedOrChanged": {"window": dragged}});
+        assert!(!state.apply(&lifted).workspaces);
+    }
+
+    #[test]
+    fn dragged_window_keeps_its_workspace_and_place() {
+        let mut state = setup();
+        // Window IDs run against the on-screen order. Column 3 is stacked.
+        state.apply(&serde_json::json!({"WindowLayoutsChanged": {"changes": [
+            [3, {"pos_in_scrolling_layout": [1, 1]}],
+            [2, {"pos_in_scrolling_layout": [2, 1]}],
+            [5, {"pos_in_scrolling_layout": [3, 1]}],
+            [1, {"pos_in_scrolling_layout": [3, 2]}],
+            [4, {"pos_in_scrolling_layout": [3, 3]}],
+        ]}}));
+        assert_eq!(window_ids(&state), vec![3, 2, 5, 1, 4, 10, 11]);
+
+        // Lifting out the first column shifts the others into its place.
+        drag(&mut state, 3);
+        state.apply(&serde_json::json!({"WindowLayoutsChanged": {"changes": [
+            [3, {"pos_in_scrolling_layout": null}],
+            [2, {"pos_in_scrolling_layout": [1, 1]}],
+            [5, {"pos_in_scrolling_layout": [2, 1]}],
+            [1, {"pos_in_scrolling_layout": [2, 2]}],
+            [4, {"pos_in_scrolling_layout": [2, 3]}],
+        ]}}));
+        assert_eq!(window_ids(&state), vec![3, 2, 5, 1, 4, 10, 11]);
         assert_eq!(state.snapshot().window_counts[&1], 5);
         let windows = state.window_list();
-        let win = windows.iter().find(|win| win.id == 5).unwrap();
+        let win = windows.iter().find(|win| win.id == 3).unwrap();
         assert_eq!(win.workspace_id, Some(1));
         assert_eq!(win.output.as_deref(), Some("DP-1"));
 
-        // Dropping it on another workspace moves it.
-        apply(
-            &mut state,
-            serde_json::json!({"WindowOpenedOrChanged": {"window": window(5, 2, "A5", false)}}),
-        );
+        // Dropping it on workspace 2 moves it there.
+        let mut dropped = window(3, 2, "A3", false);
+        dropped["layout"] = serde_json::json!({"pos_in_scrolling_layout": [1, 1]});
+        state.apply(&serde_json::json!({"WindowOpenedOrChanged": {"window": dropped}}));
+        assert_eq!(window_ids(&state), vec![2, 5, 1, 4, 3, 10, 11]);
         let snapshot = state.snapshot();
         assert_eq!(snapshot.window_counts[&1], 4);
         assert_eq!(snapshot.window_counts[&2], 1);
+
+        // Lifting the top tile of a stacked column moves the rest up.
+        drag(&mut state, 5);
+        state.apply(&serde_json::json!({"WindowLayoutsChanged": {"changes": [
+            [5, {"pos_in_scrolling_layout": null}],
+            [1, {"pos_in_scrolling_layout": [2, 1]}],
+            [4, {"pos_in_scrolling_layout": [2, 2]}],
+        ]}}));
+        assert_eq!(window_ids(&state), vec![2, 5, 1, 4, 3, 10, 11]);
     }
 
     #[test]
-    fn dragged_window_keeps_its_place_in_the_taskbar() {
+    fn dragged_floating_window_keeps_its_place() {
+        // Windows without a layout position, such as floating ones, sort by ID.
         let mut state = setup();
-        apply(
-            &mut state,
-            serde_json::json!({"WindowLayoutsChanged": {"changes": [
-                [1, {"pos_in_scrolling_layout": [1, 1]}],
-                [2, {"pos_in_scrolling_layout": [2, 1]}],
-                [3, {"pos_in_scrolling_layout": [3, 1]}],
-            ]}}),
-        );
+        drag(&mut state, 2);
         assert_eq!(window_ids(&state), vec![1, 2, 3, 4, 5, 10, 11]);
-
-        // Lifting window 2 out of the layout closes the gap behind it.
-        let mut dragged = window(2, 1, "A2", false);
-        dragged["workspace_id"] = serde_json::Value::Null;
-        apply(
-            &mut state,
-            serde_json::json!({"WindowOpenedOrChanged": {"window": dragged}}),
-        );
-        apply(
-            &mut state,
-            serde_json::json!({"WindowLayoutsChanged": {"changes": [
-                [2, {"pos_in_scrolling_layout": null}],
-                [3, {"pos_in_scrolling_layout": [2, 1]}],
-            ]}}),
-        );
-        assert_eq!(window_ids(&state), vec![1, 2, 3, 4, 5, 10, 11]);
-
-        // Dropping it on workspace 2 moves it there.
-        let mut dropped = window(2, 2, "A2", false);
-        dropped["layout"] = serde_json::json!({"pos_in_scrolling_layout": [1, 1]});
-        apply(
-            &mut state,
-            serde_json::json!({"WindowOpenedOrChanged": {"window": dropped}}),
-        );
-        assert_eq!(window_ids(&state), vec![1, 3, 4, 5, 2, 10, 11]);
-    }
-
-    #[test]
-    fn workspaces_changed_keeps_window_counts() {
-        let mut state = setup();
-        apply(
-            &mut state,
-            serde_json::json!({"WorkspacesChanged": {"workspaces": [
-                workspace(1, "DP-1", false, false, Some(4)),
-                workspace(2, "DP-1", true, true, None),
-                workspace(3, "DP-2", true, false, Some(10)),
-                workspace(4, "DP-2", false, false, Some(11)),
-            ]}}),
-        );
-
-        let snapshot = state.snapshot();
-        assert_eq!(snapshot.active_workspace, set([2]));
-        assert_eq!(snapshot.per_output["DP-1"].active_workspace, set([2]));
-        assert_eq!(
-            snapshot.window_counts,
-            counts([(1, 5), (2, 0), (3, 1), (4, 1)])
-        );
     }
 
     #[test]
@@ -1139,10 +1109,9 @@ mod tests {
         let mut state = setup();
 
         // Activating without focus only changes what the output shows.
-        let (ws_changed, _, _) = apply(
-            &mut state,
-            serde_json::json!({"WorkspaceActivated": {"id": 4, "focused": false}}),
-        );
+        let ws_changed = state
+            .apply(&serde_json::json!({"WorkspaceActivated": {"id": 4, "focused": false}}))
+            .workspaces;
         assert!(ws_changed);
         let snap = state.snapshot();
         assert_eq!(snap.active_workspace, set([1]));
@@ -1151,10 +1120,7 @@ mod tests {
         assert_eq!(shown(&state, "DP-2"), ("Y".to_string(), false));
 
         // Focusing a workspace on another output moves global focus there.
-        apply(
-            &mut state,
-            serde_json::json!({"WorkspaceActivated": {"id": 3, "focused": true}}),
-        );
+        state.apply(&serde_json::json!({"WorkspaceActivated": {"id": 3, "focused": true}}));
         let snap = state.snapshot();
         assert_eq!(snap.active_workspace, set([3]));
         assert_eq!(snap.per_output["DP-1"].active_workspace, set([1]));
@@ -1163,54 +1129,21 @@ mod tests {
     }
 
     #[test]
-    fn urgency_is_tracked_for_workspaces_and_windows() {
-        let mut state = setup();
-
-        let urgent = serde_json::json!({"WorkspaceUrgencyChanged": {"id": 2, "urgent": true}});
-        assert!(apply(&mut state, urgent.clone()).0);
-        assert_eq!(state.snapshot().urgent_workspaces, set([2]));
-        assert!(!apply(&mut state, urgent).0);
-
-        apply(
-            &mut state,
-            serde_json::json!({"WorkspaceUrgencyChanged": {"id": 2, "urgent": false}}),
-        );
-        assert!(state.snapshot().urgent_workspaces.is_empty());
-
-        let urgent = serde_json::json!({"WindowUrgencyChanged": {"id": 3, "urgent": true}});
-        assert!(apply(&mut state, urgent.clone()).1);
-        assert!(!apply(&mut state, urgent).1);
-        let urgent_windows: Vec<u64> = state
-            .window_list()
-            .iter()
-            .filter(|win| win.is_urgent)
-            .map(|win| win.id)
-            .collect();
-        assert_eq!(urgent_windows, vec![3]);
-    }
-
-    #[test]
     fn window_list_follows_output_workspace_and_layout_order() {
         let mut state = setup();
         assert_eq!(window_ids(&state), vec![1, 2, 3, 4, 5, 10, 11]);
 
-        apply(
-            &mut state,
-            serde_json::json!({"WindowLayoutsChanged": {"changes": [
-                [5, {"pos_in_scrolling_layout": [1, 1]}],
-                [3, {"pos_in_scrolling_layout": [2, 1]}],
-                [1, {"pos_in_scrolling_layout": [2, 2]}],
-            ]}}),
-        );
+        state.apply(&serde_json::json!({"WindowLayoutsChanged": {"changes": [
+            [5, {"pos_in_scrolling_layout": [1, 1]}],
+            [3, {"pos_in_scrolling_layout": [2, 1]}],
+            [1, {"pos_in_scrolling_layout": [2, 2]}],
+        ]}}));
         assert_eq!(window_ids(&state), vec![5, 3, 1, 2, 4, 10, 11]);
 
         // A full window update carries its layout position too.
         let mut moved = window(11, 3, "Y", false);
         moved["layout"] = serde_json::json!({"pos_in_scrolling_layout": [1, 1]});
-        apply(
-            &mut state,
-            serde_json::json!({"WindowOpenedOrChanged": {"window": moved}}),
-        );
+        state.apply(&serde_json::json!({"WindowOpenedOrChanged": {"window": moved}}));
         assert_eq!(window_ids(&state), vec![5, 3, 1, 2, 4, 11, 10]);
 
         let windows = state.window_list();
@@ -1221,69 +1154,50 @@ mod tests {
     }
 
     #[test]
-    fn focused_window_follows_focus_and_close() {
+    fn callbacks_run_without_the_state_lock() {
         let mut state = setup();
-        assert_eq!(
-            state.focused_window(),
-            Some(WindowInfo {
-                title: "B".to_string(),
-                app_id: "B-app".to_string(),
-                output: Some("DP-1".to_string()),
-                focused: true,
-            })
-        );
-
-        apply(
-            &mut state,
-            serde_json::json!({"WindowFocusChanged": {"id": 10}}),
-        );
-        let focused = state.focused_window().unwrap();
-        assert_eq!(focused.title, "X");
-        assert_eq!(focused.output.as_deref(), Some("DP-2"));
-
-        // Opening a focused window takes focus from the previous one.
-        apply(
-            &mut state,
-            serde_json::json!({"WindowOpenedOrChanged": {"window": window(20, 1, "New", true)}}),
-        );
-        assert_eq!(state.focused_window().unwrap().title, "New");
-        let focused_ids: Vec<u64> = state
-            .window_list()
-            .iter()
-            .filter(|win| win.is_focused)
-            .map(|win| win.id)
-            .collect();
-        assert_eq!(focused_ids, vec![20]);
-
-        apply(&mut state, serde_json::json!({"WindowClosed": {"id": 20}}));
-        assert_eq!(state.focused_window(), None);
-    }
-
-    #[test]
-    fn keyboard_layout_follows_list_and_switch() {
-        let mut state = setup();
-        assert_eq!(state.keyboard_layout(), None);
-
-        let (_, _, changed) = apply(
-            &mut state,
-            serde_json::json!({"KeyboardLayoutsChanged": {"keyboard_layouts": {
-                "names": ["English (US)", "Swedish"], "current_idx": 0
+        state.apply(
+            &serde_json::json!({"KeyboardLayoutsChanged": {"keyboard_layouts": {
+                "names": ["English (US)"], "current_idx": 0
             }}}),
         );
-        assert!(changed);
-        assert_eq!(
-            state.keyboard_layout(),
-            Some(KeyboardLayoutInfo {
-                layout_name: "English (US)".to_string(),
-                layout_count: Some(2),
-            })
-        );
+        let state = Arc::new(RwLock::new(state));
 
-        let (_, _, changed) = apply(
-            &mut state,
-            serde_json::json!({"KeyboardLayoutSwitched": {"idx": 1}}),
-        );
-        assert!(changed);
-        assert_eq!(state.keyboard_layout().unwrap().layout_name, "Swedish");
+        // Each callback checks that it could take the lock itself, as a
+        // widget calling back into the backend would.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let check: Arc<dyn Fn() + Send + Sync> = {
+            let (state, calls) = (Arc::clone(&state), Arc::clone(&calls));
+            Arc::new(move || {
+                assert!(state.try_write().is_some(), "callback ran under the lock");
+                calls.fetch_add(1, Ordering::SeqCst);
+            })
+        };
+        let callbacks = Callbacks {
+            workspace: Arc::new({
+                let check = Arc::clone(&check);
+                move |_| check()
+            }),
+            window: Arc::new({
+                let check = Arc::clone(&check);
+                move |_| check()
+            }),
+            keyboard_layout: Some(Arc::new({
+                let check = Arc::clone(&check);
+                move |_| check()
+            })),
+            window_list: Some(Arc::new(move |_| check())),
+        };
+
+        let all = Changes {
+            workspaces: true,
+            windows: true,
+            keyboard_layout: true,
+        };
+        NiriBackend::emit(&state, &callbacks, all);
+
+        // One snapshot, one window update per output, the window list and
+        // the keyboard layout.
+        assert_eq!(calls.load(Ordering::SeqCst), 5);
     }
 }
