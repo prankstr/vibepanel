@@ -160,7 +160,7 @@ impl NiriBackend {
         }
     }
 
-    fn get_windows_from_shared(shared: &Arc<SharedState>) -> Vec<super::Window> {
+    fn get_windows_from_shared(shared: &SharedState) -> Vec<super::Window> {
         let windows = shared.windows.read();
         let id_to_output = shared.id_to_output.read();
         let workspaces = shared.workspaces.read();
@@ -1341,5 +1341,255 @@ mod tests {
         );
 
         assert_eq!(shown(&shared, "DP-1"), (String::new(), true));
+    }
+
+    fn apply(shared: &SharedState, event: serde_json::Value) -> (bool, bool, bool) {
+        NiriBackend::handle_event(shared, &event)
+    }
+
+    fn snapshot(shared: &SharedState) -> WorkspaceSnapshot {
+        shared.workspace_snapshot.read().clone()
+    }
+
+    fn focused_window(shared: &SharedState) -> Option<WindowInfo> {
+        shared.focused_window.read().clone()
+    }
+
+    fn keyboard_layout(shared: &SharedState) -> Option<KeyboardLayoutInfo> {
+        shared.keyboard_layout.read().clone()
+    }
+
+    fn window_ids(shared: &SharedState) -> Vec<u64> {
+        NiriBackend::get_windows_from_shared(shared)
+            .iter()
+            .map(|win| win.id)
+            .collect()
+    }
+
+    fn set<const N: usize>(ids: [i32; N]) -> std::collections::HashSet<i32> {
+        ids.into_iter().collect()
+    }
+
+    fn counts<const N: usize>(entries: [(i32, u32); N]) -> HashMap<i32, u32> {
+        entries.into_iter().collect()
+    }
+
+    #[test]
+    fn snapshot_reports_workspaces_and_window_counts() {
+        let shared = setup();
+        let snapshot = snapshot(&shared);
+
+        assert_eq!(snapshot.active_workspace, set([1]));
+        assert_eq!(snapshot.occupied_workspaces, set([1, 2, 3, 4]));
+        assert!(snapshot.urgent_workspaces.is_empty());
+        assert_eq!(
+            snapshot.window_counts,
+            counts([(1, 5), (2, 0), (3, 1), (4, 1)])
+        );
+
+        let dp1 = &snapshot.per_output["DP-1"];
+        assert_eq!(dp1.active_workspace, set([1]));
+        assert_eq!(dp1.occupied_workspaces, set([1, 2]));
+        assert_eq!(dp1.window_counts, counts([(1, 5), (2, 0)]));
+
+        let dp2 = &snapshot.per_output["DP-2"];
+        assert_eq!(dp2.active_workspace, set([3]));
+        assert_eq!(dp2.occupied_workspaces, set([3, 4]));
+        assert_eq!(dp2.window_counts, counts([(3, 1), (4, 1)]));
+    }
+
+    #[test]
+    fn window_counts_follow_moves_and_closes() {
+        let shared = setup();
+
+        apply(
+            &shared,
+            serde_json::json!({"WindowOpenedOrChanged": {"window": window(5, 2, "A5", false)}}),
+        );
+        assert_eq!(
+            snapshot(&shared).window_counts,
+            counts([(1, 4), (2, 1), (3, 1), (4, 1)])
+        );
+
+        let (ws_changed, win_changed, _) =
+            apply(&shared, serde_json::json!({"WindowClosed": {"id": 10}}));
+        assert!(ws_changed && win_changed);
+        let snapshot = snapshot(&shared);
+        assert_eq!(snapshot.window_counts[&3], 0);
+        assert_eq!(snapshot.per_output["DP-2"].window_counts[&3], 0);
+        assert_eq!(window_ids(&shared), vec![1, 2, 3, 4, 5, 11]);
+    }
+
+    #[test]
+    fn workspaces_changed_keeps_window_counts() {
+        let shared = setup();
+        apply(
+            &shared,
+            serde_json::json!({"WorkspacesChanged": {"workspaces": [
+                workspace(1, "DP-1", false, false, Some(4)),
+                workspace(2, "DP-1", true, true, None),
+                workspace(3, "DP-2", true, false, Some(10)),
+                workspace(4, "DP-2", false, false, Some(11)),
+            ]}}),
+        );
+
+        let snapshot = snapshot(&shared);
+        assert_eq!(snapshot.active_workspace, set([2]));
+        assert_eq!(snapshot.per_output["DP-1"].active_workspace, set([2]));
+        assert_eq!(
+            snapshot.window_counts,
+            counts([(1, 5), (2, 0), (3, 1), (4, 1)])
+        );
+    }
+
+    #[test]
+    fn workspace_activation_updates_global_and_output_state() {
+        let shared = setup();
+
+        // Activating without focus only changes what the output shows.
+        let (ws_changed, _, _) = apply(
+            &shared,
+            serde_json::json!({"WorkspaceActivated": {"id": 4, "focused": false}}),
+        );
+        assert!(ws_changed);
+        let snap = snapshot(&shared);
+        assert_eq!(snap.active_workspace, set([1]));
+        assert_eq!(snap.per_output["DP-1"].active_workspace, set([1]));
+        assert_eq!(snap.per_output["DP-2"].active_workspace, set([4]));
+        assert_eq!(shown(&shared, "DP-2"), ("Y".to_string(), false));
+
+        // Focusing a workspace on another output moves global focus there.
+        apply(
+            &shared,
+            serde_json::json!({"WorkspaceActivated": {"id": 3, "focused": true}}),
+        );
+        let snap = snapshot(&shared);
+        assert_eq!(snap.active_workspace, set([3]));
+        assert_eq!(snap.per_output["DP-1"].active_workspace, set([1]));
+        assert_eq!(snap.per_output["DP-2"].active_workspace, set([3]));
+        assert_eq!(shown_focused(&shared), "X");
+    }
+
+    #[test]
+    fn urgency_is_tracked_for_workspaces_and_windows() {
+        let shared = setup();
+
+        let urgent = serde_json::json!({"WorkspaceUrgencyChanged": {"id": 2, "urgent": true}});
+        assert!(apply(&shared, urgent.clone()).0);
+        assert_eq!(snapshot(&shared).urgent_workspaces, set([2]));
+        assert!(!apply(&shared, urgent).0);
+
+        apply(
+            &shared,
+            serde_json::json!({"WorkspaceUrgencyChanged": {"id": 2, "urgent": false}}),
+        );
+        assert!(snapshot(&shared).urgent_workspaces.is_empty());
+
+        let urgent = serde_json::json!({"WindowUrgencyChanged": {"id": 3, "urgent": true}});
+        assert!(apply(&shared, urgent.clone()).1);
+        assert!(!apply(&shared, urgent).1);
+        let urgent_windows: Vec<u64> = NiriBackend::get_windows_from_shared(&shared)
+            .iter()
+            .filter(|win| win.is_urgent)
+            .map(|win| win.id)
+            .collect();
+        assert_eq!(urgent_windows, vec![3]);
+    }
+
+    #[test]
+    fn window_list_follows_output_workspace_and_layout_order() {
+        let shared = setup();
+        assert_eq!(window_ids(&shared), vec![1, 2, 3, 4, 5, 10, 11]);
+
+        apply(
+            &shared,
+            serde_json::json!({"WindowLayoutsChanged": {"changes": [
+                [5, {"pos_in_scrolling_layout": [1, 1]}],
+                [3, {"pos_in_scrolling_layout": [2, 1]}],
+                [1, {"pos_in_scrolling_layout": [2, 2]}],
+            ]}}),
+        );
+        assert_eq!(window_ids(&shared), vec![5, 3, 1, 2, 4, 10, 11]);
+
+        // A full window update carries its layout position too.
+        let mut moved = window(11, 3, "Y", false);
+        moved["layout"] = serde_json::json!({"pos_in_scrolling_layout": [1, 1]});
+        apply(
+            &shared,
+            serde_json::json!({"WindowOpenedOrChanged": {"window": moved}}),
+        );
+        assert_eq!(window_ids(&shared), vec![5, 3, 1, 2, 4, 11, 10]);
+
+        let windows = NiriBackend::get_windows_from_shared(&shared);
+        let y = windows.iter().find(|win| win.id == 11).unwrap();
+        assert_eq!(y.workspace_id, Some(3));
+        assert_eq!(y.output.as_deref(), Some("DP-2"));
+        assert_eq!(y.app_id, "Y-app");
+    }
+
+    #[test]
+    fn focused_window_follows_focus_and_close() {
+        let shared = setup();
+        assert_eq!(
+            focused_window(&shared),
+            Some(WindowInfo {
+                title: "B".to_string(),
+                app_id: "B-app".to_string(),
+                output: Some("DP-1".to_string()),
+                focused: true,
+            })
+        );
+
+        apply(
+            &shared,
+            serde_json::json!({"WindowFocusChanged": {"id": 10}}),
+        );
+        let focused = focused_window(&shared).unwrap();
+        assert_eq!(focused.title, "X");
+        assert_eq!(focused.output.as_deref(), Some("DP-2"));
+
+        // Opening a focused window takes focus from the previous one.
+        apply(
+            &shared,
+            serde_json::json!({"WindowOpenedOrChanged": {"window": window(20, 1, "New", true)}}),
+        );
+        assert_eq!(focused_window(&shared).unwrap().title, "New");
+        let focused_ids: Vec<u64> = NiriBackend::get_windows_from_shared(&shared)
+            .iter()
+            .filter(|win| win.is_focused)
+            .map(|win| win.id)
+            .collect();
+        assert_eq!(focused_ids, vec![20]);
+
+        apply(&shared, serde_json::json!({"WindowClosed": {"id": 20}}));
+        assert_eq!(focused_window(&shared), None);
+    }
+
+    #[test]
+    fn keyboard_layout_follows_list_and_switch() {
+        let shared = setup();
+        assert_eq!(keyboard_layout(&shared), None);
+
+        let (_, _, changed) = apply(
+            &shared,
+            serde_json::json!({"KeyboardLayoutsChanged": {"keyboard_layouts": {
+                "names": ["English (US)", "Swedish"], "current_idx": 0
+            }}}),
+        );
+        assert!(changed);
+        assert_eq!(
+            keyboard_layout(&shared),
+            Some(KeyboardLayoutInfo {
+                layout_name: "English (US)".to_string(),
+                layout_count: Some(2),
+            })
+        );
+
+        let (_, _, changed) = apply(
+            &shared,
+            serde_json::json!({"KeyboardLayoutSwitched": {"idx": 1}}),
+        );
+        assert!(changed);
+        assert_eq!(keyboard_layout(&shared).unwrap().layout_name, "Swedish");
     }
 }
