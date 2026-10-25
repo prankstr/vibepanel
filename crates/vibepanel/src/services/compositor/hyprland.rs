@@ -582,7 +582,7 @@ impl HyprlandBackend {
     /// Fetch initial state from Hyprland.
     fn fetch_initial_state(&self) {
         self.refresh_workspaces();
-        self.refresh_active_window();
+        self.refresh_active_window(true);
         debug!("Fetched initial Hyprland state");
     }
 
@@ -652,9 +652,10 @@ impl HyprlandBackend {
             .remove(&ws_id)
     }
 
-    /// Refresh the focused window from `activewindow`.
+    /// Refresh the focused window from `activewindow`. Pass `workspaces_fresh`
+    /// when the caller has just called `refresh_workspaces`.
     /// Returns (window_changed, workspace_changed).
-    fn refresh_active_window(&self) -> (bool, bool) {
+    fn refresh_active_window(&self, workspaces_fresh: bool) -> (bool, bool) {
         let Some(active_window) = self.query_json("activewindow") else {
             return (false, false);
         };
@@ -671,7 +672,7 @@ impl HyprlandBackend {
         // the empty update is scoped to the focused monitor, so query it now
         // rather than trusting `focusedmon` to have arrived first.
         let mut workspace_changed = false;
-        if unknown_monitor || new_focused.is_none() {
+        if !workspaces_fresh && (unknown_monitor || new_focused.is_none()) {
             workspace_changed = self.refresh_workspaces();
             new_focused = parse();
         }
@@ -754,11 +755,11 @@ impl HyprlandBackend {
         let mut window_changed = false;
         let mut keyboard_layout_changed = false;
 
+        // Hyprland sends most events twice, as v1 and v2. Their payloads aren't
+        // used, so handle only the v1 name, which every version sends.
         match event {
-            "workspace" | "workspacev2" | "createworkspace" | "createworkspacev2"
-            | "destroyworkspace" | "destroyworkspacev2" | "renameworkspace" | "openwindow"
-            | "closewindow" | "monitoradded" | "monitoraddedv2" | "monitorremoved"
-            | "monitorremovedv2" => {
+            "workspace" | "createworkspace" | "destroyworkspace" | "renameworkspace"
+            | "openwindow" | "closewindow" | "monitoradded" | "monitorremoved" => {
                 workspace_changed = self.refresh_workspaces();
             }
             "focusedmon" => {
@@ -769,20 +770,20 @@ impl HyprlandBackend {
                 // Always emit: the empty update follows the focused monitor,
                 // and duplicate clears are harmless.
                 if self.shared.focused_window.read().is_none() {
-                    workspace_changed |= self.refresh_active_window().1;
+                    workspace_changed |= self.refresh_active_window(true).1;
                     window_changed = true;
                 }
             }
-            "movewindow" | "moveworkspace" | "moveworkspacev2" => {
+            "movewindow" | "moveworkspace" => {
                 // The focused window may have changed monitor while keeping
                 // focus, which emits no `activewindow`; refresh its output.
                 workspace_changed = self.refresh_workspaces();
-                let (win, ws) = self.refresh_active_window();
+                let (win, ws) = self.refresh_active_window(true);
                 window_changed = win;
                 workspace_changed |= ws;
             }
-            "activewindow" | "activewindowv2" => {
-                (window_changed, workspace_changed) = self.refresh_active_window();
+            "activewindow" => {
+                (window_changed, workspace_changed) = self.refresh_active_window(false);
             }
             "urgent" => {
                 // urgent>>WINDOW_ADDRESS
@@ -1362,6 +1363,40 @@ mod tests {
         HyprlandBackend::build_state(monitors.as_array().unwrap(), workspaces.as_array().unwrap())
     }
 
+    /// Backend talking to a fake command socket that answers `j/<name>` with
+    /// the matching JSON and records each command it receives.
+    fn backend_with_fake_socket(
+        test: &str,
+        responses: Vec<(&'static str, Value)>,
+    ) -> (HyprlandBackend, Arc<Mutex<Vec<String>>>) {
+        use std::os::unix::net::UnixListener;
+
+        let path =
+            std::env::temp_dir().join(format!("vp-hyprland-{}-{test}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let listener = UnixListener::bind(&path).expect("bind test Hyprland socket");
+        let commands = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&commands);
+        let responses: HashMap<String, String> = responses
+            .into_iter()
+            .map(|(name, value)| (format!("j/{name}"), value.to_string()))
+            .collect();
+        thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut buf = [0u8; 1024];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let command = String::from_utf8_lossy(&buf[..n]).to_string();
+                let response = responses.get(&command).cloned().unwrap_or_default();
+                recorded.lock().unwrap().push(command);
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+
+        let backend = HyprlandBackend::new();
+        *backend.socket_path.write() = Some(path.to_string_lossy().into_owned());
+        (backend, commands)
+    }
+
     fn two_monitors(focused_active: i32, other_active: i32) -> Value {
         json!([
             {"id": 0, "name": "DP-1", "focused": true,
@@ -1520,5 +1555,59 @@ mod tests {
         });
         let (_, window_changed, _) = backend.handle_event("focusedmon>>DP-1,2");
         assert!(!window_changed);
+    }
+
+    #[test]
+    fn v2_event_twins_do_not_trigger_queries() {
+        let (backend, commands) = backend_with_fake_socket(
+            "v2-twins",
+            vec![
+                ("monitors", two_monitors(2, 5)),
+                ("workspaces", json!([])),
+                ("activewindow", json!({"address": "0xabc", "monitor": 0})),
+            ],
+        );
+
+        for line in [
+            "workspace>>2",
+            "workspacev2>>2,2",
+            "activewindow>>class,title",
+            "activewindowv2>>abc",
+            "createworkspacev2>>2,2",
+            "destroyworkspacev2>>2,2",
+            "moveworkspacev2>>2,2,DP-1",
+            "monitoraddedv2>>1,DP-1,desc",
+            "monitorremovedv2>>1,DP-1,desc",
+        ] {
+            backend.handle_event(line);
+        }
+
+        assert_eq!(
+            *commands.lock().unwrap(),
+            ["j/monitors", "j/workspaces", "j/activewindow"]
+        );
+        assert_eq!(
+            backend.get_workspace_snapshot().active_workspace,
+            HashSet::from([2])
+        );
+    }
+
+    #[test]
+    fn focusedmon_without_focused_window_rebuilds_once() {
+        let (backend, commands) = backend_with_fake_socket(
+            "focusedmon-rebuild",
+            vec![
+                ("monitors", two_monitors(2, 5)),
+                ("workspaces", json!([])),
+                ("activewindow", json!({})),
+            ],
+        );
+
+        backend.handle_event("focusedmon>>DP-1,2");
+
+        assert_eq!(
+            *commands.lock().unwrap(),
+            ["j/monitors", "j/workspaces", "j/activewindow"]
+        );
     }
 }
