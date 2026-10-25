@@ -482,10 +482,11 @@ impl CompositorManager {
         backend.set_window_layout_callback(on_window_layout_update);
         backend.set_window_list_callback(on_window_list_update);
 
-        // Start the backend first (which fetches initial state internally)
         backend.start(on_workspace_update, on_window_update);
 
-        // Now store initial state - backend has fetched it during start()
+        // Store whatever state the backend has so far. Most backends load it
+        // on their event thread, so it may still be empty; the callbacks
+        // above replace it once it arrives.
         *this.last_workspace_snapshot.borrow_mut() = Some(backend.get_workspace_snapshot());
         *this.last_keyboard_layout.borrow_mut() = backend.get_keyboard_layout();
         *this.last_window_layouts.borrow_mut() = backend.get_window_layouts();

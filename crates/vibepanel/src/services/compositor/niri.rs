@@ -30,55 +30,63 @@ const RECONNECT_INITIAL_MS: u64 = 1000;
 const RECONNECT_MAX_MS: u64 = 30000;
 const RECONNECT_MULTIPLIER: f64 = 1.5;
 
-struct SharedState {
-    workspace_snapshot: RwLock<WorkspaceSnapshot>,
-    focused_window: RwLock<Option<WindowInfo>>,
-    workspaces: RwLock<Vec<WorkspaceMeta>>,
-    /// Map from Niri's u64 workspace ID to output name.
-    id_to_output: RwLock<HashMap<u64, String>>,
-    windows: RwLock<HashMap<u64, WindowData>>,
-    /// Per-output active window info (output name -> WindowInfo).
-    /// This tracks the "would be focused" window for each monitor.
-    per_output_window: RwLock<HashMap<String, WindowInfo>>,
-    /// Niri's active window per workspace (workspace ID -> window ID). Unlike
-    /// window focus, this is kept while a layer-shell surface has the keyboard.
-    active_windows: RwLock<HashMap<u64, u64>>,
-    /// Current keyboard layout info.
-    keyboard_layout: RwLock<Option<KeyboardLayoutInfo>>,
-    /// List of available keyboard layout names (from Niri's KeyboardLayouts).
-    keyboard_layout_names: RwLock<Vec<String>>,
-    /// Current keyboard layout index.
-    keyboard_layout_idx: RwLock<usize>,
+/// Which parts of the state an event changed.
+#[derive(Debug, Clone, Copy)]
+struct Changes {
+    workspaces: bool,
+    windows: bool,
+    keyboard_layout: bool,
 }
 
-impl Default for SharedState {
-    fn default() -> Self {
-        Self {
-            workspace_snapshot: RwLock::new(WorkspaceSnapshot::default()),
-            focused_window: RwLock::new(None),
-            workspaces: RwLock::new(Vec::new()),
-            id_to_output: RwLock::new(HashMap::new()),
-            windows: RwLock::new(HashMap::new()),
-            per_output_window: RwLock::new(HashMap::new()),
-            active_windows: RwLock::new(HashMap::new()),
-            keyboard_layout: RwLock::new(None),
-            keyboard_layout_names: RwLock::new(Vec::new()),
-            keyboard_layout_idx: RwLock::new(0),
-        }
-    }
+impl Changes {
+    const NONE: Self = Self {
+        workspaces: false,
+        windows: false,
+        keyboard_layout: false,
+    };
+    const WINDOWS: Self = Self {
+        windows: true,
+        ..Self::NONE
+    };
+    const WORKSPACES_AND_WINDOWS: Self = Self {
+        workspaces: true,
+        windows: true,
+        ..Self::NONE
+    };
+    const KEYBOARD_LAYOUT: Self = Self {
+        keyboard_layout: true,
+        ..Self::NONE
+    };
 }
 
-pub struct NiriBackend {
-    running: Arc<AtomicBool>,
-    event_thread: Mutex<Option<JoinHandle<()>>>,
-    socket_path: RwLock<Option<String>>,
-    shared: Arc<SharedState>,
-    callbacks: Mutex<Option<(WorkspaceCallback, WindowCallback)>>,
-    keyboard_layout_callback: Mutex<Option<KeyboardLayoutCallback>>,
-    window_list_callback: Mutex<Option<super::WindowListCallback>>,
+/// Niri's state as reported by the event stream. Everything the panel shows
+/// is derived from it on demand.
+#[derive(Debug, Default)]
+struct NiriState {
+    workspaces: HashMap<u64, WorkspaceData>,
+    windows: HashMap<u64, WindowData>,
+    keyboard_layout_names: Vec<String>,
+    /// Current keyboard layout index, once Niri has reported one.
+    keyboard_layout_idx: Option<usize>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
+struct WorkspaceData {
+    id: u64,
+    idx: i32,
+    name: String,
+    output: Option<String>,
+    /// Visible on its output.
+    is_active: bool,
+    /// Visible on the focused output.
+    is_focused: bool,
+    is_urgent: bool,
+    /// Unlike window focus, this is kept while a layer-shell surface has the
+    /// keyboard.
+    active_window_id: Option<u64>,
+}
+
+#[derive(Debug)]
 struct WindowData {
     id: u64,
     title: String,
@@ -89,16 +97,394 @@ struct WindowData {
     /// Column and tile position in the scrolling layout (niri-specific).
     /// Used for ordering taskbar buttons to match visual window order.
     layout_position: Option<(i32, i32)>,
+    /// Niri reports no workspace or layout position while a window is being
+    /// dragged, so the last known ones are kept until it lands.
+    dragging: bool,
 }
 
-/// Extract `pos_in_scrolling_layout` from a niri window JSON value.
-fn parse_layout_position(window: &Value) -> Option<(i32, i32)> {
-    let layout = window.get("layout")?;
+pub struct NiriBackend {
+    running: Arc<AtomicBool>,
+    event_thread: Mutex<Option<JoinHandle<()>>>,
+    socket_path: RwLock<Option<String>>,
+    state: Arc<RwLock<NiriState>>,
+    keyboard_layout_callback: Mutex<Option<KeyboardLayoutCallback>>,
+    window_list_callback: Mutex<Option<super::WindowListCallback>>,
+}
+
+struct Callbacks {
+    workspace: WorkspaceCallback,
+    window: WindowCallback,
+    keyboard_layout: Option<KeyboardLayoutCallback>,
+    window_list: Option<super::WindowListCallback>,
+}
+
+fn u64_field(value: &Value, key: &str) -> Option<u64> {
+    value.get(key).and_then(Value::as_u64)
+}
+
+fn str_field<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
+    value.get(key).and_then(Value::as_str)
+}
+
+fn bool_field(value: &Value, key: &str) -> bool {
+    value.get(key).and_then(Value::as_bool).unwrap_or(false)
+}
+
+/// Set `field` to `value`, returning whether it changed.
+fn update(field: &mut bool, value: bool) -> bool {
+    std::mem::replace(field, value) != value
+}
+
+fn parse_workspace(ws: &Value) -> Option<WorkspaceData> {
+    let idx = ws.get("idx").and_then(Value::as_i64).unwrap_or(1) as i32;
+    Some(WorkspaceData {
+        id: u64_field(ws, "id")?,
+        idx,
+        name: str_field(ws, "name").map_or_else(|| idx.to_string(), String::from),
+        output: str_field(ws, "output").map(String::from),
+        is_active: bool_field(ws, "is_active"),
+        is_focused: bool_field(ws, "is_focused"),
+        is_urgent: bool_field(ws, "is_urgent"),
+        active_window_id: u64_field(ws, "active_window_id"),
+    })
+}
+
+fn parse_window(window: &Value) -> Option<WindowData> {
+    let workspace_id = u64_field(window, "workspace_id");
+    Some(WindowData {
+        id: u64_field(window, "id")?,
+        title: str_field(window, "title").unwrap_or_default().to_string(),
+        app_id: str_field(window, "app_id").unwrap_or_default().to_string(),
+        workspace_id,
+        is_focused: bool_field(window, "is_focused"),
+        is_urgent: bool_field(window, "is_urgent"),
+        layout_position: window.get("layout").and_then(parse_layout_position),
+        dragging: workspace_id.is_none(),
+    })
+}
+
+fn parse_layout_position(layout: &Value) -> Option<(i32, i32)> {
     let pos = layout.get("pos_in_scrolling_layout")?.as_array()?;
-    if pos.len() >= 2 {
-        Some((pos[0].as_i64()? as i32, pos[1].as_i64()? as i32))
-    } else {
-        None
+    Some((pos.first()?.as_i64()? as i32, pos.get(1)?.as_i64()? as i32))
+}
+
+impl NiriState {
+    fn apply(&mut self, event: &Value) -> Changes {
+        let Some((kind, data)) = event.as_object().and_then(|obj| obj.iter().next()) else {
+            return Changes::NONE;
+        };
+
+        match kind.as_str() {
+            "WorkspacesChanged" => {
+                let Some(workspaces) = data.get("workspaces").and_then(Value::as_array) else {
+                    return Changes::NONE;
+                };
+                self.workspaces = workspaces
+                    .iter()
+                    .filter_map(parse_workspace)
+                    .map(|ws| (ws.id, ws))
+                    .collect();
+                // Workspaces may have moved between outputs.
+                Changes::WORKSPACES_AND_WINDOWS
+            }
+            "WorkspaceActivated" => {
+                let Some(id) = u64_field(data, "id") else {
+                    return Changes::NONE;
+                };
+                let Some(output) = self.workspaces.get(&id).map(|ws| ws.output.clone()) else {
+                    return Changes::NONE;
+                };
+                let focused = bool_field(data, "focused");
+                let mut changed = false;
+                for ws in self.workspaces.values_mut() {
+                    let activated = ws.id == id;
+                    if ws.output == output {
+                        changed |= update(&mut ws.is_active, activated);
+                    }
+                    if focused {
+                        changed |= update(&mut ws.is_focused, activated);
+                    }
+                }
+                Changes {
+                    workspaces: changed,
+                    windows: true,
+                    ..Changes::NONE
+                }
+            }
+            "WorkspaceUrgencyChanged" => {
+                let urgent = bool_field(data, "urgent");
+                let changed = u64_field(data, "id")
+                    .and_then(|id| self.workspaces.get_mut(&id))
+                    .is_some_and(|ws| update(&mut ws.is_urgent, urgent));
+                Changes {
+                    workspaces: changed,
+                    ..Changes::NONE
+                }
+            }
+            "WorkspaceActiveWindowChanged" => {
+                let Some(ws) =
+                    u64_field(data, "workspace_id").and_then(|id| self.workspaces.get_mut(&id))
+                else {
+                    return Changes::NONE;
+                };
+                ws.active_window_id = u64_field(data, "active_window_id");
+                Changes::WINDOWS
+            }
+            "WindowsChanged" => {
+                let Some(windows) = data.get("windows").and_then(Value::as_array) else {
+                    return Changes::NONE;
+                };
+                self.windows = windows
+                    .iter()
+                    .filter_map(parse_window)
+                    .map(|win| (win.id, win))
+                    .collect();
+                Changes::WORKSPACES_AND_WINDOWS
+            }
+            "WindowOpenedOrChanged" => {
+                let Some(mut window) = data.get("window").and_then(parse_window) else {
+                    return Changes::NONE;
+                };
+                if window.dragging
+                    && let Some(prev) = self.windows.get(&window.id)
+                {
+                    window.workspace_id = prev.workspace_id;
+                    window.layout_position = prev.layout_position;
+                }
+                if window.is_focused {
+                    for win in self.windows.values_mut() {
+                        win.is_focused = false;
+                    }
+                }
+                let workspace_id = window.workspace_id;
+                let previous = self.windows.insert(window.id, window);
+                // Window counts change when a window opens or moves.
+                let moved = previous.is_none_or(|prev| prev.workspace_id != workspace_id);
+                Changes {
+                    workspaces: moved,
+                    windows: true,
+                    ..Changes::NONE
+                }
+            }
+            "WindowLayoutsChanged" => {
+                let Some(changes) = data.get("changes").and_then(Value::as_array) else {
+                    return Changes::NONE;
+                };
+                for change in changes {
+                    if let Some([id, layout, ..]) = change.as_array().map(Vec::as_slice)
+                        && let Some(win) = id.as_u64().and_then(|id| self.windows.get_mut(&id))
+                    {
+                        let position = parse_layout_position(layout);
+                        if position.is_some() || !win.dragging {
+                            win.layout_position = position;
+                        }
+                    }
+                }
+                Changes::WINDOWS
+            }
+            "WindowClosed" => {
+                let Some(id) = u64_field(data, "id") else {
+                    return Changes::NONE;
+                };
+                self.windows.remove(&id);
+                Changes::WORKSPACES_AND_WINDOWS
+            }
+            "WindowFocusChanged" => {
+                let id = u64_field(data, "id");
+                for win in self.windows.values_mut() {
+                    win.is_focused = Some(win.id) == id;
+                }
+                Changes::WINDOWS
+            }
+            "WindowUrgencyChanged" => {
+                let urgent = bool_field(data, "urgent");
+                let changed = u64_field(data, "id")
+                    .and_then(|id| self.windows.get_mut(&id))
+                    .is_some_and(|win| update(&mut win.is_urgent, urgent));
+                Changes {
+                    windows: changed,
+                    ..Changes::NONE
+                }
+            }
+            "KeyboardLayoutsChanged" => {
+                let Some(layouts) = data.get("keyboard_layouts") else {
+                    return Changes::NONE;
+                };
+                self.keyboard_layout_names = layouts
+                    .get("names")
+                    .and_then(Value::as_array)
+                    .map(|names| {
+                        names
+                            .iter()
+                            .filter_map(|name| name.as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                self.keyboard_layout_idx =
+                    Some(u64_field(layouts, "current_idx").unwrap_or(0) as usize);
+                Changes::KEYBOARD_LAYOUT
+            }
+            "KeyboardLayoutSwitched" => {
+                let Some(idx) = u64_field(data, "idx") else {
+                    return Changes::NONE;
+                };
+                self.keyboard_layout_idx = Some(idx as usize);
+                Changes::KEYBOARD_LAYOUT
+            }
+            _ => Changes::NONE,
+        }
+    }
+
+    fn output_of(&self, workspace_id: Option<u64>) -> Option<&String> {
+        self.workspaces.get(&workspace_id?)?.output.as_ref()
+    }
+
+    /// Workspaces ordered by output, then position, with those without an
+    /// output last.
+    fn workspace_list(&self) -> Vec<WorkspaceMeta> {
+        let mut workspaces: Vec<&WorkspaceData> = self.workspaces.values().collect();
+        workspaces.sort_by_key(|ws| (ws.output.is_none(), &ws.output, ws.idx, ws.id));
+        workspaces
+            .into_iter()
+            .map(|ws| WorkspaceMeta {
+                id: ws.id as i32,
+                idx: ws.idx,
+                name: ws.name.clone(),
+                output: ws.output.clone(),
+            })
+            .collect()
+    }
+
+    fn snapshot(&self) -> WorkspaceSnapshot {
+        let mut snapshot = WorkspaceSnapshot::default();
+
+        for ws in self.workspaces.values() {
+            let id = ws.id as i32;
+            // Niri workspaces are dynamic, so every workspace counts as occupied.
+            snapshot.occupied_workspaces.insert(id);
+            snapshot.window_counts.insert(id, 0);
+            if ws.is_focused {
+                snapshot.active_workspace.insert(id);
+            }
+            if ws.is_urgent {
+                snapshot.urgent_workspaces.insert(id);
+            }
+            if let Some(output) = &ws.output {
+                let per_out = snapshot.per_output.entry(output.clone()).or_default();
+                per_out.occupied_workspaces.insert(id);
+                per_out.window_counts.insert(id, 0);
+                if ws.is_active {
+                    per_out.active_workspace.insert(id);
+                }
+            }
+        }
+
+        for ws_id in self.windows.values().filter_map(|win| win.workspace_id) {
+            let id = ws_id as i32;
+            *snapshot.window_counts.entry(id).or_insert(0) += 1;
+            if let Some(output) = self.output_of(Some(ws_id))
+                && let Some(per_out) = snapshot.per_output.get_mut(output)
+            {
+                *per_out.window_counts.entry(id).or_insert(0) += 1;
+            }
+        }
+
+        snapshot
+    }
+
+    /// The window each output shows: the focused window on its visible
+    /// workspace, otherwise that workspace's active window, otherwise nothing.
+    fn per_output_windows(&self) -> HashMap<String, WindowInfo> {
+        let mut per_output = HashMap::new();
+
+        for ws in self.workspaces.values() {
+            let Some(output) = &ws.output else {
+                continue;
+            };
+            let info = per_output
+                .entry(output.clone())
+                .or_insert_with(|| WindowInfo {
+                    output: Some(output.clone()),
+                    ..Default::default()
+                });
+            if !ws.is_active {
+                continue;
+            }
+
+            info.focused = ws.is_focused;
+            let on_workspace = |win: &&WindowData| win.workspace_id == Some(ws.id);
+            let window = self
+                .windows
+                .values()
+                .filter(on_workspace)
+                .find(|win| win.is_focused)
+                .or_else(|| {
+                    ws.active_window_id
+                        .and_then(|id| self.windows.get(&id))
+                        .filter(on_workspace)
+                });
+            if let Some(win) = window {
+                info.title = win.title.clone();
+                info.app_id = win.app_id.clone();
+            }
+        }
+
+        per_output
+    }
+
+    fn focused_window(&self) -> Option<WindowInfo> {
+        let win = self.windows.values().find(|win| win.is_focused)?;
+        Some(WindowInfo {
+            title: win.title.clone(),
+            app_id: win.app_id.clone(),
+            output: self.output_of(win.workspace_id).cloned(),
+            focused: true,
+        })
+    }
+
+    fn window_list(&self) -> Vec<super::Window> {
+        let mut windows: Vec<&WindowData> = self.windows.values().collect();
+        // Mirror the workspace order, so multi-monitor taskbars with
+        // filter_by_output = false group windows by monitor first.
+        windows.sort_by_key(|win| {
+            let ws = win.workspace_id.and_then(|id| self.workspaces.get(&id));
+            (
+                ws.and_then(|ws| ws.output.as_ref()),
+                ws.map_or(i32::MAX, |ws| ws.idx),
+                win.layout_position.unwrap_or((i32::MAX, i32::MAX)),
+                // The window that slides into a dragged window's slot gets
+                // its position; the dragged one was there first.
+                !(win.dragging && win.layout_position.is_some()),
+                win.id,
+            )
+        });
+
+        windows
+            .into_iter()
+            .map(|win| super::Window {
+                id: win.id,
+                title: win.title.clone(),
+                app_id: win.app_id.clone(),
+                workspace_id: win.workspace_id.map(|id| id as i32),
+                output: self.output_of(win.workspace_id).cloned(),
+                is_focused: win.is_focused,
+                is_urgent: win.is_urgent,
+                // Niri has no scratchpad concept.
+                is_scratchpad: false,
+            })
+            .collect()
+    }
+
+    fn keyboard_layout(&self) -> Option<KeyboardLayoutInfo> {
+        let idx = self.keyboard_layout_idx?;
+        Some(KeyboardLayoutInfo {
+            layout_name: self
+                .keyboard_layout_names
+                .get(idx)
+                .cloned()
+                .unwrap_or_default(),
+            layout_count: Some(self.keyboard_layout_names.len()),
+        })
     }
 }
 
@@ -108,8 +494,7 @@ impl NiriBackend {
             running: Arc::new(AtomicBool::new(false)),
             event_thread: Mutex::new(None),
             socket_path: RwLock::new(None),
-            shared: Arc::new(SharedState::default()),
-            callbacks: Mutex::new(None),
+            state: Arc::new(RwLock::new(NiriState::default())),
             keyboard_layout_callback: Mutex::new(None),
             window_list_callback: Mutex::new(None),
         }
@@ -117,13 +502,7 @@ impl NiriBackend {
 
     /// Send a JSON request to Niri and get the response.
     fn send_request(&self, request: &Value) -> Option<Value> {
-        let socket_path = self.socket_path.read();
-        let socket_path = socket_path.as_ref()?;
-        Self::send_request_static(socket_path, request)
-    }
-
-    /// Send a JSON request to Niri (static version for use without &self).
-    fn send_request_static(socket_path: &str, request: &Value) -> Option<Value> {
+        let socket_path = self.socket_path.read().clone()?;
         let mut stream = match UnixStream::connect(socket_path) {
             Ok(s) => s,
             Err(e) => {
@@ -160,731 +539,53 @@ impl NiriBackend {
         }
     }
 
-    fn get_windows_from_shared(shared: &Arc<SharedState>) -> Vec<super::Window> {
-        let windows = shared.windows.read();
-        let id_to_output = shared.id_to_output.read();
-        let workspaces = shared.workspaces.read();
-
-        // Build a map from workspace niri-ID to workspace display index for sorting.
-        let ws_id_to_idx: HashMap<u64, i32> =
-            workspaces.iter().map(|ws| (ws.id as u64, ws.idx)).collect();
-
-        // Collect windows with their sorting keys.
-        struct SortableWindow {
-            window: super::Window,
-            output_name: String,
-            ws_idx: i32,
-            layout_pos: (i32, i32),
-        }
-
-        let mut sortable: Vec<SortableWindow> = windows
-            .values()
-            .map(|win| {
-                let output = win
-                    .workspace_id
-                    .and_then(|ws_id| id_to_output.get(&ws_id).cloned());
-
-                let ws_idx = win
-                    .workspace_id
-                    .and_then(|ws_id| ws_id_to_idx.get(&ws_id).copied())
-                    .unwrap_or(i32::MAX);
-
-                let layout_pos = win.layout_position.unwrap_or((i32::MAX, i32::MAX));
-
-                let output_name = output.clone().unwrap_or_default();
-
-                SortableWindow {
-                    window: super::Window {
-                        id: win.id,
-                        title: win.title.clone(),
-                        app_id: win.app_id.clone(),
-                        workspace_id: win.workspace_id.map(|id| id as i32),
-                        output,
-                        is_focused: win.is_focused,
-                        is_urgent: win.is_urgent,
-                        // Niri has no scratchpad concept.
-                        is_scratchpad: false,
-                    },
-                    output_name,
-                    ws_idx,
-                    layout_pos,
-                }
-            })
-            .collect();
-
-        // Sort by output name, then workspace display index, then layout position,
-        // then window ID.  This mirrors the workspace sort order (output → idx)
-        // so multi-monitor taskbars with filter_by_output=false group windows by
-        // monitor first.
-        sortable.sort_by(|a, b| {
-            a.output_name
-                .cmp(&b.output_name)
-                .then(a.ws_idx.cmp(&b.ws_idx))
-                .then(a.layout_pos.cmp(&b.layout_pos))
-                .then(a.window.id.cmp(&b.window.id))
-        });
-
-        sortable.into_iter().map(|s| s.window).collect()
-    }
-
-    /// Process workspace list and update internal state.
-    fn process_workspaces(shared: &SharedState, workspaces: &[Value]) {
-        let mut ws_list = shared.workspaces.write();
-        let mut id_to_output = shared.id_to_output.write();
-        let mut snapshot = shared.workspace_snapshot.write();
-        let mut active_windows = shared.active_windows.write();
-
-        ws_list.clear();
-        id_to_output.clear();
-        active_windows.clear();
-        snapshot.occupied_workspaces.clear();
-        snapshot.urgent_workspaces.clear();
-        snapshot.window_counts.clear();
-        snapshot.active_workspace.clear();
-        snapshot.per_output.clear();
-
-        for ws in workspaces {
-            let Some(ws_id) = ws.get("id").and_then(|v| v.as_u64()) else {
-                continue;
-            };
-            let idx = ws.get("idx").and_then(|v| v.as_i64()).unwrap_or(1) as i32;
-            // Use Niri's stable workspace ID for identity tracking.
-            let stable_id = ws_id as i32;
-            let name = ws
-                .get("name")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| idx.to_string());
-
-            // Get output name (Niri workspaces are per-monitor)
-            let output = ws
-                .get("output")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
-
-            // Store mapping from Niri workspace ID to output name
-            if let Some(ref out) = output {
-                id_to_output.insert(ws_id, out.clone());
-            }
-            if let Some(win_id) = ws.get("active_window_id").and_then(|v| v.as_u64()) {
-                active_windows.insert(ws_id, win_id);
-            }
-            ws_list.push(WorkspaceMeta {
-                id: stable_id,
-                idx,
-                name,
-                output: output.clone(),
-            });
-
-            // All workspaces in Niri are occupied (dynamic workspaces)
-            snapshot.occupied_workspaces.insert(stable_id);
-            // Initialize window count to 0, will be updated from window cache
-            snapshot.window_counts.insert(stable_id, 0);
-
-            let is_focused = ws
-                .get("is_focused")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            let is_active = ws
-                .get("is_active")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-
-            if is_focused {
-                snapshot.active_workspace.insert(stable_id);
-            }
-
-            if ws
-                .get("is_urgent")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false)
-            {
-                snapshot.urgent_workspaces.insert(stable_id);
-            }
-
-            // Build per-output state (Niri workspaces belong to specific outputs)
-            if let Some(ref out_name) = output {
-                let per_out = snapshot.per_output.entry(out_name.clone()).or_default();
-
-                per_out.occupied_workspaces.insert(stable_id);
-                // Window count will be updated from window cache
-                per_out.window_counts.insert(stable_id, 0);
-
-                // is_active means visible on this output, is_focused means globally focused
-                if is_active {
-                    per_out.active_workspace.insert(stable_id);
-                }
-            }
-        }
-
-        // Sort by output then positional index for consistent ordering
-        ws_list.sort_by(|a, b| match (&a.output, &b.output) {
-            (Some(oa), Some(ob)) => oa.cmp(ob).then(a.idx.cmp(&b.idx)),
-            (Some(_), None) => std::cmp::Ordering::Less,
-            (None, Some(_)) => std::cmp::Ordering::Greater,
-            (None, None) => a.idx.cmp(&b.idx),
-        });
-
-        // Update window counts and titles from window cache
-        // Must drop all write locks before calling the update helpers
-        drop(active_windows);
-        drop(snapshot);
-        drop(id_to_output);
-        drop(ws_list);
-        Self::update_window_counts(shared);
-        Self::update_per_output_windows(shared);
-    }
-
-    /// Update window counts from the window cache.
-    fn update_window_counts(shared: &SharedState) {
-        let win_cache = shared.windows.read();
-        let id_to_output = shared.id_to_output.read();
-        let mut snapshot = shared.workspace_snapshot.write();
-
-        // Reset global counts
-        for count in snapshot.window_counts.values_mut() {
-            *count = 0;
-        }
-
-        // Reset per-output counts
-        for per_out in snapshot.per_output.values_mut() {
-            for count in per_out.window_counts.values_mut() {
-                *count = 0;
-            }
-        }
-
-        // Count windows per workspace
-        for win in win_cache.values() {
-            if let Some(ws_niri_id) = win.workspace_id {
-                let stable_id = ws_niri_id as i32;
-
-                // Update global count
-                *snapshot.window_counts.entry(stable_id).or_insert(0) += 1;
-
-                // Update per-output count
-                if let Some(out_name) = id_to_output.get(&ws_niri_id)
-                    && let Some(per_out) = snapshot.per_output.get_mut(out_name)
-                {
-                    *per_out.window_counts.entry(stable_id).or_insert(0) += 1;
-                }
-            }
-        }
-    }
-
-    /// Process window list and update internal state.
-    fn process_windows(shared: &SharedState, windows: &[Value]) {
-        let mut win_cache = shared.windows.write();
-        win_cache.clear();
-
-        for win in windows {
-            let Some(win_id) = win.get("id").and_then(|v| v.as_u64()) else {
-                continue;
-            };
-
-            let data = WindowData {
-                id: win_id,
-                title: win
-                    .get("title")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-                app_id: win
-                    .get("app_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-                workspace_id: win.get("workspace_id").and_then(|v| v.as_u64()),
-                is_focused: win
-                    .get("is_focused")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false),
-                is_urgent: win
-                    .get("is_urgent")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false),
-                layout_position: parse_layout_position(win),
-            };
-
-            win_cache.insert(win_id, data);
-        }
-
-        drop(win_cache);
-        Self::update_window_counts(shared);
-        Self::update_focused_window_from_cache(shared);
-        Self::update_per_output_windows(shared);
-    }
-
-    /// Update per-output active window info from window cache and workspace state.
-    ///
-    /// Each output shows the window on its visible workspace that has keyboard
-    /// focus, otherwise the workspace's active window, otherwise nothing.
-    fn update_per_output_windows(shared: &SharedState) {
-        let win_cache = shared.windows.read();
-        let id_to_output = shared.id_to_output.read();
-        let snapshot = shared.workspace_snapshot.read();
-        let active_windows = shared.active_windows.read();
-        let mut per_output = shared.per_output_window.write();
-
-        // Rebuild from scratch so removed outputs aren't emitted again.
-        per_output.clear();
-
-        for (out_name, per_out) in &snapshot.per_output {
-            // Find active workspace's niri ID for this output
-            let active_ws_id = id_to_output.iter().find_map(|(&ws_id, out)| {
-                (out == out_name && per_out.active_workspace.contains(&(ws_id as i32)))
-                    .then_some(ws_id)
-            });
-            // The output showing the globally focused workspace.
-            let focused =
-                active_ws_id.is_some_and(|id| snapshot.active_workspace.contains(&(id as i32)));
-
-            let win_info = active_ws_id.and_then(|ws_id| {
-                win_cache
-                    .values()
-                    .find(|win| win.workspace_id == Some(ws_id) && win.is_focused)
-                    .or_else(|| {
-                        active_windows
-                            .get(&ws_id)
-                            .and_then(|win_id| win_cache.get(win_id))
-                            .filter(|win| win.workspace_id == Some(ws_id))
-                    })
-            });
-
-            let info = win_info
-                .map(|win| WindowInfo {
-                    title: win.title.clone(),
-                    app_id: win.app_id.clone(),
-                    output: Some(out_name.clone()),
-                    focused,
-                })
-                .unwrap_or_else(|| WindowInfo {
-                    output: Some(out_name.clone()),
-                    focused,
-                    ..Default::default()
-                });
-
-            per_output.insert(out_name.clone(), info);
-        }
-    }
-
-    /// Update focused window info from window cache.
-    fn update_focused_window_from_cache(shared: &SharedState) -> bool {
-        let win_cache = shared.windows.read();
-        let id_to_output = shared.id_to_output.read();
-
-        let mut new_focused: Option<WindowInfo> = None;
-
-        for win in win_cache.values() {
-            if !win.is_focused {
-                continue;
-            }
-
-            // Look up the output directly from Niri's workspace ID
-            let output = win
-                .workspace_id
-                .and_then(|ws_id| id_to_output.get(&ws_id).cloned());
-
-            new_focused = Some(WindowInfo {
-                title: win.title.clone(),
-                app_id: win.app_id.clone(),
-                output,
-                focused: true,
-            });
-            break;
-        }
-
-        let mut focused = shared.focused_window.write();
-        let changed = *focused != new_focused;
-        *focused = new_focused;
-        changed
-    }
-
-    /// Update a single window in the cache.
-    ///
-    /// Returns true if this should trigger a window callback (focus changed).
-    fn update_single_window(shared: &SharedState, window: &Value) -> bool {
-        let Some(win_id) = window.get("id").and_then(|v| v.as_u64()) else {
-            return false;
+    /// Send the changed parts of the state to the callbacks. The lock is
+    /// released before any callback runs.
+    fn emit(state: &RwLock<NiriState>, callbacks: &Callbacks, changes: Changes) {
+        let (snapshot, per_output, windows, keyboard_layout) = {
+            let state = state.read();
+            (
+                changes.workspaces.then(|| state.snapshot()),
+                changes.windows.then(|| state.per_output_windows()),
+                // Workspace changes can affect taskbar ordering and separator
+                // labels, which resolve workspace IDs to idx/name metadata.
+                (changes.workspaces || changes.windows).then(|| state.window_list()),
+                changes
+                    .keyboard_layout
+                    .then(|| state.keyboard_layout())
+                    .flatten(),
+            )
         };
 
-        let title = window
-            .get("title")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let app_id = window
-            .get("app_id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let workspace_id = window.get("workspace_id").and_then(|v| v.as_u64());
-        let is_focused = window
-            .get("is_focused")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let is_urgent = window
-            .get("is_urgent")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-
-        let data = WindowData {
-            id: win_id,
-            title,
-            app_id,
-            workspace_id,
-            is_focused,
-            is_urgent,
-            layout_position: parse_layout_position(window),
-        };
-
+        if let Some(snapshot) = snapshot {
+            (callbacks.workspace)(snapshot);
+        }
+        // Emit every output, including empty info for outputs with no window.
+        for info in per_output.into_iter().flat_map(HashMap::into_values) {
+            (callbacks.window)(info);
+        }
+        if let Some(wl_cb) = &callbacks.window_list
+            && let Some(windows) = windows
         {
-            let mut win_cache = shared.windows.write();
-            if is_focused {
-                for win in win_cache.values_mut() {
-                    win.is_focused = false;
-                }
-            }
-            win_cache.insert(win_id, data);
+            wl_cb(super::WindowListSnapshot { windows });
         }
-
-        // Update window counts
-        Self::update_window_counts(shared);
-
-        // If the window is focused, update focused window.
-        if is_focused {
-            return Self::update_focused_window_from_cache(shared);
-        }
-
-        false
-    }
-
-    /// Fetch initial state from Niri.
-    fn fetch_initial_state(socket_path: &str, shared: &SharedState) {
-        // Fetch workspaces
-        if let Some(reply) =
-            Self::send_request_static(socket_path, &Value::String("Workspaces".to_string()))
-            && let Some(ok) = reply.get("Ok")
-            && let Some(workspaces) = ok.get("Workspaces").and_then(|v| v.as_array())
+        if let Some(kb_cb) = &callbacks.keyboard_layout
+            && let Some(info) = keyboard_layout
         {
-            Self::process_workspaces(shared, workspaces);
+            kb_cb(info);
         }
-
-        // Fetch windows
-        if let Some(reply) =
-            Self::send_request_static(socket_path, &Value::String("Windows".to_string()))
-            && let Some(ok) = reply.get("Ok")
-            && let Some(windows) = ok.get("Windows").and_then(|v| v.as_array())
-        {
-            Self::process_windows(shared, windows);
-        }
-
-        // Fetch keyboard layouts
-        Self::fetch_keyboard_layouts(socket_path, shared);
-
-        debug!("Fetched initial Niri state");
-    }
-
-    /// Fetch keyboard layouts from Niri.
-    fn fetch_keyboard_layouts(socket_path: &str, shared: &SharedState) {
-        let Some(reply) =
-            Self::send_request_static(socket_path, &Value::String("KeyboardLayouts".to_string()))
-        else {
-            debug!("fetch_keyboard_layouts: failed to query from Niri");
-            return;
-        };
-
-        let Some(ok) = reply.get("Ok") else {
-            debug!("fetch_keyboard_layouts: Niri returned error: {:?}", reply);
-            return;
-        };
-
-        let Some(kb_layouts) = ok.get("KeyboardLayouts") else {
-            debug!("fetch_keyboard_layouts: no KeyboardLayouts in response");
-            return;
-        };
-
-        Self::process_keyboard_layouts(shared, kb_layouts);
-    }
-
-    /// Process keyboard layout data from Niri.
-    fn process_keyboard_layouts(shared: &SharedState, kb_layouts: &Value) -> bool {
-        let names = kb_layouts
-            .get("names")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|entry| entry.as_str().map(String::from))
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-
-        let current_idx = kb_layouts
-            .get("current_idx")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as usize;
-
-        let layout_count = names.len();
-        let layout_name = names.get(current_idx).cloned().unwrap_or_default();
-
-        debug!(
-            "process_keyboard_layouts: idx={}, layout='{}', count={}",
-            current_idx, layout_name, layout_count
-        );
-
-        *shared.keyboard_layout_names.write() = names;
-        *shared.keyboard_layout_idx.write() = current_idx;
-        *shared.keyboard_layout.write() = Some(KeyboardLayoutInfo {
-            layout_name,
-
-            layout_count: Some(layout_count),
-        });
-
-        true
-    }
-
-    /// Process a keyboard layout switch event.
-    fn process_keyboard_layout_switch(shared: &SharedState, idx: usize) -> bool {
-        let names = shared.keyboard_layout_names.read();
-        let layout_name = names.get(idx).cloned().unwrap_or_default();
-        let layout_count = names.len();
-
-        debug!(
-            "process_keyboard_layout_switch: idx={}, layout='{}'",
-            idx, layout_name
-        );
-
-        *shared.keyboard_layout_idx.write() = idx;
-        *shared.keyboard_layout.write() = Some(KeyboardLayoutInfo {
-            layout_name,
-
-            layout_count: Some(layout_count),
-        });
-
-        true
-    }
-
-    /// Handle a Niri event.
-    ///
-    /// Returns (workspace_changed, window_changed, keyboard_layout_changed).
-    fn handle_event(shared: &SharedState, event: &Value) -> (bool, bool, bool) {
-        super::visibility::notify_changed();
-        let mut workspace_changed = false;
-        let mut window_changed = false;
-        let mut keyboard_layout_changed = false;
-
-        if let Some(kb_layouts_changed) = event.get("KeyboardLayoutsChanged") {
-            // Full layout list changed (e.g., user reconfigured layouts)
-            if let Some(kb_layouts) = kb_layouts_changed.get("keyboard_layouts") {
-                keyboard_layout_changed = Self::process_keyboard_layouts(shared, kb_layouts);
-            }
-        } else if let Some(kb_switched) = event.get("KeyboardLayoutSwitched") {
-            // Just switched to a different layout by index
-            if let Some(idx) = kb_switched.get("idx").and_then(|v| v.as_u64()) {
-                keyboard_layout_changed =
-                    Self::process_keyboard_layout_switch(shared, idx as usize);
-            }
-        } else if let Some(workspaces_changed) = event.get("WorkspacesChanged") {
-            if let Some(workspaces) = workspaces_changed
-                .get("workspaces")
-                .and_then(|v| v.as_array())
-            {
-                Self::process_workspaces(shared, workspaces);
-                workspace_changed = true;
-                // Workspaces may have moved between outputs.
-                window_changed = true;
-            }
-        } else if let Some(workspace_activated) = event.get("WorkspaceActivated") {
-            let ws_niri_id = workspace_activated.get("id").and_then(|v| v.as_u64());
-            let is_focused = workspace_activated
-                .get("focused")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-
-            if let Some(ws_id) = ws_niri_id {
-                let stable_id = ws_id as i32;
-                let id_to_output = shared.id_to_output.read();
-                let output = id_to_output.get(&ws_id).cloned();
-                drop(id_to_output);
-
-                let mut snapshot = shared.workspace_snapshot.write();
-
-                if is_focused && !snapshot.active_workspace.contains(&stable_id) {
-                    snapshot.active_workspace.clear();
-                    snapshot.active_workspace.insert(stable_id);
-                    workspace_changed = true;
-                }
-
-                if let Some(ref out_name) = output
-                    && let Some(per_out) = snapshot.per_output.get_mut(out_name)
-                    && !per_out.active_workspace.contains(&stable_id)
-                {
-                    per_out.active_workspace.clear();
-                    per_out.active_workspace.insert(stable_id);
-                    workspace_changed = true;
-                }
-
-                drop(snapshot);
-
-                // Workspace switched - update per-output windows
-                Self::update_per_output_windows(shared);
-                window_changed = true;
-            }
-        } else if let Some(urgency_changed) = event.get("WorkspaceUrgencyChanged") {
-            if let Some(ws_id) = urgency_changed.get("id").and_then(|v| v.as_u64()) {
-                let is_urgent = urgency_changed
-                    .get("urgent")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-
-                let stable_id = ws_id as i32;
-                let mut snapshot = shared.workspace_snapshot.write();
-                if is_urgent {
-                    workspace_changed = snapshot.urgent_workspaces.insert(stable_id);
-                } else {
-                    workspace_changed = snapshot.urgent_workspaces.remove(&stable_id);
-                }
-            }
-        } else if let Some(windows_changed) = event.get("WindowsChanged") {
-            if let Some(windows) = windows_changed.get("windows").and_then(|v| v.as_array()) {
-                Self::process_windows(shared, windows);
-                window_changed = true;
-            }
-        } else if let Some(window_opened) = event.get("WindowOpenedOrChanged") {
-            if let Some(window) = window_opened.get("window") {
-                Self::update_single_window(shared, window);
-
-                if let Some(ws_id) = window.get("workspace_id").and_then(|v| v.as_u64()) {
-                    let stable_id = ws_id as i32;
-                    let mut snapshot = shared.workspace_snapshot.write();
-                    if snapshot.occupied_workspaces.insert(stable_id) {
-                        workspace_changed = true;
-                    }
-                }
-
-                // Window opened/changed - update per-output windows
-                Self::update_per_output_windows(shared);
-                window_changed = true;
-            }
-        } else if let Some(layouts_changed) = event.get("WindowLayoutsChanged") {
-            // changes is Vec<(u64, WindowLayout)> which serializes as an array of tuples:
-            // [[window_id, {layout_obj}], ...]
-            if let Some(changes) = layouts_changed.get("changes").and_then(|v| v.as_array()) {
-                let mut win_cache = shared.windows.write();
-                for entry in changes {
-                    let entry = match entry.as_array() {
-                        Some(arr) if arr.len() >= 2 => arr,
-                        _ => continue,
-                    };
-                    let win_id = match entry[0].as_u64() {
-                        Some(id) => id,
-                        None => continue,
-                    };
-                    if let Some(win) = win_cache.get_mut(&win_id) {
-                        // entry[1] is a WindowLayout object with pos_in_scrolling_layout directly
-                        win.layout_position = entry[1]
-                            .get("pos_in_scrolling_layout")
-                            .and_then(|v| v.as_array())
-                            .and_then(|arr| {
-                                if arr.len() >= 2 {
-                                    Some((arr[0].as_i64()? as i32, arr[1].as_i64()? as i32))
-                                } else {
-                                    None
-                                }
-                            });
-                    }
-                }
-                window_changed = true;
-            }
-        } else if let Some(window_closed) = event.get("WindowClosed") {
-            if let Some(win_id) = window_closed.get("id").and_then(|v| v.as_u64()) {
-                shared.windows.write().remove(&win_id);
-                Self::update_window_counts(shared);
-                Self::update_focused_window_from_cache(shared);
-                Self::update_per_output_windows(shared);
-                window_changed = true;
-                workspace_changed = true;
-            }
-        } else if let Some(focus_changed) = event.get("WindowFocusChanged") {
-            let win_id = focus_changed.get("id").and_then(|v| v.as_u64());
-            let mut win_cache = shared.windows.write();
-            for win in win_cache.values_mut() {
-                win.is_focused = win_id.is_some_and(|id| win.id == id);
-            }
-            drop(win_cache);
-            Self::update_focused_window_from_cache(shared);
-            Self::update_per_output_windows(shared);
-            window_changed = true;
-        } else if let Some(urgency_changed) = event.get("WindowUrgencyChanged") {
-            let win_id = urgency_changed.get("id").and_then(|v| v.as_u64());
-            let is_urgent = urgency_changed
-                .get("urgent")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-
-            if let Some(win_id) = win_id {
-                let mut win_cache = shared.windows.write();
-                if let Some(win) = win_cache.get_mut(&win_id)
-                    && win.is_urgent != is_urgent
-                {
-                    win.is_urgent = is_urgent;
-                    window_changed = true;
-                }
-            }
-        } else if let Some(active_changed) = event.get("WorkspaceActiveWindowChanged")
-            && let Some(ws_id) = active_changed.get("workspace_id").and_then(|v| v.as_u64())
-        {
-            let active_win_id = active_changed
-                .get("active_window_id")
-                .and_then(|v| v.as_u64());
-            {
-                let mut active_windows = shared.active_windows.write();
-                match active_win_id {
-                    Some(win_id) => active_windows.insert(ws_id, win_id),
-                    None => active_windows.remove(&ws_id),
-                };
-            }
-            Self::update_per_output_windows(shared);
-            window_changed = true;
-        }
-
-        (workspace_changed, window_changed, keyboard_layout_changed)
     }
 
     /// Run the event loop (in background thread).
+    ///
+    /// Niri starts every event stream with the full current state, so there
+    /// is no separate initial fetch, and a reconnect resynchronizes the state.
     fn event_loop(
         running: Arc<AtomicBool>,
-        shared: Arc<SharedState>,
+        state: Arc<RwLock<NiriState>>,
         socket_path: String,
-        callbacks: Option<(WorkspaceCallback, WindowCallback)>,
-        kb_callback: Option<KeyboardLayoutCallback>,
-        window_list_callback: Option<super::WindowListCallback>,
+        callbacks: Callbacks,
     ) {
-        // Fetch initial state
-        Self::fetch_initial_state(&socket_path, &shared);
-
-        // Emit initial state
-        if let Some((ref ws_cb, ref win_cb)) = callbacks {
-            ws_cb(shared.workspace_snapshot.read().clone());
-            // Emit window info for all outputs (including empty info for outputs with no active window)
-            let per_output = shared.per_output_window.read();
-            for win_info in per_output.values() {
-                win_cb(win_info.clone());
-            }
-        }
-
-        // Emit the full initial window list for taskbar consumers.
-        if let Some(ref wl_cb) = window_list_callback {
-            let windows = Self::get_windows_from_shared(&shared);
-            wl_cb(super::WindowListSnapshot { windows });
-        }
-
-        // Emit initial keyboard layout
-        if let Some(ref kb_cb) = kb_callback
-            && let Some(ref info) = *shared.keyboard_layout.read()
-        {
-            kb_cb(info.clone());
-        }
-
         // Exponential backoff state
         let mut backoff_ms = RECONNECT_INITIAL_MS;
 
@@ -958,38 +659,9 @@ impl NiriBackend {
                                     continue;
                                 }
 
-                                let (ws_changed, win_changed, kb_changed) =
-                                    Self::handle_event(&shared, &event);
-
-                                if let Some((ref ws_cb, ref win_cb)) = callbacks {
-                                    if ws_changed {
-                                        ws_cb(shared.workspace_snapshot.read().clone());
-                                    }
-                                    if win_changed {
-                                        // Emit updates for all outputs with their current active window
-                                        let per_output = shared.per_output_window.read();
-                                        for win_info in per_output.values() {
-                                            win_cb(win_info.clone());
-                                        }
-                                    }
-                                }
-
-                                if kb_changed
-                                    && let Some(ref kb_cb) = kb_callback
-                                    && let Some(ref info) = *shared.keyboard_layout.read()
-                                {
-                                    kb_cb(info.clone());
-                                }
-
-                                // Workspace metadata changes can affect taskbar ordering and
-                                // separator labels: windows are sorted by workspace idx, and
-                                // labels resolve stable workspace IDs back to idx/name metadata.
-                                if (win_changed || ws_changed)
-                                    && let Some(ref wl_cb) = window_list_callback
-                                {
-                                    let windows = Self::get_windows_from_shared(&shared);
-                                    wl_cb(super::WindowListSnapshot { windows });
-                                }
+                                super::visibility::notify_changed();
+                                let changes = state.write().apply(&event);
+                                Self::emit(&state, &callbacks, changes);
                             }
                             Err(e) => {
                                 trace!("Failed to parse Niri event: {}", e);
@@ -1043,38 +715,27 @@ impl CompositorBackend for NiriBackend {
         };
         *self.socket_path.write() = Some(socket_path.clone());
 
-        // Store callbacks for potential later use
-        *self.callbacks.lock().unwrap_or_else(|e| e.into_inner()) =
-            Some((on_workspace_update.clone(), on_window_update.clone()));
-
-        // Clone shared state and running flag for the thread
         let running = Arc::clone(&self.running);
-        let shared = Arc::clone(&self.shared);
-        let callbacks = Some((on_workspace_update, on_window_update));
-        let kb_callback = self
-            .keyboard_layout_callback
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        let window_list_callback = self
-            .window_list_callback
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
+        let state = Arc::clone(&self.state);
+        let callbacks = Callbacks {
+            workspace: on_workspace_update,
+            window: on_window_update,
+            keyboard_layout: self
+                .keyboard_layout_callback
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
+            window_list: self
+                .window_list_callback
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
+        };
 
         // Start event loop thread
         let handle = thread::Builder::new()
             .name("niri-event-loop".into())
-            .spawn(move || {
-                Self::event_loop(
-                    running,
-                    shared,
-                    socket_path,
-                    callbacks,
-                    kb_callback,
-                    window_list_callback,
-                );
-            })
+            .spawn(move || Self::event_loop(running, state, socket_path, callbacks))
             .ok();
 
         *self.event_thread.lock().unwrap_or_else(|e| e.into_inner()) = handle;
@@ -1102,7 +763,7 @@ impl CompositorBackend for NiriBackend {
     }
 
     fn list_workspaces(&self) -> Vec<WorkspaceMeta> {
-        let workspaces = self.shared.workspaces.read();
+        let workspaces = self.state.read().workspace_list();
         if workspaces.is_empty() {
             // Return default workspaces if not initialized yet
             (1..=10)
@@ -1114,25 +775,16 @@ impl CompositorBackend for NiriBackend {
                 })
                 .collect()
         } else {
-            workspaces.clone()
+            workspaces
         }
     }
 
     fn get_workspace_snapshot(&self) -> WorkspaceSnapshot {
-        // If not initialized, try to fetch state
-        let socket_path = self.socket_path.read();
-        if socket_path.is_none()
-            && let Ok(path) = env::var("NIRI_SOCKET")
-        {
-            drop(socket_path);
-            *self.socket_path.write() = Some(path.clone());
-            Self::fetch_initial_state(&path, &self.shared);
-        }
-        self.shared.workspace_snapshot.read().clone()
+        self.state.read().snapshot()
     }
 
     fn get_focused_window(&self) -> Option<WindowInfo> {
-        self.shared.focused_window.read().clone()
+        self.state.read().focused_window()
     }
 
     fn switch_workspace(&self, workspace_id: i32) {
@@ -1180,7 +832,7 @@ impl CompositorBackend for NiriBackend {
     }
 
     fn get_keyboard_layout(&self) -> Option<KeyboardLayoutInfo> {
-        self.shared.keyboard_layout.read().clone()
+        self.state.read().keyboard_layout()
     }
 
     fn switch_keyboard_layout_next(&self) {
@@ -1195,7 +847,7 @@ impl CompositorBackend for NiriBackend {
     }
 
     fn list_windows(&self) -> Vec<super::Window> {
-        Self::get_windows_from_shared(&self.shared)
+        self.state.read().window_list()
     }
 
     fn focus_window(&self, window_id: u64) {
@@ -1218,6 +870,8 @@ impl Drop for NiriBackend {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::AtomicUsize;
+
     use super::*;
 
     fn window(id: u64, ws: u64, title: &str, focused: bool) -> serde_json::Value {
@@ -1241,14 +895,14 @@ mod tests {
         })
     }
 
-    fn shown(shared: &SharedState, output: &str) -> (String, bool) {
-        let per_output = shared.per_output_window.read();
+    fn shown(state: &NiriState, output: &str) -> (String, bool) {
+        let per_output = state.per_output_windows();
         let info = per_output.get(output).expect("output has an entry");
         (info.title.clone(), info.focused)
     }
 
-    fn shown_focused(shared: &SharedState) -> String {
-        let per_output = shared.per_output_window.read();
+    fn shown_focused(state: &NiriState) -> String {
+        let per_output = state.per_output_windows();
         let focused: Vec<_> = per_output.values().filter(|info| info.focused).collect();
         assert_eq!(focused.len(), 1, "exactly one focused output");
         focused[0].title.clone()
@@ -1257,89 +911,293 @@ mod tests {
     /// Workspace 1 (DP-1, focused) has five windows with B (id 4) active;
     /// workspace 2 (DP-1) is empty; DP-2 shows workspace 3 with window X and
     /// hides workspace 4 with window Y.
-    fn setup() -> SharedState {
-        let shared = SharedState::default();
-        NiriBackend::handle_event(
-            &shared,
-            &serde_json::json!({"WorkspacesChanged": {"workspaces": [
-                workspace(1, "DP-1", true, true, Some(4)),
-                workspace(2, "DP-1", false, false, None),
-                workspace(3, "DP-2", true, false, Some(10)),
-                workspace(4, "DP-2", false, false, Some(11)),
-            ]}}),
-        );
-        NiriBackend::handle_event(
-            &shared,
-            &serde_json::json!({"WindowsChanged": {"windows": [
-                window(1, 1, "A1", false),
-                window(2, 1, "A2", false),
-                window(3, 1, "A3", false),
-                window(4, 1, "B", true),
-                window(5, 1, "A5", false),
-                window(10, 3, "X", false),
-                window(11, 4, "Y", false),
-            ]}}),
-        );
-        shared
+    fn setup() -> NiriState {
+        let mut state = NiriState::default();
+        state.apply(&serde_json::json!({"WorkspacesChanged": {"workspaces": [
+            workspace(1, "DP-1", true, true, Some(4)),
+            workspace(2, "DP-1", false, false, None),
+            workspace(3, "DP-2", true, false, Some(10)),
+            workspace(4, "DP-2", false, false, Some(11)),
+        ]}}));
+        state.apply(&serde_json::json!({"WindowsChanged": {"windows": [
+            window(1, 1, "A1", false),
+            window(2, 1, "A2", false),
+            window(3, 1, "A3", false),
+            window(4, 1, "B", true),
+            window(5, 1, "A5", false),
+            window(10, 3, "X", false),
+            window(11, 4, "Y", false),
+        ]}}));
+        state
     }
 
     #[test]
     fn layer_shell_focus_keeps_the_active_window() {
-        let shared = setup();
-        assert_eq!(shown_focused(&shared), "B");
+        let mut state = setup();
+        assert_eq!(shown_focused(&state), "B");
 
         // A layer-shell surface (e.g. a popover) takes the keyboard.
-        let (_, changed, _) = NiriBackend::handle_event(
-            &shared,
-            &serde_json::json!({"WindowFocusChanged": {"id": null}}),
-        );
+        let changed = state
+            .apply(&serde_json::json!({"WindowFocusChanged": {"id": null}}))
+            .windows;
         assert!(changed);
-        assert_eq!(shown(&shared, "DP-1"), ("B".to_string(), true));
+        assert_eq!(shown(&state, "DP-1"), ("B".to_string(), true));
 
         // The title still updates while the popover has focus.
-        NiriBackend::handle_event(
-            &shared,
-            &serde_json::json!({"WindowOpenedOrChanged": {
-                "window": window(4, 1, "B renamed", false)
-            }}),
-        );
-        assert_eq!(shown_focused(&shared), "B renamed");
+        state.apply(&serde_json::json!({"WindowOpenedOrChanged": {
+            "window": window(4, 1, "B renamed", false)
+        }}));
+        assert_eq!(shown_focused(&state), "B renamed");
 
         // Focus returns to the window.
-        NiriBackend::handle_event(
-            &shared,
-            &serde_json::json!({"WindowFocusChanged": {"id": 4}}),
-        );
-        assert_eq!(shown_focused(&shared), "B renamed");
+        state.apply(&serde_json::json!({"WindowFocusChanged": {"id": 4}}));
+        assert_eq!(shown_focused(&state), "B renamed");
     }
 
     #[test]
     fn unfocused_output_shows_its_active_window() {
-        let shared = setup();
-        assert_eq!(shown(&shared, "DP-2"), ("X".to_string(), false));
+        let mut state = setup();
+        assert_eq!(shown(&state, "DP-2"), ("X".to_string(), false));
 
         // An active-window change on a hidden workspace leaves DP-2 alone.
-        NiriBackend::handle_event(
-            &shared,
-            &serde_json::json!({"WorkspaceActiveWindowChanged": {
-                "workspace_id": 4, "active_window_id": 11
-            }}),
-        );
-        assert_eq!(shown(&shared, "DP-2"), ("X".to_string(), false));
+        state.apply(&serde_json::json!({"WorkspaceActiveWindowChanged": {
+            "workspace_id": 4, "active_window_id": 11
+        }}));
+        assert_eq!(shown(&state, "DP-2"), ("X".to_string(), false));
     }
 
     #[test]
     fn empty_workspace_clears_the_title() {
-        let shared = setup();
-        NiriBackend::handle_event(
-            &shared,
-            &serde_json::json!({"WorkspaceActivated": {"id": 2, "focused": true}}),
-        );
-        NiriBackend::handle_event(
-            &shared,
-            &serde_json::json!({"WindowFocusChanged": {"id": null}}),
+        let mut state = setup();
+        state.apply(&serde_json::json!({"WorkspaceActivated": {"id": 2, "focused": true}}));
+        state.apply(&serde_json::json!({"WindowFocusChanged": {"id": null}}));
+
+        assert_eq!(shown(&state, "DP-1"), (String::new(), true));
+    }
+
+    fn window_ids(state: &NiriState) -> Vec<u64> {
+        state.window_list().iter().map(|win| win.id).collect()
+    }
+
+    fn set<const N: usize>(ids: [i32; N]) -> std::collections::HashSet<i32> {
+        ids.into_iter().collect()
+    }
+
+    fn counts<const N: usize>(entries: [(i32, u32); N]) -> HashMap<i32, u32> {
+        entries.into_iter().collect()
+    }
+
+    #[test]
+    fn snapshot_reports_workspaces_and_window_counts() {
+        let state = setup();
+        let snapshot = state.snapshot();
+
+        assert_eq!(snapshot.active_workspace, set([1]));
+        assert_eq!(snapshot.occupied_workspaces, set([1, 2, 3, 4]));
+        assert!(snapshot.urgent_workspaces.is_empty());
+        assert_eq!(
+            snapshot.window_counts,
+            counts([(1, 5), (2, 0), (3, 1), (4, 1)])
         );
 
-        assert_eq!(shown(&shared, "DP-1"), (String::new(), true));
+        let dp1 = &snapshot.per_output["DP-1"];
+        assert_eq!(dp1.active_workspace, set([1]));
+        assert_eq!(dp1.occupied_workspaces, set([1, 2]));
+        assert_eq!(dp1.window_counts, counts([(1, 5), (2, 0)]));
+
+        let dp2 = &snapshot.per_output["DP-2"];
+        assert_eq!(dp2.active_workspace, set([3]));
+        assert_eq!(dp2.occupied_workspaces, set([3, 4]));
+        assert_eq!(dp2.window_counts, counts([(3, 1), (4, 1)]));
+    }
+
+    #[test]
+    fn window_counts_follow_moves_and_closes() {
+        let mut state = setup();
+
+        let moved =
+            serde_json::json!({"WindowOpenedOrChanged": {"window": window(5, 2, "A5", false)}});
+        assert!(state.apply(&moved).workspaces);
+        assert_eq!(
+            state.snapshot().window_counts,
+            counts([(1, 4), (2, 1), (3, 1), (4, 1)])
+        );
+
+        // A new window changes the counts; a title change doesn't.
+        let opened =
+            serde_json::json!({"WindowOpenedOrChanged": {"window": window(6, 2, "C", false)}});
+        assert!(state.apply(&opened).workspaces);
+        let renamed =
+            serde_json::json!({"WindowOpenedOrChanged": {"window": window(6, 2, "C2", false)}});
+        assert!(!state.apply(&renamed).workspaces);
+        assert_eq!(state.snapshot().window_counts[&2], 2);
+        state.apply(&serde_json::json!({"WindowClosed": {"id": 6}}));
+
+        let changes = state.apply(&serde_json::json!({"WindowClosed": {"id": 10}}));
+        assert!(changes.workspaces && changes.windows);
+        let snapshot = state.snapshot();
+        assert_eq!(snapshot.window_counts[&3], 0);
+        assert_eq!(snapshot.per_output["DP-2"].window_counts[&3], 0);
+        assert_eq!(window_ids(&state), vec![1, 2, 3, 4, 5, 11]);
+    }
+
+    fn drag(state: &mut NiriState, id: u64) {
+        let mut dragged = window(id, 1, "dragged", false);
+        dragged["workspace_id"] = serde_json::Value::Null;
+        let lifted = serde_json::json!({"WindowOpenedOrChanged": {"window": dragged}});
+        assert!(!state.apply(&lifted).workspaces);
+    }
+
+    #[test]
+    fn dragged_window_keeps_its_workspace_and_place() {
+        let mut state = setup();
+        // Window IDs run against the on-screen order. Column 3 is stacked.
+        state.apply(&serde_json::json!({"WindowLayoutsChanged": {"changes": [
+            [3, {"pos_in_scrolling_layout": [1, 1]}],
+            [2, {"pos_in_scrolling_layout": [2, 1]}],
+            [5, {"pos_in_scrolling_layout": [3, 1]}],
+            [1, {"pos_in_scrolling_layout": [3, 2]}],
+            [4, {"pos_in_scrolling_layout": [3, 3]}],
+        ]}}));
+        assert_eq!(window_ids(&state), vec![3, 2, 5, 1, 4, 10, 11]);
+
+        // Lifting out the first column shifts the others into its place.
+        drag(&mut state, 3);
+        state.apply(&serde_json::json!({"WindowLayoutsChanged": {"changes": [
+            [3, {"pos_in_scrolling_layout": null}],
+            [2, {"pos_in_scrolling_layout": [1, 1]}],
+            [5, {"pos_in_scrolling_layout": [2, 1]}],
+            [1, {"pos_in_scrolling_layout": [2, 2]}],
+            [4, {"pos_in_scrolling_layout": [2, 3]}],
+        ]}}));
+        assert_eq!(window_ids(&state), vec![3, 2, 5, 1, 4, 10, 11]);
+        assert_eq!(state.snapshot().window_counts[&1], 5);
+        let windows = state.window_list();
+        let win = windows.iter().find(|win| win.id == 3).unwrap();
+        assert_eq!(win.workspace_id, Some(1));
+        assert_eq!(win.output.as_deref(), Some("DP-1"));
+
+        // Dropping it on workspace 2 moves it there.
+        let mut dropped = window(3, 2, "A3", false);
+        dropped["layout"] = serde_json::json!({"pos_in_scrolling_layout": [1, 1]});
+        state.apply(&serde_json::json!({"WindowOpenedOrChanged": {"window": dropped}}));
+        assert_eq!(window_ids(&state), vec![2, 5, 1, 4, 3, 10, 11]);
+        let snapshot = state.snapshot();
+        assert_eq!(snapshot.window_counts[&1], 4);
+        assert_eq!(snapshot.window_counts[&2], 1);
+
+        // Lifting the top tile of a stacked column moves the rest up.
+        drag(&mut state, 5);
+        state.apply(&serde_json::json!({"WindowLayoutsChanged": {"changes": [
+            [5, {"pos_in_scrolling_layout": null}],
+            [1, {"pos_in_scrolling_layout": [2, 1]}],
+            [4, {"pos_in_scrolling_layout": [2, 2]}],
+        ]}}));
+        assert_eq!(window_ids(&state), vec![2, 5, 1, 4, 3, 10, 11]);
+    }
+
+    #[test]
+    fn dragged_floating_window_keeps_its_place() {
+        // Windows without a layout position, such as floating ones, sort by ID.
+        let mut state = setup();
+        drag(&mut state, 2);
+        assert_eq!(window_ids(&state), vec![1, 2, 3, 4, 5, 10, 11]);
+    }
+
+    #[test]
+    fn workspace_activation_updates_global_and_output_state() {
+        let mut state = setup();
+
+        // Activating without focus only changes what the output shows.
+        let ws_changed = state
+            .apply(&serde_json::json!({"WorkspaceActivated": {"id": 4, "focused": false}}))
+            .workspaces;
+        assert!(ws_changed);
+        let snap = state.snapshot();
+        assert_eq!(snap.active_workspace, set([1]));
+        assert_eq!(snap.per_output["DP-1"].active_workspace, set([1]));
+        assert_eq!(snap.per_output["DP-2"].active_workspace, set([4]));
+        assert_eq!(shown(&state, "DP-2"), ("Y".to_string(), false));
+
+        // Focusing a workspace on another output moves global focus there.
+        state.apply(&serde_json::json!({"WorkspaceActivated": {"id": 3, "focused": true}}));
+        let snap = state.snapshot();
+        assert_eq!(snap.active_workspace, set([3]));
+        assert_eq!(snap.per_output["DP-1"].active_workspace, set([1]));
+        assert_eq!(snap.per_output["DP-2"].active_workspace, set([3]));
+        assert_eq!(shown_focused(&state), "X");
+    }
+
+    #[test]
+    fn window_list_follows_output_workspace_and_layout_order() {
+        let mut state = setup();
+        assert_eq!(window_ids(&state), vec![1, 2, 3, 4, 5, 10, 11]);
+
+        state.apply(&serde_json::json!({"WindowLayoutsChanged": {"changes": [
+            [5, {"pos_in_scrolling_layout": [1, 1]}],
+            [3, {"pos_in_scrolling_layout": [2, 1]}],
+            [1, {"pos_in_scrolling_layout": [2, 2]}],
+        ]}}));
+        assert_eq!(window_ids(&state), vec![5, 3, 1, 2, 4, 10, 11]);
+
+        // A full window update carries its layout position too.
+        let mut moved = window(11, 3, "Y", false);
+        moved["layout"] = serde_json::json!({"pos_in_scrolling_layout": [1, 1]});
+        state.apply(&serde_json::json!({"WindowOpenedOrChanged": {"window": moved}}));
+        assert_eq!(window_ids(&state), vec![5, 3, 1, 2, 4, 11, 10]);
+
+        let windows = state.window_list();
+        let y = windows.iter().find(|win| win.id == 11).unwrap();
+        assert_eq!(y.workspace_id, Some(3));
+        assert_eq!(y.output.as_deref(), Some("DP-2"));
+        assert_eq!(y.app_id, "Y-app");
+    }
+
+    #[test]
+    fn callbacks_run_without_the_state_lock() {
+        let mut state = setup();
+        state.apply(
+            &serde_json::json!({"KeyboardLayoutsChanged": {"keyboard_layouts": {
+                "names": ["English (US)"], "current_idx": 0
+            }}}),
+        );
+        let state = Arc::new(RwLock::new(state));
+
+        // Each callback checks that it could take the lock itself, as a
+        // widget calling back into the backend would.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let check: Arc<dyn Fn() + Send + Sync> = {
+            let (state, calls) = (Arc::clone(&state), Arc::clone(&calls));
+            Arc::new(move || {
+                assert!(state.try_write().is_some(), "callback ran under the lock");
+                calls.fetch_add(1, Ordering::SeqCst);
+            })
+        };
+        let callbacks = Callbacks {
+            workspace: Arc::new({
+                let check = Arc::clone(&check);
+                move |_| check()
+            }),
+            window: Arc::new({
+                let check = Arc::clone(&check);
+                move |_| check()
+            }),
+            keyboard_layout: Some(Arc::new({
+                let check = Arc::clone(&check);
+                move |_| check()
+            })),
+            window_list: Some(Arc::new(move |_| check())),
+        };
+
+        let all = Changes {
+            workspaces: true,
+            windows: true,
+            keyboard_layout: true,
+        };
+        NiriBackend::emit(&state, &callbacks, all);
+
+        // One snapshot, one window update per output, the window list and
+        // the keyboard layout.
+        assert_eq!(calls.load(Ordering::SeqCst), 5);
     }
 }
