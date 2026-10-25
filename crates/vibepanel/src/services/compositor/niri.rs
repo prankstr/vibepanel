@@ -206,7 +206,7 @@ impl NiriState {
                     .filter_map(parse_window)
                     .map(|win| (win.id, win))
                     .collect();
-                (false, true, false)
+                (true, true, false)
             }
             "WindowOpenedOrChanged" => {
                 let Some(window) = data.get("window").and_then(parse_window) else {
@@ -217,8 +217,11 @@ impl NiriState {
                         win.is_focused = false;
                     }
                 }
-                self.windows.insert(window.id, window);
-                (false, true, false)
+                let workspace_id = window.workspace_id;
+                let previous = self.windows.insert(window.id, window);
+                // Window counts change when a window opens or moves.
+                let moved = previous.is_none_or(|prev| prev.workspace_id != workspace_id);
+                (moved, true, false)
             }
             "WindowLayoutsChanged" => {
                 let Some(changes) = data.get("changes").and_then(Value::as_array) else {
@@ -1032,14 +1035,25 @@ mod tests {
     fn window_counts_follow_moves_and_closes() {
         let mut state = setup();
 
-        apply(
+        let (ws_changed, _, _) = apply(
             &mut state,
             serde_json::json!({"WindowOpenedOrChanged": {"window": window(5, 2, "A5", false)}}),
         );
+        assert!(ws_changed);
         assert_eq!(
             state.snapshot().window_counts,
             counts([(1, 4), (2, 1), (3, 1), (4, 1)])
         );
+
+        // A new window changes the counts; a title change doesn't.
+        let opened =
+            serde_json::json!({"WindowOpenedOrChanged": {"window": window(6, 2, "C", false)}});
+        assert!(apply(&mut state, opened).0);
+        let renamed =
+            serde_json::json!({"WindowOpenedOrChanged": {"window": window(6, 2, "C2", false)}});
+        assert!(!apply(&mut state, renamed).0);
+        assert_eq!(state.snapshot().window_counts[&2], 2);
+        apply(&mut state, serde_json::json!({"WindowClosed": {"id": 6}}));
 
         let (ws_changed, win_changed, _) =
             apply(&mut state, serde_json::json!({"WindowClosed": {"id": 10}}));
