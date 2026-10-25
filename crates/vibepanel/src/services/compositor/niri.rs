@@ -73,6 +73,9 @@ struct WindowData {
     /// Column and tile position in the scrolling layout (niri-specific).
     /// Used for ordering taskbar buttons to match visual window order.
     layout_position: Option<(i32, i32)>,
+    /// Niri reports no workspace or layout position while a window is being
+    /// dragged, so the last known ones are kept until it lands.
+    dragging: bool,
 }
 
 pub struct NiriBackend {
@@ -124,14 +127,16 @@ fn parse_workspace(ws: &Value) -> Option<WorkspaceData> {
 }
 
 fn parse_window(window: &Value) -> Option<WindowData> {
+    let workspace_id = u64_field(window, "workspace_id");
     Some(WindowData {
         id: u64_field(window, "id")?,
         title: str_field(window, "title").unwrap_or_default().to_string(),
         app_id: str_field(window, "app_id").unwrap_or_default().to_string(),
-        workspace_id: u64_field(window, "workspace_id"),
+        workspace_id,
         is_focused: bool_field(window, "is_focused"),
         is_urgent: bool_field(window, "is_urgent"),
         layout_position: window.get("layout").and_then(parse_layout_position),
+        dragging: workspace_id.is_none(),
     })
 }
 
@@ -209,9 +214,15 @@ impl NiriState {
                 (true, true, false)
             }
             "WindowOpenedOrChanged" => {
-                let Some(window) = data.get("window").and_then(parse_window) else {
+                let Some(mut window) = data.get("window").and_then(parse_window) else {
                     return UNCHANGED;
                 };
+                if window.dragging
+                    && let Some(prev) = self.windows.get(&window.id)
+                {
+                    window.workspace_id = prev.workspace_id;
+                    window.layout_position = prev.layout_position;
+                }
                 if window.is_focused {
                     for win in self.windows.values_mut() {
                         win.is_focused = false;
@@ -232,7 +243,10 @@ impl NiriState {
                     if let Some([id, layout, ..]) = change.as_array().map(Vec::as_slice)
                         && let Some(win) = id.as_u64().and_then(|id| self.windows.get_mut(&id))
                     {
-                        win.layout_position = parse_layout_position(layout);
+                        let position = parse_layout_position(layout);
+                        if position.is_some() || !win.dragging {
+                            win.layout_position = position;
+                        }
                     }
                 }
                 (false, true, false)
@@ -405,6 +419,9 @@ impl NiriState {
                 ws.and_then(|ws| ws.output.clone()).unwrap_or_default(),
                 ws.map_or(i32::MAX, |ws| ws.idx),
                 win.layout_position.unwrap_or((i32::MAX, i32::MAX)),
+                // The window that slides into a dragged window's slot gets
+                // its position; the dragged one was there first.
+                !(win.dragging && win.layout_position.is_some()),
                 win.id,
             )
         });
@@ -1027,6 +1044,72 @@ mod tests {
         assert_eq!(snapshot.window_counts[&3], 0);
         assert_eq!(snapshot.per_output["DP-2"].window_counts[&3], 0);
         assert_eq!(window_ids(&state), vec![1, 2, 3, 4, 5, 11]);
+    }
+
+    #[test]
+    fn dragged_window_keeps_its_workspace() {
+        let mut state = setup();
+
+        let mut dragged = window(5, 1, "A5", false);
+        dragged["workspace_id"] = serde_json::Value::Null;
+        let (ws_changed, _, _) = apply(
+            &mut state,
+            serde_json::json!({"WindowOpenedOrChanged": {"window": dragged}}),
+        );
+        assert!(!ws_changed);
+        assert_eq!(state.snapshot().window_counts[&1], 5);
+        let windows = state.window_list();
+        let win = windows.iter().find(|win| win.id == 5).unwrap();
+        assert_eq!(win.workspace_id, Some(1));
+        assert_eq!(win.output.as_deref(), Some("DP-1"));
+
+        // Dropping it on another workspace moves it.
+        apply(
+            &mut state,
+            serde_json::json!({"WindowOpenedOrChanged": {"window": window(5, 2, "A5", false)}}),
+        );
+        let snapshot = state.snapshot();
+        assert_eq!(snapshot.window_counts[&1], 4);
+        assert_eq!(snapshot.window_counts[&2], 1);
+    }
+
+    #[test]
+    fn dragged_window_keeps_its_place_in_the_taskbar() {
+        let mut state = setup();
+        apply(
+            &mut state,
+            serde_json::json!({"WindowLayoutsChanged": {"changes": [
+                [1, {"pos_in_scrolling_layout": [1, 1]}],
+                [2, {"pos_in_scrolling_layout": [2, 1]}],
+                [3, {"pos_in_scrolling_layout": [3, 1]}],
+            ]}}),
+        );
+        assert_eq!(window_ids(&state), vec![1, 2, 3, 4, 5, 10, 11]);
+
+        // Lifting window 2 out of the layout closes the gap behind it.
+        let mut dragged = window(2, 1, "A2", false);
+        dragged["workspace_id"] = serde_json::Value::Null;
+        apply(
+            &mut state,
+            serde_json::json!({"WindowOpenedOrChanged": {"window": dragged}}),
+        );
+        apply(
+            &mut state,
+            serde_json::json!({"WindowLayoutsChanged": {"changes": [
+                [2, {"pos_in_scrolling_layout": null}],
+                [3, {"pos_in_scrolling_layout": [2, 1]}],
+            ]}}),
+        );
+        assert_eq!(window_ids(&state), vec![1, 2, 3, 4, 5, 10, 11]);
+
+        // Dropping it on workspace 2 moves it there.
+        let mut dropped = window(2, 2, "A2", false);
+        dropped["layout"] = serde_json::json!({"pos_in_scrolling_layout": [1, 1]});
+        apply(
+            &mut state,
+            serde_json::json!({"WindowOpenedOrChanged": {"window": dropped}}),
+        );
+        assert_eq!(window_ids(&state), vec![1, 3, 4, 5, 2, 10, 11]);
     }
 
     #[test]
