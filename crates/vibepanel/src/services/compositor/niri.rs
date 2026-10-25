@@ -496,32 +496,6 @@ impl NiriBackend {
         }
     }
 
-    /// Fetch initial state from Niri.
-    fn fetch_initial_state(socket_path: &str, state: &RwLock<NiriState>) {
-        let request = |name: &str| {
-            let mut reply = Self::send_request_static(socket_path, &Value::String(name.into()))?;
-            Some(reply.get_mut("Ok")?.get_mut(name)?.take())
-        };
-        let workspaces = request("Workspaces");
-        let windows = request("Windows");
-        let keyboard_layouts = request("KeyboardLayouts");
-
-        let mut state = state.write();
-        if let Some(workspaces) = workspaces {
-            state.apply(&serde_json::json!({"WorkspacesChanged": {"workspaces": workspaces}}));
-        }
-        if let Some(windows) = windows {
-            state.apply(&serde_json::json!({"WindowsChanged": {"windows": windows}}));
-        }
-        if let Some(keyboard_layouts) = keyboard_layouts {
-            state.apply(&serde_json::json!({
-                "KeyboardLayoutsChanged": {"keyboard_layouts": keyboard_layouts}
-            }));
-        }
-
-        debug!("Fetched initial Niri state");
-    }
-
     /// Send the changed parts of the state to the callbacks. The lock is
     /// released before any callback runs.
     fn emit(state: &RwLock<NiriState>, callbacks: &Callbacks, changes: Changes) {
@@ -560,15 +534,15 @@ impl NiriBackend {
     }
 
     /// Run the event loop (in background thread).
+    ///
+    /// Niri starts every event stream with the full current state, so there
+    /// is no separate initial fetch, and a reconnect resynchronizes the state.
     fn event_loop(
         running: Arc<AtomicBool>,
         state: Arc<RwLock<NiriState>>,
         socket_path: String,
         callbacks: Callbacks,
     ) {
-        Self::fetch_initial_state(&socket_path, &state);
-        Self::emit(&state, &callbacks, (true, true, true));
-
         // Exponential backoff state
         let mut backoff_ms = RECONNECT_INITIAL_MS;
 
@@ -767,15 +741,6 @@ impl CompositorBackend for NiriBackend {
     }
 
     fn get_workspace_snapshot(&self) -> WorkspaceSnapshot {
-        // If not initialized, try to fetch state
-        let socket_path = self.socket_path.read();
-        if socket_path.is_none()
-            && let Ok(path) = env::var("NIRI_SOCKET")
-        {
-            drop(socket_path);
-            *self.socket_path.write() = Some(path.clone());
-            Self::fetch_initial_state(&path, &self.state);
-        }
         self.state.read().snapshot()
     }
 
