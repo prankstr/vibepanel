@@ -2180,7 +2180,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vibepanel"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "async-channel",
  "cargo-husky",
@@ -2219,7 +2219,7 @@ dependencies = [
 
 [[package]]
 name = "vibepanel-core"
-version = "0.17.1"
+version = "0.17.2"
 dependencies = [
  "material-colors",
  "serde",
