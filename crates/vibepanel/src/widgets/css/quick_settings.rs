@@ -628,6 +628,16 @@ window.qs-wifi-qr-window {{
     box-shadow: none;
 }}
 
+/* Too cramped to ring the whole slider; ring the knob instead. */
+.popover .qs-app-volume-slider:focus-visible {{
+    outline: none;
+}}
+.popover .qs-app-volume-slider:focus-visible > trough > slider {{
+    outline: 2px solid var(--color-accent-primary);
+    outline-offset: 2px;
+    transition: none;
+}}
+
 .qs-app-volume-slider > trough > slider:active {{
     transform: scale(1.15);
 }}

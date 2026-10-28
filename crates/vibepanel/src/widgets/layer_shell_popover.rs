@@ -13,23 +13,8 @@ use gtk4::glib::{self, ControlFlow, Propagation};
 use gtk4::prelude::*;
 use gtk4::{
     Application, ApplicationWindow, Box as GtkBox, EventControllerKey, GestureClick, Orientation,
+    PropagationPhase,
 };
-
-/// Whether a key is a keyboard navigation key (Tab, arrows, Home, End).
-/// Used by the deferred keyboard nav controller to gate activation.
-fn is_keynav_key(keyval: gdk::Key) -> bool {
-    matches!(
-        keyval,
-        gdk::Key::Tab
-            | gdk::Key::ISO_Left_Tab
-            | gdk::Key::Up
-            | gdk::Key::Down
-            | gdk::Key::Left
-            | gdk::Key::Right
-            | gdk::Key::Home
-            | gdk::Key::End
-    )
-}
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -40,7 +25,320 @@ use crate::services::background_effect::{BackgroundEffectManager, rounded_bounds
 use crate::services::compositor::CompositorManager;
 use crate::services::config_manager::ConfigManager;
 use crate::services::surfaces::{SHADOW_MARGIN, SurfaceStyleManager};
-use crate::styles::{class, surface};
+use crate::styles::{class, state, surface};
+
+/// The keypad's navigation keys (NumLock off) as their plain equivalents,
+/// which is all the handlers here match on.
+pub(crate) fn plain_nav_key(keyval: gdk::Key) -> gdk::Key {
+    match keyval {
+        gdk::Key::KP_Left => gdk::Key::Left,
+        gdk::Key::KP_Right => gdk::Key::Right,
+        gdk::Key::KP_Up => gdk::Key::Up,
+        gdk::Key::KP_Down => gdk::Key::Down,
+        gdk::Key::KP_Home => gdk::Key::Home,
+        gdk::Key::KP_End => gdk::Key::End,
+        gdk::Key::KP_Page_Up => gdk::Key::Page_Up,
+        gdk::Key::KP_Page_Down => gdk::Key::Page_Down,
+        key => key,
+    }
+}
+
+/// Whether a key is a keyboard navigation key (Tab, arrows, Home, End), which
+/// lifts focus-ring suppression in windows and nested popovers.
+fn is_keynav_key(keyval: gdk::Key) -> bool {
+    matches!(
+        plain_nav_key(keyval),
+        gdk::Key::Tab
+            | gdk::Key::ISO_Left_Tab
+            | gdk::Key::Up
+            | gdk::Key::Down
+            | gdk::Key::Left
+            | gdk::Key::Right
+            | gdk::Key::Home
+            | gdk::Key::End
+    )
+}
+
+/// HJKL as arrows, plus plain Left/Right for the row-edge fallback.
+pub(crate) fn nav_arrow_key(keyval: gdk::Key, state: gdk::ModifierType) -> Option<gdk::Key> {
+    // Shift is checked per key below: Shift+Left/Right stay GTK's.
+    if state.intersects(ANY_MODIFIER.difference(gdk::ModifierType::SHIFT_MASK)) {
+        return None;
+    }
+    match keyval {
+        gdk::Key::h => Some(gdk::Key::Left),
+        gdk::Key::j => Some(gdk::Key::Down),
+        gdk::Key::k => Some(gdk::Key::Up),
+        gdk::Key::l => Some(gdk::Key::Right),
+        gdk::Key::Left | gdk::Key::Right if !state.contains(gdk::ModifierType::SHIFT_MASK) => {
+            Some(keyval)
+        }
+        _ => None,
+    }
+}
+
+fn is_text_input(widget: &gtk4::Widget) -> bool {
+    widget.is::<gtk4::Editable>()
+}
+
+/// Like GTK's window arrow binding, but at a row's edge Left/Right continue in
+/// Tab order onto the previous/next row, without Tab's wrap-around.
+pub(crate) fn move_focus_for_arrow(scope: &gtk4::Widget, keyval: gdk::Key) {
+    use gtk4::DirectionType;
+    // Directional moves don't wrap, but a window or popover's own Tab
+    // handling would, so the Tab fallback runs on its child.
+    let child = match scope.downcast_ref::<gtk4::Window>() {
+        Some(window) => window.child(),
+        None => scope
+            .downcast_ref::<gtk4::Popover>()
+            .and_then(|p| p.child()),
+    };
+    let Some(child) = child else {
+        return;
+    };
+    let (direction, fallback) = match keyval {
+        gdk::Key::Left => (DirectionType::Left, Some(DirectionType::TabBackward)),
+        gdk::Key::Right => (DirectionType::Right, Some(DirectionType::TabForward)),
+        gdk::Key::Up => (DirectionType::Up, None),
+        gdk::Key::Down => (DirectionType::Down, None),
+        _ => return,
+    };
+    if !child.child_focus(direction)
+        && let Some(fallback) = fallback
+    {
+        child.child_focus(fallback);
+    }
+}
+
+/// What GtkRange's own arrow keybindings do; it handles inverted and RTL.
+fn move_slider(range: &gtk4::Range, arrow: gdk::Key) {
+    let scroll = match arrow {
+        gdk::Key::Left => gtk4::ScrollType::StepLeft,
+        gdk::Key::Right => gtk4::ScrollType::StepRight,
+        gdk::Key::Up => gtk4::ScrollType::StepUp,
+        gdk::Key::Down => gtk4::ScrollType::StepDown,
+        _ => return,
+    };
+    range.emit_move_slider(scroll);
+}
+
+/// Our controller claims the keys it handles before GTK's focus-ring tracker
+/// sees them, so show the rings ourselves. Like the tracker, this restarts
+/// GTK's timer that hides them after a few idle seconds.
+fn show_focus_rings(window: &gtk4::Window) {
+    GtkWindowExt::set_focus_visible(window, true);
+}
+
+fn handle_nav_key(
+    window: &gtk4::Window,
+    scope: &gtk4::Widget,
+    keyval: gdk::Key,
+    state: gdk::ModifierType,
+) -> Propagation {
+    let focus = GtkWindowExt::focus(window);
+    let slider = focus.as_ref().and_then(|f| f.downcast_ref::<gtk4::Range>());
+    if let Some(slider) = slider
+        && let Some(propagation) =
+            handle_slider_grab_key(window, slider.upcast_ref(), keyval, state)
+    {
+        return propagation;
+    }
+    let arrow = match nav_arrow_key(keyval, state) {
+        Some(arrow) => arrow,
+        None if slider.is_some() && is_plain_up_down(keyval, state) => keyval,
+        None => return Propagation::Proceed,
+    };
+    if focus.as_ref().is_some_and(is_text_input) {
+        return Propagation::Proceed;
+    }
+
+    show_focus_rings(window);
+    if begin_keynav(window, scope) {
+        return Propagation::Stop;
+    }
+
+    // A slider only takes the arrows while grabbed; otherwise they move on.
+    match slider {
+        Some(range) if range.has_css_class(state::GRABBED) => move_slider(range, arrow),
+        _ => move_focus_for_arrow(scope, arrow),
+    }
+    Propagation::Stop
+}
+
+pub(crate) const ANY_MODIFIER: gdk::ModifierType = gdk::ModifierType::SHIFT_MASK
+    .union(gdk::ModifierType::CONTROL_MASK)
+    .union(gdk::ModifierType::ALT_MASK)
+    .union(gdk::ModifierType::SUPER_MASK)
+    .union(gdk::ModifierType::META_MASK);
+
+fn is_plain_up_down(keyval: gdk::Key, state: gdk::ModifierType) -> bool {
+    matches!(keyval, gdk::Key::Up | gdk::Key::Down) && !state.intersects(ANY_MODIFIER)
+}
+
+fn is_activate_key(keyval: gdk::Key) -> bool {
+    matches!(
+        keyval,
+        gdk::Key::Return | gdk::Key::KP_Enter | gdk::Key::space | gdk::Key::KP_Space
+    )
+}
+
+/// Sliders are passed over by arrows until grabbed with Enter (or a click);
+/// then all arrows adjust them until Enter, Escape or a focus change.
+/// Enter toggles on press; its auto-repeats are swallowed until release
+/// (see `nav_keys_controller`), so holding it can't flicker.
+fn handle_slider_grab_key(
+    window: &gtk4::Window,
+    slider: &gtk4::Widget,
+    keyval: gdk::Key,
+    state: gdk::ModifierType,
+) -> Option<Propagation> {
+    if state.intersects(ANY_MODIFIER) {
+        return None;
+    }
+    let grabbed = slider.has_css_class(state::GRABBED);
+    match keyval {
+        key if is_activate_key(key) && grabbed => slider.remove_css_class(state::GRABBED),
+        key if is_activate_key(key) => slider.add_css_class(state::GRABBED),
+        // Stops the popover's own Escape from closing it.
+        gdk::Key::Escape if grabbed => slider.remove_css_class(state::GRABBED),
+        // GTK's jump keybindings would set a slider that is only passed over.
+        gdk::Key::Home | gdk::Key::End | gdk::Key::Page_Up | gdk::Key::Page_Down if !grabbed => {
+            return Some(Propagation::Stop);
+        }
+        _ => return None,
+    }
+    // A slider clicked before any keyboard navigation still has them hidden.
+    lift_focus_suppression(window);
+    show_focus_rings(window);
+    Some(Propagation::Stop)
+}
+
+/// Releases a grabbed slider once focus leaves it, and grabs a slider on
+/// click so the arrows keep adjusting what the pointer just moved.
+fn slider_grab_tracking(window: &ApplicationWindow) -> (glib::SignalHandlerId, GestureClick) {
+    let last_focus = RefCell::new(GtkWindowExt::focus(window).map(|w| w.downgrade()));
+    let focus_handler = window.connect_focus_widget_notify(move |window| {
+        let focus = GtkWindowExt::focus(window);
+        if let Some(previous) = last_focus.borrow().as_ref().and_then(|w| w.upgrade())
+            && focus.as_ref() != Some(&previous)
+        {
+            previous.remove_css_class(state::GRABBED);
+        }
+        *last_focus.borrow_mut() = focus.map(|w| w.downgrade());
+    });
+
+    let click = GestureClick::new();
+    click.set_propagation_phase(PropagationPhase::Capture);
+    click.connect_pressed(|gesture, _, x, y| {
+        let slider = gesture
+            .widget()
+            .and_then(|window| window.pick(x, y, gtk4::PickFlags::DEFAULT))
+            // Scale, not Range: a scrollbar's internal range isn't a slider.
+            .and_then(|picked| picked.ancestor(gtk4::Scale::static_type()));
+        if let Some(slider) = slider {
+            slider.add_css_class(state::GRABBED);
+        }
+    });
+    (focus_handler, click)
+}
+
+/// Handles HJKL, Left/Right, and Up/Down on sliders within `scope`: they
+/// move focus or adjust a grabbed slider. Capture phase so the focused
+/// widget never sees the raw key.
+fn nav_keys_controller(scope: &gtk4::Widget) -> EventControllerKey {
+    let controller = EventControllerKey::new();
+    controller.set_propagation_phase(PropagationPhase::Capture);
+    let scope_weak = scope.downgrade();
+    // GTK routes releases of presses we handled to this controller only.
+    // Keycodes, since the keyval can change between press and release.
+    let swallowed: Rc<RefCell<Vec<u32>>> = Rc::default();
+    controller.connect_key_pressed({
+        let swallowed = swallowed.clone();
+        move |_, keyval, keycode, state| {
+            let keyval = plain_nav_key(keyval);
+            // A held Enter acts once; its auto-repeats are inert until release.
+            if is_activate_key(keyval) && swallowed.borrow().contains(&keycode) {
+                return Propagation::Stop;
+            }
+            let Some(scope) = scope_weak.upgrade() else {
+                return Propagation::Proceed;
+            };
+            let Some(window) = scope.root().and_downcast::<gtk4::Window>() else {
+                return Propagation::Proceed;
+            };
+            if scope.is::<gtk4::Popover>() {
+                let typing = GtkWindowExt::focus(&window).is_some_and(|f| is_text_input(&f));
+                if is_keynav_key(keyval) || (nav_arrow_key(keyval, state).is_some() && !typing) {
+                    lift_nested_focus_suppression(&scope);
+                }
+            }
+            let propagation = handle_nav_key(&window, &scope, keyval, state);
+            if propagation == Propagation::Stop && !swallowed.borrow().contains(&keycode) {
+                swallowed.borrow_mut().push(keycode);
+            }
+            propagation
+        }
+    });
+    controller.connect_key_released(move |_, _, keycode, _| {
+        swallowed.borrow_mut().retain(|code| *code != keycode);
+    });
+    controller
+}
+
+/// Keys pressed in a nested GtkPopover never reach its window's controllers,
+/// so it gets its own. Its `.vp-no-focus` (from `configure_popover`) is lifted
+/// on keyboard navigation, or on map if it was opened from the keyboard.
+/// The window's is lifted too: the popover's CSS node sits under it.
+pub(crate) fn install_nested_popover_keynav(popover: &gtk4::Popover) {
+    popover.add_controller(nav_keys_controller(popover.upcast_ref()));
+
+    popover.connect_map(|popover| {
+        if popover
+            .root()
+            .and_downcast::<gtk4::Window>()
+            .is_some_and(|window| GtkWindowExt::gets_focus_visible(&window))
+        {
+            lift_nested_focus_suppression(popover.upcast_ref());
+        }
+    });
+    popover.connect_unmap(|popover| popover.add_css_class(surface::NO_FOCUS));
+}
+
+fn lift_nested_focus_suppression(popover: &gtk4::Widget) {
+    popover.remove_css_class(surface::NO_FOCUS);
+    if let Some(window) = popover.root().and_downcast::<gtk4::Window>() {
+        lift_focus_suppression(&window);
+    }
+}
+
+/// Whether the window still hides focus rings until the first keynav key.
+fn focus_suppressed(window: &gtk4::Window) -> bool {
+    window
+        .child()
+        .is_some_and(|child| child.has_css_class(surface::NO_FOCUS))
+}
+
+fn lift_focus_suppression(window: &gtk4::Window) {
+    if let Some(child) = window.child() {
+        child.remove_css_class(surface::NO_FOCUS);
+    }
+}
+
+/// On the first keynav key, lift focus suppression and, if nothing has focus
+/// yet (e.g. no clicked slider), land on the first widget in `scope` like Tab
+/// would. Returns whether it placed focus, in which case the key is consumed
+/// even if placement found nothing.
+fn begin_keynav(window: &gtk4::Window, scope: &gtk4::Widget) -> bool {
+    if !focus_suppressed(window) {
+        return false;
+    }
+    lift_focus_suppression(window);
+    if GtkWindowExt::focus(window).is_some() {
+        return false;
+    }
+    scope.child_focus(gtk4::DirectionType::TabForward);
+    true
+}
 
 type AnchorMonitorCallback = Rc<dyn Fn(Option<Monitor>)>;
 
@@ -474,13 +772,15 @@ impl SurfaceAnimation {
 /// Click-catcher and deferred keyboard navigation shared by bar popovers.
 ///
 /// The window's child carries `.vp-no-focus`; focus rings stay hidden until
-/// the first keynav key (Tab, arrows, Home, End).
+/// the first keynav key (Tab, arrows, Home, End, HJKL).
 #[derive(Default)]
 pub(crate) struct BarPopoverChrome {
     /// Only exists while the popover is open: a hidden fullscreen surface
     /// keeps its GPU buffers, which across all popovers added up to ~1 GiB.
     catcher: RefCell<Option<ApplicationWindow>>,
-    keynav: Rc<RefCell<Option<EventControllerKey>>>,
+    keynav: RefCell<Option<EventControllerKey>>,
+    nav_keys: RefCell<Option<EventControllerKey>>,
+    slider_grab: RefCell<Option<(glib::SignalHandlerId, GestureClick)>>,
 }
 
 impl BarPopoverChrome {
@@ -527,6 +827,10 @@ impl BarPopoverChrome {
         if let Some(controller) = self.keynav.borrow_mut().take() {
             window.remove_controller(&controller);
         }
+        if let Some(controller) = self.nav_keys.borrow_mut().take() {
+            window.remove_controller(&controller);
+        }
+        self.remove_slider_grab(window);
         if let Some(catcher) = self.catcher.borrow_mut().take() {
             // close() can run from the catcher's own click handler.
             catcher.set_visible(false);
@@ -545,34 +849,59 @@ impl BarPopoverChrome {
         }
 
         let controller = EventControllerKey::new();
-        let slot = Rc::downgrade(&self.keynav);
+        // Capture: a focused list or calendar claims Up/Down in bubble, which
+        // would move focus with the rings still hidden.
+        controller.set_propagation_phase(PropagationPhase::Capture);
         let window_weak = window.downgrade();
-        controller.connect_key_pressed(move |ctrl, keyval, _, _| {
-            if !is_keynav_key(keyval) {
-                return Propagation::Proceed;
-            }
+        controller.connect_key_pressed(move |_, keyval, _, _| {
             let Some(window) = window_weak.upgrade() else {
                 return Propagation::Proceed;
             };
-            GtkWindowExt::set_focus_visible(&window, true);
-            if let Some(child) = window.child() {
-                child.remove_css_class(surface::NO_FOCUS);
+            let window: &gtk4::Window = window.upcast_ref();
+            if !is_keynav_key(keyval) || !focus_suppressed(window) {
+                return Propagation::Proceed;
             }
-            window.remove_controller(ctrl);
-            if let Some(slot) = slot.upgrade() {
-                slot.borrow_mut().take();
-            }
+            show_focus_rings(window);
             if keyval == gdk::Key::Tab || keyval == gdk::Key::ISO_Left_Tab {
-                // GTK's own Tab keynav sets :focus-visible correctly.
-                Propagation::Proceed
-            } else {
-                // Arrows/Home/End: land on the first widget like Tab would.
-                window.child_focus(gtk4::DirectionType::TabForward);
+                // GTK's own Tab keynav places focus and sets :focus-visible.
+                lift_focus_suppression(window);
+                return Propagation::Proceed;
+            }
+            if begin_keynav(window, window.upcast_ref()) {
                 Propagation::Stop
+            } else {
+                Propagation::Proceed
             }
         });
         window.add_controller(controller.clone());
         *self.keynav.borrow_mut() = Some(controller);
+
+        self.install_nav_keys(window);
+    }
+
+    fn install_nav_keys(&self, window: &ApplicationWindow) {
+        if let Some(old) = self.nav_keys.borrow_mut().take() {
+            window.remove_controller(&old);
+        }
+        let controller = nav_keys_controller(window.upcast_ref());
+        window.add_controller(controller.clone());
+        *self.nav_keys.borrow_mut() = Some(controller);
+
+        self.remove_slider_grab(window);
+        let (focus_handler, click) = slider_grab_tracking(window);
+        window.add_controller(click.clone());
+        *self.slider_grab.borrow_mut() = Some((focus_handler, click));
+    }
+
+    fn remove_slider_grab(&self, window: &ApplicationWindow) {
+        if let Some((focus_handler, click)) = self.slider_grab.borrow_mut().take() {
+            window.disconnect(focus_handler);
+            window.remove_controller(&click);
+        }
+        // A grabbed slider always has focus, so this releases it.
+        if let Some(focus) = GtkWindowExt::focus(window) {
+            focus.remove_css_class(state::GRABBED);
+        }
     }
 
     /// Close the catcher window (for `Drop`).
@@ -1781,6 +2110,7 @@ impl Dismissible for LayerShellPopover {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gtk4::glib::translate::IntoGlib;
 
     #[test]
     fn max_content_height_subtracts_reservations_and_never_exceeds_screen() {
@@ -1824,5 +2154,81 @@ mod tests {
         let mut state = AnimState::new_idle();
         state.prepare(AnimDirection::Opening, 1, 0, 0.0);
         assert!(!state.popover_is_complete(half_us));
+    }
+
+    #[test]
+    fn modified_keys_are_not_taken_over() {
+        use gdk::ModifierType as M;
+        assert_eq!(nav_arrow_key(gdk::Key::j, M::CONTROL_MASK), None);
+        assert_eq!(nav_arrow_key(gdk::Key::l, M::ALT_MASK), None);
+        assert_eq!(nav_arrow_key(gdk::Key::h, M::SUPER_MASK), None);
+        assert_eq!(nav_arrow_key(gdk::Key::Right, M::SHIFT_MASK), None);
+        assert_eq!(nav_arrow_key(gdk::Key::Left, M::CONTROL_MASK), None);
+    }
+
+    #[test]
+    #[ignore = "UI regression test: needs a GTK display; run under Xvfb"]
+    fn test_ui_regression_popover_keynav() {
+        crate::ui_regression_test_support::run_ignored_contract_subprocess(
+            "popover_keynav_runner",
+            "VIBEPANEL_POPOVER_KEYNAV_UI_REGRESSION_TEST",
+            "popover.keynav",
+            "popover keynav test",
+        );
+    }
+
+    #[test]
+    #[ignore = "internal runner for the popover keynav subprocess"]
+    fn popover_keynav_runner() {
+        match std::env::var("VIBEPANEL_POPOVER_KEYNAV_UI_REGRESSION_TEST").as_deref() {
+            Ok("popover.keynav") => run_test_popover_keynav(),
+            Ok(other) => panic!("unknown popover keynav test: {other}"),
+            Err(_) => eprintln!("skipping popover keynav test: no test case selected"),
+        }
+    }
+
+    /// Guards the GTK internals the key handling leans on, which a GTK
+    /// update would break silently.
+    fn run_test_popover_keynav() {
+        use crate::ui_regression_test_support::{flush_gtk, init_gtk_or_skip};
+        if !init_gtk_or_skip(
+            "popover keynav test",
+            Some("VIBEPANEL_UI_REGRESSION_REQUIRED"),
+        ) {
+            return;
+        }
+
+        // Grabbed sliders step like GtkRange's own arrow bindings, inverted
+        // ones included.
+        let scale = gtk4::Scale::with_range(Orientation::Horizontal, 0.0, 10.0, 1.0);
+        scale.set_value(5.0);
+        move_slider(scale.upcast_ref(), gdk::Key::Right);
+        assert_eq!(scale.value(), 6.0);
+        scale.set_inverted(true);
+        move_slider(scale.upcast_ref(), gdk::Key::Right);
+        assert_eq!(scale.value(), 5.0);
+
+        // Keys we claim still show the focus rings.
+        let row = GtkBox::new(Orientation::Horizontal, 0);
+        let buttons = [gtk4::Button::new(), gtk4::Button::new()];
+        buttons.iter().for_each(|button| row.append(button));
+        row.add_css_class(surface::NO_FOCUS);
+        let window = ApplicationWindow::builder().child(&row).build();
+        window.present();
+        flush_gtk();
+        let chrome = BarPopoverChrome::default();
+        chrome.prepare_keynav(&window);
+        let nav = chrome.nav_keys.borrow().clone().unwrap();
+        let stroke = |keyval: gdk::Key| {
+            let args: [&dyn ToValue; 3] = [&keyval.into_glib(), &0u32, &gdk::ModifierType::empty()];
+            nav.emit_by_name::<bool>("key-pressed", &args);
+            nav.emit_by_name::<()>("key-released", &args);
+        };
+        stroke(gdk::Key::l);
+        GtkWindowExt::set_focus_visible(&window, false);
+        stroke(gdk::Key::l);
+        assert!(GtkWindowExt::gets_focus_visible(&window));
+
+        window.close();
     }
 }

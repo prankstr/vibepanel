@@ -431,10 +431,23 @@ popover.widget-menu .popover.widget-menu-content {{
     outline-offset: -2px;
     transition: none;
 }}
-.popover scale:focus-visible > trough > slider {{
+/* -5px insets the (default) 38px scale box to a 32px ring, matching icon
+   buttons. */
+.popover scale:focus-visible {{
     outline: 2px solid var(--color-accent-primary);
-    outline-offset: -2px;
+    outline-offset: -5px;
+    border-radius: var(--radius-widget);
     transition: none;
+}}
+/* Grabbed with Enter, the arrows move the knob: ring it instead, and
+   enlarge it as while dragging. */
+.popover scale.grabbed:focus-visible {{
+    outline: none;
+}}
+.popover scale.grabbed:focus-visible > trough > slider {{
+    outline: 2px solid var(--color-accent-primary);
+    outline-offset: 2px;
+    transform: scale(1.15);
 }}
 /* Suppress Adwaita's outline transition on entries so the accent color
    doesn't flash blue when focus leaves. */

@@ -52,6 +52,7 @@ pub fn configure_popover(popover: &Popover) {
     popover.set_autohide(true);
     popover.add_css_class(surface::WIDGET_MENU);
     popover.add_css_class(surface::NO_FOCUS);
+    super::layer_shell_popover::install_nested_popover_keynav(popover);
     popover.set_position(PositionType::Bottom);
     popover.set_halign(Align::Center);
 

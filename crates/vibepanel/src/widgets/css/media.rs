@@ -258,6 +258,20 @@ pub fn css(animations: bool) -> String {
     {slider_transition}
 }}
 
+/* The time labels tuck under the slider, so ring the track instead;
+   7px clears the knob's overhang. */
+.popover .media-seek-slider:focus-visible {{
+    outline: none;
+}}
+.popover .media-seek-slider:focus-visible > trough {{
+    outline: 2px solid var(--color-accent-primary);
+    outline-offset: 7px;
+    transition: none;
+}}
+.popover .media-seek-slider.grabbed:focus-visible > trough {{
+    outline: none;
+}}
+
 .media-seek-slider slider:active {{
     transform: scale(1.15);
 }}
