@@ -122,6 +122,14 @@ fn move_slider(range: &gtk4::Range, arrow: gdk::Key) {
     range.emit_move_slider(scroll);
 }
 
+/// Marks a widget whose own key controller handles arrows and hjkl, so the
+/// popover navigation passes those keys through to it.
+const OWNS_ARROWS: &str = "vp-owns-arrows";
+
+pub(crate) fn claim_arrow_keys(widget: &gtk4::Widget) {
+    widget.add_css_class(OWNS_ARROWS);
+}
+
 /// Our controller claims the keys it handles before GTK's focus-ring tracker
 /// sees them, so show the rings ourselves. Like the tracker, this restarts
 /// GTK's timer that hides them after a few idle seconds.
@@ -155,6 +163,9 @@ fn handle_nav_key(
     show_focus_rings(window);
     if begin_keynav(window, scope) {
         return Propagation::Stop;
+    }
+    if focus.as_ref().is_some_and(|f| f.has_css_class(OWNS_ARROWS)) {
+        return Propagation::Proceed;
     }
 
     // A slider only takes the arrows while grabbed; otherwise they move on.
@@ -243,8 +254,9 @@ fn slider_grab_tracking(window: &ApplicationWindow) -> (glib::SignalHandlerId, G
 }
 
 /// Handles HJKL, Left/Right, and Up/Down on sliders within `scope`: they
-/// move focus or adjust a grabbed slider. Capture phase so the focused
-/// widget never sees the raw key.
+/// move focus, adjust a grabbed slider, or pass through to a widget that
+/// claimed them ([`claim_arrow_keys`]). Capture phase so other focused
+/// widgets never see the raw key.
 fn nav_keys_controller(scope: &gtk4::Widget) -> EventControllerKey {
     let controller = EventControllerKey::new();
     controller.set_propagation_phase(PropagationPhase::Capture);

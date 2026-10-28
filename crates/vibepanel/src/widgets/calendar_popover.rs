@@ -5,6 +5,7 @@ use std::sync::Once;
 use chrono::{Datelike, Local, NaiveDate, Timelike};
 use gtk4::cairo;
 use gtk4::gdk::RGBA;
+use gtk4::glib;
 use gtk4::glib::markup_escape_text;
 use gtk4::pango::EllipsizeMode;
 use gtk4::prelude::*;
@@ -129,6 +130,11 @@ pub fn build_clock_calendar_popover(
     if events_enabled {
         calendar.add_css_class(cal::EVENTS_ENABLED);
     }
+    // Picking a day only does something when it shows that day's events.
+    calendar.set_focusable(events_enabled);
+    if events_enabled {
+        select_day_with_arrows(&calendar);
+    }
 
     // GtkCalendar owns selection, navigation, locale, and accessibility; this overlay
     // only paints event dots above its existing day labels.
@@ -200,6 +206,14 @@ pub fn build_clock_calendar_popover(
         scroller.set_child(Some(&content));
         scroller.set_max_content_height(EVENTS_LIST_MAX_HEIGHT);
         scroller.set_propagate_natural_height(true);
+        // Rows aren't interactive: a focus stop only when there's overflow
+        // to scroll with Page Up/Down.
+        scroller.set_can_focus(false);
+        scroller.vadjustment().connect_changed(glib::clone!(
+            #[weak]
+            scroller,
+            move |adj| scroller.set_can_focus(adj.upper() > adj.page_size())
+        ));
         events_card.append(&scroller);
         if let Some(layout) = &calendar_events_layout {
             layout.append(&events_card);
@@ -437,6 +451,60 @@ pub fn build_clock_calendar_popover(
         weather_refresh,
         events_refresh,
     )
+}
+
+/// The selected day is the keyboard position: arrows move it within the shown
+/// month and leave the grid past it. GtkCalendar's own keyboard cursor only
+/// moves without selecting, and has no API to sync it with the selection.
+/// Handles hjkl too: the popover's navigation passes them through.
+fn select_day_with_arrows(calendar: &Calendar) {
+    use crate::widgets::layer_shell_popover::{
+        ANY_MODIFIER, claim_arrow_keys, nav_arrow_key, plain_nav_key,
+    };
+    use gtk4::gdk::Key;
+    use gtk4::glib::Propagation::{Proceed, Stop};
+    claim_arrow_keys(calendar.upcast_ref());
+    let keys = gtk4::EventControllerKey::new();
+    keys.set_propagation_phase(gtk4::PropagationPhase::Capture);
+    keys.connect_key_pressed(|controller, keyval, _, state| {
+        if state.intersects(ANY_MODIFIER) {
+            return Proceed;
+        }
+        let Some(calendar) = controller.widget().and_downcast::<Calendar>() else {
+            return Proceed;
+        };
+        let rtl = calendar.direction() == gtk4::TextDirection::Rtl;
+        let keyval = nav_arrow_key(keyval, state).unwrap_or_else(|| plain_nav_key(keyval));
+        let days = match keyval {
+            Key::Left if rtl => 1,
+            Key::Left => -1,
+            Key::Right if rtl => -1,
+            Key::Right => 1,
+            Key::Up => -7,
+            Key::Down => 7,
+            // The day is already selected; GTK's would pick its stale cursor.
+            Key::space | Key::KP_Space | Key::Return | Key::KP_Enter => return Stop,
+            _ => return Proceed,
+        };
+        let Some(date) = calendar_selected_date(&calendar) else {
+            return Proceed;
+        };
+        match date.checked_add_signed(chrono::Duration::days(days)) {
+            // Not via set_calendar_date: its `updating` guard would skip the
+            // date notify that refreshes the events list.
+            Some(next) if next.month() == date.month() => calendar.set_day(next.day() as i32),
+            _ => {
+                if let Some(root) = calendar.root() {
+                    crate::widgets::layer_shell_popover::move_focus_for_arrow(
+                        root.upcast_ref(),
+                        keyval,
+                    );
+                }
+            }
+        }
+        Stop
+    });
+    calendar.add_controller(keys);
 }
 
 fn rebuild_event_list(content: &GtkBox, date: NaiveDate, snapshot: &CalendarSnapshot) {
