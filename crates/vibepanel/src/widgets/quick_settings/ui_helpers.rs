@@ -587,6 +587,25 @@ pub fn clear_list_box(list_box: &ListBox) {
     }
 }
 
+/// Device lists are rebuilt on every change, including picking a device.
+/// Rows are named after their device so focus can return to the same one.
+pub(super) fn focused_device(list_box: &ListBox) -> Option<String> {
+    focused_row_of(list_box).map(|row| row.widget_name().to_string())
+}
+
+pub(super) fn append_device_row(
+    list_box: &ListBox,
+    row: &ListBoxRow,
+    device: &str,
+    focused: Option<&str>,
+) {
+    row.set_widget_name(device);
+    list_box.append(row);
+    if focused == Some(device) {
+        row.grab_focus();
+    }
+}
+
 /// Add a disabled state placeholder to a list box.
 ///
 /// Creates a centered container with an icon and message label.
