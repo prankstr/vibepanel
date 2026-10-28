@@ -486,18 +486,11 @@ popover.widget-menu .popover.widget-menu-content {{
 
 /* Suppress :focus-within outlines on rows whose children handle their own
    focus rings (e.g. password entry row).  The child widget (entry, button)
-   already shows the accent-colored ring. */
-.popover row:focus-within {{
+   already shows the accent-colored ring.  Not :focus: GTK marks a focused
+   row :focus-within too. */
+.popover row:focus-within:not(:focus) {{
     outline: none;
     box-shadow: none;
-}}
-
-/* Power action rows are directly focusable (hold-to-confirm on the row
-   itself).  Restore the accent focus ring that :focus-within above kills. */
-.popover row.qs-power-row:focus-visible {{
-    outline: 2px solid var(--color-accent-primary);
-    outline-offset: -2px;
-    transition: none;
 }}
 
 /* ===== COMPONENT CLASSES ===== */

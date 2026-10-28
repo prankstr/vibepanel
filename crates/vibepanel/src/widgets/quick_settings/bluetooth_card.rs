@@ -569,7 +569,7 @@ fn build_auth_row(auth_request: &BluetoothAuthRequest, state: &BluetoothCardStat
 
     let auth_row = ListBoxRow::new();
     auth_row.set_activatable(false);
-    auth_row.set_focusable(true);
+    auth_row.set_focusable(false);
     auth_row.set_child(Some(&auth_box));
 
     auth_row
