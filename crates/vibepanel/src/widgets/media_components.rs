@@ -391,6 +391,9 @@ pub fn build_seek_section(
     let is_seeking = Rc::new(RefCell::new(false));
 
     let scale = Scale::with_range(Orientation::Horizontal, 0.0, 1.0, 1.0);
+    // The range is set in microseconds later (set_range keeps these), so
+    // arrows seek 5s, and Page Up/Down and a wheel notch 10s, not 1µs.
+    scale.set_increments(5_000_000.0, 10_000_000.0);
     scale.add_css_class(media::SEEK_SLIDER);
     for class in extra_slider_classes {
         scale.add_css_class(class);
@@ -450,7 +453,11 @@ pub fn build_seek_section(
         let is_seeking = is_seeking.clone();
         let pending_seek = pending_seek.clone();
         let position_label = position_label.clone();
-        scale.connect_change_value(move |_, _, value| {
+        scale.connect_change_value(move |scale, _, value| {
+            // GTK passes the unclamped value (a 5s step past either end)
+            // and only clamps the adjustment afterwards.
+            let adj = scale.adjustment();
+            let value = value.clamp(adj.lower(), adj.upper() - adj.page_size());
             if *is_pressed.borrow() {
                 *is_seeking.borrow_mut() = true;
                 *pending_seek.borrow_mut() = Some(value as i64);
