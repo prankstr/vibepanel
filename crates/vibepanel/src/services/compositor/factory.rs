@@ -5,7 +5,9 @@
 use std::env;
 use tracing::{debug, info};
 
-use super::{CompositorBackend, HyprlandBackend, MangoBackend, NiriBackend, SwayBackend};
+use super::{
+    CompositorBackend, ExtWorkspaceBackend, HyprlandBackend, MangoBackend, NiriBackend, SwayBackend,
+};
 
 /// Backend kind enum for configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,6 +20,8 @@ pub enum BackendKind {
     Niri,
     /// Sway and i3-compatible compositors (Miracle WM, Scroll).
     Sway,
+    /// Generic ext-workspace-v1 (labwc, COSMIC, ... and any compositor offering it).
+    ExtWorkspace,
     /// Auto-detect from environment.
     Auto,
 }
@@ -30,6 +34,7 @@ impl BackendKind {
             "hyprland" => BackendKind::Hyprland,
             "niri" => BackendKind::Niri,
             "sway" | "miracle" | "miraclewm" | "scroll" => BackendKind::Sway,
+            "ext-workspace" | "ext_workspace" => BackendKind::ExtWorkspace,
             "auto" | "" => BackendKind::Auto,
             _ => BackendKind::Auto, // Unknown defaults to auto-detect
         }
@@ -44,7 +49,8 @@ impl BackendKind {
 /// 3. SWAYSOCK → Sway
 /// 4. MIRACLESOCK → Sway (Miracle WM supports i3 IPC)
 /// 5. MANGO_INSTANCE_SIGNATURE → MangoWC
-/// 6. Default → MangoWC
+/// 6. ext_workspace_manager_v1 advertised → ext-workspace
+/// 7. Default → MangoWC
 pub fn detect_backend() -> BackendKind {
     // Check for Hyprland
     if env::var("HYPRLAND_INSTANCE_SIGNATURE").is_ok() {
@@ -75,8 +81,13 @@ pub fn detect_backend() -> BackendKind {
         return BackendKind::Mango;
     }
 
+    if super::ext_workspace::is_available() {
+        debug!("No compositor-specific socket detected, using ext-workspace-v1");
+        return BackendKind::ExtWorkspace;
+    }
+
     // Default to MangoWC
-    debug!("No compositor-specific socket detected, defaulting to MangoWC");
+    debug!("No compositor-specific socket or ext-workspace detected, defaulting to MangoWC");
     BackendKind::Mango
 }
 
@@ -88,8 +99,8 @@ pub fn detect_backend() -> BackendKind {
 ///
 /// # Returns
 ///
-/// A boxed backend implementation ready for use.
-pub fn create_backend(kind: BackendKind) -> Box<dyn CompositorBackend> {
+/// The resolved backend kind and a boxed backend implementation ready for use.
+pub fn create_backend(kind: BackendKind) -> (BackendKind, Box<dyn CompositorBackend>) {
     let resolved_kind = if kind == BackendKind::Auto {
         detect_backend()
     } else {
@@ -98,16 +109,18 @@ pub fn create_backend(kind: BackendKind) -> Box<dyn CompositorBackend> {
 
     info!("Creating compositor backend: {:?}", resolved_kind);
 
-    match resolved_kind {
+    let backend: Box<dyn CompositorBackend> = match resolved_kind {
         BackendKind::Mango => Box::new(MangoBackend::new()),
         BackendKind::Hyprland => Box::new(HyprlandBackend::new()),
         BackendKind::Niri => Box::new(NiriBackend::new()),
         BackendKind::Sway => Box::new(SwayBackend::new()),
+        BackendKind::ExtWorkspace => Box::new(ExtWorkspaceBackend::new()),
         BackendKind::Auto => {
             // Should never reach here after resolution, but handle gracefully
             Box::new(MangoBackend::new())
         }
-    }
+    };
+    (resolved_kind, backend)
 }
 
 #[cfg(test)]

@@ -1195,7 +1195,13 @@ fn collect_display_ids(
         .iter()
         // `window_count.is_some()` filters out synthetic placeholders and only
         // includes empty workspaces explicitly reported by the compositor.
-        .filter(|ws| ws.occupied || (show_unoccupied && ws.window_count.is_some()))
+        // Without occupancy data (ext-workspace), every listed workspace is
+        // shown: the compositor already filtered what to list.
+        .filter(|ws| {
+            !snapshot.occupancy_known
+                || ws.occupied
+                || (show_unoccupied && ws.window_count.is_some())
+        })
         .map(|ws| ws.id)
         .collect();
 
@@ -1690,6 +1696,7 @@ mod tests {
                     },
                 ),
             ]),
+            occupancy_known: true,
         };
 
         let display_ids =
@@ -1717,6 +1724,7 @@ mod tests {
             window_counts: HashMap::from([(1, 0), (2, 1), (3, 0)]),
             workspaces: workspaces.clone(),
             per_output: HashMap::new(),
+            occupancy_known: true,
         };
 
         let default_ids =
@@ -1727,6 +1735,27 @@ mod tests {
             collect_display_ids(&workspaces, &active_workspaces, &snapshot, true, false);
         assert_eq!(show_unoccupied_ids, HashSet::from([1, 2, 3]));
         assert!(!show_unoccupied_ids.contains(&4));
+    }
+
+    #[test]
+    fn test_unknown_occupancy_shows_all_listed_workspaces() {
+        let active_workspaces = HashSet::from([1]);
+        let workspaces = vec![
+            make_workspace(1, "1", true, false, false, None),
+            make_workspace(2, "2", false, false, false, None),
+            make_workspace(3, "3", false, false, false, None),
+        ];
+        let snapshot = WorkspaceServiceSnapshot {
+            active_workspace: active_workspaces.clone(),
+            occupied_workspaces: HashSet::new(),
+            window_counts: HashMap::new(),
+            workspaces: workspaces.clone(),
+            per_output: HashMap::new(),
+            occupancy_known: false,
+        };
+
+        let ids = collect_display_ids(&workspaces, &active_workspaces, &snapshot, false, false);
+        assert_eq!(ids, HashSet::from([1, 2, 3]));
     }
 
     // -- build_tooltip tests --

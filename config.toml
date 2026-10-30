@@ -156,7 +156,7 @@ enabled = false
 # refresh_interval = 900  # Seconds; minimum 600
 
 [advanced]
-# compositor = "auto"  # "auto", "hyprland", "niri", "mango", "sway", "miracle", "scroll"
+# compositor = "auto"  # "auto", "hyprland", "niri", "mango", "sway", "miracle", "scroll", "ext-workspace"
 
 # Custom CSS: place style.css in same directory as this file. Relative @import
 # paths resolve from the importing stylesheet, and imported files hot-reload.
