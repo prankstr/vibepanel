@@ -10,7 +10,6 @@
 //! off the GTK main loop and start before any GTK surface exists.
 
 use std::collections::HashMap;
-use std::os::fd::{AsFd, AsRawFd};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::thread::{self, JoinHandle};
@@ -27,8 +26,9 @@ use wayland_protocols::ext::workspace::v1::client::{
     ext_workspace_manager_v1::{self, ExtWorkspaceManagerV1},
 };
 
-pub(super) const MANAGER_INTERFACE: &str = "ext_workspace_manager_v1";
-const POLL_TIMEOUT_MS: i32 = 500;
+use crate::services::compositor::wayland_loop;
+
+pub(crate) const MANAGER_INTERFACE: &str = "ext_workspace_manager_v1";
 
 // ---------------------------------------------------------------------------
 // Model
@@ -372,21 +372,6 @@ pub struct ExtWorkspaceClient {
 }
 
 impl ExtWorkspaceClient {
-    /// Whether the compositor offers ext-workspace (one short roundtrip).
-    pub(super) fn is_available() -> bool {
-        let Ok(conn) = Connection::connect_to_env() else {
-            return false;
-        };
-        let Ok((globals, _queue)) =
-            wayland_client::globals::registry_queue_init::<ProbeState>(&conn)
-        else {
-            return false;
-        };
-        globals
-            .contents()
-            .with_list(|list| list.iter().any(|g| g.interface == MANAGER_INTERFACE))
-    }
-
     /// Connect and start tracking. Returns `None` if there is no Wayland
     /// display or the compositor lacks the protocol.
     pub fn start(on_update: ModelCallback) -> Option<Self> {
@@ -470,55 +455,8 @@ impl Drop for ExtWorkspaceClient {
 }
 
 fn run_loop(mut queue: EventQueue<ClientState>, mut state: ClientState, shared: Arc<ClientShared>) {
-    while shared.running.load(Ordering::SeqCst) {
-        if let Err(e) = queue.dispatch_pending(&mut state) {
-            warn!("ext-workspace dispatch failed: {e}");
-            break;
-        }
-        if let Err(e) = queue.flush() {
-            warn!("ext-workspace flush failed: {e}");
-            break;
-        }
-        let Some(guard) = queue.prepare_read() else {
-            continue;
-        };
-        let mut pfd = libc::pollfd {
-            fd: guard.connection_fd().as_fd().as_raw_fd(),
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        // SAFETY: one valid pollfd, length 1.
-        let ready = unsafe { libc::poll(&mut pfd, 1, POLL_TIMEOUT_MS) };
-        if ready <= 0 {
-            continue; // timeout (re-check `running`) or EINTR; guard is dropped
-        }
-        match guard.read() {
-            Ok(_) => {}
-            Err(wayland_client::backend::WaylandError::Io(e))
-                if e.kind() == std::io::ErrorKind::WouldBlock => {}
-            Err(e) => {
-                warn!("ext-workspace read failed: {e}");
-                break;
-            }
-        }
-    }
-    if shared.running.load(Ordering::SeqCst) {
-        // Terminal error, not a requested stop.
+    if !wayland_loop::run(&mut queue, &mut state, &shared.running, "ext-workspace") {
         state.reset();
     }
     debug!("ext-workspace client stopped");
-}
-
-struct ProbeState;
-
-impl Dispatch<wl_registry::WlRegistry, wayland_client::globals::GlobalListContents> for ProbeState {
-    fn event(
-        _: &mut Self,
-        _: &wl_registry::WlRegistry,
-        _: wl_registry::Event,
-        _: &wayland_client::globals::GlobalListContents,
-        _: &Connection,
-        _: &QueueHandle<Self>,
-    ) {
-    }
 }

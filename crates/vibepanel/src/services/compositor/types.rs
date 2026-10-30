@@ -113,8 +113,8 @@ impl Default for WorkspaceSnapshot {
 /// Window information for an output.
 ///
 /// Backends emit the focused window, and may also emit updates for other
-/// outputs (Niri emits one per output). `focused` marks the update for the
-/// globally focused output. An empty title and app ID means no window.
+/// outputs (Niri and wlr-foreign-toplevel do). `focused` marks the update for
+/// the globally focused output. An empty title and app ID means no window.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct WindowInfo {
     /// Window title (may be empty).

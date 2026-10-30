@@ -26,7 +26,7 @@
 //! });
 //! ```
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -99,6 +99,10 @@ pub struct CompositorManager {
     /// Latest window update per output (`None` key for unscoped updates).
     last_window_infos: RefCell<HashMap<Option<String>, WindowInfo>>,
     ext_overlay: RefCell<Option<ExtOverlay>>,
+    /// Drop window titles of outputs missing from workspace snapshots. Off for
+    /// the generic backend: its snapshots may not list every output, and its
+    /// title client clears removed outputs itself.
+    prune_window_outputs: Cell<bool>,
     last_keyboard_layout: RefCell<Option<KeyboardLayoutInfo>>,
     last_window_layouts: RefCell<Option<WindowLayoutSnapshot>>,
     last_window_list: RefCell<Option<super::WindowListSnapshot>>,
@@ -120,6 +124,7 @@ impl CompositorManager {
             last_workspace_snapshot: RefCell::new(None),
             last_window_infos: RefCell::new(HashMap::new()),
             ext_overlay: RefCell::new(None),
+            prune_window_outputs: Cell::new(true),
             last_keyboard_layout: RefCell::new(None),
             last_window_layouts: RefCell::new(None),
             last_window_list: RefCell::new(None),
@@ -172,6 +177,7 @@ impl CompositorManager {
                 last_workspace_snapshot: RefCell::new(Some(snapshot)),
                 last_window_infos: RefCell::new(HashMap::new()),
                 ext_overlay: RefCell::new(None),
+                prune_window_outputs: Cell::new(true),
                 last_keyboard_layout: RefCell::new(None),
                 last_window_layouts: RefCell::new(None),
                 last_window_list: RefCell::new(None),
@@ -444,7 +450,9 @@ impl CompositorManager {
 
         // Drop windows of removed outputs before subscribers can recreate bars,
         // so a reconnected output doesn't replay a stale title.
-        prune_removed_outputs(&mut self.last_window_infos.borrow_mut(), &snapshot);
+        if self.prune_window_outputs.get() {
+            prune_removed_outputs(&mut self.last_window_infos.borrow_mut(), &snapshot);
+        }
 
         // Dispatch to all registered callbacks
         // Effective metadata is already installed (list_workspaces reads the
@@ -521,6 +529,8 @@ impl CompositorManager {
 
         // Backends no longer filter by outputs - that's now handled at the widget level
         let (resolved_kind, backend) = factory::create_backend(backend_kind);
+        this.prune_window_outputs
+            .set(resolved_kind != BackendKind::Generic);
 
         info!(
             "CompositorManager using backend: {} (config: {})",
