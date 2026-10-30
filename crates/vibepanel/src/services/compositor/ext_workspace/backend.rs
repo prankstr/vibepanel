@@ -57,7 +57,8 @@ impl IdMap {
 ///   (niri-like); groups spanning several or no outputs are global.
 /// - ext-workspace has no window information: occupancy is reported as
 ///   unknown, and no window counts are reported.
-/// - Order: by group, then coordinates, then numeric name, then name.
+/// - Order: by group, then coordinates (row-major), then numeric name, then
+///   name.
 fn workspaces_from_model(
     model: &ExtWorkspaceModel,
     ids: &mut IdMap,
@@ -67,7 +68,9 @@ fn workspaces_from_model(
     visible.sort_by(|a, b| {
         a.group
             .cmp(&b.group)
-            .then_with(|| a.coordinates.cmp(&b.coordinates))
+            // Coordinates are [x, y, ...] (e.g. Wayfire sends [column, row]);
+            // compare the last dimension first to flatten grids row by row.
+            .then_with(|| a.coordinates.iter().rev().cmp(b.coordinates.iter().rev()))
             .then_with(|| a.name.parse::<i64>().ok().cmp(&b.name.parse::<i64>().ok()))
             .then_with(|| a.name.cmp(&b.name))
     });
@@ -320,6 +323,30 @@ mod tests {
             snap.per_output["HDMI-A-1"]
                 .active_workspace
                 .contains(&metas[0].id)
+        );
+    }
+
+    #[test]
+    fn backend_flattens_grid_row_major() {
+        // Wayfire-style [column, row] coordinates for a 2x2 grid.
+        let cell = |name: &str, x: u32, y: u32| {
+            let mut w = ws(name, name, Some(0));
+            w.coordinates = vec![x, y];
+            w
+        };
+        let m = model(
+            vec![
+                cell("d", 1, 1),
+                cell("c", 0, 1),
+                cell("b", 1, 0),
+                cell("a", 0, 0),
+            ],
+            &[&["DP-1"]],
+        );
+        let (metas, _) = workspaces_from_model(&m, &mut IdMap::default());
+        assert_eq!(
+            metas.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(),
+            vec!["a", "b", "c", "d"]
         );
     }
 

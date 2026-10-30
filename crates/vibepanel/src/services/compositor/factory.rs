@@ -34,7 +34,7 @@ impl BackendKind {
             "hyprland" => BackendKind::Hyprland,
             "niri" => BackendKind::Niri,
             "sway" | "miracle" | "miraclewm" | "scroll" => BackendKind::Sway,
-            "ext-workspace" | "ext_workspace" => BackendKind::ExtWorkspace,
+            "ext-workspace" => BackendKind::ExtWorkspace,
             "auto" | "" => BackendKind::Auto,
             _ => BackendKind::Auto, // Unknown defaults to auto-detect
         }

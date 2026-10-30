@@ -1410,7 +1410,7 @@ fn update_indicators(
             }
         }
 
-        let tooltip_text = build_tooltip(workspace);
+        let tooltip_text = build_tooltip(workspace, snapshot.occupancy_known);
         TooltipManager::global().set_styled_tooltip(indicator, &tooltip_text);
     }
     drop(labels);
@@ -1421,7 +1421,10 @@ fn update_indicators(
 }
 
 /// Build tooltip text for a workspace.
-fn build_tooltip(workspace: &Workspace) -> String {
+///
+/// Without occupancy data (`occupancy_known = false`, e.g. ext-workspace),
+/// the window/occupancy part is omitted rather than claiming "Empty".
+fn build_tooltip(workspace: &Workspace, occupancy_known: bool) -> String {
     let mut parts = Vec::new();
 
     // Negative indexes mean the compositor has no meaningful numeric label, so
@@ -1449,7 +1452,7 @@ fn build_tooltip(workspace: &Workspace) -> String {
         parts.push(tr!("{n} window" | "{n} windows" % count));
     } else if workspace.occupied {
         parts.push(tr!("Has windows"));
-    } else {
+    } else if occupancy_known {
         parts.push(tr!("workspace" => "Empty"));
     }
 
@@ -1783,38 +1786,46 @@ mod tests {
     #[test]
     fn test_build_tooltip_active_with_windows() {
         let ws = make_workspace(1, "1", true, true, false, Some(3));
-        assert_eq!(build_tooltip(&ws), "Workspace 1 • Active • 3 windows");
+        assert_eq!(build_tooltip(&ws, true), "Workspace 1 • Active • 3 windows");
     }
 
     #[test]
     fn test_build_tooltip_active_single_window() {
         let ws = make_workspace(2, "2", true, true, false, Some(1));
-        assert_eq!(build_tooltip(&ws), "Workspace 2 • Active • 1 window");
+        assert_eq!(build_tooltip(&ws, true), "Workspace 2 • Active • 1 window");
     }
 
     #[test]
     fn test_build_tooltip_inactive_empty() {
         let ws = make_workspace(3, "3", false, false, false, None);
-        assert_eq!(build_tooltip(&ws), "Workspace 3 • Empty");
+        assert_eq!(build_tooltip(&ws, true), "Workspace 3 • Empty");
+    }
+
+    #[test]
+    fn test_build_tooltip_unknown_occupancy_omits_empty() {
+        let ws = make_workspace(3, "3", false, false, false, None);
+        assert_eq!(build_tooltip(&ws, false), "Workspace 3");
+        let ws = make_workspace(1, "1", true, false, false, None);
+        assert_eq!(build_tooltip(&ws, false), "Workspace 1 • Active");
     }
 
     #[test]
     fn test_build_tooltip_occupied_no_count() {
         let ws = make_workspace(4, "4", false, true, false, None);
-        assert_eq!(build_tooltip(&ws), "Workspace 4 • Has windows");
+        assert_eq!(build_tooltip(&ws, true), "Workspace 4 • Has windows");
     }
 
     #[test]
     fn test_build_tooltip_urgent() {
         let ws = make_workspace(5, "5", false, true, true, Some(2));
-        assert_eq!(build_tooltip(&ws), "Workspace 5 • Urgent • 2 windows");
+        assert_eq!(build_tooltip(&ws, true), "Workspace 5 • Urgent • 2 windows");
     }
 
     #[test]
     fn test_build_tooltip_custom_name() {
         let ws = make_workspace(1, "browser", true, true, false, Some(5));
         assert_eq!(
-            build_tooltip(&ws),
+            build_tooltip(&ws, true),
             "Workspace 1: browser • Active • 5 windows"
         );
     }
@@ -1822,7 +1833,10 @@ mod tests {
     #[test]
     fn test_build_tooltip_named_workspace_hides_negative_id() {
         let ws = make_workspace(-1337, "web", true, true, false, Some(2));
-        assert_eq!(build_tooltip(&ws), "Workspace web • Active • 2 windows");
+        assert_eq!(
+            build_tooltip(&ws, true),
+            "Workspace web • Active • 2 windows"
+        );
     }
 
     // -- container layout helpers --

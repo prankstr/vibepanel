@@ -590,8 +590,13 @@ impl CompositorManager {
         *this.backend.borrow_mut() = Some(backend);
         *this.started.borrow_mut() = true;
 
-        // The ext-workspace backend already reports that state as primary data.
-        if resolved_kind != BackendKind::ExtWorkspace {
+        // Only merge ext-workspace state where it fills a gap in native IPC:
+        // Hyprland reports a single active workspace per monitor, while
+        // plugins like Hyprtagger expose several over ext-workspace. Other
+        // native backends already report this, and may apply their own
+        // `hidden` policy (Mango hides inactive tags) that would override
+        // ours. The ext-workspace backend reports it as primary data.
+        if resolved_kind == BackendKind::Hyprland {
             this.start_ext_overlay(&inbox);
             if let Some(snapshot) = this
                 .ext_overlay
