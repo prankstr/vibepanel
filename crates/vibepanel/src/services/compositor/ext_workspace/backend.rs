@@ -19,32 +19,6 @@ use crate::services::compositor::{
     WorkspaceSnapshot,
 };
 
-/// Assigns numeric IDs to model keys. IDs are never reused; keys of
-/// workspaces that no longer exist are pruned.
-#[derive(Debug, Default)]
-struct IdMap {
-    by_key: HashMap<u64, i32>,
-    next: i32,
-}
-
-impl IdMap {
-    fn id(&mut self, key: u64) -> i32 {
-        *self.by_key.entry(key).or_insert_with(|| {
-            self.next += 1;
-            self.next
-        })
-    }
-
-    fn retain_keys(&mut self, keys: impl IntoIterator<Item = u64>) {
-        let keep: HashSet<u64> = keys.into_iter().collect();
-        self.by_key.retain(|key, _| keep.contains(key));
-    }
-
-    fn key(&self, id: i32) -> Option<u64> {
-        self.by_key.iter().find(|(_, v)| **v == id).map(|(k, _)| *k)
-    }
-}
-
 /// Convert an ext-workspace model into vibepanel's workspace types.
 ///
 /// - Hidden workspaces are left out entirely.
@@ -54,11 +28,7 @@ impl IdMap {
 ///   unknown, and no window counts are reported.
 /// - Order: by group, then coordinates (row-major), then numeric name, then
 ///   name.
-fn workspaces_from_model(
-    model: &ExtWorkspaceModel,
-    ids: &mut IdMap,
-) -> (Vec<WorkspaceMeta>, WorkspaceSnapshot) {
-    ids.retain_keys(model.workspaces.iter().map(|w| w.key));
+fn workspaces_from_model(model: &ExtWorkspaceModel) -> (Vec<WorkspaceMeta>, WorkspaceSnapshot) {
     let mut visible: Vec<&ExtWorkspace> = model.workspaces.iter().filter(|w| !w.hidden).collect();
     visible.sort_by(|a, b| {
         a.group
@@ -89,7 +59,7 @@ fn workspaces_from_model(
     let mut position_in_group: HashMap<Option<usize>, i32> = HashMap::new();
 
     for ws in visible {
-        let id = ids.id(ws.key);
+        let id = ws.id;
         let position = position_in_group.entry(ws.group).or_insert(0);
         *position += 1;
         // Mixing name numbers and positions could produce duplicates, so a
@@ -139,7 +109,6 @@ fn workspaces_from_model(
 
 #[derive(Default)]
 struct BackendState {
-    ids: IdMap,
     workspaces: Vec<WorkspaceMeta>,
     snapshot: WorkspaceSnapshot,
 }
@@ -174,7 +143,7 @@ impl CompositorBackend for ExtWorkspaceBackend {
         let client = ExtWorkspaceClient::start(Arc::new(move |model| {
             let snapshot = {
                 let mut state = state.write();
-                let (workspaces, snapshot) = workspaces_from_model(&model, &mut state.ids);
+                let (workspaces, snapshot) = workspaces_from_model(&model);
                 state.workspaces = workspaces;
                 state.snapshot = snapshot.clone();
                 snapshot
@@ -206,10 +175,9 @@ impl CompositorBackend for ExtWorkspaceBackend {
     }
 
     fn switch_workspace(&self, workspace_id: i32) {
-        let key = self.state.read().ids.key(workspace_id);
-        debug!("ext-workspace: switch to workspace {workspace_id} (key {key:?})");
-        if let (Some(key), Some(client)) = (key, self.client.lock().as_ref()) {
-            client.activate(key);
+        debug!("ext-workspace: switch to workspace {workspace_id}");
+        if let Some(client) = self.client.lock().as_ref() {
+            client.activate(workspace_id);
         }
     }
 
@@ -223,9 +191,9 @@ mod tests {
     use super::*;
     use crate::services::compositor::ext_workspace::client::ExtWorkspaceGroup;
 
-    fn ws(key: u64, name: &str, group: Option<usize>) -> ExtWorkspace {
+    fn ws(id: i32, name: &str, group: Option<usize>) -> ExtWorkspace {
         ExtWorkspace {
-            key,
+            id,
             name: name.into(),
             group,
             ..Default::default()
@@ -253,8 +221,7 @@ mod tests {
         c.hidden = true;
         let m = model(vec![b, c, a], &[&["DP-1"]]);
 
-        let mut ids = IdMap::default();
-        let (metas, snap) = workspaces_from_model(&m, &mut ids);
+        let (metas, snap) = workspaces_from_model(&m);
 
         assert_eq!(
             metas.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(),
@@ -272,26 +239,11 @@ mod tests {
     }
 
     #[test]
-    fn backend_ids_are_stable_and_never_reused() {
-        let mut ids = IdMap::default();
-        let m1 = model(vec![ws(1, "a", None), ws(2, "a", None)], &[]);
-        let (first, _) = workspaces_from_model(&m1, &mut ids);
-        let m2 = model(vec![ws(2, "a", None), ws(3, "a", None)], &[]);
-        let (second, _) = workspaces_from_model(&m2, &mut ids);
-
-        assert_ne!(first[0].id, first[1].id);
-        assert_eq!(first[1].id, second[0].id);
-        assert!(!first.iter().any(|m| m.id == second[1].id));
-        assert_eq!(ids.key(first[0].id), None);
-        assert_eq!(ids.key(second[1].id), Some(3));
-    }
-
-    #[test]
     fn backend_group_spanning_outputs_is_global() {
         let mut a = ws(1, "1", Some(0));
         a.active = true;
         let m = model(vec![a], &[&["DP-1", "HDMI-A-1"]]);
-        let (metas, snap) = workspaces_from_model(&m, &mut IdMap::default());
+        let (metas, snap) = workspaces_from_model(&m);
 
         assert_eq!(metas[0].output, None);
         assert!(
@@ -310,7 +262,7 @@ mod tests {
     fn backend_flattens_grid_row_major() {
         // Wayfire-style [column, row] coordinates for a 2x2 grid.
         let cell = |name: &str, x: u32, y: u32| {
-            let mut w = ws((2 * y + x).into(), name, Some(0));
+            let mut w = ws((2 * y + x) as i32, name, Some(0));
             w.coordinates = vec![x, y];
             w
         };
@@ -323,7 +275,7 @@ mod tests {
             ],
             &[&["DP-1"]],
         );
-        let (metas, _) = workspaces_from_model(&m, &mut IdMap::default());
+        let (metas, _) = workspaces_from_model(&m);
         assert_eq!(
             metas.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(),
             vec!["a", "b", "c", "d"]
@@ -341,7 +293,7 @@ mod tests {
             ],
             &[&["A"], &["B"]],
         );
-        let (metas, _) = workspaces_from_model(&m, &mut IdMap::default());
+        let (metas, _) = workspaces_from_model(&m);
         let idx: HashMap<&str, i32> = metas.iter().map(|m| (m.name.as_str(), m.idx)).collect();
         assert_eq!((idx["1"], idx["web"]), (1, -1));
         assert_eq!((idx["chat"], idx["mail"]), (1, 2));

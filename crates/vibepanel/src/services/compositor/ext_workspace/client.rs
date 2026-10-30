@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 use std::os::fd::{AsFd, AsRawFd};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::thread::{self, JoinHandle};
 
 use parking_lot::Mutex;
@@ -37,8 +37,8 @@ const POLL_TIMEOUT_MS: i32 = 500;
 /// One workspace as reported over ext-workspace.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ExtWorkspace {
-    /// Identity for the workspace's lifetime; never reused.
-    pub key: u64,
+    /// Workspace ID for its whole lifetime; never reused.
+    pub id: i32,
     pub name: String,
     pub coordinates: Vec<u32>,
     pub active: bool,
@@ -66,14 +66,14 @@ pub struct ExtWorkspaceModel {
 // Protocol client
 // ---------------------------------------------------------------------------
 
-/// Source of workspace keys. Process-wide and never reset, so a key is never
+/// Source of workspace IDs. Process-wide and never reset, so an ID is never
 /// reused. Wayland object ids are recycled, and the protocol `id` may arrive
 /// after the workspace, so neither is used.
-static NEXT_KEY: AtomicU64 = AtomicU64::new(1);
+static NEXT_ID: AtomicI32 = AtomicI32::new(1);
 
 #[derive(Debug)]
 struct WsEntry {
-    key: u64,
+    id: i32,
     name: String,
     coordinates: Vec<u32>,
     state: u32,
@@ -83,7 +83,7 @@ struct WsEntry {
 impl WsEntry {
     fn new() -> Self {
         Self {
-            key: NEXT_KEY.fetch_add(1, Ordering::Relaxed),
+            id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
             name: String::new(),
             coordinates: Vec::new(),
             state: 0,
@@ -130,7 +130,7 @@ impl ClientState {
             .map(|id| {
                 let entry = &self.workspaces[id].1;
                 ExtWorkspace {
-                    key: entry.key,
+                    id: entry.id,
                     name: entry.name.clone(),
                     coordinates: entry.coordinates.clone(),
                     active: entry.state & WsState::Active.bits() != 0,
@@ -159,7 +159,7 @@ impl ClientState {
         *self.shared.handles.lock() = self
             .workspaces
             .values()
-            .map(|(handle, entry)| (entry.key, handle.clone()))
+            .map(|(handle, entry)| (entry.id, handle.clone()))
             .collect();
         *self.shared.manager.lock() = self.manager.clone();
 
@@ -201,7 +201,12 @@ impl Dispatch<wl_registry::WlRegistry, ()> for ClientState {
             },
             wl_registry::Event::GlobalRemove { name } => {
                 if let Some(output) = state.output_globals.remove(&name) {
-                    state.outputs.remove(&output.id().protocol_id());
+                    // Object ids are recycled, so drop every reference.
+                    let oid = output.id().protocol_id();
+                    state.outputs.remove(&oid);
+                    for outputs in state.groups.values_mut() {
+                        outputs.retain(|o| *o != oid);
+                    }
                     output.release();
                 }
             }
@@ -356,7 +361,7 @@ pub type ModelCallback = Arc<dyn Fn(ExtWorkspaceModel) + Send + Sync>;
 struct ClientShared {
     connection: Connection,
     manager: Mutex<Option<ExtWorkspaceManagerV1>>,
-    handles: Mutex<HashMap<u64, ExtWorkspaceHandleV1>>,
+    handles: Mutex<HashMap<i32, ExtWorkspaceHandleV1>>,
     running: AtomicBool,
 }
 
@@ -434,13 +439,13 @@ impl ExtWorkspaceClient {
         })
     }
 
-    /// Ask the compositor to activate the workspace with this model key.
-    pub fn activate(&self, key: u64) {
+    /// Ask the compositor to activate the workspace with this model ID.
+    pub fn activate(&self, id: i32) {
         let Some(manager) = self.shared.manager.lock().clone() else {
             return;
         };
-        let Some(handle) = self.shared.handles.lock().get(&key).cloned() else {
-            debug!("ext-workspace: no workspace with key {key}");
+        let Some(handle) = self.shared.handles.lock().get(&id).cloned() else {
+            debug!("ext-workspace: no workspace with ID {id}");
             return;
         };
         handle.activate();

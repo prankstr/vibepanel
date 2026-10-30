@@ -6,7 +6,7 @@
 //! - **Several active workspaces per output** (e.g. dwl/Mango-style tags on
 //!   Hyprland via a plugin).
 //! - **Hidden workspaces**, which are removed even if IPC reports them as
-//!   occupied or active.
+//!   occupied (but not while IPC reports them active).
 //!
 //! Workspaces are matched by name (Hyprland sends no ext-workspace ids), and
 //! always within a scope: per output, only groups shown on that output are
@@ -80,16 +80,10 @@ impl ExtWorkspaceOverlay {
     }
 }
 
-/// Map workspace names to IDs for the workspaces visible from `output`
-/// (`None` = global scope), dropping names that are ambiguous in that scope.
-fn name_to_id_map(metas: &[WorkspaceMeta], output: Option<&str>) -> HashMap<String, i32> {
+/// Map workspace names to IDs, dropping ambiguous names.
+fn name_to_id_map(metas: &[WorkspaceMeta]) -> HashMap<String, i32> {
     let mut map: HashMap<&str, Option<i32>> = HashMap::new();
     for meta in metas {
-        if let Some(output) = output
-            && meta.output.as_deref().is_some_and(|o| o != output)
-        {
-            continue;
-        }
         map.entry(meta.name.as_str())
             .and_modify(|id| *id = None)
             .or_insert(Some(meta.id));
@@ -110,16 +104,19 @@ struct Scope {
 /// Merge the given groups over one scope's IPC state.
 ///
 /// - **Hidden:** a name counts as hidden if some group hides it and no group
-///   in the scope shows it.
+///   in the scope shows it. Workspaces IPC reports active on any output are
+///   never hidden.
 /// - **Active:** the ext active set of the one group that contains the
 ///   IPC-reported active workspace. If no group or several groups match, IPC
-///   state is kept. This is a conservative heuristic for two independent
-///   event streams, not synchronization: while both briefly disagree, the
-///   IPC state wins.
+///   state is kept.
+///
+/// This is a conservative heuristic for two independent event streams, not
+/// synchronization: while both briefly disagree, the IPC state wins.
 fn merge_scope(
     name_to_id: &HashMap<String, i32>,
     groups: &[&OverlayGroup],
     ipc_active: &HashSet<i32>,
+    ipc_active_anywhere: &HashSet<i32>,
 ) -> Scope {
     let id_of = |name: &String| name_to_id.get(name).copied();
 
@@ -128,6 +125,7 @@ fn merge_scope(
         .flat_map(|g| &g.hidden)
         .filter(|name| !groups.iter().any(|g| g.visible.contains(*name)))
         .filter_map(id_of)
+        .filter(|id| !ipc_active_anywhere.contains(id))
         .collect();
 
     let ipc_active_names: Vec<&String> = name_to_id
@@ -166,11 +164,13 @@ fn remove_ids(
     counts.retain(|id, _| !ids.contains(id));
 }
 
-/// Merge ext-workspace state over a native backend's metadata and snapshot.
+/// Merge ext-workspace state over the Hyprland backend's metadata and snapshot.
 ///
 /// Returns the effective metadata (hidden workspaces removed) and snapshot.
 /// With an empty overlay, or one that agrees with IPC, the native input is
 /// returned unchanged. Occupancy knowledge is always the native backend's.
+/// Metadata is global (Hyprland workspaces have no output), so names are
+/// matched once for all scopes.
 pub fn merge(
     metas: &[WorkspaceMeta],
     snapshot: &WorkspaceSnapshot,
@@ -181,12 +181,22 @@ pub fn merge(
         return (metas.to_vec(), snap);
     }
 
-    // Global scope: all groups, unambiguous names only.
+    let name_to_id = name_to_id_map(metas);
+    let ipc_active_anywhere: HashSet<i32> = snapshot
+        .per_output
+        .values()
+        .flat_map(|s| &s.active_workspace)
+        .chain(&snapshot.active_workspace)
+        .copied()
+        .collect();
+
+    // Global scope: all groups.
     let all_groups: Vec<&OverlayGroup> = overlay.groups.iter().collect();
     let global = merge_scope(
-        &name_to_id_map(metas, None),
+        &name_to_id,
         &all_groups,
         &snapshot.active_workspace,
+        &ipc_active_anywhere,
     );
     if let Some(active) = &global.active {
         snap.active_workspace = active.clone();
@@ -200,7 +210,6 @@ pub fn merge(
         .retain(|id| !global.hidden.contains(id));
 
     // Per-output scopes: only groups shown on that output.
-    let mut hidden_per_output: HashMap<String, HashSet<i32>> = HashMap::new();
     for (output, state) in snap.per_output.iter_mut() {
         let groups: Vec<&OverlayGroup> = overlay
             .groups
@@ -211,9 +220,10 @@ pub fn merge(
             continue;
         }
         let scope = merge_scope(
-            &name_to_id_map(metas, Some(output)),
+            &name_to_id,
             &groups,
             &state.active_workspace,
+            &ipc_active_anywhere,
         );
         if let Some(active) = &scope.active {
             state.active_workspace = active.clone();
@@ -226,18 +236,11 @@ pub fn merge(
         if let Some(urgent) = state.urgent_workspaces.as_mut() {
             urgent.retain(|id| !scope.hidden.contains(id));
         }
-        hidden_per_output.insert(output.clone(), scope.hidden);
     }
 
     let effective_metas = metas
         .iter()
-        .filter(|meta| {
-            let hidden = match meta.output.as_deref() {
-                Some(output) => hidden_per_output.get(output).unwrap_or(&global.hidden),
-                None => &global.hidden,
-            };
-            !hidden.contains(&meta.id)
-        })
+        .filter(|meta| !global.hidden.contains(&meta.id))
         .cloned()
         .collect();
 
@@ -387,7 +390,7 @@ mod tests {
     }
 
     #[test]
-    fn hidden_wins_over_occupied_and_active() {
+    fn hidden_wins_over_occupied() {
         let metas = global_metas(&[1, 2, 3]);
         let overlay = ExtWorkspaceOverlay {
             groups: vec![group(&["DP-1"], &["2"], &["2", "3"], &["1", "3"])],
@@ -404,27 +407,25 @@ mod tests {
     }
 
     #[test]
-    fn hidden_name_on_one_output_does_not_hide_same_name_on_another() {
-        // Per-output naming (niri-like): "1" exists on both outputs, hidden
-        // only on A.
-        let metas = vec![
-            meta(10, "1", Some("A")),
-            meta(11, "2", Some("A")),
-            meta(20, "1", Some("B")),
-        ];
-        let mut native = ipc("A", 11, &[]);
+    fn ipc_active_is_never_hidden() {
+        // The streams disagree: IPC shows 3 on DP-1 and 4 on B, ext-workspace
+        // already hides both.
+        let metas = global_metas(&[1, 3, 4]);
+        let mut native = ipc("DP-1", 3, &[]);
         let mut b = PerOutputState::default();
-        b.active_workspace.insert(20);
+        b.active_workspace.insert(4);
         native.per_output.insert("B".into(), b);
         let overlay = ExtWorkspaceOverlay {
             groups: vec![
-                group(&["A"], &["2"], &["2"], &["1"]),
-                group(&["B"], &["1"], &["1"], &[]),
+                group(&["DP-1"], &["1"], &["1"], &["3"]),
+                group(&["B"], &[], &[], &["4"]),
             ],
         };
-        let (out_metas, _) = merge(&metas, &native, &overlay);
+        let (out_metas, snap) = merge(&metas, &native, &overlay);
 
-        assert_eq!(ids(&out_metas), vec![11, 20]);
+        assert_eq!(ids(&out_metas), vec![1, 3, 4]);
+        assert_eq!(snap.active_workspace, HashSet::from([3]));
+        assert_eq!(snap.per_output["B"].active_workspace, HashSet::from([4]));
     }
 
     #[test]
