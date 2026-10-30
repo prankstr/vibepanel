@@ -96,6 +96,7 @@ pub struct CompositorManager {
     window_layout_callbacks: Callbacks<WindowLayoutSnapshot>,
     window_list_callbacks: Callbacks<super::WindowListSnapshot>,
     last_workspace_snapshot: RefCell<Option<WorkspaceSnapshot>>,
+    /// Latest window update per output (`None` key for unscoped updates).
     last_window_infos: RefCell<HashMap<Option<String>, WindowInfo>>,
     ext_overlay: RefCell<Option<ExtOverlay>>,
     last_keyboard_layout: RefCell<Option<KeyboardLayoutInfo>>,
@@ -419,8 +420,8 @@ impl CompositorManager {
                 Some(overlay) => {
                     let mut changed = false;
                     if let Some(snapshot) = native {
-                        // Metadata is read now, together with the snapshot, so
-                        // both describe the same moment.
+                        // Read metadata as close to the snapshot as possible;
+                        // see the coalescing note in `init_backend`.
                         let metas = self
                             .backend
                             .borrow()

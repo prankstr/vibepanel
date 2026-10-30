@@ -476,7 +476,6 @@ mod tests {
     #[test]
     fn from_model_keeps_groups_and_their_outputs() {
         let ws = |name: &str, group: Option<usize>, active: bool, hidden: bool| ExtWorkspace {
-            key: format!("tok:{name}"),
             name: name.into(),
             active,
             hidden,

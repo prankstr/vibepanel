@@ -23,30 +23,25 @@ use crate::services::compositor::{
 /// workspaces that no longer exist are pruned.
 #[derive(Debug, Default)]
 struct IdMap {
-    by_key: HashMap<String, i32>,
+    by_key: HashMap<u64, i32>,
     next: i32,
 }
 
 impl IdMap {
-    fn id(&mut self, key: &str) -> i32 {
-        if let Some(id) = self.by_key.get(key) {
-            return *id;
-        }
-        self.next += 1;
-        self.by_key.insert(key.to_string(), self.next);
-        self.next
+    fn id(&mut self, key: u64) -> i32 {
+        *self.by_key.entry(key).or_insert_with(|| {
+            self.next += 1;
+            self.next
+        })
     }
 
-    fn retain_keys<'a>(&mut self, keys: impl IntoIterator<Item = &'a str>) {
-        let keep: std::collections::HashSet<&str> = keys.into_iter().collect();
-        self.by_key.retain(|key, _| keep.contains(key.as_str()));
+    fn retain_keys(&mut self, keys: impl IntoIterator<Item = u64>) {
+        let keep: HashSet<u64> = keys.into_iter().collect();
+        self.by_key.retain(|key, _| keep.contains(key));
     }
 
-    fn key(&self, id: i32) -> Option<&str> {
-        self.by_key
-            .iter()
-            .find(|(_, v)| **v == id)
-            .map(|(k, _)| k.as_str())
+    fn key(&self, id: i32) -> Option<u64> {
+        self.by_key.iter().find(|(_, v)| **v == id).map(|(k, _)| *k)
     }
 }
 
@@ -63,7 +58,7 @@ fn workspaces_from_model(
     model: &ExtWorkspaceModel,
     ids: &mut IdMap,
 ) -> (Vec<WorkspaceMeta>, WorkspaceSnapshot) {
-    ids.retain_keys(model.workspaces.iter().map(|w| w.key.as_str()));
+    ids.retain_keys(model.workspaces.iter().map(|w| w.key));
     let mut visible: Vec<&ExtWorkspace> = model.workspaces.iter().filter(|w| !w.hidden).collect();
     visible.sort_by(|a, b| {
         a.group
@@ -94,7 +89,7 @@ fn workspaces_from_model(
     let mut position_in_group: HashMap<Option<usize>, i32> = HashMap::new();
 
     for ws in visible {
-        let id = ids.id(&ws.key);
+        let id = ids.id(ws.key);
         let position = position_in_group.entry(ws.group).or_insert(0);
         *position += 1;
         // Mixing name numbers and positions could produce duplicates, so a
@@ -211,10 +206,10 @@ impl CompositorBackend for ExtWorkspaceBackend {
     }
 
     fn switch_workspace(&self, workspace_id: i32) {
-        let key = self.state.read().ids.key(workspace_id).map(str::to_owned);
+        let key = self.state.read().ids.key(workspace_id);
         debug!("ext-workspace: switch to workspace {workspace_id} (key {key:?})");
         if let (Some(key), Some(client)) = (key, self.client.lock().as_ref()) {
-            client.activate(&key);
+            client.activate(key);
         }
     }
 
@@ -228,9 +223,9 @@ mod tests {
     use super::*;
     use crate::services::compositor::ext_workspace::client::ExtWorkspaceGroup;
 
-    fn ws(key: &str, name: &str, group: Option<usize>) -> ExtWorkspace {
+    fn ws(key: u64, name: &str, group: Option<usize>) -> ExtWorkspace {
         ExtWorkspace {
-            key: key.into(),
+            key,
             name: name.into(),
             group,
             ..Default::default()
@@ -251,10 +246,10 @@ mod tests {
 
     #[test]
     fn backend_skips_hidden_and_marks_active_per_output() {
-        let mut a = ws("tok:1", "1", Some(0));
+        let mut a = ws(1, "1", Some(0));
         a.active = true;
-        let b = ws("tok:2", "2", Some(0));
-        let mut c = ws("tok:3", "3", Some(0));
+        let b = ws(2, "2", Some(0));
+        let mut c = ws(3, "3", Some(0));
         c.hidden = true;
         let m = model(vec![b, c, a], &[&["DP-1"]]);
 
@@ -279,21 +274,21 @@ mod tests {
     #[test]
     fn backend_ids_are_stable_and_never_reused() {
         let mut ids = IdMap::default();
-        let m1 = model(vec![ws("tok:1", "a", None), ws("tok:2", "a", None)], &[]);
+        let m1 = model(vec![ws(1, "a", None), ws(2, "a", None)], &[]);
         let (first, _) = workspaces_from_model(&m1, &mut ids);
-        let m2 = model(vec![ws("tok:2", "a", None), ws("tok:3", "a", None)], &[]);
+        let m2 = model(vec![ws(2, "a", None), ws(3, "a", None)], &[]);
         let (second, _) = workspaces_from_model(&m2, &mut ids);
 
         assert_ne!(first[0].id, first[1].id);
         assert_eq!(first[1].id, second[0].id);
         assert!(!first.iter().any(|m| m.id == second[1].id));
         assert_eq!(ids.key(first[0].id), None);
-        assert_eq!(ids.key(second[1].id), Some("tok:3"));
+        assert_eq!(ids.key(second[1].id), Some(3));
     }
 
     #[test]
     fn backend_group_spanning_outputs_is_global() {
-        let mut a = ws("tok:1", "1", Some(0));
+        let mut a = ws(1, "1", Some(0));
         a.active = true;
         let m = model(vec![a], &[&["DP-1", "HDMI-A-1"]]);
         let (metas, snap) = workspaces_from_model(&m, &mut IdMap::default());
@@ -315,7 +310,7 @@ mod tests {
     fn backend_flattens_grid_row_major() {
         // Wayfire-style [column, row] coordinates for a 2x2 grid.
         let cell = |name: &str, x: u32, y: u32| {
-            let mut w = ws(name, name, Some(0));
+            let mut w = ws((2 * y + x).into(), name, Some(0));
             w.coordinates = vec![x, y];
             w
         };
@@ -339,10 +334,10 @@ mod tests {
     fn backend_index_from_name_or_position() {
         let m = model(
             vec![
-                ws("tok:1", "web", Some(0)),
-                ws("tok:2", "1", Some(0)),
-                ws("tok:3", "mail", Some(1)),
-                ws("tok:4", "chat", Some(1)),
+                ws(1, "web", Some(0)),
+                ws(2, "1", Some(0)),
+                ws(3, "mail", Some(1)),
+                ws(4, "chat", Some(1)),
             ],
             &[&["A"], &["B"]],
         );
