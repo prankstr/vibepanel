@@ -14,7 +14,9 @@ use tracing::{debug, warn};
 use vibepanel_core::config::WidgetEntry;
 
 use crate::services::callbacks::CallbackId;
-use crate::services::compositor::{CompositorManager, WorkspaceMeta, WorkspaceSnapshot};
+use crate::services::compositor::{
+    CompositorManager, WindowListSnapshot, WorkspaceMeta, WorkspaceSnapshot,
+};
 use crate::services::config_manager::ConfigManager;
 use crate::services::icons::get_app_icon_name;
 use crate::services::tooltip::TooltipManager;
@@ -199,6 +201,14 @@ impl Default for TaskbarConfig {
     }
 }
 
+impl TaskbarConfig {
+    /// Whether separators show a workspace label, which follows workspace state.
+    fn shows_separator_label(&self) -> bool {
+        self.show_workspace_separator
+            && self.workspace_separator_label != WorkspaceSeparatorLabel::None
+    }
+}
+
 /// Window identity snapshot used to detect when the button list needs a full rebuild.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct WindowListKey {
@@ -246,6 +256,7 @@ fn sync_taskbar_button_state(button: &Widget, target_class: Option<&str>) {
 pub struct TaskbarWidget {
     base: BaseWidget,
     window_list_callback_id: CallbackId,
+    workspace_callback_id: Option<CallbackId>,
 }
 
 impl TaskbarWidget {
@@ -324,7 +335,9 @@ impl TaskbarWidget {
             Rc::new(RefCell::new(WindowListKey::default()));
         let output_id_for_log = output_id.clone();
 
-        let window_list_callback_id = WindowListService::global().connect(move |snapshot| {
+        let track_workspaces = config.shows_separator_label();
+        let last_windows: Rc<RefCell<Option<WindowListSnapshot>>> = Rc::new(RefCell::new(None));
+        let render: Rc<dyn Fn(&WindowListSnapshot)> = Rc::new(move |snapshot| {
             update_window_buttons(
                 &content,
                 &window_buttons,
@@ -338,11 +351,33 @@ impl TaskbarWidget {
             );
         });
 
+        let window_list_callback_id = WindowListService::global().connect({
+            let render = render.clone();
+            let last_windows = last_windows.clone();
+            move |snapshot| {
+                *last_windows.borrow_mut() = Some(snapshot.clone());
+                render(snapshot);
+            }
+        });
+
+        // Separators reflect workspace state, which can change without any
+        // window-list change (e.g. viewing several workspaces at once).
+        // Re-rendering is cheap: update_window_buttons skips unchanged state.
+        let workspace_callback_id = track_workspaces.then(|| {
+            CompositorManager::global().register_workspace_callback(move |_| {
+                let snapshot = last_windows.borrow().clone();
+                if let Some(snapshot) = snapshot {
+                    render(&snapshot);
+                }
+            })
+        });
+
         debug!("TaskbarWidget created (output_id: {:?})", output_id_for_log);
 
         Self {
             base,
             window_list_callback_id,
+            workspace_callback_id,
         }
     }
 
@@ -354,6 +389,9 @@ impl TaskbarWidget {
 impl Drop for TaskbarWidget {
     fn drop(&mut self) {
         WindowListService::global().disconnect(self.window_list_callback_id);
+        if let Some(id) = self.workspace_callback_id {
+            CompositorManager::global().unregister_workspace_callback(id);
+        }
     }
 }
 
@@ -462,8 +500,7 @@ fn update_window_buttons(
         windows.truncate(config.max_windows);
     }
 
-    let track_active_separator = config.show_workspace_separator
-        && config.workspace_separator_label != WorkspaceSeparatorLabel::None;
+    let track_active_separator = config.shows_separator_label();
     let (
         workspace_labels,
         active_workspaces,
