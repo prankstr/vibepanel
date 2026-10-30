@@ -5,7 +5,7 @@
 //!   the protocol, for compositors without a native IPC backend. This is the
 //!   primary use.
 //! - [`overlay`]: merging ext-workspace state (several active / hidden
-//!   workspaces) over a native backend; owned by `CompositorManager`.
+//!   workspaces) over the Hyprland backend; owned by `CompositorManager`.
 
 mod backend;
 mod client;

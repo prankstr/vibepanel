@@ -11,7 +11,7 @@
 //! which schedules callbacks directly on the GTK main loop without polling. It maintains:
 //! - A single backend instance
 //! - Registered callbacks for workspace and window updates
-//! - Alongside a native backend, an optional ext-workspace overlay whose state
+//! - Alongside the Hyprland backend, an optional ext-workspace overlay whose state
 //!   is merged over the backend's workspace state before it is published (see
 //!   `ext_workspace::overlay`). All consumers see the merged state.
 //!
@@ -452,7 +452,7 @@ impl CompositorManager {
         self.workspace_callbacks.notify(&snapshot);
     }
 
-    /// Start merging ext-workspace state over a native backend, if offered.
+    /// Start merging ext-workspace state over the backend, if offered.
     fn start_ext_overlay(&self, inbox: &WorkspaceInbox) {
         let inbox = inbox.clone();
         let on_model: ModelCallback = Arc::new(move |model| {

@@ -4,7 +4,7 @@
 //! outputs) on its own Wayland connection and thread, and publishes an
 //! [`ExtWorkspaceModel`] after every `done`. It has two consumers in this
 //! module: the standalone [`super::ExtWorkspaceBackend`] and the overlay that
-//! `CompositorManager` merges over native backends.
+//! `CompositorManager` merges over the Hyprland backend.
 //!
 //! It deliberately does not share GDK's connection: compositor backends run
 //! off the GTK main loop and start before any GTK surface exists.
@@ -37,8 +37,8 @@ const POLL_TIMEOUT_MS: i32 = 500;
 /// One workspace as reported over ext-workspace.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ExtWorkspace {
-    /// Stable key: the protocol `id` if the compositor sends one, else the
-    /// name (Hyprland sends no ids but has stable names), else the object id.
+    /// Stable key: the protocol `id` if the compositor sends one, else a
+    /// per-object token that is never reused.
     pub key: String,
     pub name: String,
     pub coordinates: Vec<u32>,
@@ -111,6 +111,8 @@ struct ClientState {
     manager: Option<ExtWorkspaceManagerV1>,
     /// wl_output protocol id -> connector name.
     outputs: HashMap<u32, String>,
+    /// Registry global name -> bound wl_output, to release it on removal.
+    output_globals: HashMap<u32, wl_output::WlOutput>,
     /// group protocol id -> output protocol ids.
     groups: HashMap<u32, Vec<u32>>,
     /// workspace protocol id -> state.
@@ -131,7 +133,7 @@ impl ClientState {
             .map(|g| ExtWorkspaceGroup {
                 outputs: self.groups[g]
                     .iter()
-                    .filter_map(|o| self.outputs.get(o).cloned())
+                    .filter_map(|o| self.outputs.get(o).filter(|n| !n.is_empty()).cloned())
                     .collect(),
             })
             .collect();
@@ -208,10 +210,16 @@ impl Dispatch<wl_registry::WlRegistry, ()> for ClientState {
                     state
                         .outputs
                         .insert(output.id().protocol_id(), String::new());
+                    state.output_globals.insert(name, output);
                 }
                 _ => {}
             },
-            wl_registry::Event::GlobalRemove { .. } => {}
+            wl_registry::Event::GlobalRemove { name } => {
+                if let Some(output) = state.output_globals.remove(&name) {
+                    state.outputs.remove(&output.id().protocol_id());
+                    output.release();
+                }
+            }
             _ => {}
         }
     }
@@ -409,6 +417,7 @@ impl ExtWorkspaceClient {
         let mut state = ClientState {
             manager: None,
             outputs: HashMap::new(),
+            output_globals: HashMap::new(),
             groups: HashMap::new(),
             workspaces: HashMap::new(),
             last_model: None,

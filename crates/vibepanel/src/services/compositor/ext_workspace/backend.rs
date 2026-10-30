@@ -7,7 +7,7 @@
 //! as unknown (`occupancy_known = false`) and has no focused window or window
 //! list.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use parking_lot::{Mutex, RwLock};
@@ -85,18 +85,25 @@ fn workspaces_from_model(
         occupancy_known: false,
         ..Default::default()
     };
+    let numeric_name = |ws: &ExtWorkspace| ws.name.parse::<i32>().ok().filter(|n| *n > 0);
+    let numbered_groups: HashSet<Option<usize>> = visible
+        .iter()
+        .filter(|ws| numeric_name(ws).is_some())
+        .map(|ws| ws.group)
+        .collect();
     let mut position_in_group: HashMap<Option<usize>, i32> = HashMap::new();
 
     for ws in visible {
         let id = ids.id(&ws.key);
         let position = position_in_group.entry(ws.group).or_insert(0);
         *position += 1;
-        let idx = ws
-            .name
-            .parse::<i32>()
-            .ok()
-            .filter(|n| *n > 0)
-            .unwrap_or(*position);
+        // Mixing name numbers and positions could produce duplicates, so a
+        // group with numeric names labels the others by name (idx -1).
+        let idx = match numeric_name(ws) {
+            Some(n) => n,
+            None if numbered_groups.contains(&ws.group) => -1,
+            None => *position,
+        };
 
         metas.push(WorkspaceMeta {
             id,
@@ -219,8 +226,6 @@ impl CompositorBackend for ExtWorkspaceBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashSet;
-
     use crate::services::compositor::ext_workspace::client::ExtWorkspaceGroup;
 
     fn ws(key: &str, name: &str, group: Option<usize>) -> ExtWorkspace {
@@ -246,10 +251,10 @@ mod tests {
 
     #[test]
     fn backend_skips_hidden_and_marks_active_per_output() {
-        let mut a = ws("name:1", "1", Some(0));
+        let mut a = ws("tok:1", "1", Some(0));
         a.active = true;
-        let b = ws("name:2", "2", Some(0));
-        let mut c = ws("name:3", "3", Some(0));
+        let b = ws("tok:2", "2", Some(0));
+        let mut c = ws("tok:3", "3", Some(0));
         c.hidden = true;
         let m = model(vec![b, c, a], &[&["DP-1"]]);
 
@@ -272,43 +277,23 @@ mod tests {
     }
 
     #[test]
-    fn backend_duplicate_names_get_distinct_ids() {
-        // No protocol ids, same name on two outputs: keys are per-object tokens.
-        let m = model(
-            vec![ws("tok:1", "1", Some(0)), ws("tok:2", "1", Some(1))],
-            &[&["A"], &["B"]],
-        );
+    fn backend_ids_are_stable_and_never_reused() {
         let mut ids = IdMap::default();
-        let (metas, _) = workspaces_from_model(&m, &mut ids);
-        assert_ne!(metas[0].id, metas[1].id);
-        assert_eq!(ids.key(metas[1].id), Some("tok:2"));
-    }
-
-    #[test]
-    fn backend_prunes_gone_keys_without_reusing_ids() {
-        let mut ids = IdMap::default();
-        let (first, _) = workspaces_from_model(&model(vec![ws("tok:1", "a", None)], &[]), &mut ids);
-        let (second, _) =
-            workspaces_from_model(&model(vec![ws("tok:2", "a", None)], &[]), &mut ids);
-        assert_eq!(ids.key(first[0].id), None);
-        assert_ne!(first[0].id, second[0].id);
-    }
-
-    #[test]
-    fn backend_ids_are_stable_and_reversible() {
-        let mut ids = IdMap::default();
-        let m1 = model(vec![ws("id:a", "a", None), ws("id:b", "b", None)], &[]);
+        let m1 = model(vec![ws("tok:1", "a", None), ws("tok:2", "a", None)], &[]);
         let (first, _) = workspaces_from_model(&m1, &mut ids);
-        let m2 = model(vec![ws("id:b", "b", None)], &[]);
+        let m2 = model(vec![ws("tok:2", "a", None), ws("tok:3", "a", None)], &[]);
         let (second, _) = workspaces_from_model(&m2, &mut ids);
 
+        assert_ne!(first[0].id, first[1].id);
         assert_eq!(first[1].id, second[0].id);
-        assert_eq!(ids.key(second[0].id), Some("id:b"));
+        assert!(!first.iter().any(|m| m.id == second[1].id));
+        assert_eq!(ids.key(first[0].id), None);
+        assert_eq!(ids.key(second[1].id), Some("tok:3"));
     }
 
     #[test]
     fn backend_group_spanning_outputs_is_global() {
-        let mut a = ws("name:1", "1", Some(0));
+        let mut a = ws("tok:1", "1", Some(0));
         a.active = true;
         let m = model(vec![a], &[&["DP-1", "HDMI-A-1"]]);
         let (metas, snap) = workspaces_from_model(&m, &mut IdMap::default());
@@ -354,15 +339,16 @@ mod tests {
     fn backend_index_from_name_or_position() {
         let m = model(
             vec![
-                ws("k1", "web", Some(0)),
-                ws("k2", "7", Some(0)),
-                ws("k3", "chat", Some(0)),
+                ws("tok:1", "web", Some(0)),
+                ws("tok:2", "1", Some(0)),
+                ws("tok:3", "mail", Some(1)),
+                ws("tok:4", "chat", Some(1)),
             ],
-            &[&["DP-1"]],
+            &[&["A"], &["B"]],
         );
         let (metas, _) = workspaces_from_model(&m, &mut IdMap::default());
         let idx: HashMap<&str, i32> = metas.iter().map(|m| (m.name.as_str(), m.idx)).collect();
-        assert_eq!(idx["7"], 7);
-        assert!(idx["web"] > 0 && idx["chat"] > 0 && idx["web"] != idx["chat"]);
+        assert_eq!((idx["1"], idx["web"]), (1, -1));
+        assert_eq!((idx["chat"], idx["mail"]), (1, 2));
     }
 }

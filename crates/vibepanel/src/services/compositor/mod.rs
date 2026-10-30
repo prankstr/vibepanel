@@ -5,8 +5,8 @@
 //! - Niri (via socket IPC with JSON protocol)
 //! - Hyprland (via socket IPC with JSON protocol)
 //! - Sway / Miracle WM / Scroll (via i3 IPC binary protocol over Unix socket)
-//! - Any compositor offering ext-workspace-v1 (also merged over native
-//!   backends, see `ext_workspace::overlay`)
+//! - Any compositor offering ext-workspace-v1 (also merged over the Hyprland
+//!   backend, see `ext_workspace::overlay`)
 //!
 //! The backend trait feeds both:
 //! - `WorkspaceService` (workspace/tag state)

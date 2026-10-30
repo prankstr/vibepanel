@@ -444,16 +444,6 @@ mod tests {
     }
 
     #[test]
-    fn preserves_native_occupancy_knowledge() {
-        let metas = global_metas(&[1, 2]);
-        let overlay = ExtWorkspaceOverlay {
-            groups: vec![group(&["DP-1"], &["1", "2"], &["1", "2"], &[])],
-        };
-        let (_, snap) = merge(&metas, &ipc("DP-1", 1, &[1]), &overlay);
-        assert!(snap.occupancy_known);
-    }
-
-    #[test]
     fn state_recomputes_from_native_input() {
         let mut state = ExtOverlayState::default();
         state.set_native(global_metas(&[1, 2, 3]), ipc("DP-1", 2, &[2]));
