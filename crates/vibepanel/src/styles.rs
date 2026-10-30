@@ -258,6 +258,9 @@ pub mod state {
     /// Scan/refresh in progress (`.scanning`).
     pub const SCANNING: &str = "scanning";
 
+    /// Slider grabbed for keyboard adjustment (`.grabbed`).
+    pub const GRABBED: &str = "grabbed";
+
     /// Service unavailable state (`.service-unavailable`).
     pub const SERVICE_UNAVAILABLE: &str = "service-unavailable";
 

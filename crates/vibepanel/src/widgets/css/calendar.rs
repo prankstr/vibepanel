@@ -82,6 +82,26 @@ calendar.view.calendar-events-enabled grid label.day-number:selected:not(.today)
     box-shadow: none;
 }
 
+/* Arrows move the selection, so the ring marks the selected day while the
+   calendar has visible focus. */
+.popover calendar.view:focus-visible grid label.day-number:selected {
+    outline: 2px solid var(--color-accent-primary);
+    outline-offset: -2px;
+    border-radius: var(--radius-widget);
+}
+/* Today is accent-filled. */
+.popover calendar.view:focus-visible grid label.day-number.today:selected {
+    outline-color: var(--color-accent-text, #fff);
+}
+
+/* Below .vp-no-focus's specificity, so hidden until keyboard navigation. */
+.calendar-events-card > scrolledwindow:focus-visible {
+    outline: 2px solid var(--color-accent-primary);
+    outline-offset: -2px;
+    border-radius: var(--radius-widget);
+    transition: none;
+}
+
 .week-number-header {
     font-size: var(--font-size-xs);
     color: var(--color-foreground-muted);

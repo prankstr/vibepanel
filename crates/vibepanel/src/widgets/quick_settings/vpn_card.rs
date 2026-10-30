@@ -408,7 +408,7 @@ pub fn populate_vpn_list(state: &Rc<VpnCardState>, list_box: &ListBox, snapshot:
         {
             let auth_row = ListBoxRow::new();
             auth_row.set_activatable(false);
-            auth_row.set_focusable(true);
+            auth_row.set_focusable(false);
             auth_box.set_visible(true);
             auth_row.set_child(Some(auth_box));
             list_box.append(&auth_row);
@@ -424,7 +424,7 @@ pub fn populate_vpn_list(state: &Rc<VpnCardState>, list_box: &ListBox, snapshot:
     {
         let auth_row = ListBoxRow::new();
         auth_row.set_activatable(false);
-        auth_row.set_focusable(true);
+        auth_row.set_focusable(false);
         auth_box.set_visible(true);
         auth_row.set_child(Some(auth_box));
         list_box.append(&auth_row);

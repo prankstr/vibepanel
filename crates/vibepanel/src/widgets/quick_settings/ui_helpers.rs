@@ -587,6 +587,25 @@ pub fn clear_list_box(list_box: &ListBox) {
     }
 }
 
+/// Device lists are rebuilt on every change, including picking a device.
+/// Rows are named after their device so focus can return to the same one.
+pub(super) fn focused_device(list_box: &ListBox) -> Option<String> {
+    focused_row_of(list_box).map(|row| row.widget_name().to_string())
+}
+
+pub(super) fn append_device_row(
+    list_box: &ListBox,
+    row: &ListBoxRow,
+    device: &str,
+    focused: Option<&str>,
+) {
+    row.set_widget_name(device);
+    list_box.append(row);
+    if focused == Some(device) {
+        row.grab_focus();
+    }
+}
+
 /// Add a disabled state placeholder to a list box.
 ///
 /// Creates a centered container with an icon and message label.
@@ -641,7 +660,56 @@ pub fn create_qs_list_box() -> ListBox {
     let list_box = ListBox::new();
     list_box.add_css_class(qs::LIST);
     list_box.set_selection_mode(SelectionMode::None);
+    list_box.connect_move_cursor(move_focus_between_rows);
+    list_box.connect_keynav_failed(|list_box, _| {
+        // Default is an error bell plus claiming the key; let it pass so
+        // focus can leave the list instead.
+        if focused_row_of(list_box).is_some() {
+            list_box.stop_signal_emission_by_name("keynav-failed");
+        }
+        gtk4::glib::Propagation::Proceed
+    });
     list_box
+}
+
+fn focused_row_of(list_box: &ListBox) -> Option<ListBoxRow> {
+    list_box
+        .root()
+        .and_then(|root| root.focus())
+        .and_then(|focus| focus.ancestor(ListBoxRow::static_type()))
+        .filter(|row| row.parent().as_ref() == Some(list_box.upcast_ref()))
+        .and_downcast()
+}
+
+/// Up/Down focus the next row, which silently fails for rows that delegate
+/// focus to a trailing button. Move into the adjacent row instead, and past
+/// the ends to the surrounding widgets. Relies on the `keynav-failed`
+/// override, without which `child_focus` claims success at the ends.
+fn move_focus_between_rows(
+    list_box: &ListBox,
+    step: gtk4::MovementStep,
+    count: i32,
+    _extend: bool,
+    _modify: bool,
+) {
+    if step != gtk4::MovementStep::DisplayLines || focused_row_of(list_box).is_none() {
+        return;
+    }
+    list_box.stop_signal_emission_by_name("move-cursor");
+
+    let direction = if count < 0 {
+        gtk4::DirectionType::Up
+    } else {
+        gtk4::DirectionType::Down
+    };
+    if !list_box.child_focus(direction)
+        && let Some(content) = list_box
+            .root()
+            .and_downcast::<gtk4::Window>()
+            .and_then(|window| window.child())
+    {
+        content.child_focus(direction);
+    }
 }
 
 /// Self-contained scan/refresh icon button with spinner state.
