@@ -276,6 +276,9 @@ pub mod state {
     /// Urgent workspace state (`.urgent`).
     pub const URGENT: &str = "urgent";
 
+    /// Focused window state (`.focused`).
+    pub const FOCUSED: &str = "focused";
+
     /// Ripple overlay element (`.vp-ripple-overlay`).
     pub const RIPPLE_OVERLAY: &str = "vp-ripple-overlay";
 
@@ -565,6 +568,42 @@ pub mod widget {
 
     /// Workspace separator (`.workspace-separator`).
     pub const WORKSPACE_SEPARATOR: &str = "workspace-separator";
+
+    /// Workspace indicator that can show window icons (`.workspace-indicator-windows`).
+    /// Set on every indicator when `show_windows` is enabled.
+    pub const WORKSPACE_INDICATOR_WINDOWS: &str = "workspace-indicator-windows";
+
+    /// Workspace indicator currently showing window icons (`.has-windows`).
+    pub const WORKSPACE_HAS_WINDOWS: &str = "has-windows";
+
+    /// Workspace label inside a window-showing indicator (`.workspace-label`).
+    pub const WORKSPACE_LABEL: &str = "workspace-label";
+
+    /// Window icon row inside a workspace indicator (`.workspace-windows`).
+    pub const WORKSPACE_WINDOWS: &str = "workspace-windows";
+
+    /// Clickable window icon inside a workspace indicator (`.workspace-window`).
+    pub const WORKSPACE_WINDOW: &str = "workspace-window";
+
+    /// Window app icon image (`.workspace-window-icon`).
+    pub const WORKSPACE_WINDOW_ICON: &str = "workspace-window-icon";
+
+    /// "+N" label for windows beyond `max_windows` (`.workspace-windows-overflow`).
+    pub const WORKSPACE_WINDOWS_OVERFLOW: &str = "workspace-windows-overflow";
+
+    /// Active-workspace pill that slides between indicators when window icons
+    /// are shown (`.workspace-highlight`).
+    pub const WORKSPACE_HIGHLIGHT: &str = "workspace-highlight";
+
+    /// Workspace container drawing a sliding highlight (`.has-highlight`).
+    pub const WORKSPACE_HAS_HIGHLIGHT: &str = "has-highlight";
+
+    /// Workspace container whose labels stay put while the highlight slides
+    /// (`.sliding`): every indicator gets the active width.
+    pub const WORKSPACE_SLIDING: &str = "sliding";
+
+    /// Indicator currently covered by the sliding highlight (`.under-highlight`).
+    pub const WORKSPACE_UNDER_HIGHLIGHT: &str = "under-highlight";
 
     /// Active workspace (`.active`).
     pub const ACTIVE: &str = "active";

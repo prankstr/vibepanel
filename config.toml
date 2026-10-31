@@ -80,6 +80,12 @@ background_opacity = 1.0
 #   # "all" checks every GPU while the GPU widget or system popover is active. Runtime-suspended
 #   # GPUs skip vendor polling, but active secondary GPUs are queried and may use more power than "auto".
 #
+#   [widgets.workspaces]
+#   label_type = "index"  # "none" (dots, default), "icons", "name", or "index"
+#   show_windows = true   # Show app icons for each workspace's windows (Niri, MangoWC)
+#   max_windows = 4       # Icons per workspace, the rest show as "+N" (default: 0 = unlimited)
+#   group_by_app = true   # One icon per app; clicking it cycles through its windows
+#
 #   [widgets.notifications]
 #   toast_position = "top-right"  # "top-left", "top-center", "top-right", "bottom-left", "bottom-center", "bottom-right"
 #
