@@ -6,7 +6,7 @@ use std::env;
 use tracing::{debug, info};
 
 use super::{
-    CompositorBackend, ExtWorkspaceBackend, HyprlandBackend, MangoBackend, NiriBackend, SwayBackend,
+    CompositorBackend, GenericBackend, HyprlandBackend, MangoBackend, NiriBackend, SwayBackend,
 };
 
 /// Backend kind enum for configuration.
@@ -122,7 +122,7 @@ pub fn create_backend(kind: BackendKind) -> (BackendKind, Box<dyn CompositorBack
         BackendKind::Hyprland => Box::new(HyprlandBackend::new()),
         BackendKind::Niri => Box::new(NiriBackend::new()),
         BackendKind::Sway => Box::new(SwayBackend::new()),
-        BackendKind::Generic => Box::new(ExtWorkspaceBackend::new()),
+        BackendKind::Generic => Box::new(GenericBackend::new()),
         BackendKind::Auto => {
             // Should never reach here after resolution, but handle gracefully
             Box::new(MangoBackend::new())

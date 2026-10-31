@@ -2,9 +2,9 @@
 //!
 //! [`ExtWorkspaceClient`] tracks the full protocol state (workspaces, groups,
 //! outputs) on its own Wayland connection and thread, and publishes an
-//! [`ExtWorkspaceModel`] after every `done`. It has two consumers in this
-//! module: the standalone [`super::ExtWorkspaceBackend`] and the overlay that
-//! `CompositorManager` merges over the Hyprland backend.
+//! [`ExtWorkspaceModel`] after every `done`. It has two consumers: the
+//! generic backend and the overlay that `CompositorManager` merges over the
+//! Hyprland backend.
 //!
 //! It deliberately does not share GDK's connection: compositor backends run
 //! off the GTK main loop and start before any GTK surface exists.

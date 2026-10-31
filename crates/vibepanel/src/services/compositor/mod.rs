@@ -21,6 +21,7 @@
 mod ext_workspace;
 mod factory;
 mod foreign_toplevel;
+mod generic;
 mod hyprland;
 pub mod layout_names;
 mod manager;
@@ -32,8 +33,8 @@ pub mod types;
 pub mod visibility;
 mod wayland_loop;
 
-pub use ext_workspace::ExtWorkspaceBackend;
 pub use factory::BackendKind;
+pub use generic::GenericBackend;
 pub use hyprland::HyprlandBackend;
 pub use manager::CompositorManager;
 pub use mango::MangoBackend;

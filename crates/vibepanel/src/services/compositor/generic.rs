@@ -12,8 +12,10 @@ use std::sync::Arc;
 use parking_lot::{Mutex, RwLock};
 use tracing::{debug, info};
 
-use super::client::{ExtWorkspace, ExtWorkspaceClient, ExtWorkspaceModel, MANAGER_INTERFACE};
-use crate::services::compositor::foreign_toplevel::ForeignToplevelClient;
+use super::ext_workspace::client::{
+    ExtWorkspace, ExtWorkspaceClient, ExtWorkspaceModel, MANAGER_INTERFACE,
+};
+use super::foreign_toplevel::ForeignToplevelClient;
 use crate::services::compositor::{
     CompositorBackend, WindowCallback, WindowInfo, WorkspaceCallback, WorkspaceMeta,
     WorkspaceSnapshot,
@@ -117,13 +119,13 @@ struct BackendState {
 }
 
 /// The generic backend: ext-workspace workspaces and foreign-toplevel titles.
-pub struct ExtWorkspaceBackend {
+pub struct GenericBackend {
     state: Arc<RwLock<BackendState>>,
     client: Mutex<Option<ExtWorkspaceClient>>,
     toplevels: Mutex<Option<ForeignToplevelClient>>,
 }
 
-impl ExtWorkspaceBackend {
+impl GenericBackend {
     pub fn new() -> Self {
         Self {
             state: Arc::new(RwLock::new(BackendState::default())),
@@ -133,13 +135,13 @@ impl ExtWorkspaceBackend {
     }
 }
 
-impl Default for ExtWorkspaceBackend {
+impl Default for GenericBackend {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl CompositorBackend for ExtWorkspaceBackend {
+impl CompositorBackend for GenericBackend {
     fn start(&self, on_workspace_update: WorkspaceCallback, on_window_update: WindowCallback) {
         if self.client.lock().is_some() || self.toplevels.lock().is_some() {
             return;
