@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.0](https://github.com/prankstr/vibepanel/compare/v0.17.2...v0.18.0) (2026-10-31)
+
+
+### Features
+
+* **popovers:** add hjkl as navigation keys and improve pathing ([#282](https://github.com/prankstr/vibepanel/issues/282)) ([b3468e3](https://github.com/prankstr/vibepanel/commit/b3468e3d4bec15802eda1130b0e9d0ed45fa68e5))
+* **wayland:** add support for the ext-workspace protocol ([#284](https://github.com/prankstr/vibepanel/issues/284)) ([dae23cf](https://github.com/prankstr/vibepanel/commit/dae23cf249416557901015b54e156dd74aa4a837))
+* **wayland:** add window titles via wlr-foreign-toplevel ([#285](https://github.com/prankstr/vibepanel/issues/285)) ([0cf7448](https://github.com/prankstr/vibepanel/commit/0cf7448ee9ffb1359d03c59c7723ded025b8c22b))
+
 ## [0.17.2](https://github.com/prankstr/vibepanel/compare/v0.17.1...v0.17.2) (2026-10-25)
 
 
