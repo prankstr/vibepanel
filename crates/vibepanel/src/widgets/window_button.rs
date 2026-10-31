@@ -1,5 +1,9 @@
 //! Window buttons shared by the taskbar and the workspaces widget.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
+
 use gtk4::gdk::BUTTON_PRIMARY;
 use gtk4::prelude::*;
 use gtk4::{Align, GestureClick, Image, Widget};
@@ -9,6 +13,7 @@ use crate::services::icons::resolve_app_icon_name;
 use crate::services::tooltip::TooltipManager;
 use crate::services::window_list::WindowListService;
 use crate::styles::icon;
+use crate::widgets::window_title::friendly_app_name;
 
 /// Icon used when an app ID matches neither a desktop entry nor a themed icon.
 const FALLBACK_APP_ICON: &str = "application-x-executable";
@@ -37,12 +42,27 @@ pub(crate) fn window_display_title(window: &Window) -> &str {
     }
 }
 
-/// Tooltip for a window: "app_id - title", or just app_id.
-pub(crate) fn window_tooltip(window: &Window) -> String {
-    if window.title.is_empty() {
-        window.app_id.clone()
+/// Readable app name for an app ID (e.g. "com.mitchellh.ghostty" → "Ghostty"),
+/// as shown by the window title widget. Falls back to the app ID itself.
+pub(crate) fn app_display_name(app_id: &str) -> String {
+    thread_local! {
+        static NAMES: Rc<RefCell<HashMap<String, String>>> = Rc::default();
+    }
+    let name = NAMES.with(|names| friendly_app_name(names, app_id));
+    if name.is_empty() {
+        app_id.to_string()
     } else {
-        format!("{} - {}", window.app_id, window.title)
+        name
+    }
+}
+
+/// Tooltip for a window: "App - title", or just the app name.
+pub(crate) fn window_tooltip(window: &Window) -> String {
+    let app = app_display_name(&window.app_id);
+    if window.title.is_empty() {
+        app
+    } else {
+        format!("{app} - {}", window.title)
     }
 }
 

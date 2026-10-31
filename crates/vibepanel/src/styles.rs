@@ -588,11 +588,14 @@ pub mod widget {
     /// Window app icon image (`.workspace-window-icon`).
     pub const WORKSPACE_WINDOW_ICON: &str = "workspace-window-icon";
 
+    /// Window count badge on a grouped app icon (`.workspace-window-count`).
+    pub const WORKSPACE_WINDOW_COUNT: &str = "workspace-window-count";
+
     /// "+N" label for windows beyond `max_windows` (`.workspace-windows-overflow`).
     pub const WORKSPACE_WINDOWS_OVERFLOW: &str = "workspace-windows-overflow";
 
-    /// Active-workspace pill that slides between indicators when window icons
-    /// are shown (`.workspace-highlight`).
+    /// Active-workspace pill that slides between index/name labels
+    /// (`.workspace-highlight`).
     pub const WORKSPACE_HIGHLIGHT: &str = "workspace-highlight";
 
     /// Workspace container drawing a sliding highlight (`.has-highlight`).

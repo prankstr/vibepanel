@@ -20,12 +20,13 @@
 //!   window; clicking elsewhere on the indicator switches workspace. Needs a
 //!   backend that reports windows (Niri, MangoWC); otherwise ignored. Always
 //!   shows a label: `"none"` and `"icons"` fall back to `"index"`.
-//! - `max_windows`: icons per workspace, `0` (default) = unlimited. The rest
-//!   are summarized as "+N".
+//! - `max_windows`: icons per workspace, `3` (default); `0` = unlimited. The
+//!   rest are summarized as "+N".
 //! - `group_by_app`: `false` (default). When `true`, windows of the same app
 //!   share one icon; clicking it cycles through them.
-//! - `icon_size`: window icon size in pixels (default: fits the height of a
-//!   plain indicator).
+//! - `icon_size`: window icon size in pixels. The default matches the label
+//!   (about half of `bar.size`); larger sizes make every pill taller and are
+//!   capped to fit the bar.
 //!
 //! # Animation
 //!
@@ -78,7 +79,8 @@ use crate::widgets::base::BaseWidget;
 use crate::widgets::ripple::{trigger_ripple_from_gesture, wrap_with_ripple};
 use crate::widgets::warn_unknown_options;
 use crate::widgets::window_button::{
-    app_icon, app_icon_name, connect_focus_on_click, sync_exclusive_class, window_tooltip,
+    app_display_name, app_icon, app_icon_name, connect_focus_on_click, sync_exclusive_class,
+    window_tooltip,
 };
 
 // ---------------------------------------------------------------------------
@@ -123,7 +125,7 @@ mod ws_container_imp {
         pub(super) long_mw_css_provider: RefCell<Option<CssProvider>>,
         /// True when the bar is on a side edge; the flow axis is then vertical.
         pub(super) axis_vertical: Cell<bool>,
-        /// Sliding active-workspace highlight (window icon mode only).
+        /// Sliding active-workspace highlight (index/name labels).
         pub(super) highlight: RefCell<Option<Highlight>>,
     }
 
@@ -531,10 +533,10 @@ impl WorkspaceContainer {
         });
     }
 
-    /// Move the active-workspace highlight to `target` (workspace ID and
-    /// whether it shows window icons), sliding when it was already showing.
-    /// `None` hides it; active indicators then paint their own background.
-    fn set_highlight(&self, target: Option<(i32, bool)>) {
+    /// Move the active-workspace highlight to the indicator of workspace
+    /// `target`, sliding when it was already showing. `None` hides it; active
+    /// indicators then paint their own background.
+    fn set_highlight(&self, target: Option<i32>) {
         let imp = self.imp();
         let mut highlight = imp.highlight.borrow_mut();
         let h = highlight.get_or_insert_with(|| {
@@ -554,13 +556,6 @@ impl WorkspaceContainer {
                 ticking: false,
             }
         });
-        let has_windows = target.is_some_and(|(_, has_windows)| has_windows);
-        sync_exclusive_class(
-            &h.widget,
-            &[widget::WORKSPACE_HAS_WINDOWS],
-            has_windows.then_some(widget::WORKSPACE_HAS_WINDOWS),
-        );
-        let target = target.map(|(id, _)| id);
         if h.target == target {
             return;
         }
@@ -607,6 +602,9 @@ impl WorkspaceContainer {
         let Some(id) = h.target else {
             return;
         };
+        // GTK expects a measure before every allocate; the size comes from
+        // the target indicator instead.
+        h.widget.measure(Orientation::Horizontal, -1);
         let bounds = imp
             .entries
             .borrow()
@@ -680,11 +678,9 @@ impl WorkspaceContainer {
         );
     }
 
-    /// Mark indicators whose center the highlight's flow-axis span covers, so
-    /// labels light up as it passes over them rather than before it arrives.
-    /// Only colors depend on the class, so toggling it during allocation
-    /// doesn't resize anything. Styles are already updated by then, so while
-    /// sliding the tick callback marks them ahead of time as well.
+    /// Mark indicators whose center the highlight covers, so labels light up
+    /// as it passes over them. Only colors depend on the class, so this is
+    /// safe during allocation.
     fn sync_under_highlight(&self, span: Option<(f64, f64)>) {
         let vertical = self.imp().axis_vertical.get();
         for e in self.imp().entries.borrow().iter() {
@@ -914,12 +910,12 @@ fn ease_out_quad(t: f64) -> f64 {
 }
 
 /// Highlight slide: the edge leading the move arrives after this long...
-const HIGHLIGHT_LEAD_US: f64 = 160_000.0;
+const HIGHLIGHT_LEAD_US: f64 = 140_000.0;
 /// ...and the trailing edge after this long, stretching the highlight.
-const HIGHLIGHT_TRAIL_US: f64 = 240_000.0;
+const HIGHLIGHT_TRAIL_US: f64 = 210_000.0;
 /// Longer jumps take slightly longer, so they don't look rushed.
 const HIGHLIGHT_EXTRA_US_PER_PX: f64 = 400.0;
-const HIGHLIGHT_MAX_EXTRA_US: f64 = 80_000.0;
+const HIGHLIGHT_MAX_EXTRA_US: f64 = 55_000.0;
 
 fn ease_out_cubic(t: f64) -> f64 {
     1.0 - (1.0 - t).powi(3)
@@ -1181,7 +1177,7 @@ impl WidgetConfig for WorkspacesConfig {
             .get("group_by_app")
             .and_then(|v| v.as_bool())
             .unwrap_or(defaults.group_by_app);
-        // Clamped to the indicator height in `WorkspacesWidget::new()`.
+        // Capped to fit the bar in `WindowsMode::resolve()`.
         let icon_size = entry
             .options
             .get("icon_size")
@@ -1193,8 +1189,8 @@ impl WidgetConfig for WorkspacesConfig {
             && windows_label_type(label_type) != label_type
         {
             warn!(
-                "workspaces label_type = {:?} isn't supported with show_windows; showing index. \
-                 For window icons without workspaces, use the taskbar widget",
+                "workspaces label_type = {:?} can't be combined with window icons; index is \
+                 shown while they are. For window icons without workspaces, use the taskbar widget",
                 entry
                     .options
                     .get("label_type")
@@ -1240,7 +1236,7 @@ impl Default for WorkspacesConfig {
             filter_by_output: true,
             show_unoccupied: false,
             show_windows: false,
-            max_windows: 0,
+            max_windows: 3,
             group_by_app: false,
             icon_size: None,
         }
@@ -1292,8 +1288,12 @@ impl WindowsMode {
         // By default an icon plus its padding fits a plain indicator's
         // height, so pills don't grow taller when windows show up.
         let default_icon = (sizes.text_icon_size as i32 - 2 * WINDOW_ICON_PAD_CROSS).max(8);
+        let icon_size = config.icon_size.unwrap_or(default_icon);
+        if icon_size > max_icon {
+            warn!("workspaces icon_size {icon_size} is too big for the bar; using {max_icon}");
+        }
         Some(Self {
-            icon_size: config.icon_size.unwrap_or(default_icon).min(max_icon),
+            icon_size: icon_size.min(max_icon),
             max_windows: config.max_windows,
             group_by_app: config.group_by_app,
         })
@@ -1305,20 +1305,18 @@ impl WindowsMode {
 /// making pills taller.
 pub(crate) const WINDOW_ICON_PAD_FLOW: i32 = 2;
 pub(crate) const WINDOW_ICON_PAD_CROSS: i32 = 1;
+
 /// Keeps label pills as round as the theme intends.
 ///
-/// The theme's pill radius (`--radius-pill * 1.2`) is sized for indicators
-/// as tall as `--icon-size`, but a label's line height (or large window
-/// icons) can make pills taller, which flattens their ends. Scaling the
-/// radius by the measured height over the icon size (bar.rs consumes the
-/// variables) keeps the theme in charge of how round pills are. Pills with
-/// and without window icons are measured separately, since a large
-/// `icon_size` makes the former taller.
+/// The theme's pill radius is sized for indicators as tall as `--icon-size`,
+/// but a label's line height or a large `icon_size` makes pills taller,
+/// flattening their ends. The radius is scaled by the measured height; all
+/// pills are equally tall, so measuring one is enough.
 struct PillRadius {
     provider: CssProvider,
     icon_size: f64,
-    /// Scales for (plain, with window icons) pills, once measured.
-    scales: Cell<(Option<f64>, Option<f64>)>,
+    /// Scale applied so far, once measured.
+    scale: Cell<Option<f64>>,
 }
 
 impl PillRadius {
@@ -1331,38 +1329,29 @@ impl PillRadius {
         Self {
             provider,
             icon_size: ConfigManager::global().theme_sizes().text_icon_size.max(1) as f64,
-            scales: Cell::new((None, None)),
+            scale: Cell::new(None),
         }
     }
 
-    /// Re-measure pills and update the radius scales if needed.
+    /// Re-measure a pill and update the radius scale if needed.
     fn sync(&self, indicators: &HashMap<i32, Indicator>, is_vertical: bool) {
         let cross = if is_vertical {
             Orientation::Horizontal
         } else {
             Orientation::Vertical
         };
-        let measure = |with_windows: bool| {
-            indicators
-                .values()
-                .map(|indicator| &indicator.root)
-                // Unrooted widgets aren't styled by the theme yet.
-                .find(|root| {
-                    root.has_css_class(widget::WORKSPACE_HAS_WINDOWS) == with_windows
-                        && root.root().is_some()
-                })
-                .map(|root| pill_radius_scale(root.measure(cross, -1).1, self.icon_size))
-        };
-        let (plain, windows) = self.scales.get();
-        let scales = (measure(false).or(plain), measure(true).or(windows));
-        if scales != (plain, windows) {
-            self.scales.set(scales);
-            debug!("Workspace pill radius scales (plain, with windows): {scales:?}");
+        let scale = indicators
+            .values()
+            .map(|indicator| &indicator.root)
+            // Unrooted widgets aren't styled by the theme yet.
+            .find(|root| root.root().is_some())
+            .map(|root| pill_radius_scale(root.measure(cross, -1).1, self.icon_size));
+        if scale.is_some() && scale != self.scale.get() {
+            self.scale.set(scale);
+            debug!("Workspace pill radius scale: {scale:?}");
             self.provider.load_from_string(&format!(
-                ".workspaces .content {{ --vp-workspace-pill-scale: {}; \
-                 --vp-workspace-windows-pill-scale: {}; }}",
-                scales.0.unwrap_or(1.0),
-                scales.1.unwrap_or(1.0),
+                ".workspaces .content {{ --vp-workspace-pill-scale: {}; }}",
+                scale.unwrap_or(1.0),
             ));
         }
     }
@@ -1422,7 +1411,7 @@ fn workspace_window_items(
             let count = item.window_ids.len();
             item.tooltip = format!(
                 "{} • {}",
-                window.app_id,
+                app_display_name(&window.app_id),
                 tr!("{n} window" | "{n} windows" % count)
             );
             continue;
@@ -1491,48 +1480,49 @@ struct Indicator {
 struct IndicatorWindows {
     row: GtkBox,
     overflow: Label,
-    buttons: RefCell<Vec<WindowButton>>,
+    icons: RefCell<Vec<WindowIcon>>,
+    scroll_focus: Rc<WorkspaceScrollFocus>,
 }
 
 impl IndicatorWindows {
     /// Show `items`, reusing icon widgets by key so unchanged icons are not
     /// recreated on every window-list or workspace update.
     fn update(&self, items: Vec<WindowItem>, hidden: usize, icon_size: i32) {
-        let mut buttons = self.buttons.borrow_mut();
-        let keys_changed = buttons.len() != items.len()
-            || buttons
+        let mut icons = self.icons.borrow_mut();
+        let keys_changed = icons.len() != items.len()
+            || icons
                 .iter()
                 .zip(&items)
-                .any(|(button, item)| button.item.borrow().key != item.key);
+                .any(|(icon, item)| icon.item.borrow().key != item.key);
         if keys_changed {
-            let mut old: HashMap<WindowItemKey, WindowButton> = buttons
+            let mut old: HashMap<WindowItemKey, WindowIcon> = icons
                 .drain(..)
-                .map(|button| {
-                    let key = button.item.borrow().key.clone();
-                    (key, button)
+                .map(|icon| {
+                    let key = icon.item.borrow().key.clone();
+                    (key, icon)
                 })
                 .collect();
             let mut prev: Option<Widget> = None;
             for item in &items {
-                let button = old
+                let icon = old
                     .remove(&item.key)
-                    .unwrap_or_else(|| WindowButton::new(item, icon_size));
-                if button.root.parent().is_some() {
-                    self.row.reorder_child_after(&button.root, prev.as_ref());
+                    .unwrap_or_else(|| WindowIcon::new(item, icon_size, &self.scroll_focus));
+                if icon.root.parent().is_some() {
+                    self.row.reorder_child_after(&icon.root, prev.as_ref());
                 } else {
-                    self.row.insert_child_after(&button.root, prev.as_ref());
+                    self.row.insert_child_after(&icon.root, prev.as_ref());
                 }
-                prev = Some(button.root.clone().upcast());
-                buttons.push(button);
+                prev = Some(icon.root.clone().upcast());
+                icons.push(icon);
             }
             for stale in old.into_values() {
                 self.row.remove(&stale.root);
             }
         }
-        for (button, item) in buttons.iter().zip(items) {
-            button.update(item);
+        for (icon, item) in icons.iter().zip(items) {
+            icon.update(item);
         }
-        self.row.set_visible(!buttons.is_empty());
+        self.row.set_visible(!icons.is_empty());
         if hidden > 0 {
             self.overflow.set_text(&format!("+{hidden}"));
         }
@@ -1540,14 +1530,16 @@ impl IndicatorWindows {
     }
 }
 
-struct WindowButton {
+struct WindowIcon {
     root: GtkBox,
     icon: Image,
+    /// Window count, shown when the icon stands for several windows.
+    count: Label,
     item: Rc<RefCell<WindowItem>>,
 }
 
-impl WindowButton {
-    fn new(item: &WindowItem, icon_size: i32) -> Self {
+impl WindowIcon {
+    fn new(item: &WindowItem, icon_size: i32, scroll_focus: &Rc<WorkspaceScrollFocus>) -> Self {
         let root = GtkBox::new(Orientation::Horizontal, 0);
         root.add_css_class(widget::WORKSPACE_WINDOW);
         root.add_css_class(state::CLICKABLE);
@@ -1556,15 +1548,34 @@ impl WindowButton {
 
         let icon = app_icon(&item.app_id, icon_size);
         icon.add_css_class(widget::WORKSPACE_WINDOW_ICON);
-        root.append(&icon);
+        let count = Label::new(None);
+        count.add_css_class(widget::WORKSPACE_WINDOW_COUNT);
+        count.set_halign(Align::End);
+        count.set_valign(Align::End);
+        count.set_visible(false);
+        let overlay = gtk4::Overlay::new();
+        overlay.set_child(Some(&icon));
+        overlay.add_overlay(&count);
+        root.append(&overlay);
 
         let item = Rc::new(RefCell::new(item.clone()));
         connect_focus_on_click(&root, {
             let item = Rc::clone(&item);
-            move || window_item_click_target(&item.borrow())
+            let scroll_focus = Rc::clone(scroll_focus);
+            move || {
+                // Like a workspace click, this supersedes pending scrolls.
+                scroll_focus.clear();
+                scroll_focus.cancel_target();
+                window_item_click_target(&item.borrow())
+            }
         });
 
-        Self { root, icon, item }
+        Self {
+            root,
+            icon,
+            count,
+            item,
+        }
     }
 
     fn update(&self, item: WindowItem) {
@@ -1572,6 +1583,11 @@ impl WindowButton {
         if current.app_id != item.app_id {
             self.icon.set_icon_name(Some(&app_icon_name(&item.app_id)));
         }
+        let windows = item.window_ids.len();
+        if windows > 1 {
+            self.count.set_text(&windows.to_string());
+        }
+        self.count.set_visible(windows > 1);
         let root = self.root.upcast_ref::<Widget>();
         sync_exclusive_class(
             root,
@@ -2010,7 +2026,7 @@ fn create_single_indicator(
         .as_ref()
         .is_some_and(|label| label.text().chars().count() > 2);
 
-    let (overlay, ripple_handle, windows) = if windows_mode.is_some() {
+    let (overlay, ripple_handle, windows) = if let Some(mode) = windows_mode {
         let orientation = if is_vertical {
             Orientation::Vertical
         } else {
@@ -2019,6 +2035,15 @@ fn create_single_indicator(
         let content = GtkBox::new(orientation, 0);
         content.set_halign(Align::Center);
         content.set_valign(Align::Center);
+        // Every pill is as thick as a window icon, so a large icon_size
+        // doesn't leave pills without windows (and the highlight on them)
+        // thinner than the rest.
+        let thickness = mode.icon_size + 2 * WINDOW_ICON_PAD_CROSS;
+        if is_vertical {
+            content.set_size_request(thickness, -1);
+        } else {
+            content.set_size_request(-1, thickness);
+        }
         if let Some(label) = &label {
             label.add_css_class(widget::WORKSPACE_LABEL);
             content.append(label);
@@ -2036,7 +2061,8 @@ fn create_single_indicator(
         let windows = IndicatorWindows {
             row,
             overflow,
-            buttons: RefCell::new(Vec::new()),
+            icons: RefCell::new(Vec::new()),
+            scroll_focus: Rc::clone(scroll_focus),
         };
         (o, rh, Some(windows))
     } else if let Some(label) = &label {
@@ -2302,9 +2328,27 @@ fn update_indicators(
         };
         let root = &indicator.root;
 
+        let mut urgent_icon_shown = false;
+        if let Some((mode, windows)) = windows
+            && let Some(parts) = &indicator.windows
+        {
+            let mut items =
+                workspace_window_items(windows, workspace.id, output_id, mode.group_by_app);
+            let hidden = limit_window_items(&mut items, mode.max_windows);
+            let has_windows = !items.is_empty();
+            urgent_icon_shown = items.iter().any(|item| item.urgent);
+            parts.update(items, hidden, mode.icon_size);
+            sync_exclusive_class(
+                root,
+                &[widget::WORKSPACE_HAS_WINDOWS],
+                has_windows.then_some(widget::WORKSPACE_HAS_WINDOWS),
+            );
+        }
+
+        // An urgent window's icon marks the urgency instead of the label.
         let target_class: Option<&str> = if workspace.active {
             Some(widget::ACTIVE)
-        } else if workspace.urgent {
+        } else if workspace.urgent && !urgent_icon_shown {
             Some(state::URGENT)
         } else if workspace.occupied {
             Some(state::OCCUPIED)
@@ -2350,21 +2394,6 @@ fn update_indicators(
             }
         }
 
-        if let Some((mode, windows)) = windows
-            && let Some(parts) = &indicator.windows
-        {
-            let mut items =
-                workspace_window_items(windows, workspace.id, output_id, mode.group_by_app);
-            let hidden = limit_window_items(&mut items, mode.max_windows);
-            let has_windows = !items.is_empty();
-            parts.update(items, hidden, mode.icon_size);
-            sync_exclusive_class(
-                root,
-                &[widget::WORKSPACE_HAS_WINDOWS],
-                has_windows.then_some(widget::WORKSPACE_HAS_WINDOWS),
-            );
-        }
-
         let tooltip_text = build_tooltip(workspace, snapshot.occupancy_known);
         TooltipManager::global().set_styled_tooltip(root, &tooltip_text);
     }
@@ -2382,12 +2411,7 @@ fn update_indicators(
                 (Some(ws), None) => Some(ws.id),
                 _ => None,
             };
-            let has_windows = |id: &i32| {
-                indicators_cell.borrow().get(id).is_some_and(|indicator| {
-                    indicator.root.has_css_class(widget::WORKSPACE_HAS_WINDOWS)
-                })
-            };
-            wsc.set_highlight(target.map(|id| (id, has_windows(&id))));
+            wsc.set_highlight(target);
         }
     }
 }
@@ -2647,7 +2671,7 @@ mod tests {
         let entry = make_widget_entry("workspaces", HashMap::new());
         let config = WorkspacesConfig::from_entry(&entry);
         assert!(!config.show_windows);
-        assert_eq!(config.max_windows, 0);
+        assert_eq!(config.max_windows, 3);
         assert!(!config.group_by_app);
         assert_eq!(config.icon_size, None);
     }
@@ -2665,14 +2689,6 @@ mod tests {
         assert_eq!(config.max_windows, 3);
         assert!(config.group_by_app);
         assert_eq!(config.icon_size, Some(8));
-    }
-
-    #[test]
-    fn test_workspace_config_negative_max_windows_is_unlimited() {
-        let mut options = HashMap::new();
-        options.insert("max_windows".to_string(), Value::Integer(-2));
-        let entry = make_widget_entry("workspaces", options);
-        assert_eq!(WorkspacesConfig::from_entry(&entry).max_windows, 0);
     }
 
     // -- window icons --
@@ -2702,12 +2718,11 @@ mod tests {
         let items = workspace_window_items(&windows, 1, Some("eDP-1"), false);
         assert_eq!(item_ids(&items), vec![vec![1], vec![3]]);
         assert_eq!(items[0].key, WindowItemKey::Window(1));
-        assert_eq!(items[0].tooltip, "foot - title 1");
+        assert_eq!(items[0].tooltip, "Foot - title 1");
     }
 
     #[test]
     fn test_window_items_skip_same_tag_on_other_outputs() {
-        // MangoWC reuses tag IDs on every monitor.
         let windows = vec![
             make_window(1, "foot", 2, "eDP-1"),
             make_window(2, "firefox", 2, "HDMI-A-1"),
@@ -2747,9 +2762,9 @@ mod tests {
         assert_eq!(items[0].key, WindowItemKey::App("foot".to_string()));
         assert_eq!(items[0].focused, Some(1));
         assert!(!items[0].urgent);
-        assert_eq!(items[0].tooltip, "foot • 2 windows");
+        assert_eq!(items[0].tooltip, "Foot • 2 windows");
         assert!(items[1].urgent);
-        assert_eq!(items[1].tooltip, "firefox - title 2");
+        assert_eq!(items[1].tooltip, "Firefox - title 2");
     }
 
     #[test]
@@ -2806,59 +2821,21 @@ mod tests {
     }
 
     #[test]
-    fn test_windows_label_type_always_shows_a_label() {
-        assert_eq!(windows_label_type(LabelType::None), LabelType::Index);
-        assert_eq!(windows_label_type(LabelType::Icons), LabelType::Index);
-        assert_eq!(windows_label_type(LabelType::Index), LabelType::Index);
-        assert_eq!(windows_label_type(LabelType::Name), LabelType::Name);
-    }
-
-    // -- sliding highlight --
-
-    #[test]
-    fn test_highlight_edges_start_and_settle() {
-        let (from, to) = ((0.0, 20.0), (100.0, 140.0));
-        let extra = highlight_extra_us(100.0);
-        assert_eq!(highlight_edges(from, to, 0.0, extra), (from, false));
-        assert_eq!(
-            highlight_edges(from, to, HIGHLIGHT_TRAIL_US + extra, extra),
-            (to, true)
-        );
-    }
-
-    #[test]
-    fn test_highlight_stretches_with_leading_edge_first() {
-        for (from, to) in [((0.0, 20.0), (100.0, 140.0)), ((100.0, 140.0), (0.0, 20.0))] {
-            let forward = to.0 > from.0;
-            let mut stretched = false;
-            for step in 1..24 {
-                let elapsed = step as f64 * 10_000.0;
-                let ((start, end), _) = highlight_edges(from, to, elapsed, 0.0);
-                let width = end - start;
-                assert!(width >= 20.0, "never narrower than a pill: {width}");
-                stretched |= width > 40.0;
-                // The leading edge is always at least as far along as the trailing one.
-                let lead = if forward {
-                    (end - from.1) / (to.1 - from.1)
-                } else {
-                    (start - from.0) / (to.0 - from.0)
-                };
-                let trail = if forward {
-                    (start - from.0) / (to.0 - from.0)
-                } else {
-                    (end - from.1) / (to.1 - from.1)
-                };
-                assert!(lead >= trail, "step {step}: lead {lead} < trail {trail}");
-            }
-            assert!(stretched, "the highlight should stretch while moving");
+    fn test_highlight_slides_stretched_and_settles_on_target() {
+        let (a, b) = ((0.0, 20.0), (100.0, 140.0));
+        for (from, to) in [(a, b), (b, a)] {
+            let extra = highlight_extra_us(100.0);
+            assert_eq!(highlight_edges(from, to, 0.0, extra), (from, false));
+            let ((start, end), done) = highlight_edges(from, to, HIGHLIGHT_LEAD_US, extra);
+            assert!(
+                !done && end - start > 40.0,
+                "stretched midway: {start}..{end}"
+            );
+            assert_eq!(
+                highlight_edges(from, to, HIGHLIGHT_TRAIL_US + extra, extra),
+                (to, true)
+            );
         }
-    }
-
-    #[test]
-    fn test_highlight_extra_duration_is_capped() {
-        assert_eq!(highlight_extra_us(0.0), 0.0);
-        assert_eq!(highlight_extra_us(100.0), 40_000.0);
-        assert_eq!(highlight_extra_us(10_000.0), HIGHLIGHT_MAX_EXTRA_US);
     }
 
     #[test]

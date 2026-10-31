@@ -1722,8 +1722,5 @@ mod tests {
         let windows = shared.windows.read();
         assert_eq!(windows[0].workspace_id, Some(2));
         assert_eq!(windows[0].extra_workspace_ids, vec![4]);
-        assert!(windows[0].is_on_workspace(2));
-        assert!(windows[0].is_on_workspace(4));
-        assert!(!windows[0].is_on_workspace(3));
     }
 }

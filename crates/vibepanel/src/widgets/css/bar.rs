@@ -28,6 +28,11 @@ pub fn css(screen_margin: u32, spacing: u32, workspace_animations: bool) -> Stri
     } else {
         "transition: none;"
     };
+    let window_icon_transition = if workspace_animations {
+        "transition: transform 100ms ease-out;"
+    } else {
+        "transition: none;"
+    };
     // Labels lighting up under the sliding highlight. Short, so they keep up
     // with it passing over them.
     let highlight_transition = if workspace_animations {
@@ -488,16 +493,11 @@ workspace-container > .workspace-indicator {{
     margin-bottom: var(--vp-widget-gap);
 }}
 
-/* Window icons inside workspace indicators (show_windows = true).
-   Without windows an indicator looks exactly as in normal mode. With windows,
-   the label keeps a plain indicator's width as its own slot, the icons follow,
-   and padding closes the pill after them. Such pills sit closer to the next
-   indicator since their padding already separates them. Their radius scales
-   with their own measured height, as a large icon_size makes them taller than
-   plain pills. */
+/* Window icons inside workspace indicators (show_windows = true). The label
+   keeps its own slot, the icons follow, and padding closes the pill, which
+   then sits closer to the next one. */
 .workspace-indicator.workspace-indicator-windows.has-windows {{
     padding-right: {windows_indicator_pad}px;
-    border-radius: calc(var(--radius-pill) * 1.2 * var(--vp-workspace-windows-pill-scale, 1));
 }}
 
 .bar--vertical .workspace-indicator.workspace-indicator-windows.has-windows {{
@@ -568,21 +568,21 @@ workspace-container.has-highlight > .workspace-indicator.under-highlight {{
     border-radius: calc(var(--radius-pill) * 1.2 * var(--vp-workspace-pill-scale, 1));
 }}
 
-.workspace-highlight.has-windows {{
-    border-radius: calc(var(--radius-pill) * 1.2 * var(--vp-workspace-windows-pill-scale, 1));
-}}
-
 workspace-container.has-highlight > .workspace-indicator.active {{
     background-color: transparent;
 }}
 
-workspace-container > .workspace-indicator.workspace-indicator-windows.has-windows,
+/* Without this, the accent hover of a clicked pill hides the highlight
+   sliding in under the pointer. */
+workspace-container.has-highlight > .workspace-indicator.active.clickable:hover {{
+    background-color: var(--color-workspace-indicator-hover-bg, var(--color-workspace-indicator-hover-default-bg));
+}}
+
 .workspaces > overlay > .content > .workspace-indicator.workspace-indicator-windows.has-windows:not(:last-child),
 .workspaces > .content > .workspace-indicator.workspace-indicator-windows.has-windows:not(:last-child) {{
     margin-right: calc(var(--vp-widget-gap) * 0.3);
 }}
 
-.bar--vertical workspace-container > .workspace-indicator.workspace-indicator-windows.has-windows,
 .bar--vertical .workspaces > overlay > .content > .workspace-indicator.workspace-indicator-windows.has-windows:not(:last-child),
 .bar--vertical .workspaces > .content > .workspace-indicator.workspace-indicator-windows.has-windows:not(:last-child) {{
     margin-right: 0;
@@ -623,20 +623,36 @@ workspace-container > .workspace-indicator.workspace-indicator-windows.has-windo
 
 .workspace-window {{
     padding: {window_icon_pad_cross}px {window_icon_pad_flow}px;
-    border-radius: calc(var(--radius-pill) * 0.8);
+    {window_icon_transition}
 }}
 
 .bar--vertical .workspace-window {{
     padding: {window_icon_pad_flow}px {window_icon_pad_cross}px;
 }}
 
+.workspace-window.urgent {{
+    background-color: color-mix(in srgb, var(--color-state-urgent) 45%, transparent);
+    border-radius: calc(var(--radius-pill) * 1.2);
+}}
+
+/* Hovered icons grow slightly, like tray items. */
 .workspace-window.clickable:hover {{
-    background-color: var(--color-taskbar-button-hover-bg);
+    transform: scale(1.15);
 }}
 
 .workspace-windows-overflow {{
     font-size: 0.75em;
     font-weight: 600;
+}}
+
+/* Window count on an icon standing for several windows (group_by_app). */
+.workspace-window-count {{
+    font-size: 0.55em;
+    font-weight: 700;
+    padding: 0 2px;
+    border-radius: var(--radius-widget);
+    background-color: {widget_bg};
+    color: var(--color-foreground-primary);
 }}
 
 /* ===== TASKBAR ===== */

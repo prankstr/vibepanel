@@ -598,7 +598,7 @@ impl ThemePalette {
     --widget-hover-tint: {widget_hover_tint};
     /* Semantic hover backgrounds for user CSS overrides. */
     --color-widget-hover-bg: {widget_hover_bg_value};
-    --color-workspace-indicator-hover-default-bg: var(--color-card-overlay-hover);
+    --color-workspace-indicator-hover-default-bg: color-mix(in srgb, transparent 88%, var(--widget-hover-tint));
     --color-workspace-indicator-active-hover-bg: var(--color-accent-hover-bg);
     --color-workspace-indicator-urgent-hover-bg: color-mix(in srgb, var(--color-state-urgent) 80%, var(--widget-hover-tint));
     --color-taskbar-button-hover-bg: color-mix(in srgb, transparent 92%, var(--widget-hover-tint));
@@ -1688,7 +1688,7 @@ mod tests {
         let css = palette.css_vars_block();
 
         assert!(css.contains(
-            "--color-workspace-indicator-hover-default-bg: var(--color-card-overlay-hover);"
+            "--color-workspace-indicator-hover-default-bg: color-mix(in srgb, transparent 88%, var(--widget-hover-tint));"
         ));
         assert!(!css.contains("--color-workspace-indicator-hover-bg:"));
         assert!(!css.contains("--color-workspace-indicator-minimal-hover-bg"));

@@ -83,8 +83,9 @@ background_opacity = 1.0
 #   [widgets.workspaces]
 #   label_type = "index"  # "none" (dots, default), "icons", "name", or "index"
 #   show_windows = true   # Show app icons for each workspace's windows (Niri, MangoWC)
-#   max_windows = 4       # Icons per workspace, the rest show as "+N" (default: 0 = unlimited)
+#   max_windows = 5       # Icons per workspace, the rest show as "+N" (default: 3, 0 = unlimited)
 #   group_by_app = true   # One icon per app; clicking it cycles through its windows
+#   icon_size = 16        # Window icon size in px (default: matches the label, ~half of bar.size; capped to fit the bar)
 #
 #   [widgets.notifications]
 #   toast_position = "top-right"  # "top-left", "top-center", "top-right", "bottom-left", "bottom-center", "bottom-right"
