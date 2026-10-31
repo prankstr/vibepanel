@@ -39,6 +39,7 @@ glib-unix = "0.22"
 gio-unix = "0.22"
 wayland-client = "0.31"
 wayland-protocols = { version = "0.32", features = ["client", "staging"] }
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 
 # File watching
 notify = "6.1"

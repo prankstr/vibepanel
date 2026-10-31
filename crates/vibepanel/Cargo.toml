@@ -23,6 +23,7 @@ glib-unix = { workspace = true }
 gio-unix = { workspace = true }
 wayland-client = { workspace = true }
 wayland-protocols = { workspace = true }
+wayland-protocols-wlr = { workspace = true }
 notify = { workspace = true }
 notify-debouncer-mini = { workspace = true }
 serde = { workspace = true }

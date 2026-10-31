@@ -5,8 +5,9 @@
 //! - Niri (via socket IPC with JSON protocol)
 //! - Hyprland (via socket IPC with JSON protocol)
 //! - Sway / Miracle WM / Scroll (via i3 IPC binary protocol over Unix socket)
-//! - Any compositor offering ext-workspace-v1 (also merged over the Hyprland
-//!   backend, see `ext_workspace::overlay`)
+//! - Any other compositor offering ext-workspace-v1 (workspaces, also merged
+//!   over the Hyprland backend, see `ext_workspace::overlay`) and/or
+//!   wlr-foreign-toplevel-management (window titles)
 //!
 //! The backend trait feeds both:
 //! - `WorkspaceService` (workspace/tag state)
@@ -19,6 +20,8 @@
 
 mod ext_workspace;
 mod factory;
+mod foreign_toplevel;
+mod generic;
 mod hyprland;
 pub mod layout_names;
 mod manager;
@@ -28,9 +31,10 @@ mod niri;
 mod sway;
 pub mod types;
 pub mod visibility;
+mod wayland_loop;
 
-pub use ext_workspace::ExtWorkspaceBackend;
 pub use factory::BackendKind;
+pub use generic::GenericBackend;
 pub use hyprland::HyprlandBackend;
 pub use manager::CompositorManager;
 pub use mango::MangoBackend;

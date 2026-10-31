@@ -28,7 +28,7 @@ const VALID_COMPOSITORS: &[&str] = &[
     "miracle",
     "miraclewm",
     "scroll",
-    "ext-workspace",
+    "generic",
 ];
 
 /// Known valid values for theme.mode.
