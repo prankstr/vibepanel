@@ -4,7 +4,7 @@
 //! focused window on each unfocused output. The protocol has no notion of
 //! workspaces, so it cannot provide occupancy.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
@@ -42,6 +42,23 @@ struct Toplevel {
     activated_at: u64,
 }
 
+fn is_empty(info: &WindowInfo) -> bool {
+    info.title.is_empty() && info.app_id.is_empty()
+}
+
+fn window_info(
+    window: Option<&ToplevelState>,
+    output: Option<String>,
+    focused: bool,
+) -> WindowInfo {
+    WindowInfo {
+        title: window.map(|w| w.title.clone()).unwrap_or_default(),
+        app_id: window.map(|w| w.app_id.clone()).unwrap_or_default(),
+        output,
+        focused,
+    }
+}
+
 /// Window state and the publish decision, independent of Wayland objects.
 #[derive(Default)]
 struct Model {
@@ -50,11 +67,14 @@ struct Model {
     /// toplevel protocol id -> state.
     toplevels: HashMap<u32, Toplevel>,
     activations: u64,
-    focused: Option<WindowInfo>,
-    /// Output name -> toplevel its bar shows and the update last sent for it.
-    /// The protocol can't tell which window is visible on an unfocused output,
-    /// so the last focused one is kept until it closes or leaves that output.
-    shown: HashMap<String, (u32, WindowInfo)>,
+    /// Output name -> toplevel its bar shows. The protocol can't tell which
+    /// window is visible on an unfocused output, so the last focused one is
+    /// kept until it closes or leaves that output.
+    remembered: HashMap<String, u32>,
+    /// Last update sent per output (`None` when outputs have no names).
+    /// Publishing sends only what differs from what each bar should show, so
+    /// this never drifts from what the bars display.
+    sent: HashMap<Option<String>, WindowInfo>,
     /// Set once any output is named. Stays set after the last output is
     /// removed, so titles keep waiting for an output instead of going to
     /// every bar.
@@ -73,26 +93,17 @@ impl Model {
         toplevel.current = toplevel.pending.clone();
     }
 
-    /// Returns an empty update if a bar showed a window on the output, so it
-    /// isn't replayed when the output reconnects.
-    fn remove_output(&mut self, oid: u32) -> Option<WindowInfo> {
+    fn remove_toplevel(&mut self, tid: u32) {
+        self.toplevels.remove(&tid);
+        self.remembered.retain(|_, t| *t != tid);
+    }
+
+    fn remove_output(&mut self, oid: u32) {
         for toplevel in self.toplevels.values_mut() {
             toplevel.pending.outputs.retain(|o| *o != oid);
             toplevel.current.outputs.retain(|o| *o != oid);
         }
-        let name = self.outputs.remove(&oid)?;
-        // Forget focus on the output, so the window is republished if it
-        // returns with the same state.
-        let focused = self
-            .focused
-            .take_if(|f| f.output.as_deref() == Some(name.as_str()))
-            .is_some();
-        self.shown.remove(&name)?;
-        Some(WindowInfo {
-            output: Some(name),
-            focused,
-            ..Default::default()
-        })
+        self.outputs.remove(&oid);
     }
 
     fn output_name(&self, window: &ToplevelState) -> Option<String> {
@@ -102,19 +113,14 @@ impl Model {
             .find_map(|o| self.outputs.get(o).filter(|n| !n.is_empty()).cloned())
     }
 
-    /// `tid`'s update for an unfocused `output`, if it is still on it.
-    fn unfocused_info(&self, tid: u32, output: &str) -> Option<WindowInfo> {
+    /// `tid`'s committed state, if it is on `output`.
+    fn window_on(&self, tid: u32, output: &str) -> Option<&ToplevelState> {
         let window = &self.toplevels.get(&tid)?.current;
-        let on_output = window
+        window
             .outputs
             .iter()
-            .any(|o| self.outputs.get(o).is_some_and(|n| n == output));
-        on_output.then(|| WindowInfo {
-            title: window.title.clone(),
-            app_id: window.app_id.clone(),
-            output: Some(output.to_string()),
-            focused: false,
-        })
+            .any(|o| self.outputs.get(o).is_some_and(|n| n == output))
+            .then_some(window)
     }
 
     fn updates(&mut self) -> Vec<WindowInfo> {
@@ -125,85 +131,86 @@ impl Model {
             .iter()
             .filter(|(_, t)| t.current.activated)
             .max_by_key(|(_, t)| t.activated_at)
-            .map(|(tid, t)| {
-                let info = WindowInfo {
-                    title: t.current.title.clone(),
-                    app_id: t.current.app_id.clone(),
-                    output: self.output_name(&t.current),
-                    focused: true,
-                };
-                (*tid, info)
-            });
+            .map(|(tid, t)| (*tid, self.output_name(&t.current)));
 
-        // An update without an output replaces every bar's title. Unless the
-        // compositor never names outputs, hold back the focused window's
-        // update until its output is known.
-        let waiting =
-            self.names_known && next.as_ref().is_some_and(|(_, info)| info.output.is_none());
+        if !self.names_known {
+            // No output names: one update for every bar.
+            let window = next.and_then(|(tid, _)| self.toplevels.get(&tid));
+            let info = window_info(window.map(|t| &t.current), None, true);
+            return self.send(vec![(None, info)]);
+        }
 
+        // Clear what was sent for every bar before outputs had names; the
+        // per-output updates follow.
         let mut updates = Vec::new();
+        if self.sent.remove(&None).is_some_and(|prev| !is_empty(&prev)) {
+            updates.push(window_info(None, None, true));
+        }
+
+        // Without a focused window on a known output, focus stays on the
+        // output that last had it.
+        let focused_output = match &next {
+            Some((_, Some(output))) => Some(output.clone()),
+            _ => self
+                .sent
+                .iter()
+                .find(|(_, info)| info.focused)
+                .and_then(|(output, _)| output.clone()),
+        };
         match &next {
-            Some(_) if waiting => debug!("foreign-toplevel: focused window has no output yet"),
-            Some((tid, info)) => {
-                if self.focused.as_ref() != Some(info) {
-                    updates.push(info.clone());
-                }
-                if let Some(output) = &info.output {
-                    let sent = WindowInfo {
-                        focused: false,
-                        ..info.clone()
-                    };
-                    self.shown.insert(output.clone(), (*tid, sent));
-                }
+            Some((tid, Some(output))) => {
+                self.remembered.insert(output.clone(), *tid);
             }
+            // An update without an output would replace every bar's title.
+            Some((_, None)) => debug!("foreign-toplevel: focused window has no output yet"),
             // Focus lost: clear the previously focused output. The protocol
             // can't tell where focus went (e.g. an empty workspace elsewhere).
             None => {
-                if let Some(prev) = self.focused.take() {
-                    if let Some(output) = &prev.output {
-                        self.shown.remove(output);
-                    }
-                    updates.push(WindowInfo {
-                        output: prev.output,
-                        focused: true,
-                        ..Default::default()
-                    });
+                if let Some(output) = &focused_output {
+                    self.remembered.remove(output);
                 }
             }
         }
 
-        let focused_output = next.as_ref().and_then(|(_, info)| info.output.as_deref());
-        let changed: Vec<(String, Option<WindowInfo>)> = self
-            .shown
-            .iter()
-            .filter(|(output, _)| Some(output.as_str()) != focused_output)
-            .filter_map(|(output, (tid, sent))| {
-                let info = self.unfocused_info(*tid, output);
-                (info.as_ref() != Some(sent)).then(|| (output.clone(), info))
-            })
-            .collect();
-        for (output, info) in changed {
-            match info {
-                Some(info) => {
-                    if let Some(entry) = self.shown.get_mut(&output) {
-                        entry.1 = info.clone();
-                    }
-                    updates.push(info);
-                }
+        let mut outputs: BTreeSet<String> = self.remembered.keys().cloned().collect();
+        outputs.extend(self.sent.keys().flatten().cloned());
+        outputs.extend(focused_output.clone());
+        let mut desired = Vec::new();
+        for output in outputs {
+            let window = self
+                .remembered
+                .get(&output)
+                .and_then(|tid| self.window_on(*tid, &output));
+            let gone = window.is_none();
+            let focused = focused_output.as_ref() == Some(&output);
+            let info = window_info(window, Some(output.clone()), focused);
+            if gone {
                 // Closed or left the output.
-                None => {
-                    self.shown.remove(&output);
-                    updates.push(WindowInfo {
-                        output: Some(output),
-                        ..Default::default()
-                    });
-                }
+                self.remembered.remove(&output);
             }
+            desired.push((Some(output), info));
         }
+        updates.extend(self.send(desired));
+        updates
+    }
 
-        if !waiting {
-            self.focused = next.map(|(_, info)| info);
+    /// Send the desired updates that differ from the last ones sent, then
+    /// forget outputs that are empty and unfocused, or no longer connected.
+    fn send(&mut self, desired: Vec<(Option<String>, WindowInfo)>) -> Vec<WindowInfo> {
+        let mut updates = Vec::new();
+        for (key, info) in desired {
+            let previous = self.sent.get(&key);
+            if previous == Some(&info) || (previous.is_none() && is_empty(&info) && !info.focused) {
+                continue;
+            }
+            updates.push(info.clone());
+            self.sent.insert(key, info);
         }
+        let named: HashSet<&String> = self.outputs.values().collect();
+        self.sent.retain(|key, info| match key {
+            Some(output) => named.contains(output) && (info.focused || !is_empty(info)),
+            None => true,
+        });
         updates
     }
 }
@@ -291,11 +298,8 @@ impl Dispatch<wl_registry::WlRegistry, ()> for ClientState {
             wl_registry::Event::GlobalRemove { name } => {
                 if let Some(output) = state.output_globals.remove(&name) {
                     // Object ids are recycled, so drop every reference.
-                    let cleared = state.model.remove_output(output.id().protocol_id());
+                    state.model.remove_output(output.id().protocol_id());
                     output.release();
-                    if let Some(info) = cleared.filter(|_| state.ready) {
-                        (state.on_update)(info);
-                    }
                     state.schedule_publish(conn, qh);
                 }
             }
@@ -375,7 +379,7 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, ()> for ClientState {
         let tid = handle.id().protocol_id();
         match event {
             zwlr_foreign_toplevel_handle_v1::Event::Closed => {
-                state.model.toplevels.remove(&tid);
+                state.model.remove_toplevel(tid);
                 state.handles.remove(&tid);
                 handle.destroy();
                 state.schedule_publish(conn, qh);
@@ -551,13 +555,16 @@ mod tests {
         m.commit(A);
         pending(&mut m, B).activated = true;
         m.commit(B);
-        assert_eq!(m.updates(), vec![info("b", "DP-2", true)]);
+        assert_eq!(
+            m.updates(),
+            vec![info("a", "DP-1", false), info("b", "DP-2", true)]
+        );
 
         pending(&mut m, A).title = "renamed".into();
         m.commit(A);
         assert_eq!(m.updates(), vec![info("renamed", "DP-1", false)]);
 
-        m.toplevels.remove(&A);
+        m.remove_toplevel(A);
         assert_eq!(m.updates(), vec![info("", "DP-1", false)]);
     }
 
@@ -574,25 +581,67 @@ mod tests {
 
         pending(&mut m, A).title = "renamed".into();
         m.commit(A);
-        assert_eq!(m.updates(), vec![info("renamed", "DP-1", false)]);
+        assert_eq!(m.updates(), vec![info("renamed", "DP-1", true)]);
 
         pending(&mut m, B).outputs = vec![2];
         m.commit(B);
-        assert_eq!(m.updates(), vec![info("b", "DP-2", true)]);
+        assert_eq!(
+            m.updates(),
+            vec![info("renamed", "DP-1", false), info("b", "DP-2", true)]
+        );
     }
 
     #[test]
     fn removed_output_is_cleared_and_republished_on_return() {
         let mut m = model();
-        assert_eq!(m.remove_output(2), None);
-        assert_eq!(m.remove_output(1), Some(info("", "DP-1", true)));
-        assert_eq!(m.remove_output(1), None);
+        m.remove_output(2);
+        m.remove_output(1);
+        assert_eq!(m.updates(), vec![info("", "DP-1", true)]);
         assert!(m.updates().is_empty());
 
         m.outputs.insert(3, "DP-1".into());
         pending(&mut m, A).outputs = vec![3];
         m.commit(A);
         assert_eq!(m.updates(), vec![info("a", "DP-1", true)]);
+    }
+
+    #[test]
+    fn focus_moving_to_an_untitled_window_is_published() {
+        const C: u32 = 30;
+        let mut m = model();
+        m.toplevels.insert(C, Toplevel::default());
+        let c = pending(&mut m, C);
+        c.outputs = vec![2];
+        c.activated = true;
+        m.commit(C);
+        pending(&mut m, A).activated = false;
+        m.commit(A);
+        assert_eq!(
+            m.updates(),
+            vec![info("a", "DP-1", false), info("", "DP-2", true)]
+        );
+    }
+
+    #[test]
+    fn unscoped_title_is_cleared_when_output_names_arrive() {
+        let unscoped = |title: &str| WindowInfo {
+            title: title.into(),
+            focused: true,
+            ..Default::default()
+        };
+        let mut m = Model::default();
+        m.toplevels.insert(A, Toplevel::default());
+        let a = pending(&mut m, A);
+        a.title = "a".into();
+        a.activated = true;
+        m.commit(A);
+        assert_eq!(m.updates(), vec![unscoped("a")]);
+
+        m.outputs.insert(1, "DP-1".into());
+        m.names_known = true;
+        pending(&mut m, A).outputs = vec![1];
+        m.commit(A);
+        assert_eq!(m.updates(), vec![unscoped(""), info("a", "DP-1", true)]);
     }
 
     #[test]
@@ -613,7 +662,19 @@ mod tests {
         m.commit(A);
         assert_eq!(
             m.updates(),
-            vec![info("a", "DP-2", true), info("", "DP-1", false)]
+            vec![info("", "DP-1", false), info("a", "DP-2", true)]
         );
+    }
+
+    #[test]
+    fn focused_window_leaving_every_output_is_republished_on_return() {
+        let mut m = model();
+        pending(&mut m, A).outputs.clear();
+        m.commit(A);
+        assert_eq!(m.updates(), vec![info("", "DP-1", true)]);
+
+        pending(&mut m, A).outputs = vec![1];
+        m.commit(A);
+        assert_eq!(m.updates(), vec![info("a", "DP-1", true)]);
     }
 }
