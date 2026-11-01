@@ -279,6 +279,9 @@ pub mod state {
     /// Focused window state (`.focused`).
     pub const FOCUSED: &str = "focused";
 
+    /// Element under the pointer, when GTK's `:hover` can't express it (`.hovered`).
+    pub const HOVERED: &str = "hovered";
+
     /// Ripple overlay element (`.vp-ripple-overlay`).
     pub const RIPPLE_OVERLAY: &str = "vp-ripple-overlay";
 

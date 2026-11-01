@@ -125,6 +125,8 @@ mod ws_container_imp {
         pub(super) long_mw_css_provider: RefCell<Option<CssProvider>>,
         /// True when the bar is on a side edge; the flow axis is then vertical.
         pub(super) axis_vertical: Cell<bool>,
+        /// Pointer position while it's over the container.
+        pub(super) pointer: Cell<Option<(f64, f64)>>,
         /// Sliding active-workspace highlight (index/name labels).
         pub(super) highlight: RefCell<Option<Highlight>>,
     }
@@ -162,7 +164,21 @@ mod ws_container_imp {
     impl ObjectImpl for WorkspaceContainer {
         fn constructed(&self) {
             self.parent_constructed();
-            self.obj().set_overflow(gtk4::Overflow::Hidden);
+            let obj = self.obj();
+            obj.set_overflow(gtk4::Overflow::Hidden);
+
+            let motion = gtk4::EventControllerMotion::new();
+            let track = |motion: &gtk4::EventControllerMotion, pointer| {
+                let Some(wsc) = motion.widget().and_downcast::<super::WorkspaceContainer>() else {
+                    return;
+                };
+                wsc.imp().pointer.set(pointer);
+                wsc.sync_highlight_hover();
+            };
+            motion.connect_enter(move |m, x, y| track(m, Some((x, y))));
+            motion.connect_motion(move |m, x, y| track(m, Some((x, y))));
+            motion.connect_leave(move |m| track(m, None));
+            obj.add_controller(motion);
         }
 
         fn dispose(&self) {
@@ -588,6 +604,31 @@ impl WorkspaceContainer {
         if sliding {
             self.ensure_highlight_tick();
         }
+        self.sync_highlight_hover();
+    }
+
+    /// Give the highlight the active hover color while the pointer is over
+    /// its workspace. An opaque hover background on the indicator itself
+    /// would hide the highlight sliding in under the pointer.
+    fn sync_highlight_hover(&self) {
+        let imp = self.imp();
+        let highlight = imp.highlight.borrow();
+        let Some(h) = highlight.as_ref() else {
+            return;
+        };
+        let hovered = h.target.zip(imp.pointer.get()).is_some_and(|(id, (x, y))| {
+            imp.entries
+                .borrow()
+                .iter()
+                .find(|e| e.id == id && !e.leaving)
+                .and_then(|e| e.widget.compute_bounds(self))
+                .is_some_and(|r| r.contains_point(&gtk4::graphene::Point::new(x as f32, y as f32)))
+        });
+        sync_exclusive_class(
+            &h.widget,
+            &[state::HOVERED],
+            hovered.then_some(state::HOVERED),
+        );
     }
 
     /// Allocate the highlight over its target indicator (or on its way there).

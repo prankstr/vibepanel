@@ -566,16 +566,18 @@ workspace-container.has-highlight > .workspace-indicator.under-highlight {{
 .workspace-highlight {{
     background-color: var(--color-accent-primary);
     border-radius: calc(var(--radius-pill) * 1.2 * var(--vp-workspace-pill-scale, 1));
+    {workspace_transition}
 }}
 
-workspace-container.has-highlight > .workspace-indicator.active {{
-    background-color: transparent;
+/* The active pill's hover color goes on the highlight below it, so it can't
+   hide the highlight sliding in under the pointer. */
+.workspace-highlight.hovered {{
+    background-color: var(--color-workspace-indicator-active-hover-bg);
 }}
 
-/* Without this, the accent hover of a clicked pill hides the highlight
-   sliding in under the pointer. */
+workspace-container.has-highlight > .workspace-indicator.active,
 workspace-container.has-highlight > .workspace-indicator.active.clickable:hover {{
-    background-color: var(--color-workspace-indicator-hover-bg, var(--color-workspace-indicator-hover-default-bg));
+    background-color: transparent;
 }}
 
 .workspaces > overlay > .content > .workspace-indicator.workspace-indicator-windows.has-windows:not(:last-child),
