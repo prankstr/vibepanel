@@ -706,6 +706,52 @@ fn test_notification_toast_structure_contract() {
     }
 }
 
+fn run_test_notification_toast_window_freed_after_close() {
+    if !init_gtk_or_skip(
+        "notification toast UI regression test",
+        Some("VIBEPANEL_UI_REGRESSION_REQUIRED"),
+    ) {
+        return;
+    }
+
+    let mut config = Config::default();
+    config.theme.animations = false;
+    ConfigManager::replace_global_for_test(config);
+
+    // Dismiss button, default-action click and an action button: every
+    // closure in the content that can close the window.
+    let mut notification = test_notification(URGENCY_CRITICAL);
+    notification.actions = vec![
+        ("default".to_string(), "Open".to_string()),
+        ("reply".to_string(), "Reply".to_string()),
+    ];
+    let noop_dismiss: ToastCallback = Rc::new(|_| {});
+    let noop_action: ToastActionCallback = Rc::new(|_, _| {});
+
+    let window = gtk4::Window::new();
+    let content = build_toast_content(
+        &notification,
+        noop_dismiss,
+        noop_action,
+        &window,
+        TOAST_BODY_FALLBACK_MAX_HEIGHT,
+    );
+    window.set_child(Some(&content));
+    drop(content);
+    window.present();
+    flush_gtk();
+
+    let window_weak = window.downgrade();
+    window.close();
+    drop(window);
+    flush_gtk();
+
+    assert!(
+        window_weak.upgrade().is_none(),
+        "a closed toast window should be freed; its content must not hold it strongly"
+    );
+}
+
 #[test]
 #[ignore = "UI regression test: opens GTK windows; run under Xvfb"]
 fn test_ui_regression_notification_toast_structure() {
@@ -725,12 +771,21 @@ fn test_ui_regression_notification_toast_user_css_outline_pixel() {
 }
 
 #[test]
+#[ignore = "UI regression test: opens GTK windows; run under Xvfb"]
+fn test_ui_regression_notification_toast_window_freed_after_close() {
+    run_toast_ui_regression_subprocess("toast.window_freed_after_close");
+}
+
+#[test]
 #[ignore = "internal runner for one notification toast UI regression subprocess"]
 fn notification_toast_ui_regression_runner() {
     match std::env::var("VIBEPANEL_NOTIFICATION_TOAST_UI_REGRESSION_TEST").as_deref() {
         Ok("toast.structure") => run_test_notification_toast_structure(),
         Ok("toast.surface_pixels") => run_test_notification_toast_surface_pixels(),
         Ok("toast.user_css_outline_pixel") => run_test_notification_toast_user_css_outline_pixel(),
+        Ok("toast.window_freed_after_close") => {
+            run_test_notification_toast_window_freed_after_close()
+        }
         Ok(other) => panic!("unknown notification toast UI regression test: {other}"),
         Err(_) => {
             eprintln!("skipping notification toast UI regression test: no test case selected")

@@ -561,11 +561,13 @@ fn build_toast_content(
     dismiss_btn.set_child(Some(&dismiss_icon));
 
     let notification_id = notification.id;
-    let window = close_window.clone();
+    let window = close_window.downgrade();
     let on_dismiss_for_btn = on_dismiss.clone();
     dismiss_btn.connect_clicked(move |_| {
         on_dismiss_for_btn(notification_id);
-        window.close();
+        if let Some(window) = window.upgrade() {
+            window.close();
+        }
     });
 
     main_row.append(&dismiss_btn);
@@ -578,7 +580,7 @@ fn build_toast_content(
         let on_action_clone = on_action.clone();
         let on_dismiss_clone = on_dismiss.clone();
         let notification_id = notification.id;
-        let window_for_action = close_window.clone();
+        let window_for_action = close_window.downgrade();
         // Use connect_pressed instead of connect_released to ensure it's a real click
         // that started within the widget (released can fire from drags ending on widget)
         click_gesture.connect_pressed(move |gesture, n_press, _, _| {
@@ -588,7 +590,9 @@ fn build_toast_content(
                 gesture.set_state(gtk4::EventSequenceState::Claimed);
                 on_action_clone(notification_id, "default");
                 on_dismiss_clone(notification_id);
-                window_for_action.close();
+                if let Some(window) = window_for_action.upgrade() {
+                    window.close();
+                }
             }
         });
         content.add_controller(click_gesture);
@@ -641,11 +645,13 @@ fn build_toast_content(
             let on_dismiss_clone = on_dismiss.clone();
             let notification_id = notification.id;
             let action_id = action_id.clone();
-            let window_for_action = close_window.clone();
+            let window_for_action = close_window.downgrade();
             action_btn.connect_clicked(move |_| {
                 on_action_clone(notification_id, &action_id);
                 on_dismiss_clone(notification_id);
-                window_for_action.close();
+                if let Some(window) = window_for_action.upgrade() {
+                    window.close();
+                }
             });
 
             actions_box.append(&action_btn);
