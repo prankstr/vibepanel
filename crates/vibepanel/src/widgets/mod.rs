@@ -58,6 +58,7 @@ mod updates;
 mod updates_common;
 mod weather;
 mod weather_popover;
+mod window_button;
 mod window_title;
 mod workspaces;
 

@@ -7,9 +7,8 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use gtk4::gdk::BUTTON_PRIMARY;
 use gtk4::prelude::*;
-use gtk4::{Align, Box as GtkBox, CssProvider, GestureClick, Image, Label, Orientation, Widget};
+use gtk4::{Align, Box as GtkBox, CssProvider, Label, Orientation, Widget};
 use tracing::{debug, warn};
 use vibepanel_core::config::WidgetEntry;
 
@@ -18,13 +17,15 @@ use crate::services::compositor::{
     CompositorManager, WindowListSnapshot, WorkspaceMeta, WorkspaceSnapshot,
 };
 use crate::services::config_manager::ConfigManager;
-use crate::services::icons::get_app_icon_name;
 use crate::services::tooltip::TooltipManager;
 use crate::services::window_list::WindowListService;
-use crate::styles::{icon, state, widget};
+use crate::styles::{state, widget};
 use crate::widgets::WidgetConfig;
 use crate::widgets::base::BaseWidget;
 use crate::widgets::warn_unknown_options;
+use crate::widgets::window_button::{
+    app_icon, connect_focus_on_click, sync_exclusive_class, window_display_title, window_tooltip,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkspaceSeparatorLabel {
@@ -241,15 +242,7 @@ fn taskbar_button_state_class(
 }
 
 fn sync_taskbar_button_state(button: &Widget, target_class: Option<&str>) {
-    for &cls in &[widget::ACTIVE, state::URGENT] {
-        if Some(cls) == target_class {
-            if !button.has_css_class(cls) {
-                button.add_css_class(cls);
-            }
-        } else if button.has_css_class(cls) {
-            button.remove_css_class(cls);
-        }
-    }
+    sync_exclusive_class(button, &[widget::ACTIVE, state::URGENT], target_class);
 }
 
 /// Taskbar widget that displays all windows as clickable buttons.
@@ -647,24 +640,6 @@ fn update_window_buttons(
     }
 }
 
-/// The window's display title: title if non-empty, otherwise app_id.
-fn window_display_title(window: &crate::services::compositor::Window) -> &str {
-    if window.title.is_empty() {
-        &window.app_id
-    } else {
-        &window.title
-    }
-}
-
-/// Tooltip string for a window button: "app_id - title", or just app_id.
-fn window_tooltip(window: &crate::services::compositor::Window) -> String {
-    if window.title.is_empty() {
-        window.app_id.clone()
-    } else {
-        format!("{} - {}", window.app_id, window.title)
-    }
-}
-
 /// Compute the padding used around each taskbar button icon.
 /// Returns `(effective_icon, pad)`.
 fn compute_button_padding(icon_size: i32, max_button_size: i32) -> (i32, i32) {
@@ -776,15 +751,8 @@ fn create_window_button(
     );
 
     if config.show_icon {
-        let icon_name = get_app_icon_name(&window.app_id);
-        let icon = Image::from_icon_name(&icon_name);
-        icon.add_css_class(icon::TEXT);
+        let icon = app_icon(&window.app_id, effective_icon);
         icon.add_css_class(widget::TASKBAR_ICON);
-        icon.set_valign(Align::Center);
-        icon.set_halign(Align::Center);
-
-        icon.set_pixel_size(effective_icon);
-
         button.append(&icon);
     }
 
@@ -798,15 +766,7 @@ fn create_window_button(
     }
 
     let window_id = window.id;
-    let gesture = GestureClick::new();
-    gesture.set_button(BUTTON_PRIMARY);
-    gesture.connect_released(move |gesture, _n_press, _x, _y| {
-        if gesture.current_button() == BUTTON_PRIMARY {
-            TooltipManager::global().cancel_and_hide();
-            WindowListService::global().focus_window(window_id);
-        }
-    });
-    button.add_controller(gesture);
+    connect_focus_on_click(&button, move || Some(window_id));
 
     TooltipManager::global().set_styled_tooltip(&button, &window_tooltip(window));
 

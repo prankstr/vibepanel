@@ -599,7 +599,10 @@ fn clean_title(title: &str, friendly_app: &str) -> String {
 }
 
 /// Get a friendly app name from the app_id.
-fn friendly_app_name(cache: &Rc<RefCell<HashMap<String, String>>>, app_id: &str) -> String {
+pub(crate) fn friendly_app_name(
+    cache: &Rc<RefCell<HashMap<String, String>>>,
+    app_id: &str,
+) -> String {
     if app_id.is_empty() {
         return String::new();
     }

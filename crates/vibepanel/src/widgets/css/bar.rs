@@ -4,7 +4,10 @@
 //! so it returns a formatted String rather than a static str.
 
 use super::WIDGET_BG_WITH_OPACITY;
-use crate::widgets::workspaces::{INDICATOR_ACTIVE_MULT, LONG_INDICATOR_HPAD};
+use crate::widgets::workspaces::{
+    INDICATOR_ACTIVE_MULT, LONG_INDICATOR_HPAD, WINDOW_ICON_PAD_CROSS, WINDOW_ICON_PAD_FLOW,
+    WINDOWS_INDICATOR_PAD,
+};
 
 /// Return bar CSS with config values interpolated.
 ///
@@ -17,8 +20,23 @@ pub fn css(screen_margin: u32, spacing: u32, workspace_animations: bool) -> Stri
     let widget_bg = WIDGET_BG_WITH_OPACITY;
     let active_mult = INDICATOR_ACTIVE_MULT;
     let long_hpad = LONG_INDICATOR_HPAD;
+    let window_icon_pad_flow = WINDOW_ICON_PAD_FLOW;
+    let window_icon_pad_cross = WINDOW_ICON_PAD_CROSS;
+    let windows_indicator_pad = WINDOWS_INDICATOR_PAD;
     let workspace_transition = if workspace_animations {
         "transition: background-color 100ms ease;"
+    } else {
+        "transition: none;"
+    };
+    let window_icon_transition = if workspace_animations {
+        "transition: transform 100ms ease-out;"
+    } else {
+        "transition: none;"
+    };
+    // Labels lighting up under the sliding highlight. Short, so they keep up
+    // with it passing over them.
+    let highlight_transition = if workspace_animations {
+        "transition: background-color 100ms ease, color 100ms ease;"
     } else {
         "transition: none;"
     };
@@ -407,18 +425,21 @@ sectioned-bar.bar.bar--vertical {{
 
 /* ===== WORKSPACE ===== */
 
+/* --vp-workspace-pill-scale (set in workspaces.rs) grows the radius with
+   label pills that are taller than --icon-size, so they stay as round as the
+   theme intends. Dots don't set it. */
 .workspace-indicator {{
     padding: 0;
     min-width: var(--icon-size);
     min-height: var(--icon-size);
-    border-radius: calc(var(--radius-pill) * 1.2);
+    border-radius: calc(var(--radius-pill) * 1.2 * var(--vp-workspace-pill-scale, 1));
     color: var(--color-foreground-faint);
     {workspace_transition}
 }}
 
 /* Override ripple overlay fallback radius (overlay.vp-ripple-wrap uses --radius-widget) */
 overlay.workspace-indicator {{
-    border-radius: calc(var(--radius-pill) * 1.2);
+    border-radius: calc(var(--radius-pill) * 1.2 * var(--vp-workspace-pill-scale, 1));
 }}
 
 /* Workspace hover backgrounds use scoped tokens so active hover can differ from global accent hover. */
@@ -470,6 +491,170 @@ workspace-container > .workspace-indicator {{
 .bar--vertical workspace-container > .workspace-indicator {{
     margin-right: 0;
     margin-bottom: var(--vp-widget-gap);
+}}
+
+/* Window icons inside workspace indicators (show_windows = true). The label
+   keeps its own slot, the icons follow, and padding closes the pill, which
+   then sits closer to the next one. */
+.workspace-indicator.workspace-indicator-windows.has-windows {{
+    padding-right: {windows_indicator_pad}px;
+}}
+
+.bar--vertical .workspace-indicator.workspace-indicator-windows.has-windows {{
+    padding-right: 0;
+    padding-bottom: {windows_indicator_pad}px;
+}}
+
+.workspace-indicator-windows.has-windows .workspace-label {{
+    min-width: var(--icon-size);
+}}
+
+.bar--vertical .workspace-indicator-windows.has-windows .workspace-label {{
+    min-width: 0;
+    min-height: var(--icon-size);
+}}
+
+/* Space before the label slot, so labels sit as far from the pill edge as in
+   an empty (active-width) pill, whether or not the workspace is active. */
+.workspace-indicator.workspace-indicator-windows.has-windows:not(.workspace-indicator-long) {{
+    padding-left: max(0px, calc((var(--widget-height) * {active_mult} - var(--icon-size)) * 0.5));
+}}
+
+.bar--vertical .workspace-indicator.workspace-indicator-windows.has-windows:not(.workspace-indicator-long) {{
+    padding-left: 0;
+    padding-top: max(0px, calc((var(--widget-height) * {active_mult} - var(--icon-size)) * 0.5));
+}}
+
+.workspace-indicator-windows.has-windows .workspace-label,
+.workspace-indicator-windows.active .workspace-label {{
+    font-weight: 600;
+}}
+
+/* Sliding active pill (index/name labels, animated). Every indicator gets the
+   active width and sits close to the next, so labels stay put and only the
+   highlight moves. The active indicator itself stays transparent while the
+   highlight is drawn behind it. Labels light up while the highlight covers
+   them, not when their workspace becomes active. */
+workspace-container.sliding > .workspace-indicator {{
+    min-width: calc(var(--widget-height) * {active_mult});
+    margin-right: calc(var(--vp-widget-gap) * 0.3);
+}}
+
+.bar--vertical workspace-container.sliding > .workspace-indicator {{
+    min-width: var(--icon-size);
+    min-height: calc(var(--widget-height) * {active_mult});
+    margin-right: 0;
+    margin-bottom: calc(var(--vp-widget-gap) * 0.3);
+}}
+
+workspace-container.has-highlight > .workspace-indicator.active:not(.under-highlight) {{
+    color: var(--color-foreground-faint);
+}}
+
+workspace-container.has-highlight > .workspace-indicator.workspace-indicator-windows.has-windows.active:not(.under-highlight) {{
+    color: var(--color-foreground-primary);
+}}
+
+/* Transitions run with the state being entered: labels fade in as the
+   highlight covers them and drop back at once when it moves on, so no
+   bright label trails behind it. */
+workspace-container.has-highlight > .workspace-indicator.under-highlight {{
+    color: var(--color-accent-text, #fff);
+    {highlight_transition}
+}}
+
+.workspace-highlight {{
+    background-color: var(--color-accent-primary);
+    border-radius: calc(var(--radius-pill) * 1.2 * var(--vp-workspace-pill-scale, 1));
+    {workspace_transition}
+}}
+
+/* The active pill's hover color goes on the highlight below it, so it can't
+   hide the highlight sliding in under the pointer. */
+.workspace-highlight.hovered {{
+    background-color: var(--color-workspace-indicator-active-hover-bg);
+}}
+
+workspace-container.has-highlight > .workspace-indicator.active,
+workspace-container.has-highlight > .workspace-indicator.active.clickable:hover {{
+    background-color: transparent;
+}}
+
+.workspaces > overlay > .content > .workspace-indicator.workspace-indicator-windows.has-windows:not(:last-child),
+.workspaces > .content > .workspace-indicator.workspace-indicator-windows.has-windows:not(:last-child) {{
+    margin-right: calc(var(--vp-widget-gap) * 0.3);
+}}
+
+.bar--vertical .workspaces > overlay > .content > .workspace-indicator.workspace-indicator-windows.has-windows:not(:last-child),
+.bar--vertical .workspaces > .content > .workspace-indicator.workspace-indicator-windows.has-windows:not(:last-child) {{
+    margin-right: 0;
+    margin-bottom: calc(var(--vp-widget-gap) * 0.3);
+}}
+
+.workspace-indicator-windows.occupied {{
+    color: var(--color-foreground-primary);
+}}
+
+/* Urgent workspaces color their label instead of filling the pill. */
+.workspace-indicator.workspace-indicator-windows.urgent {{
+    color: var(--color-state-urgent);
+    background-color: transparent;
+}}
+
+.workspace-indicator.workspace-indicator-windows.urgent.clickable:hover {{
+    background-color: var(--color-workspace-indicator-hover-bg, var(--color-workspace-indicator-hover-default-bg));
+}}
+
+.workspace-window + .workspace-window {{
+    margin-left: 1px;
+}}
+
+.workspace-windows + .workspace-windows-overflow {{
+    margin-left: 2px;
+}}
+
+.bar--vertical .workspace-window + .workspace-window {{
+    margin-left: 0;
+    margin-top: 1px;
+}}
+
+.bar--vertical .workspace-windows + .workspace-windows-overflow {{
+    margin-left: 0;
+    margin-top: 2px;
+}}
+
+.workspace-window {{
+    padding: {window_icon_pad_cross}px {window_icon_pad_flow}px;
+    {window_icon_transition}
+}}
+
+.bar--vertical .workspace-window {{
+    padding: {window_icon_pad_flow}px {window_icon_pad_cross}px;
+}}
+
+.workspace-window.urgent {{
+    background-color: color-mix(in srgb, var(--color-state-urgent) 45%, transparent);
+    border-radius: calc(var(--radius-pill) * 1.2);
+}}
+
+/* Hovered icons grow slightly, like tray items. */
+.workspace-window.clickable:hover {{
+    transform: scale(1.15);
+}}
+
+.workspace-windows-overflow {{
+    font-size: 0.75em;
+    font-weight: 600;
+}}
+
+/* Window count on an icon standing for several windows (group_by_app). */
+.workspace-window-count {{
+    font-size: 0.55em;
+    font-weight: 700;
+    padding: 0 2px;
+    border-radius: var(--radius-widget);
+    background-color: {widget_bg};
+    color: var(--color-foreground-primary);
 }}
 
 /* ===== TASKBAR ===== */

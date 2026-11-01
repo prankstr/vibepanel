@@ -466,6 +466,7 @@ impl NiriState {
                 title: win.title.clone(),
                 app_id: win.app_id.clone(),
                 workspace_id: win.workspace_id.map(|id| id as i32),
+                extra_workspace_ids: Vec::new(),
                 output: self.output_of(win.workspace_id).cloned(),
                 is_focused: win.is_focused,
                 is_urgent: win.is_urgent,
@@ -848,6 +849,10 @@ impl CompositorBackend for NiriBackend {
 
     fn list_windows(&self) -> Vec<super::Window> {
         self.state.read().window_list()
+    }
+
+    fn supports_window_list(&self) -> bool {
+        true
     }
 
     fn focus_window(&self, window_id: u64) {

@@ -207,6 +207,9 @@ pub struct Window {
     pub app_id: String,
     /// Workspace ID the window is on.
     pub workspace_id: Option<i32>,
+    /// Further workspaces the window is shown on, besides `workspace_id`
+    /// (MangoWC clients can carry several tags). Empty for most windows.
+    pub extra_workspace_ids: Vec<i32>,
     /// Output/monitor name the window is on.
     pub output: Option<String>,
     /// Whether this window is currently focused.
@@ -217,6 +220,13 @@ pub struct Window {
     /// a regular or named MangoWC scratchpad. Compositors
     /// without a scratchpad concept always report `false`.
     pub is_scratchpad: bool,
+}
+
+impl Window {
+    /// Whether the window is shown on the given workspace.
+    pub fn is_on_workspace(&self, workspace_id: i32) -> bool {
+        self.workspace_id == Some(workspace_id) || self.extra_workspace_ids.contains(&workspace_id)
+    }
 }
 
 /// Snapshot of all windows for the taskbar.
@@ -367,6 +377,11 @@ pub trait CompositorBackend: Send + Sync {
     /// Returns a snapshot of all windows currently open across all workspaces.
     fn list_windows(&self) -> Vec<Window> {
         Vec::new()
+    }
+
+    /// Whether `list_windows` reports windows with their workspaces.
+    fn supports_window_list(&self) -> bool {
+        false
     }
 
     /// Register a callback for window list changes.

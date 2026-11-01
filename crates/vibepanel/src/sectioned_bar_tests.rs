@@ -485,6 +485,7 @@ fn local_runtime_css_variables() -> BTreeSet<&'static str> {
         "--vp-taskbar-separator-gap",
         "--vp-taskbar-widget-content-gap",
         "--vp-taskbar-widget-content-padding",
+        "--vp-workspace-pill-scale",
     ])
 }
 

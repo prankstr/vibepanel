@@ -412,6 +412,10 @@ impl CompositorBackend for MangoBackend {
         self.shared.windows.read().clone()
     }
 
+    fn supports_window_list(&self) -> bool {
+        true
+    }
+
     fn set_window_list_callback(&self, callback: WindowListCallback) {
         *self
             .window_list_callback
@@ -848,6 +852,15 @@ fn apply_window_list_focus(shared: &Arc<MangoSharedState>, focused_id: Option<u6
 
 fn client_value_to_window(value: &Value) -> Option<Window> {
     let id = value.get("id")?.as_u64()?;
+    let mut tags = value
+        .get("tags")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_i64)
+        .map(|tag| tag as i32);
+    let workspace_id = tags.next();
+    let extra_workspace_ids = tags.collect();
 
     Some(Window {
         id,
@@ -861,12 +874,8 @@ fn client_value_to_window(value: &Value) -> Option<Window> {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string(),
-        workspace_id: value
-            .get("tags")
-            .and_then(Value::as_array)
-            .and_then(|tags| tags.first())
-            .and_then(Value::as_i64)
-            .map(|id| id as i32),
+        workspace_id,
+        extra_workspace_ids,
         output: value
             .get("monitor")
             .and_then(Value::as_str)
@@ -1700,5 +1709,18 @@ mod tests {
         assert_eq!(windows.len(), 1);
         assert_eq!(windows[0].workspace_id, Some(2));
         assert!(!windows[0].is_scratchpad);
+    }
+
+    #[test]
+    fn socket_window_list_keeps_every_tag_of_multi_tag_clients() {
+        let shared = Arc::new(MangoSharedState::default());
+        let value = serde_json::json!({
+            "clients": [{"id": 5, "tags": [2, 4], "monitor": "DP-1"}]
+        });
+
+        assert!(apply_window_list_from_clients(&shared, &value));
+        let windows = shared.windows.read();
+        assert_eq!(windows[0].workspace_id, Some(2));
+        assert_eq!(windows[0].extra_workspace_ids, vec![4]);
     }
 }

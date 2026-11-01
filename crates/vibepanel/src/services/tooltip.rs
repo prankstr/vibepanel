@@ -353,17 +353,52 @@ impl TooltipManager {
             }
         });
 
-        // Track motion to update cursor X position
+        // Track the cursor relative to the tooltip's widget. Motion also
+        // reaches ancestors with their own tooltips, in their coordinates.
         let manager = Self::global();
-        motion.connect_motion(move |_controller, x, y| {
-            manager.cursor_x.set(x);
-            manager.cursor_y.set(y);
+        motion.connect_motion(move |controller, x, y| {
+            let is_current = manager
+                .current_widget
+                .borrow()
+                .as_ref()
+                .and_then(|w| w.upgrade())
+                .zip(controller.widget())
+                .is_some_and(|(current, widget)| current == widget);
+            if is_current {
+                manager.cursor_x.set(x);
+                manager.cursor_y.set(y);
+            }
         });
 
-        // On leave: cancel timer and hide tooltip
+        // On leave: cancel timer and hide tooltip. A still-hovered ancestor
+        // with its own tooltip (a workspace pill around a window icon) gets no
+        // new enter event, so hand the tooltip back to it.
         let manager = Self::global();
-        motion.connect_leave(move |_controller| {
+        motion.connect_leave(move |controller| {
             manager.cancel_and_hide();
+            let Some(widget) = controller.widget() else {
+                return;
+            };
+            let texts = manager.tooltip_texts.borrow();
+            let Some((ancestor, text)) = std::iter::successors(widget.parent(), |w| w.parent())
+                .find_map(|w| Some((w.clone(), texts.get(&(w.as_ptr() as usize))?.clone())))
+            else {
+                return;
+            };
+            drop(texts);
+            if !ancestor.state_flags().contains(gtk4::StateFlags::PRELIGHT) {
+                return;
+            }
+            // The last position is relative to the widget that was left.
+            let point = gtk4::graphene::Point::new(
+                manager.cursor_x.get() as f32,
+                manager.cursor_y.get() as f32,
+            );
+            if let Some(point) = widget.compute_point(&ancestor, &point) {
+                manager.cursor_x.set(point.x() as f64);
+                manager.cursor_y.set(point.y() as f64);
+            }
+            manager.schedule_show(&ancestor, &text);
         });
 
         widget.add_controller(motion);

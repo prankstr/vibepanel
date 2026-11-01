@@ -392,6 +392,14 @@ impl CompositorManager {
         }
     }
 
+    /// Whether the backend reports a window list with workspaces.
+    pub fn supports_window_list(&self) -> bool {
+        self.backend
+            .borrow()
+            .as_ref()
+            .is_some_and(|backend| backend.supports_window_list())
+    }
+
     /// Focus a specific window by its ID.
     pub fn focus_window(&self, window_id: u64) {
         if let Some(ref backend) = *self.backend.borrow() {
