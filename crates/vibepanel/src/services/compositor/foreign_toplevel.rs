@@ -1,7 +1,8 @@
 //! `wlr-foreign-toplevel-management-unstable-v1` protocol client.
 //!
-//! Window titles for the generic backend: the focused window, and the last
-//! focused window on each unfocused output. The protocol has no notion of
+//! Window titles for backends without their own (run by the compositor
+//! manager): the focused window, and the last focused window on each
+//! unfocused output. The protocol has no notion of
 //! workspaces, so it cannot provide occupancy.
 
 use std::collections::{BTreeSet, HashMap, HashSet};

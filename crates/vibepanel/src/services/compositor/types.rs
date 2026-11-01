@@ -300,6 +300,12 @@ pub trait CompositorBackend: Send + Sync {
     /// no window is focused or state is unknown.
     fn get_focused_window(&self) -> Option<WindowInfo>;
 
+    /// Whether the backend reports window titles through `on_window_update`.
+    /// When it doesn't, the manager gets them from wlr-foreign-toplevel.
+    fn provides_window_titles(&self) -> bool {
+        true
+    }
+
     /// Get the connector name of the focused output (e.g., "DP-1").
     ///
     /// Default: `None` for backends that don't track output focus directly.

@@ -14,6 +14,8 @@
 //! - Alongside the Hyprland backend, an optional ext-workspace overlay whose state
 //!   is merged over the backend's workspace state before it is published (see
 //!   `ext_workspace::overlay`). All consumers see the merged state.
+//! - A wlr-foreign-toplevel client for window titles, when the backend has
+//!   none of its own (see `CompositorBackend::provides_window_titles`).
 //!
 //! # Usage
 //!
@@ -26,7 +28,7 @@
 //! });
 //! ```
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -38,6 +40,7 @@ use vibepanel_core::config::AdvancedConfig;
 
 use super::ext_workspace::overlay::{ExtOverlayState, ExtWorkspaceOverlay};
 use super::ext_workspace::{ExtWorkspaceClient, ModelCallback};
+use super::foreign_toplevel::ForeignToplevelClient;
 use super::{
     BackendKind, CompositorBackend, KeyboardLayoutCallback, KeyboardLayoutInfo, WindowCallback,
     WindowInfo, WindowLayoutCallback, WindowLayoutSnapshot, WorkspaceCallback, WorkspaceMeta,
@@ -99,10 +102,8 @@ pub struct CompositorManager {
     /// Latest window update per output (`None` key for unscoped updates).
     last_window_infos: RefCell<HashMap<Option<String>, WindowInfo>>,
     ext_overlay: RefCell<Option<ExtOverlay>>,
-    /// Drop window titles of outputs missing from workspace snapshots. Off for
-    /// the generic backend: its snapshots may not list every output, and its
-    /// title client clears removed outputs itself.
-    prune_window_outputs: Cell<bool>,
+    /// Window titles from wlr-foreign-toplevel, for backends without their own.
+    toplevels: RefCell<Option<ForeignToplevelClient>>,
     last_keyboard_layout: RefCell<Option<KeyboardLayoutInfo>>,
     last_window_layouts: RefCell<Option<WindowLayoutSnapshot>>,
     last_window_list: RefCell<Option<super::WindowListSnapshot>>,
@@ -124,7 +125,7 @@ impl CompositorManager {
             last_workspace_snapshot: RefCell::new(None),
             last_window_infos: RefCell::new(HashMap::new()),
             ext_overlay: RefCell::new(None),
-            prune_window_outputs: Cell::new(true),
+            toplevels: RefCell::new(None),
             last_keyboard_layout: RefCell::new(None),
             last_window_layouts: RefCell::new(None),
             last_window_list: RefCell::new(None),
@@ -177,7 +178,7 @@ impl CompositorManager {
                 last_workspace_snapshot: RefCell::new(Some(snapshot)),
                 last_window_infos: RefCell::new(HashMap::new()),
                 ext_overlay: RefCell::new(None),
-                prune_window_outputs: Cell::new(true),
+                toplevels: RefCell::new(None),
                 last_keyboard_layout: RefCell::new(None),
                 last_window_layouts: RefCell::new(None),
                 last_window_list: RefCell::new(None),
@@ -265,8 +266,13 @@ impl CompositorManager {
     /// Get the current focused window info.
     ///
     /// Delegates to the backend directly, since window callbacks are emitted
-    /// per output rather than only for the focused window.
+    /// per output rather than only for the focused window. With titles from
+    /// foreign-toplevel, it is the focused update.
     pub fn get_focused_window(&self) -> Option<WindowInfo> {
+        if self.toplevel_titles() {
+            return focused_update(&self.last_window_infos.borrow())
+                .filter(|w| !w.title.is_empty() || !w.app_id.is_empty());
+        }
         if let Some(ref backend) = *self.backend.borrow() {
             backend.get_focused_window()
         } else {
@@ -275,7 +281,13 @@ impl CompositorManager {
     }
 
     /// Get the connector name of the focused output, if the backend tracks it.
+    ///
+    /// With titles from foreign-toplevel, it is the output that last had a
+    /// focused window: a guess, as the protocol has no output focus.
     pub fn get_focused_output(&self) -> Option<String> {
+        if self.toplevel_titles() {
+            return focused_update(&self.last_window_infos.borrow())?.output;
+        }
         self.backend
             .borrow()
             .as_ref()
@@ -407,6 +419,11 @@ impl CompositorManager {
         }
     }
 
+    /// Whether window titles come from foreign-toplevel.
+    fn toplevel_titles(&self) -> bool {
+        self.toplevels.borrow().is_some()
+    }
+
     /// Get the backend name (e.g., "Hyprland", "Niri", "MangoWC").
     pub fn backend_name(&self) -> &'static str {
         if let Some(ref backend) = *self.backend.borrow() {
@@ -458,7 +475,9 @@ impl CompositorManager {
 
         // Drop windows of removed outputs before subscribers can recreate bars,
         // so a reconnected output doesn't replay a stale title.
-        if self.prune_window_outputs.get() {
+        // Not with titles from foreign-toplevel: workspace snapshots may not
+        // list every output, and the client clears removed outputs itself.
+        if !self.toplevel_titles() {
             prune_removed_outputs(&mut self.last_window_infos.borrow_mut(), &snapshot);
         }
 
@@ -537,8 +556,6 @@ impl CompositorManager {
 
         // Backends no longer filter by outputs - that's now handled at the widget level
         let (resolved_kind, backend) = factory::create_backend(backend_kind);
-        this.prune_window_outputs
-            .set(resolved_kind != BackendKind::Generic);
 
         info!(
             "CompositorManager using backend: {} (config: {})",
@@ -596,7 +613,11 @@ impl CompositorManager {
         backend.set_window_layout_callback(on_window_layout_update);
         backend.set_window_list_callback(on_window_list_update);
 
-        backend.start(on_workspace_update, on_window_update);
+        backend.start(on_workspace_update, on_window_update.clone());
+
+        if !backend.provides_window_titles() {
+            *this.toplevels.borrow_mut() = ForeignToplevelClient::start(on_window_update);
+        }
 
         // Store whatever state the backend has so far. Most backends load it
         // on their event thread, so it may still be empty; the callbacks
@@ -645,6 +666,11 @@ fn store_window_update(infos: &mut HashMap<Option<String>, WindowInfo>, info: &W
     infos.insert(info.output.clone(), info.clone());
 }
 
+/// The stored update for the focused output.
+fn focused_update(infos: &HashMap<Option<String>, WindowInfo>) -> Option<WindowInfo> {
+    infos.values().find(|info| info.focused).cloned()
+}
+
 /// Remove stored windows for outputs missing from the workspace snapshot.
 /// Unscoped entries are kept. An empty `per_output` means no outputs are
 /// connected, so every per-output entry is removed.
@@ -671,6 +697,9 @@ impl Drop for CompositorManager {
     fn drop(&mut self) {
         if let Some(overlay) = self.ext_overlay.borrow_mut().take() {
             overlay.client.stop();
+        }
+        if let Some(toplevels) = self.toplevels.borrow_mut().take() {
+            toplevels.stop();
         }
         if let Some(ref backend) = *self.backend.borrow() {
             backend.stop();
@@ -732,6 +761,19 @@ mod tests {
         let replay = window_updates_for_replay(&infos);
         assert_eq!(replay[0].output, None);
         assert_eq!(replay[1].output.as_deref(), Some("DP-2"));
+    }
+
+    #[test]
+    fn focused_update_is_the_stored_focused_output() {
+        let mut infos = HashMap::new();
+        assert!(focused_update(&infos).is_none());
+
+        store_window_update(&mut infos, &titled("DP-1", "a"));
+        store_window_update(&mut infos, &info("DP-2", true));
+        assert_eq!(
+            focused_update(&infos).and_then(|i| i.output).as_deref(),
+            Some("DP-2")
+        );
     }
 
     #[test]
