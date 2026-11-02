@@ -24,8 +24,9 @@ use serde_json::Value;
 use tracing::{debug, error, trace, warn};
 
 use super::{
-    CompositorBackend, KeyboardLayoutCallback, KeyboardLayoutInfo, WindowCallback, WindowInfo,
-    WorkspaceCallback, WorkspaceMeta, WorkspaceSnapshot, synthetic_id_for_name,
+    CompositorBackend, KeyboardLayoutCallback, KeyboardLayoutInfo, Window, WindowCallback,
+    WindowInfo, WindowListCallback, WindowListSnapshot, WorkspaceCallback, WorkspaceMeta,
+    WorkspaceSnapshot, synthetic_id_for_name,
 };
 
 // i3 IPC constants
@@ -141,6 +142,22 @@ struct SharedState {
     focused_window: RwLock<Option<WindowInfo>>,
     workspaces: RwLock<Vec<WorkspaceMeta>>,
     keyboard_layout: RwLock<Option<KeyboardLayoutInfo>>,
+    windows: RwLock<Vec<Window>>,
+}
+
+struct TreeState {
+    window_counts: HashMap<i32, u32>,
+    per_output_counts: HashMap<String, HashMap<i32, u32>>,
+    focused_window: Option<WindowInfo>,
+    windows: Vec<Window>,
+}
+
+#[derive(Default)]
+struct EventChanges {
+    workspaces: bool,
+    window: bool,
+    window_list: bool,
+    keyboard_layout: bool,
 }
 
 impl Default for SharedState {
@@ -159,6 +176,7 @@ impl Default for SharedState {
                     .collect(),
             ),
             keyboard_layout: RwLock::new(None),
+            windows: RwLock::new(Vec::new()),
         }
     }
 }
@@ -170,17 +188,24 @@ pub struct SwayBackend {
     shared: Arc<SharedState>,
     callbacks: Mutex<Option<(WorkspaceCallback, WindowCallback)>>,
     keyboard_layout_callback: Mutex<Option<KeyboardLayoutCallback>>,
+    window_list_callback: Mutex<Option<WindowListCallback>>,
     compositor_name: &'static str,
     socket_env_var: &'static str,
+    /// False for Miracle WM. Per its IPC source, `name` is the (empty) session
+    /// name rather than the title, there are no title events, criteria never
+    /// match floating windows and scratchpad windows are absent from the tree,
+    /// so it uses foreign-toplevel.
+    native_window_list: bool,
 }
 
 impl SwayBackend {
     pub fn new() -> Self {
-        let (compositor_name, socket_env_var) = if env::var("MIRACLESOCK").is_ok() {
-            ("Miracle WM", "MIRACLESOCK")
-        } else {
-            ("Sway", "SWAYSOCK")
-        };
+        let (compositor_name, socket_env_var, native_window_list) =
+            if env::var("MIRACLESOCK").is_ok() {
+                ("Miracle WM", "MIRACLESOCK", false)
+            } else {
+                ("Sway", "SWAYSOCK", true)
+            };
 
         Self {
             running: Arc::new(AtomicBool::new(false)),
@@ -189,8 +214,10 @@ impl SwayBackend {
             shared: Arc::new(SharedState::default()),
             callbacks: Mutex::new(None),
             keyboard_layout_callback: Mutex::new(None),
+            window_list_callback: Mutex::new(None),
             compositor_name,
             socket_env_var,
+            native_window_list,
         }
     }
 
@@ -302,18 +329,44 @@ impl SwayBackend {
         ws_list
     }
 
-    /// Walk the tree to count windows per workspace and find the focused window.
-    ///
-    /// The tree is a hierarchy: root -> outputs -> workspaces -> containers -> windows.
-    fn fetch_tree(socket_path: &str, shared: &SharedState, wm: &str) {
+    /// Returns whether the window list changed.
+    fn fetch_tree(socket_path: &str, shared: &SharedState, wm: &str) -> bool {
         let Some(tree) = ipc_request(socket_path, IPC_GET_TREE, b"", wm) else {
             warn!("Failed to fetch tree from {}", wm);
-            return;
+            return false;
         };
 
+        let state = Self::parse_tree(&tree, &shared.workspaces.read());
+
+        {
+            let mut snapshot = shared.workspace_snapshot.write();
+            snapshot.window_counts = state.window_counts;
+
+            // per_output entries are populated by the prior fetch_workspaces call
+            for (out_name, counts) in &state.per_output_counts {
+                if let Some(per_out) = snapshot.per_output.get_mut(out_name) {
+                    per_out.window_counts = counts.clone();
+                }
+            }
+        }
+
+        *shared.focused_window.write() = state.focused_window;
+
+        let mut windows = shared.windows.write();
+        if *windows == state.windows {
+            false
+        } else {
+            *windows = state.windows;
+            true
+        }
+    }
+
+    /// The tree is a hierarchy: root -> outputs -> workspaces -> containers -> windows.
+    fn parse_tree(tree: &Value, workspaces: &[WorkspaceMeta]) -> TreeState {
         let mut window_counts: HashMap<i32, u32> = HashMap::new();
         let mut per_output_counts: HashMap<String, HashMap<i32, u32>> = HashMap::new();
         let mut focused_window: Option<WindowInfo> = None;
+        let mut windows: Vec<Window> = Vec::new();
 
         if let Some(outputs) = tree.get("nodes").and_then(|v| v.as_array()) {
             for output in outputs {
@@ -345,7 +398,9 @@ impl SwayBackend {
                             ws_num
                         };
 
-                        let count = Self::count_windows(ws_node);
+                        let before = windows.len();
+                        Self::collect_windows(ws_node, ws_id, &output_name, false, &mut windows);
+                        let count = (windows.len() - before) as u32;
                         *window_counts.entry(ws_id).or_insert(0) += count;
                         *per_output_counts
                             .entry(output_name.clone())
@@ -361,19 +416,106 @@ impl SwayBackend {
             }
         }
 
-        {
-            let mut snapshot = shared.workspace_snapshot.write();
-            snapshot.window_counts = window_counts;
+        let ws_position: HashMap<i32, usize> = workspaces
+            .iter()
+            .enumerate()
+            .map(|(pos, ws)| (ws.id, pos))
+            .collect();
+        let position_of = |win: &Window| {
+            win.workspace_id
+                .and_then(|id| ws_position.get(&id).copied())
+        };
+        // Match the workspaces widget order; the stable sort keeps tree order within a workspace.
+        windows.sort_by(|a, b| {
+            a.output.cmp(&b.output).then_with(|| {
+                position_of(a)
+                    .unwrap_or(usize::MAX)
+                    .cmp(&position_of(b).unwrap_or(usize::MAX))
+            })
+        });
 
-            // per_output entries are populated by the prior fetch_workspaces call
-            for (out_name, counts) in &per_output_counts {
-                if let Some(per_out) = snapshot.per_output.get_mut(out_name) {
-                    per_out.window_counts = counts.clone();
-                }
+        TreeState {
+            window_counts,
+            per_output_counts,
+            focused_window,
+            windows,
+        }
+    }
+
+    /// Windows are leaves with a `pid` (Sway sets it only on windows, and to 0
+    /// for XWayland windows whose pid is unknown), so empty split containers
+    /// are skipped. `in_scratchpad` is inherited because a whole container can
+    /// be sent to the scratchpad.
+    fn collect_windows(
+        node: &Value,
+        ws_id: i32,
+        output_name: &str,
+        in_scratchpad: bool,
+        out: &mut Vec<Window>,
+    ) {
+        let in_scratchpad = in_scratchpad
+            || matches!(
+                node.get("scratchpad_state").and_then(|v| v.as_str()),
+                Some("fresh" | "changed")
+            );
+
+        let children = node.get("nodes").and_then(|v| v.as_array());
+        let floating = node.get("floating_nodes").and_then(|v| v.as_array());
+
+        let has_children =
+            children.is_some_and(|c| !c.is_empty()) || floating.is_some_and(|f| !f.is_empty());
+
+        if !has_children {
+            let is_window = node.get("pid").is_some_and(Value::is_number);
+            let id = node.get("id").and_then(|v| v.as_u64());
+
+            if is_window && let Some(id) = id {
+                out.push(Window {
+                    id,
+                    title: node
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    app_id: Self::app_id_of(node),
+                    workspace_id: Some(ws_id),
+                    output: Some(output_name.to_string()),
+                    is_focused: node
+                        .get("focused")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false),
+                    is_urgent: node
+                        .get("urgent")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false),
+                    is_scratchpad: in_scratchpad,
+                    ..Default::default()
+                });
             }
+            return;
         }
 
-        *shared.focused_window.write() = focused_window;
+        for child in children
+            .into_iter()
+            .flatten()
+            .chain(floating.into_iter().flatten())
+        {
+            Self::collect_windows(child, ws_id, output_name, in_scratchpad, out);
+        }
+    }
+
+    /// XWayland windows have no `app_id`; fall back to `window_properties.class`.
+    fn app_id_of(node: &Value) -> String {
+        node.get("app_id")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                node.get("window_properties")
+                    .and_then(|wp| wp.get("class"))
+                    .and_then(|v| v.as_str())
+            })
+            .unwrap_or("")
+            .to_string()
     }
 
     /// The focused window, or an empty update scoped to the focused output so
@@ -395,40 +537,6 @@ impl SwayBackend {
         })
     }
 
-    /// Count leaf windows (application windows) in a container subtree.
-    ///
-    /// Uses `pid > 0` to identify windows (per Sway IPC spec, `pid` is set only
-    /// on windows), which avoids false-counting empty split containers.
-    fn count_windows(node: &Value) -> u32 {
-        let children = node.get("nodes").and_then(|v| v.as_array());
-        let floating = node.get("floating_nodes").and_then(|v| v.as_array());
-
-        let has_children =
-            children.is_some_and(|c| !c.is_empty()) || floating.is_some_and(|f| !f.is_empty());
-
-        if !has_children {
-            let is_window = node
-                .get("pid")
-                .and_then(|v| v.as_i64())
-                .is_some_and(|p| p > 0);
-
-            return if is_window { 1 } else { 0 };
-        }
-
-        let mut count = 0;
-        if let Some(children) = children {
-            for child in children {
-                count += Self::count_windows(child);
-            }
-        }
-        if let Some(floating) = floating {
-            for child in floating {
-                count += Self::count_windows(child);
-            }
-        }
-        count
-    }
-
     fn find_focused_window(node: &Value, output_name: &str) -> Option<WindowInfo> {
         let focused = node
             .get("focused")
@@ -447,22 +555,7 @@ impl SwayBackend {
                 return None; // Focused workspace with no focused window
             }
 
-            let app_id = node
-                .get("app_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-
-            // For XWayland windows, app_id may be null; fall back to window_properties.class
-            let app_id = if app_id.is_empty() {
-                node.get("window_properties")
-                    .and_then(|wp| wp.get("class"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string()
-            } else {
-                app_id
-            };
+            let app_id = Self::app_id_of(node);
 
             let title = node
                 .get("name")
@@ -496,9 +589,10 @@ impl SwayBackend {
         None
     }
 
-    fn fetch_all(socket_path: &str, shared: &SharedState, wm: &str) {
+    /// Returns whether the window list changed.
+    fn fetch_all(socket_path: &str, shared: &SharedState, wm: &str) -> bool {
         Self::fetch_workspaces(socket_path, shared, wm);
-        Self::fetch_tree(socket_path, shared, wm);
+        Self::fetch_tree(socket_path, shared, wm)
     }
 
     /// Fetch keyboard layout from Sway's `get_inputs`.
@@ -558,20 +652,31 @@ impl SwayBackend {
         socket_path: String,
         callbacks: Option<(WorkspaceCallback, WindowCallback)>,
         kb_callback: Option<KeyboardLayoutCallback>,
+        window_list_callback: Option<WindowListCallback>,
         wm: &str,
     ) {
-        Self::fetch_all(&socket_path, &shared, wm);
-        Self::fetch_keyboard_layout(&socket_path, &shared, wm);
+        let emit_window_list = || {
+            if let Some(ref cb) = window_list_callback {
+                let windows = shared.windows.read().clone();
+                cb(WindowListSnapshot { windows });
+            }
+        };
 
-        if let Some((ref ws_cb, ref win_cb)) = callbacks {
-            ws_cb(shared.workspace_snapshot.read().clone());
-            win_cb(Self::window_update(&shared));
-        }
-        if let Some(ref kb_cb) = kb_callback
-            && let Some(ref info) = *shared.keyboard_layout.read()
-        {
-            kb_cb(info.clone());
-        }
+        let resync = || {
+            Self::fetch_all(&socket_path, &shared, wm);
+            Self::fetch_keyboard_layout(&socket_path, &shared, wm);
+
+            if let Some((ref ws_cb, ref win_cb)) = callbacks {
+                ws_cb(shared.workspace_snapshot.read().clone());
+                win_cb(Self::window_update(&shared));
+            }
+            emit_window_list();
+            if let Some(ref kb_cb) = kb_callback
+                && let Some(ref info) = *shared.keyboard_layout.read()
+            {
+                kb_cb(info.clone());
+            }
+        };
 
         let mut backoff_ms = RECONNECT_INITIAL_MS;
 
@@ -643,6 +748,10 @@ impl SwayBackend {
                 }
             }
 
+            // Fetch after subscribing so no change is missed, including any
+            // made while disconnected.
+            resync();
+
             // 1s read timeout so we can check the `running` flag between events
             let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
 
@@ -662,19 +771,23 @@ impl SwayBackend {
                             }
                         };
 
-                        let (ws_changed, win_changed, kb_changed) =
+                        let changes =
                             Self::handle_event(msg_type, &event, &socket_path, &shared, wm);
 
                         if let Some((ref ws_cb, ref win_cb)) = callbacks {
-                            if ws_changed {
+                            if changes.workspaces {
                                 ws_cb(shared.workspace_snapshot.read().clone());
                             }
-                            if win_changed {
+                            if changes.window {
                                 win_cb(Self::window_update(&shared));
                             }
                         }
 
-                        if kb_changed
+                        if changes.window_list {
+                            emit_window_list();
+                        }
+
+                        if changes.keyboard_layout
                             && let Some(ref kb_cb) = kb_callback
                             && let Some(ref info) = *shared.keyboard_layout.read()
                         {
@@ -701,41 +814,47 @@ impl SwayBackend {
     }
 
     /// Handle a single event.
-    /// Returns (workspace_changed, window_changed, keyboard_layout_changed).
     fn handle_event(
         msg_type: u32,
         event: &Value,
         socket_path: &str,
         shared: &SharedState,
         wm: &str,
-    ) -> (bool, bool, bool) {
+    ) -> EventChanges {
         let change = event.get("change").and_then(|v| v.as_str()).unwrap_or("");
 
         trace!("{} event: type=0x{:x}, change={}", wm, msg_type, change);
 
         match msg_type {
-            IPC_EVENT_WORKSPACE => {
-                Self::fetch_all(socket_path, shared, wm);
-                (true, true, false)
-            }
+            IPC_EVENT_WORKSPACE => EventChanges {
+                window_list: Self::fetch_all(socket_path, shared, wm),
+                workspaces: true,
+                window: true,
+                ..Default::default()
+            },
             IPC_EVENT_WINDOW => {
                 match change {
-                    "focus" | "title" => {
-                        Self::fetch_tree(socket_path, shared, wm);
-                        (false, true, false)
-                    }
-                    "close" | "new" | "move" => {
-                        // Window count / occupancy may have changed
-                        Self::fetch_all(socket_path, shared, wm);
-                        (true, true, false)
-                    }
-                    "urgent" => {
-                        Self::fetch_all(socket_path, shared, wm);
-                        (true, false, false)
-                    }
+                    // Floating windows are listed after tiled ones.
+                    "focus" | "title" | "floating" => EventChanges {
+                        window_list: Self::fetch_tree(socket_path, shared, wm),
+                        window: change != "floating",
+                        ..Default::default()
+                    },
+                    // Window count / occupancy may have changed
+                    "close" | "new" | "move" => EventChanges {
+                        window_list: Self::fetch_all(socket_path, shared, wm),
+                        workspaces: true,
+                        window: true,
+                        ..Default::default()
+                    },
+                    "urgent" => EventChanges {
+                        window_list: Self::fetch_all(socket_path, shared, wm),
+                        workspaces: true,
+                        ..Default::default()
+                    },
                     _ => {
                         trace!("Unhandled {} window change: {}", wm, change);
-                        (false, false, false)
+                        EventChanges::default()
                     }
                 }
             }
@@ -763,14 +882,17 @@ impl SwayBackend {
                             layout_name: active_layout,
                             layout_count,
                         });
-                        return (false, false, true);
+                        return EventChanges {
+                            keyboard_layout: true,
+                            ..Default::default()
+                        };
                     }
                 }
-                (false, false, false)
+                EventChanges::default()
             }
             _ => {
                 trace!("Unhandled {} event type: 0x{:x}", wm, msg_type);
-                (false, false, false)
+                EventChanges::default()
             }
         }
     }
@@ -813,6 +935,11 @@ impl CompositorBackend for SwayBackend {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
+        let window_list_callback = self
+            .window_list_callback
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
 
         let handle = thread::Builder::new()
             .name(format!(
@@ -820,7 +947,15 @@ impl CompositorBackend for SwayBackend {
                 wm.to_lowercase().replace(' ', "-")
             ))
             .spawn(move || {
-                Self::event_loop(running, shared, socket_path, callbacks, kb_callback, wm);
+                Self::event_loop(
+                    running,
+                    shared,
+                    socket_path,
+                    callbacks,
+                    kb_callback,
+                    window_list_callback,
+                    wm,
+                );
             })
             .ok();
 
@@ -880,6 +1015,42 @@ impl CompositorBackend for SwayBackend {
 
     fn get_focused_window(&self) -> Option<WindowInfo> {
         self.shared.focused_window.read().clone()
+    }
+
+    fn list_windows(&self) -> Vec<Window> {
+        if self.native_window_list {
+            self.shared.windows.read().clone()
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn provides_window_list(&self) -> bool {
+        self.native_window_list
+    }
+
+    fn set_window_list_callback(&self, callback: WindowListCallback) {
+        if !self.native_window_list {
+            return;
+        }
+        *self
+            .window_list_callback
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(callback);
+    }
+
+    fn focus_window(&self, window_id: u64) {
+        let socket_path = self.socket_path.read();
+        if let Some(ref path) = *socket_path {
+            // Sway switches to the window's workspace and output on its own.
+            let command = format!("[con_id={}] focus", window_id);
+            let _ = ipc_request(
+                path,
+                IPC_RUN_COMMAND,
+                command.as_bytes(),
+                self.compositor_name,
+            );
+        }
     }
 
     fn switch_workspace(&self, workspace_id: i32) {
@@ -995,5 +1166,63 @@ mod tests {
         assert_eq!(info.output.as_deref(), Some("DP-2"));
         assert!(info.focused);
         assert!(info.title.is_empty());
+    }
+
+    fn win(id: u64) -> Value {
+        serde_json::json!({ "id": id, "pid": id, "app_id": "app", "name": "title" })
+    }
+
+    fn ws(num: i64, name: &str, nodes: Vec<Value>, floating: Vec<Value>) -> Value {
+        serde_json::json!({ "num": num, "name": name, "nodes": nodes, "floating_nodes": floating })
+    }
+
+    fn windows(tree: Value, workspace_order: &[i32]) -> Vec<Window> {
+        let workspaces: Vec<_> = workspace_order
+            .iter()
+            .map(|&id| WorkspaceMeta {
+                id,
+                idx: id,
+                name: id.to_string(),
+                output: None,
+            })
+            .collect();
+        SwayBackend::parse_tree(&tree, &workspaces).windows
+    }
+
+    #[test]
+    fn window_list_follows_output_workspace_then_tree_order() {
+        // Workspaces are out of order in the tree; floating windows come after tiled ones.
+        // The split holds an XWayland window with pid 0 and an empty container.
+        let xwayland = serde_json::json!({ "id": 22, "pid": 0 });
+        let empty = serde_json::json!({ "id": 98 });
+        let split = serde_json::json!({ "id": 99, "nodes": [win(21), xwayland, empty] });
+        let tree = serde_json::json!({ "nodes": [
+            { "name": "DP-2", "nodes": [ws(3, "3", vec![win(30)], vec![])] },
+            { "name": "DP-1", "nodes": [
+                ws(2, "2", vec![win(20), split], vec![win(23)]),
+                ws(1, "1", vec![win(10)], vec![]),
+            ]},
+        ]});
+
+        let ids: Vec<u64> = windows(tree, &[1, 2, 3]).iter().map(|w| w.id).collect();
+
+        assert_eq!(ids, vec![10, 20, 21, 22, 23, 30]);
+    }
+
+    #[test]
+    fn window_list_hides_stashed_scratchpad_and_flags_shown_one() {
+        let mut shown = win(2);
+        shown["scratchpad_state"] = "fresh".into();
+        let tree = serde_json::json!({ "nodes": [
+            { "name": "__i3", "nodes": [ws(-1, "__i3_scratch", vec![], vec![win(3)])] },
+            { "name": "DP-1", "nodes": [ws(1, "1", vec![win(1)], vec![shown])] },
+        ]});
+
+        let listed: Vec<_> = windows(tree, &[1])
+            .iter()
+            .map(|w| (w.id, w.is_scratchpad))
+            .collect();
+
+        assert_eq!(listed, vec![(1, false), (2, true)]);
     }
 }
