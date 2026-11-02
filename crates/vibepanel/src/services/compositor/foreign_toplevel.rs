@@ -1,8 +1,10 @@
 //! `wlr-foreign-toplevel-management-unstable-v1` protocol client.
 //!
-//! Window titles for the generic backend: the focused window, and the last
-//! focused window on each unfocused output. The protocol has no notion of
-//! workspaces, so it cannot provide occupancy.
+//! Run by the compositor manager for what the backend lacks: window titles
+//! (the focused window, and the last focused window on each unfocused
+//! output) and the taskbar's window list, with activate and minimize
+//! requests. The protocol has no notion of workspaces, so it cannot provide
+//! occupancy or workspace grouping.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
@@ -11,7 +13,7 @@ use std::thread::{self, JoinHandle};
 
 use parking_lot::Mutex;
 use tracing::{debug, trace, warn};
-use wayland_client::protocol::{wl_callback, wl_output, wl_registry};
+use wayland_client::protocol::{wl_callback, wl_output, wl_registry, wl_seat};
 use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle, event_created_child};
 use wayland_protocols_wlr::foreign_toplevel::v1::client::{
     zwlr_foreign_toplevel_handle_v1::{self, State, ZwlrForeignToplevelHandleV1},
@@ -19,10 +21,11 @@ use wayland_protocols_wlr::foreign_toplevel::v1::client::{
 };
 
 use super::wayland_loop;
-use super::{WindowCallback, WindowInfo};
+use super::{Window, WindowCallback, WindowInfo, WindowListCallback, WindowListSnapshot};
 
 pub(super) const MANAGER_INTERFACE: &str = "zwlr_foreign_toplevel_manager_v1";
 const MANAGER_VERSION: u32 = 3;
+const SEAT_VERSION: u32 = 5;
 
 #[derive(Debug, Clone, Default)]
 struct ToplevelState {
@@ -31,6 +34,7 @@ struct ToplevelState {
     /// wl_output protocol ids.
     outputs: Vec<u32>,
     activated: bool,
+    minimized: bool,
 }
 
 /// Events write to `pending`; the toplevel's own `done` commits it, so a
@@ -40,6 +44,10 @@ struct Toplevel {
     pending: ToplevelState,
     current: ToplevelState,
     activated_at: u64,
+    /// Stable window list ID. Protocol IDs are recycled, so they can't be used.
+    window_id: u64,
+    /// Whether `current` holds a committed batch.
+    committed: bool,
 }
 
 fn is_empty(info: &WindowInfo) -> bool {
@@ -79,9 +87,26 @@ struct Model {
     /// removed, so titles keep waiting for an output instead of going to
     /// every bar.
     names_known: bool,
+    /// Last window list ID handed out; IDs start at 1 and are never reused.
+    last_window_id: u64,
+    /// Last window list sent.
+    sent_list: Option<Vec<Window>>,
 }
 
 impl Model {
+    /// Track a new toplevel; returns its window list ID.
+    fn add_toplevel(&mut self, tid: u32) -> u64 {
+        self.last_window_id += 1;
+        self.toplevels.insert(
+            tid,
+            Toplevel {
+                window_id: self.last_window_id,
+                ..Default::default()
+            },
+        );
+        self.last_window_id
+    }
+
     fn commit(&mut self, tid: u32) {
         let Some(toplevel) = self.toplevels.get_mut(&tid) else {
             return;
@@ -91,6 +116,67 @@ impl Model {
             toplevel.activated_at = self.activations;
         }
         toplevel.current = toplevel.pending.clone();
+        toplevel.committed = true;
+    }
+
+    /// The focused toplevel. Compositors usually report at most one activated
+    /// toplevel; if there are several, the most recently activated wins.
+    fn focused(&self) -> Option<u32> {
+        self.toplevels
+            .iter()
+            .filter(|(_, t)| t.current.activated)
+            .max_by_key(|(_, t)| t.activated_at)
+            .map(|(tid, _)| *tid)
+    }
+
+    /// Committed toplevels grouped by primary output (windows without one
+    /// last), in creation order within each group. Grouping keeps output
+    /// separators contiguous when the taskbar shows every output.
+    fn window_list(&self) -> Vec<Window> {
+        let focused = self.focused();
+        let mut windows: Vec<Window> = self
+            .toplevels
+            .iter()
+            .filter(|(_, t)| t.committed)
+            .map(|(tid, t)| {
+                let mut outputs = Vec::new();
+                for name in t
+                    .current
+                    .outputs
+                    .iter()
+                    .filter_map(|o| self.outputs.get(o).filter(|n| !n.is_empty()))
+                {
+                    if !outputs.contains(name) {
+                        outputs.push(name.clone());
+                    }
+                }
+                let mut outputs = outputs.into_iter();
+                Window {
+                    id: t.window_id,
+                    title: t.current.title.clone(),
+                    app_id: t.current.app_id.clone(),
+                    output: outputs.next(),
+                    extra_outputs: outputs.collect(),
+                    is_focused: focused == Some(*tid),
+                    is_minimized: t.current.minimized,
+                    ..Default::default()
+                }
+            })
+            .collect();
+        windows.sort_by(|a, b| {
+            (a.output.is_none(), &a.output, a.id).cmp(&(b.output.is_none(), &b.output, b.id))
+        });
+        windows
+    }
+
+    /// The window list, if it changed since it was last sent.
+    fn list_update(&mut self) -> Option<Vec<Window>> {
+        let list = self.window_list();
+        if self.sent_list.as_ref() == Some(&list) {
+            return None;
+        }
+        self.sent_list = Some(list.clone());
+        Some(list)
     }
 
     fn remove_toplevel(&mut self, tid: u32) {
@@ -124,14 +210,9 @@ impl Model {
     }
 
     fn updates(&mut self) -> Vec<WindowInfo> {
-        // Compositors usually report at most one activated toplevel; if there
-        // are several, the most recently activated wins.
         let next = self
-            .toplevels
-            .iter()
-            .filter(|(_, t)| t.current.activated)
-            .max_by_key(|(_, t)| t.activated_at)
-            .map(|(tid, t)| (*tid, self.output_name(&t.current)));
+            .focused()
+            .map(|tid| (tid, self.output_name(&self.toplevels[&tid].current)));
 
         if !self.names_known {
             // No output names: one update for every bar.
@@ -215,6 +296,19 @@ impl Model {
     }
 }
 
+/// State shared between the client thread and request callers.
+struct ClientShared {
+    connection: Connection,
+    /// To schedule a publish from another thread; see `enable_list`.
+    qh: QueueHandle<ClientState>,
+    seat: Mutex<Option<wl_seat::WlSeat>>,
+    /// Window list ID -> handle.
+    handles: Mutex<HashMap<u64, ZwlrForeignToplevelHandleV1>>,
+    /// Set when something uses the window list: at `start`, or later through
+    /// `enable_list`.
+    on_list: Mutex<Option<WindowListCallback>>,
+}
+
 struct ClientState {
     manager: Option<ZwlrForeignToplevelManagerV1>,
     /// Manager global (name, version) waiting to be bound; see `start`.
@@ -222,12 +316,14 @@ struct ClientState {
     defer_manager: bool,
     /// Registry global name -> bound wl_output, to release it on removal.
     output_globals: HashMap<u32, wl_output::WlOutput>,
-    handles: HashMap<u32, ZwlrForeignToplevelHandleV1>,
+    /// Registry global name of the bound seat.
+    seat_global: Option<u32>,
     model: Model,
     /// Holds back updates until output names are known.
     ready: bool,
     sync_pending: bool,
-    on_update: WindowCallback,
+    on_update: Option<WindowCallback>,
+    shared: Arc<ClientShared>,
 }
 
 impl ClientState {
@@ -245,18 +341,26 @@ impl ClientState {
         if !self.ready {
             return;
         }
-        for info in self.model.updates() {
-            trace!("foreign-toplevel update: {:?}", info);
-            (self.on_update)(info);
+        if let Some(on_update) = &self.on_update {
+            for info in self.model.updates() {
+                trace!("foreign-toplevel update: {:?}", info);
+                on_update(info);
+            }
+        }
+        let on_list = self.shared.on_list.lock().clone();
+        if let Some(on_list) = on_list
+            && let Some(windows) = self.model.list_update()
+        {
+            trace!("foreign-toplevel window list: {} windows", windows.len());
+            on_list(WindowListSnapshot { windows });
         }
     }
 
     fn reset(&mut self) {
         self.manager = None;
-        for handle in self.handles.values() {
+        for (_, handle) in self.shared.handles.lock().drain() {
             handle.destroy();
         }
-        self.handles.clear();
         self.model.toplevels.clear();
         self.publish();
     }
@@ -293,6 +397,12 @@ impl Dispatch<wl_registry::WlRegistry, ()> for ClientState {
                         .insert(output.id().protocol_id(), String::new());
                     state.output_globals.insert(name, output);
                 }
+                "wl_seat" if state.seat_global.is_none() => {
+                    let seat: wl_seat::WlSeat =
+                        registry.bind(name, version.min(SEAT_VERSION), qh, ());
+                    *state.shared.seat.lock() = Some(seat);
+                    state.seat_global = Some(name);
+                }
                 _ => {}
             },
             wl_registry::Event::GlobalRemove { name } => {
@@ -301,10 +411,29 @@ impl Dispatch<wl_registry::WlRegistry, ()> for ClientState {
                     state.model.remove_output(output.id().protocol_id());
                     output.release();
                     state.schedule_publish(conn, qh);
+                } else if state.seat_global == Some(name) {
+                    state.seat_global = None;
+                    if let Some(seat) = state.shared.seat.lock().take()
+                        && seat.version() >= 5
+                    {
+                        seat.release();
+                    }
                 }
             }
             _ => {}
         }
+    }
+}
+
+impl Dispatch<wl_seat::WlSeat, ()> for ClientState {
+    fn event(
+        _state: &mut Self,
+        _seat: &wl_seat::WlSeat,
+        _event: wl_seat::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
     }
 }
 
@@ -350,9 +479,8 @@ impl Dispatch<ZwlrForeignToplevelManagerV1, ()> for ClientState {
     ) {
         match event {
             zwlr_foreign_toplevel_manager_v1::Event::Toplevel { toplevel } => {
-                let tid = toplevel.id().protocol_id();
-                state.model.toplevels.insert(tid, Toplevel::default());
-                state.handles.insert(tid, toplevel);
+                let window_id = state.model.add_toplevel(toplevel.id().protocol_id());
+                state.shared.handles.lock().insert(window_id, toplevel);
             }
             zwlr_foreign_toplevel_manager_v1::Event::Finished => {
                 debug!("foreign-toplevel manager finished");
@@ -379,8 +507,10 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, ()> for ClientState {
         let tid = handle.id().protocol_id();
         match event {
             zwlr_foreign_toplevel_handle_v1::Event::Closed => {
+                if let Some(toplevel) = state.model.toplevels.get(&tid) {
+                    state.shared.handles.lock().remove(&toplevel.window_id);
+                }
                 state.model.remove_toplevel(tid);
-                state.handles.remove(&tid);
                 handle.destroy();
                 state.schedule_publish(conn, qh);
                 return;
@@ -411,11 +541,15 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, ()> for ClientState {
                 pending.outputs.retain(|o| *o != oid);
             }
             zwlr_foreign_toplevel_handle_v1::Event::State { state: states } => {
-                pending.activated = states
-                    .as_chunks::<4>()
-                    .0
-                    .iter()
-                    .any(|c| u32::from_ne_bytes(*c) == State::Activated as u32);
+                let has = |s: State| {
+                    states
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .any(|c| u32::from_ne_bytes(*c) == s as u32)
+                };
+                pending.activated = has(State::Activated);
+                pending.minimized = has(State::Minimized);
             }
             _ => {}
         }
@@ -426,14 +560,19 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, ()> for ClientState {
 pub struct ForeignToplevelClient {
     running: Arc<AtomicBool>,
     thread: Mutex<Option<JoinHandle<()>>>,
+    shared: Arc<ClientShared>,
 }
 
 impl ForeignToplevelClient {
-    /// `on_update` is called on the client thread with the focused window and
-    /// with changes to the window shown on each unfocused output. Returns
-    /// `None` if there is no Wayland display or the compositor lacks the
-    /// protocol.
-    pub fn start(on_update: WindowCallback) -> Option<Self> {
+    /// `on_update`, if given, is called on the client thread with the focused
+    /// window and with changes to the window shown on each unfocused output;
+    /// `on_list`, if given, with every changed window list (see also
+    /// `enable_list`). Returns `None` if there is no Wayland display or the
+    /// compositor lacks the protocol.
+    pub fn start(
+        on_update: Option<WindowCallback>,
+        on_list: Option<WindowListCallback>,
+    ) -> Option<Self> {
         let connection = Connection::connect_to_env()
             .map_err(|e| debug!("foreign-toplevel: no Wayland connection: {e}"))
             .ok()?;
@@ -441,16 +580,24 @@ impl ForeignToplevelClient {
         let qh = queue.handle();
         let registry = connection.display().get_registry(&qh, ());
 
+        let shared = Arc::new(ClientShared {
+            connection: connection.clone(),
+            qh: qh.clone(),
+            seat: Mutex::new(None),
+            handles: Mutex::new(HashMap::new()),
+            on_list: Mutex::new(on_list),
+        });
         let mut state = ClientState {
             manager: None,
             manager_global: None,
             defer_manager: true,
             output_globals: HashMap::new(),
-            handles: HashMap::new(),
+            seat_global: None,
             model: Model::default(),
             ready: false,
             sync_pending: false,
             on_update,
+            shared: shared.clone(),
         };
 
         let roundtrip = |queue: &mut EventQueue<ClientState>, state: &mut ClientState| {
@@ -492,7 +639,64 @@ impl ForeignToplevelClient {
         Some(Self {
             running,
             thread: Mutex::new(Some(thread)),
+            shared,
         })
+    }
+
+    /// Start publishing the window list on an already running client.
+    pub fn enable_list(&self, on_list: WindowListCallback) {
+        *self.shared.on_list.lock() = Some(on_list);
+        // The sync's callback publishes on the client thread.
+        self.shared.connection.display().sync(&self.shared.qh, ());
+        self.flush();
+    }
+
+    fn handle(&self, window_id: u64) -> Option<ZwlrForeignToplevelHandleV1> {
+        let handle = self.shared.handles.lock().get(&window_id).cloned();
+        if handle.is_none() {
+            debug!("foreign-toplevel: no window with ID {window_id}");
+        }
+        handle
+    }
+
+    fn flush(&self) {
+        if let Err(e) = self.shared.connection.flush() {
+            warn!("foreign-toplevel: flush failed: {e}");
+        }
+    }
+
+    /// Ask the compositor to focus the window with this window list ID.
+    pub fn activate(&self, window_id: u64) {
+        let Some(handle) = self.handle(window_id) else {
+            return;
+        };
+        let Some(seat) = self.shared.seat.lock().clone() else {
+            debug!("foreign-toplevel: no seat to activate window {window_id} with");
+            return;
+        };
+        handle.activate(&seat);
+        self.flush();
+    }
+
+    /// Ask the compositor to minimize the window.
+    pub fn minimize(&self, window_id: u64) {
+        let Some(handle) = self.handle(window_id) else {
+            return;
+        };
+        handle.set_minimized();
+        self.flush();
+    }
+
+    /// Ask the compositor to restore the minimized window and focus it.
+    pub fn restore(&self, window_id: u64) {
+        let Some(handle) = self.handle(window_id) else {
+            return;
+        };
+        handle.unset_minimized();
+        if let Some(seat) = self.shared.seat.lock().clone() {
+            handle.activate(&seat);
+        }
+        self.flush();
     }
 
     pub fn stop(&self) {
@@ -664,6 +868,121 @@ mod tests {
             m.updates(),
             vec![info("", "DP-1", false), info("a", "DP-2", true)]
         );
+    }
+
+    /// (id, title, output, extra outputs, focused)
+    type ListEntry = (u64, String, Option<String>, Vec<String>, bool);
+
+    fn list(m: &mut Model) -> Option<Vec<ListEntry>> {
+        m.list_update().map(|windows| {
+            windows
+                .into_iter()
+                .map(|w| (w.id, w.title, w.output, w.extra_outputs, w.is_focused))
+                .collect()
+        })
+    }
+
+    /// A focused on DP-1 and B on DP-2, created in that order.
+    fn list_model() -> Model {
+        let mut m = Model {
+            outputs: HashMap::from([(1, "DP-1".into()), (2, "DP-2".into())]),
+            names_known: true,
+            ..Default::default()
+        };
+        for (tid, output, title) in [(A, 1, "a"), (B, 2, "b")] {
+            m.add_toplevel(tid);
+            let p = pending(&mut m, tid);
+            p.title = title.into();
+            p.outputs = vec![output];
+            p.activated = tid == A;
+            m.commit(tid);
+        }
+        m
+    }
+
+    #[test]
+    fn window_list_has_stable_ids() {
+        let mut m = list_model();
+        assert_eq!(
+            list(&mut m),
+            Some(vec![
+                (1, "a".into(), Some("DP-1".into()), vec![], true),
+                (2, "b".into(), Some("DP-2".into()), vec![], false),
+            ])
+        );
+
+        // A closes and its protocol ID is reused by a new window.
+        m.remove_toplevel(A);
+        m.add_toplevel(A);
+        let p = pending(&mut m, A);
+        p.title = "c".into();
+        p.outputs = vec![1];
+        m.commit(A);
+        assert_eq!(
+            list(&mut m),
+            Some(vec![
+                (3, "c".into(), Some("DP-1".into()), vec![], false),
+                (2, "b".into(), Some("DP-2".into()), vec![], false),
+            ])
+        );
+    }
+
+    #[test]
+    fn window_list_groups_by_output_in_creation_order() {
+        let mut m = list_model();
+        list(&mut m);
+        // Interleave creation across outputs, plus one window with no output.
+        for (tid, outputs, title) in [(30, vec![1], "c"), (40, vec![], "d"), (50, vec![2], "e")] {
+            m.add_toplevel(tid);
+            let p = pending(&mut m, tid);
+            p.title = title.into();
+            p.outputs = outputs;
+            m.commit(tid);
+        }
+        let order: Vec<(u64, Option<String>)> = list(&mut m)
+            .unwrap()
+            .into_iter()
+            .map(|(id, _, output, _, _)| (id, output))
+            .collect();
+        assert_eq!(
+            order,
+            vec![
+                (1, Some("DP-1".into())),
+                (3, Some("DP-1".into())),
+                (2, Some("DP-2".into())),
+                (5, Some("DP-2".into())),
+                (4, None),
+            ]
+        );
+    }
+
+    #[test]
+    fn window_list_skips_uncommitted_and_unchanged() {
+        let mut m = list_model();
+        list(&mut m);
+        const C: u32 = 30;
+        m.add_toplevel(C);
+        pending(&mut m, C).title = "c".into();
+        assert_eq!(list(&mut m), None);
+
+        m.commit(C);
+        assert_eq!(list(&mut m).map(|l| l.len()), Some(3));
+        assert_eq!(list(&mut m), None);
+    }
+
+    #[test]
+    fn window_list_reports_every_output_and_minimized_state() {
+        let mut m = list_model();
+        list(&mut m);
+        let b = pending(&mut m, B);
+        b.outputs = vec![2, 1];
+        b.minimized = true;
+        m.commit(B);
+        let windows = m.list_update().unwrap();
+        assert_eq!(windows[1].output.as_deref(), Some("DP-2"));
+        assert_eq!(windows[1].extra_outputs, vec!["DP-1".to_string()]);
+        assert!(windows[1].is_on_output("DP-1"));
+        assert!(windows[1].is_minimized);
     }
 
     #[test]

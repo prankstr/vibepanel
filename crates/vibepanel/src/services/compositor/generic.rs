@@ -1,10 +1,11 @@
 //! The generic backend, for compositors without a native IPC backend (labwc,
 //! COSMIC, river, ...).
 //!
-//! Workspaces come from `ext-workspace-v1` and window titles from
-//! wlr-foreign-toplevel-management; either may be missing. ext-workspace has
-//! no notion of windows, so occupancy is reported as unknown
-//! (`occupancy_known = false`) and there is no window list.
+//! Workspaces come from `ext-workspace-v1`, which may be missing. It has no
+//! notion of windows, so occupancy is reported as unknown
+//! (`occupancy_known = false`). Window titles and the taskbar's window list
+//! come from wlr-foreign-toplevel-management, which the compositor manager
+//! runs (see `provides_window_titles` and `provides_window_list`).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -15,7 +16,6 @@ use tracing::{debug, info};
 use super::ext_workspace::client::{
     ExtWorkspace, ExtWorkspaceClient, ExtWorkspaceModel, MANAGER_INTERFACE,
 };
-use super::foreign_toplevel::ForeignToplevelClient;
 use crate::services::compositor::{
     CompositorBackend, WindowCallback, WindowInfo, WorkspaceCallback, WorkspaceMeta,
     WorkspaceSnapshot,
@@ -113,16 +113,12 @@ fn workspaces_from_model(model: &ExtWorkspaceModel) -> (Vec<WorkspaceMeta>, Work
 struct BackendState {
     workspaces: Vec<WorkspaceMeta>,
     snapshot: WorkspaceSnapshot,
-    /// Last focused update, including empty ones. Its output is the one that
-    /// last had a focused window: a guess, as the protocol has no output focus.
-    focused_window: Option<WindowInfo>,
 }
 
-/// The generic backend: ext-workspace workspaces and foreign-toplevel titles.
+/// The generic backend: ext-workspace workspaces.
 pub struct GenericBackend {
     state: Arc<RwLock<BackendState>>,
     client: Mutex<Option<ExtWorkspaceClient>>,
-    toplevels: Mutex<Option<ForeignToplevelClient>>,
 }
 
 impl GenericBackend {
@@ -130,7 +126,6 @@ impl GenericBackend {
         Self {
             state: Arc::new(RwLock::new(BackendState::default())),
             client: Mutex::new(None),
-            toplevels: Mutex::new(None),
         }
     }
 }
@@ -142,8 +137,8 @@ impl Default for GenericBackend {
 }
 
 impl CompositorBackend for GenericBackend {
-    fn start(&self, on_workspace_update: WorkspaceCallback, on_window_update: WindowCallback) {
-        if self.client.lock().is_some() || self.toplevels.lock().is_some() {
+    fn start(&self, on_workspace_update: WorkspaceCallback, _on_window_update: WindowCallback) {
+        if self.client.lock().is_some() {
             return;
         }
         let state = self.state.clone();
@@ -161,23 +156,11 @@ impl CompositorBackend for GenericBackend {
             info!("generic backend: compositor does not offer {MANAGER_INTERFACE}, no workspaces");
         }
         *self.client.lock() = client;
-
-        let state = self.state.clone();
-        let toplevels = ForeignToplevelClient::start(Arc::new(move |info| {
-            if info.focused {
-                state.write().focused_window = Some(info.clone());
-            }
-            on_window_update(info);
-        }));
-        *self.toplevels.lock() = toplevels;
     }
 
     fn stop(&self) {
         if let Some(client) = self.client.lock().take() {
             client.stop();
-        }
-        if let Some(toplevels) = self.toplevels.lock().take() {
-            toplevels.stop();
         }
     }
 
@@ -190,15 +173,11 @@ impl CompositorBackend for GenericBackend {
     }
 
     fn get_focused_window(&self) -> Option<WindowInfo> {
-        self.state
-            .read()
-            .focused_window
-            .clone()
-            .filter(|w| !w.title.is_empty() || !w.app_id.is_empty())
+        None
     }
 
-    fn get_focused_output(&self) -> Option<String> {
-        self.state.read().focused_window.as_ref()?.output.clone()
+    fn provides_window_titles(&self) -> bool {
+        false
     }
 
     fn switch_workspace(&self, workspace_id: i32) {

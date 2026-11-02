@@ -279,6 +279,9 @@ pub mod state {
     /// Focused window state (`.focused`).
     pub const FOCUSED: &str = "focused";
 
+    /// Minimized window state (`.minimized`).
+    pub const MINIMIZED: &str = "minimized";
+
     /// Element under the pointer, when GTK's `:hover` can't express it (`.hovered`).
     pub const HOVERED: &str = "hovered";
 

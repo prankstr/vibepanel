@@ -472,6 +472,7 @@ impl NiriState {
                 is_urgent: win.is_urgent,
                 // Niri has no scratchpad concept.
                 is_scratchpad: false,
+                ..Default::default()
             })
             .collect()
     }
@@ -851,7 +852,7 @@ impl CompositorBackend for NiriBackend {
         self.state.read().window_list()
     }
 
-    fn supports_window_list(&self) -> bool {
+    fn provides_window_list(&self) -> bool {
         true
     }
 

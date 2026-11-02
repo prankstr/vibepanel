@@ -212,6 +212,9 @@ pub struct Window {
     pub extra_workspace_ids: Vec<i32>,
     /// Output/monitor name the window is on.
     pub output: Option<String>,
+    /// Further outputs the window overlaps, besides `output`
+    /// (wlr-foreign-toplevel reports every output). Empty for most windows.
+    pub extra_outputs: Vec<String>,
     /// Whether this window is currently focused.
     pub is_focused: bool,
     /// Whether this window is requesting attention.
@@ -220,12 +223,20 @@ pub struct Window {
     /// a regular or named MangoWC scratchpad. Compositors
     /// without a scratchpad concept always report `false`.
     pub is_scratchpad: bool,
+    /// Whether this window is minimized. Only reported by the
+    /// wlr-foreign-toplevel window list.
+    pub is_minimized: bool,
 }
 
 impl Window {
     /// Whether the window is shown on the given workspace.
     pub fn is_on_workspace(&self, workspace_id: i32) -> bool {
         self.workspace_id == Some(workspace_id) || self.extra_workspace_ids.contains(&workspace_id)
+    }
+
+    /// Whether the window is shown on the given output.
+    pub fn is_on_output(&self, output: &str) -> bool {
+        self.output.as_deref() == Some(output) || self.extra_outputs.iter().any(|o| o == output)
     }
 }
 
@@ -299,6 +310,12 @@ pub trait CompositorBackend: Send + Sync {
     /// Returns the last known focused window info, or None if
     /// no window is focused or state is unknown.
     fn get_focused_window(&self) -> Option<WindowInfo>;
+
+    /// Whether the backend reports window titles through `on_window_update`.
+    /// When it doesn't, the manager gets them from wlr-foreign-toplevel.
+    fn provides_window_titles(&self) -> bool {
+        true
+    }
 
     /// Get the connector name of the focused output (e.g., "DP-1").
     ///
@@ -379,8 +396,10 @@ pub trait CompositorBackend: Send + Sync {
         Vec::new()
     }
 
-    /// Whether `list_windows` reports windows with their workspaces.
-    fn supports_window_list(&self) -> bool {
+    /// Whether the backend reports its own window list (`list_windows`), with
+    /// workspaces. When it doesn't, the manager gets the list from
+    /// wlr-foreign-toplevel, without workspaces.
+    fn provides_window_list(&self) -> bool {
         false
     }
 

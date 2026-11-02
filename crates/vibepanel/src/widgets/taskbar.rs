@@ -24,7 +24,7 @@ use crate::widgets::WidgetConfig;
 use crate::widgets::base::BaseWidget;
 use crate::widgets::warn_unknown_options;
 use crate::widgets::window_button::{
-    app_icon, connect_focus_on_click, sync_exclusive_class, window_display_title, window_tooltip,
+    app_icon, connect_window_click, sync_exclusive_class, window_display_title, window_tooltip,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -241,8 +241,51 @@ fn taskbar_button_state_class(
     }
 }
 
-fn sync_taskbar_button_state(button: &Widget, target_class: Option<&str>) {
-    sync_exclusive_class(button, &[widget::ACTIVE, state::URGENT], target_class);
+fn sync_taskbar_button_state(
+    button: &Widget,
+    window: &crate::services::compositor::Window,
+    config: &TaskbarConfig,
+) {
+    sync_exclusive_class(
+        button,
+        &[widget::ACTIVE, state::URGENT],
+        taskbar_button_state_class(window, config),
+    );
+    sync_exclusive_class(
+        button,
+        &[state::MINIMIZED],
+        window.is_minimized.then_some(state::MINIMIZED),
+    );
+}
+
+/// Whether the window belongs on the taskbar of `output_id`.
+fn shown_on_output(
+    window: &crate::services::compositor::Window,
+    config: &TaskbarConfig,
+    output_id: Option<&str>,
+) -> bool {
+    match output_id {
+        Some(output_id) if config.filter_by_output => {
+            window.output.is_none() || window.is_on_output(output_id)
+        }
+        _ => true,
+    }
+}
+
+/// Whether an output-boundary separator belongs between `prev` and `cur`.
+///
+/// A taskbar filtered to one output never shows output boundaries: windows
+/// spanning outputs appear there even when their primary output differs.
+fn output_boundary(
+    prev: Option<&str>,
+    cur: Option<&str>,
+    config: &TaskbarConfig,
+    output_id: Option<&str>,
+) -> bool {
+    if config.filter_by_output && output_id.is_some() {
+        return false;
+    }
+    matches!((prev, cur), (Some(p), Some(c)) if p != c)
 }
 
 /// Taskbar widget that displays all windows as clickable buttons.
@@ -470,10 +513,7 @@ fn update_window_buttons(
             if !config.show_scratchpad_windows && win.is_scratchpad {
                 return false;
             }
-            if !config.filter_by_output || output_id.is_none() {
-                return true;
-            }
-            win.output.as_deref() == output_id || win.output.is_none()
+            shown_on_output(win, config, output_id)
         })
         .cloned()
         .collect();
@@ -555,10 +595,8 @@ fn update_window_buttons(
         let mut prev_output: Option<&str> = None;
         for window in windows.iter() {
             if config.show_workspace_separator {
-                let output_changed = match (prev_output, window.output.as_deref()) {
-                    (Some(prev), Some(cur)) => prev != cur,
-                    _ => false,
-                };
+                let output_changed =
+                    output_boundary(prev_output, window.output.as_deref(), config, output_id);
 
                 if output_changed {
                     // Output boundary — insert a more prominent separator.
@@ -745,10 +783,7 @@ fn create_window_button(
         .style_context()
         .add_provider(button_css, gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION);
 
-    sync_taskbar_button_state(
-        button.upcast_ref(),
-        taskbar_button_state_class(window, config),
-    );
+    sync_taskbar_button_state(button.upcast_ref(), window, config);
 
     if config.show_icon {
         let icon = app_icon(&window.app_id, effective_icon);
@@ -766,7 +801,11 @@ fn create_window_button(
     }
 
     let window_id = window.id;
-    connect_focus_on_click(&button, move || Some(window_id));
+    connect_window_click(
+        &button,
+        move || Some(window_id),
+        |window_id| WindowListService::global().activate_or_minimize(window_id),
+    );
 
     TooltipManager::global().set_styled_tooltip(&button, &window_tooltip(window));
 
@@ -778,7 +817,7 @@ fn update_button_state(
     window: &crate::services::compositor::Window,
     config: &TaskbarConfig,
 ) {
-    sync_taskbar_button_state(button, taskbar_button_state_class(window, config));
+    sync_taskbar_button_state(button, window, config);
 
     TooltipManager::global().set_styled_tooltip(button, &window_tooltip(window));
 
@@ -869,6 +908,57 @@ mod tests {
             WorkspaceSeparatorLabel::Number
         );
         assert!(!config.show_scratchpad_windows);
+    }
+
+    #[test]
+    fn shown_on_every_output_the_window_is_on() {
+        let window = crate::services::compositor::Window {
+            output: Some("DP-1".into()),
+            extra_outputs: vec!["DP-2".into()],
+            ..Default::default()
+        };
+        let config = TaskbarConfig::default();
+        assert!(shown_on_output(&window, &config, Some("DP-1")));
+        assert!(shown_on_output(&window, &config, Some("DP-2")));
+        assert!(!shown_on_output(&window, &config, Some("HDMI-A-1")));
+
+        let unfiltered = TaskbarConfig {
+            filter_by_output: false,
+            ..TaskbarConfig::default()
+        };
+        assert!(shown_on_output(&window, &unfiltered, Some("HDMI-A-1")));
+    }
+
+    #[test]
+    fn no_output_separator_on_filtered_taskbar() {
+        // A window primarily on DP-1 spanning DP-2, followed by a DP-2 window,
+        // must not get an output separator on DP-2's filtered taskbar.
+        let config = TaskbarConfig::default();
+        assert!(!output_boundary(
+            Some("DP-1"),
+            Some("DP-2"),
+            &config,
+            Some("DP-2")
+        ));
+
+        let unfiltered = TaskbarConfig {
+            filter_by_output: false,
+            ..TaskbarConfig::default()
+        };
+        assert!(output_boundary(
+            Some("DP-1"),
+            Some("DP-2"),
+            &unfiltered,
+            Some("DP-2")
+        ));
+        assert!(output_boundary(Some("DP-1"), Some("DP-2"), &config, None));
+        assert!(!output_boundary(
+            Some("DP-1"),
+            Some("DP-1"),
+            &unfiltered,
+            None
+        ));
+        assert!(!output_boundary(None, Some("DP-1"), &unfiltered, None));
     }
 
     #[test]

@@ -78,6 +78,11 @@ impl WindowListService {
         manager.focus_window(window_id);
     }
 
+    /// Minimize the focused window, or focus it otherwise.
+    pub fn activate_or_minimize(&self, window_id: u64) {
+        CompositorManager::global().activate_or_minimize(window_id);
+    }
+
     fn handle_update(&self, window_list: &WindowListSnapshot) {
         *self.current.borrow_mut() = window_list.clone();
         *self.ready.borrow_mut() = true;

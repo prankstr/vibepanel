@@ -412,7 +412,7 @@ impl CompositorBackend for MangoBackend {
         self.shared.windows.read().clone()
     }
 
-    fn supports_window_list(&self) -> bool {
+    fn provides_window_list(&self) -> bool {
         true
     }
 
@@ -889,6 +889,7 @@ fn client_value_to_window(value: &Value) -> Option<Window> {
             .and_then(Value::as_bool)
             .unwrap_or(false),
         is_scratchpad: is_scratchpad_client(value),
+        ..Default::default()
     })
 }
 
