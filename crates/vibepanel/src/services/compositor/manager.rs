@@ -14,8 +14,10 @@
 //! - Alongside the Hyprland backend, an optional ext-workspace overlay whose state
 //!   is merged over the backend's workspace state before it is published (see
 //!   `ext_workspace::overlay`). All consumers see the merged state.
-//! - A wlr-foreign-toplevel client for window titles, when the backend has
-//!   none of its own (see `CompositorBackend::provides_window_titles`).
+//! - A wlr-foreign-toplevel client for what the backend lacks: window titles
+//!   (see `CompositorBackend::provides_window_titles`), and the taskbar's
+//!   window list with focus and minimize (see `supports_window_list`). The
+//!   list is only started once something subscribes to it.
 //!
 //! # Usage
 //!
@@ -28,7 +30,7 @@
 //! });
 //! ```
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -85,6 +87,24 @@ struct ExtOverlay {
     state: ExtOverlayState,
 }
 
+/// foreign-toplevel client plus what it provides in place of the backend.
+struct ToplevelSource {
+    client: ForeignToplevelClient,
+    titles: bool,
+    list: bool,
+}
+
+/// Forwards window list updates from any thread to the main loop.
+fn window_list_callback() -> super::WindowListCallback {
+    // No coalescing needed: window changes are relatively infrequent and
+    // each event should update the UI.
+    Arc::new(move |snapshot| {
+        glib::idle_add_once(move || {
+            CompositorManager::global().handle_window_list_update(snapshot);
+        });
+    })
+}
+
 // Thread-local singleton storage for CompositorManager
 thread_local! {
     static COMPOSITOR_MANAGER: RefCell<Option<Rc<CompositorManager>>> = const { RefCell::new(None) };
@@ -102,8 +122,10 @@ pub struct CompositorManager {
     /// Latest window update per output (`None` key for unscoped updates).
     last_window_infos: RefCell<HashMap<Option<String>, WindowInfo>>,
     ext_overlay: RefCell<Option<ExtOverlay>>,
-    /// Window titles from wlr-foreign-toplevel, for backends without their own.
-    toplevels: RefCell<Option<ForeignToplevelClient>>,
+    /// wlr-foreign-toplevel, for what the backend lacks.
+    toplevels: RefCell<Option<ToplevelSource>>,
+    /// Whether the first window list subscriber has been seen.
+    window_list_requested: Cell<bool>,
     last_keyboard_layout: RefCell<Option<KeyboardLayoutInfo>>,
     last_window_layouts: RefCell<Option<WindowLayoutSnapshot>>,
     last_window_list: RefCell<Option<super::WindowListSnapshot>>,
@@ -126,6 +148,7 @@ impl CompositorManager {
             last_window_infos: RefCell::new(HashMap::new()),
             ext_overlay: RefCell::new(None),
             toplevels: RefCell::new(None),
+            window_list_requested: Cell::new(false),
             last_keyboard_layout: RefCell::new(None),
             last_window_layouts: RefCell::new(None),
             last_window_list: RefCell::new(None),
@@ -179,6 +202,7 @@ impl CompositorManager {
                 last_window_infos: RefCell::new(HashMap::new()),
                 ext_overlay: RefCell::new(None),
                 toplevels: RefCell::new(None),
+                window_list_requested: Cell::new(false),
                 last_keyboard_layout: RefCell::new(None),
                 last_window_layouts: RefCell::new(None),
                 last_window_list: RefCell::new(None),
@@ -343,6 +367,7 @@ impl CompositorManager {
         F: Fn(&super::WindowListSnapshot) + 'static,
     {
         let id = self.window_list_callbacks.register(callback);
+        self.start_toplevel_list();
 
         // Immediately send current state if available
         if let Some(ref snapshot) = *self.last_window_list.borrow() {
@@ -397,6 +422,14 @@ impl CompositorManager {
 
     /// Get the list of all windows.
     pub fn list_windows(&self) -> Vec<super::Window> {
+        if self.toplevel_list() {
+            return self
+                .last_window_list
+                .borrow()
+                .as_ref()
+                .map(|snapshot| snapshot.windows.clone())
+                .unwrap_or_default();
+        }
         if let Some(ref backend) = *self.backend.borrow() {
             backend.list_windows()
         } else {
@@ -414,14 +447,69 @@ impl CompositorManager {
 
     /// Focus a specific window by its ID.
     pub fn focus_window(&self, window_id: u64) {
-        if let Some(ref backend) = *self.backend.borrow() {
+        if let Some(source) = self.toplevels.borrow().as_ref().filter(|s| s.list) {
+            source.client.activate(window_id);
+        } else if let Some(ref backend) = *self.backend.borrow() {
             backend.focus_window(window_id);
+        }
+    }
+
+    /// Whether windows can be minimized (only via foreign-toplevel).
+    pub fn supports_minimize(&self) -> bool {
+        self.toplevel_list()
+    }
+
+    /// Minimize a window, or restore and focus it.
+    pub fn minimize_window(&self, window_id: u64, minimized: bool) {
+        if let Some(source) = self.toplevels.borrow().as_ref().filter(|s| s.list) {
+            source.client.set_minimized(window_id, minimized);
         }
     }
 
     /// Whether window titles come from foreign-toplevel.
     fn toplevel_titles(&self) -> bool {
-        self.toplevels.borrow().is_some()
+        self.toplevels.borrow().as_ref().is_some_and(|s| s.titles)
+    }
+
+    /// Whether the window list comes from foreign-toplevel.
+    fn toplevel_list(&self) -> bool {
+        self.toplevels.borrow().as_ref().is_some_and(|s| s.list)
+    }
+
+    /// On the first window list subscriber, get the list from foreign-toplevel
+    /// if the backend has none. A running title client also takes on the
+    /// list, so there is at most one connection.
+    fn start_toplevel_list(&self) {
+        let Some(has_list) = self
+            .backend
+            .borrow()
+            .as_ref()
+            .map(|backend| backend.supports_window_list())
+        else {
+            return;
+        };
+        if self.window_list_requested.replace(true) || has_list {
+            return;
+        }
+        let mut toplevels = self.toplevels.borrow_mut();
+        match toplevels.as_mut() {
+            Some(source) => {
+                source.client.enable_list(window_list_callback());
+                source.list = true;
+            }
+            None => {
+                *toplevels = ForeignToplevelClient::start(None, Some(window_list_callback())).map(
+                    |client| ToplevelSource {
+                        client,
+                        titles: false,
+                        list: true,
+                    },
+                );
+            }
+        }
+        if toplevels.is_some() {
+            info!("Window list from wlr-foreign-toplevel");
+        }
     }
 
     /// Get the backend name (e.g., "Hyprland", "Niri", "MangoWC").
@@ -598,25 +686,25 @@ impl CompositorManager {
             });
         });
 
-        // Window list events: no coalescing needed — window changes are
-        // relatively infrequent and each event should update the UI.
-        let on_window_list_update: super::WindowListCallback =
-            Arc::new(move |window_list_snapshot| {
-                glib::idle_add_once(move || {
-                    CompositorManager::global().handle_window_list_update(window_list_snapshot);
-                });
-            });
-
         // Register callbacks before start() so the backend
         // can fire them during initialization.
         backend.set_keyboard_layout_callback(on_keyboard_layout_update);
         backend.set_window_layout_callback(on_window_layout_update);
-        backend.set_window_list_callback(on_window_list_update);
+        backend.set_window_list_callback(window_list_callback());
 
         backend.start(on_workspace_update, on_window_update.clone());
 
+        // The window list is started on its first subscriber instead; see
+        // `start_toplevel_list`.
         if !backend.provides_window_titles() {
-            *this.toplevels.borrow_mut() = ForeignToplevelClient::start(on_window_update);
+            *this.toplevels.borrow_mut() =
+                ForeignToplevelClient::start(Some(on_window_update), None).map(|client| {
+                    ToplevelSource {
+                        client,
+                        titles: true,
+                        list: false,
+                    }
+                });
         }
 
         // Store whatever state the backend has so far. Most backends load it
@@ -698,8 +786,8 @@ impl Drop for CompositorManager {
         if let Some(overlay) = self.ext_overlay.borrow_mut().take() {
             overlay.client.stop();
         }
-        if let Some(toplevels) = self.toplevels.borrow_mut().take() {
-            toplevels.stop();
+        if let Some(source) = self.toplevels.borrow_mut().take() {
+            source.client.stop();
         }
         if let Some(ref backend) = *self.backend.borrow() {
             backend.stop();

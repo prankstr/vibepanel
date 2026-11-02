@@ -804,6 +804,10 @@ workspace-container.has-highlight > .workspace-indicator.active.clickable:hover 
     color: var(--color-accent-text, #fff);
 }}
 
+.taskbar-button.minimized > * {{
+    opacity: 0.5;
+}}
+
 "#
     )
 }

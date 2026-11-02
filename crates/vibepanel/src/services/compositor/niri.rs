@@ -472,6 +472,7 @@ impl NiriState {
                 is_urgent: win.is_urgent,
                 // Niri has no scratchpad concept.
                 is_scratchpad: false,
+                ..Default::default()
             })
             .collect()
     }

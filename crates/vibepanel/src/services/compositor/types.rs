@@ -212,6 +212,9 @@ pub struct Window {
     pub extra_workspace_ids: Vec<i32>,
     /// Output/monitor name the window is on.
     pub output: Option<String>,
+    /// Further outputs the window overlaps, besides `output`
+    /// (wlr-foreign-toplevel reports every output). Empty for most windows.
+    pub extra_outputs: Vec<String>,
     /// Whether this window is currently focused.
     pub is_focused: bool,
     /// Whether this window is requesting attention.
@@ -220,12 +223,20 @@ pub struct Window {
     /// a regular or named MangoWC scratchpad. Compositors
     /// without a scratchpad concept always report `false`.
     pub is_scratchpad: bool,
+    /// Whether this window is minimized. Only reported when the window list
+    /// supports minimizing (`CompositorManager::supports_minimize`).
+    pub is_minimized: bool,
 }
 
 impl Window {
     /// Whether the window is shown on the given workspace.
     pub fn is_on_workspace(&self, workspace_id: i32) -> bool {
         self.workspace_id == Some(workspace_id) || self.extra_workspace_ids.contains(&workspace_id)
+    }
+
+    /// Whether the window is shown on the given output.
+    pub fn is_on_output(&self, output: &str) -> bool {
+        self.output.as_deref() == Some(output) || self.extra_outputs.iter().any(|o| o == output)
     }
 }
 

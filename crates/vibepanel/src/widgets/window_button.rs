@@ -90,6 +90,17 @@ pub(crate) fn connect_focus_on_click(
     widget: &impl IsA<Widget>,
     target: impl Fn() -> Option<u64> + 'static,
 ) {
+    connect_window_click(widget, target, |window_id| {
+        WindowListService::global().focus_window(window_id);
+    });
+}
+
+/// Like `connect_focus_on_click`, but runs `action` on the chosen window.
+pub(crate) fn connect_window_click(
+    widget: &impl IsA<Widget>,
+    target: impl Fn() -> Option<u64> + 'static,
+    action: impl Fn(u64) + 'static,
+) {
     let gesture = GestureClick::new();
     gesture.set_button(BUTTON_PRIMARY);
     gesture.connect_pressed(|gesture, _n_press, _x, _y| {
@@ -101,7 +112,7 @@ pub(crate) fn connect_focus_on_click(
         }
         TooltipManager::global().cancel_and_hide();
         if let Some(window_id) = target() {
-            WindowListService::global().focus_window(window_id);
+            action(window_id);
         }
     });
     widget.add_controller(gesture);
