@@ -655,9 +655,6 @@ impl SwayBackend {
         window_list_callback: Option<WindowListCallback>,
         wm: &str,
     ) {
-        Self::fetch_all(&socket_path, &shared, wm);
-        Self::fetch_keyboard_layout(&socket_path, &shared, wm);
-
         let emit_window_list = || {
             if let Some(ref cb) = window_list_callback {
                 let windows = shared.windows.read().clone();
@@ -665,16 +662,21 @@ impl SwayBackend {
             }
         };
 
-        if let Some((ref ws_cb, ref win_cb)) = callbacks {
-            ws_cb(shared.workspace_snapshot.read().clone());
-            win_cb(Self::window_update(&shared));
-        }
-        emit_window_list();
-        if let Some(ref kb_cb) = kb_callback
-            && let Some(ref info) = *shared.keyboard_layout.read()
-        {
-            kb_cb(info.clone());
-        }
+        let resync = || {
+            Self::fetch_all(&socket_path, &shared, wm);
+            Self::fetch_keyboard_layout(&socket_path, &shared, wm);
+
+            if let Some((ref ws_cb, ref win_cb)) = callbacks {
+                ws_cb(shared.workspace_snapshot.read().clone());
+                win_cb(Self::window_update(&shared));
+            }
+            emit_window_list();
+            if let Some(ref kb_cb) = kb_callback
+                && let Some(ref info) = *shared.keyboard_layout.read()
+            {
+                kb_cb(info.clone());
+            }
+        };
 
         let mut backoff_ms = RECONNECT_INITIAL_MS;
 
@@ -745,6 +747,10 @@ impl SwayBackend {
                     continue;
                 }
             }
+
+            // Fetch after subscribing so no change is missed, including any
+            // made while disconnected.
+            resync();
 
             // 1s read timeout so we can check the `running` flag between events
             let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
