@@ -474,7 +474,7 @@ impl CompositorManager {
     }
 
     /// Whether minimize requests can be sent (only via foreign-toplevel).
-    /// Compositors may ignore them; Sway, for one, has no minimized state.
+    /// Compositors may ignore them.
     fn supports_minimize(&self) -> bool {
         self.toplevel_list()
     }
