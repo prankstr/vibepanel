@@ -317,7 +317,6 @@ struct ClientState {
     output_globals: HashMap<u32, wl_output::WlOutput>,
     /// Registry global name of the bound seat.
     seat_global: Option<u32>,
-    handles: HashMap<u32, ZwlrForeignToplevelHandleV1>,
     model: Model,
     /// Holds back updates until output names are known.
     ready: bool,
@@ -358,11 +357,9 @@ impl ClientState {
 
     fn reset(&mut self) {
         self.manager = None;
-        self.shared.handles.lock().clear();
-        for handle in self.handles.values() {
+        for (_, handle) in self.shared.handles.lock().drain() {
             handle.destroy();
         }
-        self.handles.clear();
         self.model.toplevels.clear();
         self.publish();
     }
@@ -481,14 +478,8 @@ impl Dispatch<ZwlrForeignToplevelManagerV1, ()> for ClientState {
     ) {
         match event {
             zwlr_foreign_toplevel_manager_v1::Event::Toplevel { toplevel } => {
-                let tid = toplevel.id().protocol_id();
-                let window_id = state.model.add_toplevel(tid);
-                state
-                    .shared
-                    .handles
-                    .lock()
-                    .insert(window_id, toplevel.clone());
-                state.handles.insert(tid, toplevel);
+                let window_id = state.model.add_toplevel(toplevel.id().protocol_id());
+                state.shared.handles.lock().insert(window_id, toplevel);
             }
             zwlr_foreign_toplevel_manager_v1::Event::Finished => {
                 debug!("foreign-toplevel manager finished");
@@ -519,7 +510,6 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, ()> for ClientState {
                     state.shared.handles.lock().remove(&toplevel.window_id);
                 }
                 state.model.remove_toplevel(tid);
-                state.handles.remove(&tid);
                 handle.destroy();
                 state.schedule_publish(conn, qh);
                 return;
@@ -602,7 +592,6 @@ impl ForeignToplevelClient {
             defer_manager: true,
             output_globals: HashMap::new(),
             seat_global: None,
-            handles: HashMap::new(),
             model: Model::default(),
             ready: false,
             sync_pending: false,
