@@ -87,7 +87,8 @@ struct Model {
     /// removed, so titles keep waiting for an output instead of going to
     /// every bar.
     names_known: bool,
-    window_ids: u64,
+    /// Last window list ID handed out; IDs start at 1 and are never reused.
+    last_window_id: u64,
     /// Last window list sent.
     sent_list: Option<Vec<Window>>,
 }
@@ -95,15 +96,15 @@ struct Model {
 impl Model {
     /// Track a new toplevel; returns its window list ID.
     fn add_toplevel(&mut self, tid: u32) -> u64 {
-        self.window_ids += 1;
+        self.last_window_id += 1;
         self.toplevels.insert(
             tid,
             Toplevel {
-                window_id: self.window_ids,
+                window_id: self.last_window_id,
                 ..Default::default()
             },
         );
-        self.window_ids
+        self.last_window_id
     }
 
     fn commit(&mut self, tid: u32) {
@@ -677,18 +678,23 @@ impl ForeignToplevelClient {
         self.flush();
     }
 
-    /// Ask the compositor to minimize the window, or to restore and focus it.
-    pub fn set_minimized(&self, window_id: u64, minimized: bool) {
+    /// Ask the compositor to minimize the window.
+    pub fn minimize(&self, window_id: u64) {
         let Some(handle) = self.handle(window_id) else {
             return;
         };
-        if minimized {
-            handle.set_minimized();
-        } else {
-            handle.unset_minimized();
-            if let Some(seat) = self.shared.seat.lock().clone() {
-                handle.activate(&seat);
-            }
+        handle.set_minimized();
+        self.flush();
+    }
+
+    /// Ask the compositor to restore the minimized window and focus it.
+    pub fn restore(&self, window_id: u64) {
+        let Some(handle) = self.handle(window_id) else {
+            return;
+        };
+        handle.unset_minimized();
+        if let Some(seat) = self.shared.seat.lock().clone() {
+            handle.activate(&seat);
         }
         self.flush();
     }

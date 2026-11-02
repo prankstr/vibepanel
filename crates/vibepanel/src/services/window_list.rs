@@ -11,24 +11,7 @@ use std::rc::Rc;
 use tracing::debug;
 
 use super::callbacks::{CallbackId, Callbacks};
-use super::compositor::{CompositorManager, Window, WindowListSnapshot};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ClickAction {
-    Focus,
-    Minimize,
-    Restore,
-}
-
-fn click_action(window: &Window) -> ClickAction {
-    if window.is_minimized {
-        ClickAction::Restore
-    } else if window.is_focused {
-        ClickAction::Minimize
-    } else {
-        ClickAction::Focus
-    }
-}
+use super::compositor::{CompositorManager, WindowListSnapshot};
 
 /// Shared, process-wide window list service.
 ///
@@ -95,26 +78,9 @@ impl WindowListService {
         manager.focus_window(window_id);
     }
 
-    /// Restore a minimized window, minimize the focused one, or focus it
-    /// otherwise. Without minimize support this only focuses.
+    /// Minimize the focused window, or focus it otherwise.
     pub fn activate_or_minimize(&self, window_id: u64) {
-        let manager = CompositorManager::global();
-        if !manager.supports_minimize() {
-            manager.focus_window(window_id);
-            return;
-        }
-        let window = self
-            .current
-            .borrow()
-            .windows
-            .iter()
-            .find(|w| w.id == window_id)
-            .cloned();
-        match window.map(|w| click_action(&w)) {
-            Some(ClickAction::Restore) => manager.minimize_window(window_id, false),
-            Some(ClickAction::Minimize) => manager.minimize_window(window_id, true),
-            Some(ClickAction::Focus) | None => manager.focus_window(window_id),
-        }
+        CompositorManager::global().activate_or_minimize(window_id);
     }
 
     fn handle_update(&self, window_list: &WindowListSnapshot) {
@@ -141,23 +107,5 @@ impl Drop for WindowListService {
             manager.unregister_window_list_callback(id);
         }
         debug!("WindowListService dropped");
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn click_restores_minimized_minimizes_focused_and_focuses_others() {
-        let window = |is_focused, is_minimized| Window {
-            is_focused,
-            is_minimized,
-            ..Default::default()
-        };
-        assert_eq!(click_action(&window(false, true)), ClickAction::Restore);
-        assert_eq!(click_action(&window(true, true)), ClickAction::Restore);
-        assert_eq!(click_action(&window(true, false)), ClickAction::Minimize);
-        assert_eq!(click_action(&window(false, false)), ClickAction::Focus);
     }
 }

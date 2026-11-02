@@ -30,7 +30,7 @@
 //! });
 //! ```
 
-use std::cell::{Cell, RefCell};
+use std::cell::{Cell, Ref, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -447,23 +447,55 @@ impl CompositorManager {
 
     /// Focus a specific window by its ID.
     pub fn focus_window(&self, window_id: u64) {
-        if let Some(source) = self.toplevels.borrow().as_ref().filter(|s| s.list) {
-            source.client.activate(window_id);
+        if let Some(client) = self.list_client() {
+            // Whether activating a minimized window also restores it is up
+            // to the compositor, so restore it explicitly.
+            if self.listed_window(window_id, |w| w.is_minimized) {
+                client.restore(window_id);
+            } else {
+                client.activate(window_id);
+            }
         } else if let Some(ref backend) = *self.backend.borrow() {
             backend.focus_window(window_id);
         }
     }
 
-    /// Whether windows can be minimized (only via foreign-toplevel).
-    pub fn supports_minimize(&self) -> bool {
+    /// Minimize the focused window, or focus it otherwise (`focus_window`
+    /// restores a minimized one). Without minimize support this only focuses.
+    pub fn activate_or_minimize(&self, window_id: u64) {
+        let minimize = self.supports_minimize()
+            && self.listed_window(window_id, |w| w.is_focused && !w.is_minimized);
+        if minimize {
+            self.minimize_window(window_id);
+        } else {
+            self.focus_window(window_id);
+        }
+    }
+
+    /// Whether minimize requests can be sent (only via foreign-toplevel).
+    /// Compositors may ignore them; Sway, for one, has no minimized state.
+    fn supports_minimize(&self) -> bool {
         self.toplevel_list()
     }
 
-    /// Minimize a window, or restore and focus it.
-    pub fn minimize_window(&self, window_id: u64, minimized: bool) {
-        if let Some(source) = self.toplevels.borrow().as_ref().filter(|s| s.list) {
-            source.client.set_minimized(window_id, minimized);
+    /// Minimize a window. `focus_window` restores it.
+    fn minimize_window(&self, window_id: u64) {
+        if let Some(client) = self.list_client() {
+            client.minimize(window_id);
         }
+    }
+
+    /// Whether the window is listed and matches `pred`.
+    fn listed_window(&self, window_id: u64, pred: impl Fn(&super::Window) -> bool) -> bool {
+        self.last_window_list
+            .borrow()
+            .as_ref()
+            .is_some_and(|snapshot| {
+                snapshot
+                    .windows
+                    .iter()
+                    .any(|w| w.id == window_id && pred(w))
+            })
     }
 
     /// Whether window titles come from foreign-toplevel.
@@ -471,9 +503,17 @@ impl CompositorManager {
         self.toplevels.borrow().as_ref().is_some_and(|s| s.titles)
     }
 
+    /// The foreign-toplevel client, if it provides the window list.
+    fn list_client(&self) -> Option<Ref<'_, ForeignToplevelClient>> {
+        Ref::filter_map(self.toplevels.borrow(), |toplevels| {
+            toplevels.as_ref().filter(|s| s.list).map(|s| &s.client)
+        })
+        .ok()
+    }
+
     /// Whether the window list comes from foreign-toplevel.
     fn toplevel_list(&self) -> bool {
-        self.toplevels.borrow().as_ref().is_some_and(|s| s.list)
+        self.list_client().is_some()
     }
 
     /// On the first window list subscriber, get the list from foreign-toplevel

@@ -223,8 +223,8 @@ pub struct Window {
     /// a regular or named MangoWC scratchpad. Compositors
     /// without a scratchpad concept always report `false`.
     pub is_scratchpad: bool,
-    /// Whether this window is minimized. Only reported when the window list
-    /// supports minimizing (`CompositorManager::supports_minimize`).
+    /// Whether this window is minimized. Only reported by the
+    /// wlr-foreign-toplevel window list.
     pub is_minimized: bool,
 }
 
