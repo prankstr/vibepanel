@@ -521,12 +521,12 @@ impl CompositorManager {
     /// if the backend has none. A running title client also takes on the
     /// list, so there is at most one connection.
     fn start_toplevel_list(&self) {
-        let Some(has_list) = self
-            .backend
-            .borrow()
-            .as_ref()
-            .map(|backend| backend.provides_window_list())
-        else {
+        let Some((has_list, has_titles)) = self.backend.borrow().as_ref().map(|backend| {
+            (
+                backend.provides_window_list(),
+                backend.provides_window_titles(),
+            )
+        }) else {
             return;
         };
         if self.window_list_requested.replace(true) || has_list {
@@ -538,6 +538,9 @@ impl CompositorManager {
                 source.client.enable_list(window_list_callback());
                 source.list = true;
             }
+            // The title client already failed to start, so the protocol is
+            // missing; don't connect again.
+            None if !has_titles => return,
             None => {
                 *toplevels = ForeignToplevelClient::start(None, Some(window_list_callback())).map(
                     |client| ToplevelSource {
