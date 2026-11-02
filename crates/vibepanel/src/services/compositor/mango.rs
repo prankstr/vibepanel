@@ -412,7 +412,7 @@ impl CompositorBackend for MangoBackend {
         self.shared.windows.read().clone()
     }
 
-    fn supports_window_list(&self) -> bool {
+    fn provides_window_list(&self) -> bool {
         true
     }
 

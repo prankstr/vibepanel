@@ -396,8 +396,10 @@ pub trait CompositorBackend: Send + Sync {
         Vec::new()
     }
 
-    /// Whether `list_windows` reports windows with their workspaces.
-    fn supports_window_list(&self) -> bool {
+    /// Whether the backend reports its own window list (`list_windows`), with
+    /// workspaces. When it doesn't, the manager gets the list from
+    /// wlr-foreign-toplevel, without workspaces.
+    fn provides_window_list(&self) -> bool {
         false
     }
 

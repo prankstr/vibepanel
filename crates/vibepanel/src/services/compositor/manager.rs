@@ -16,7 +16,7 @@
 //!   `ext_workspace::overlay`). All consumers see the merged state.
 //! - A wlr-foreign-toplevel client for what the backend lacks: window titles
 //!   (see `CompositorBackend::provides_window_titles`), and the taskbar's
-//!   window list with focus and minimize (see `supports_window_list`). The
+//!   window list with focus and minimize (see `provides_window_list`). The
 //!   list is only started once something subscribes to it.
 //!
 //! # Usage
@@ -437,12 +437,13 @@ impl CompositorManager {
         }
     }
 
-    /// Whether the backend reports a window list with workspaces.
-    pub fn supports_window_list(&self) -> bool {
+    /// Whether listed windows carry their workspaces. Only native window
+    /// lists do; the wlr-foreign-toplevel list has no workspaces.
+    pub fn window_list_has_workspaces(&self) -> bool {
         self.backend
             .borrow()
             .as_ref()
-            .is_some_and(|backend| backend.supports_window_list())
+            .is_some_and(|backend| backend.provides_window_list())
     }
 
     /// Focus a specific window by its ID.
@@ -524,7 +525,7 @@ impl CompositorManager {
             .backend
             .borrow()
             .as_ref()
-            .map(|backend| backend.supports_window_list())
+            .map(|backend| backend.provides_window_list())
         else {
             return;
         };

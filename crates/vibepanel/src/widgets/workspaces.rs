@@ -1314,7 +1314,7 @@ impl WindowsMode {
         if !config.show_windows {
             return None;
         }
-        if !CompositorManager::global().supports_window_list() {
+        if !CompositorManager::global().window_list_has_workspaces() {
             static WARNED: std::sync::Once = std::sync::Once::new();
             WARNED.call_once(|| {
                 warn!(

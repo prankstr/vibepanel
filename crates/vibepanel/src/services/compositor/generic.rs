@@ -5,7 +5,7 @@
 //! notion of windows, so occupancy is reported as unknown
 //! (`occupancy_known = false`). Window titles and the taskbar's window list
 //! come from wlr-foreign-toplevel-management, which the compositor manager
-//! runs (see `provides_window_titles` and `supports_window_list`).
+//! runs (see `provides_window_titles` and `provides_window_list`).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
