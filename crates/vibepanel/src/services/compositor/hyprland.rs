@@ -1144,10 +1144,11 @@ impl HyprlandBackend {
         // Hyprland sends most events twice, as v1 and v2. Where the payload
         // isn't used, handle only the v1 name, which every version sends.
         match event {
-            // `workspace` also moves pinned windows and shown scratchpads.
+            // `workspace` also moves pinned windows and shown scratchpads;
+            // a config reload can move every window.
             "workspace" | "createworkspace" | "destroyworkspace" | "renameworkspace"
             | "changeworkspaceid" | "openwindow" | "closewindow" | "monitoradded"
-            | "monitorremoved" | "activespecial" => {
+            | "monitorremoved" | "activespecial" | "configreloaded" => {
                 changes = self.refresh();
             }
             "focusedmon" => {
@@ -1169,10 +1170,23 @@ impl HyprlandBackend {
                 changes |= self.refresh_active_window(true);
             }
             "activewindow" => {
+                let focus_key = || {
+                    (
+                        self.shared.tracking.read().focused,
+                        self.shared
+                            .focused_window
+                            .read()
+                            .as_ref()
+                            .map(|w| (w.app_id.clone(), w.output.clone())),
+                    )
+                };
+                let before = focus_key();
                 changes = self.refresh_active_window(false);
-                // Swapping tiles sends no event, but usually comes with a
-                // focus change.
-                changes |= self.refresh_windows();
+                // Also sent on title changes, which `windowtitlev2` applies.
+                // Swapped tiles are picked up on the next focus change.
+                if focus_key() != before {
+                    changes |= self.refresh_windows();
+                }
             }
             "changefloatingmode" | "togglegroup" | "moveintogroup" | "moveoutofgroup" => {
                 changes = self.refresh_windows();
@@ -2152,6 +2166,35 @@ mod tests {
         assert_eq!(windows.len(), 1);
         assert!(windows[0].is_focused);
         assert_eq!(windows[0].title, "vim: a, b");
+    }
+
+    #[test]
+    fn activewindow_requeries_clients_only_when_focus_changes() {
+        // (previous focus, previous class, expected queries)
+        let cases = [
+            (0xa, "app", vec!["j/activewindow"]),
+            (0xb, "app", vec!["j/activewindow", "j/clients"]),
+            (0xa, "old", vec!["j/activewindow", "j/clients"]),
+        ];
+        for (i, (focused, class, expected)) in cases.into_iter().enumerate() {
+            let active = json!({"address": "0xa", "class": "app", "monitor": 0});
+            let (backend, socket) = backend_with_fake_socket(
+                &format!("activewindow-{i}"),
+                vec![("activewindow", active)],
+            );
+            backend.apply_state(state(two_monitors(1, 5), json!([])));
+            backend.set_focused_window(Some(focused));
+            *backend.shared.focused_window.write() = Some(WindowInfo {
+                app_id: class.to_string(),
+                output: Some("DP-1".to_string()),
+                focused: true,
+                ..Default::default()
+            });
+
+            backend.handle_event("activewindow>>app,new title");
+
+            assert_eq!(*socket.commands.lock().unwrap(), expected, "case {i}");
+        }
     }
 
     #[test]
