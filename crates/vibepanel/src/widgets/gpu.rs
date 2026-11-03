@@ -6,7 +6,6 @@
 //!
 //! Uses:
 //! - `IconsService` (via BaseWidget) for themed GPU icon
-//! - `TooltipManager` for styled tooltips
 //! - Shared popover with CPU/Memory widgets for detailed system info
 
 use gtk4::Label;
@@ -18,7 +17,7 @@ use crate::services::callbacks::CallbackId;
 use crate::services::config_manager::ConfigManager;
 use crate::services::gpu::{GpuDeviceSnapshot, GpuPowerState, GpuService, GpuSnapshot};
 use crate::services::icons::IconHandle;
-use crate::services::tooltip::TooltipManager;
+use crate::services::tooltip::set_tooltip;
 use crate::styles::{class, widget};
 use crate::widgets::base::BaseWidget;
 use crate::widgets::gpu_format;
@@ -369,8 +368,7 @@ fn update_gpu_widget(
     icon_handle.widget().set_visible(config.show_icon);
 
     let tooltip = format_gpu_tooltip(snapshot);
-    let tooltip_manager = TooltipManager::global();
-    tooltip_manager.set_styled_tooltip(container, &tooltip);
+    set_tooltip(container, Some(&tooltip));
 }
 
 #[cfg(test)]

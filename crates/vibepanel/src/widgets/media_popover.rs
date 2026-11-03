@@ -8,6 +8,7 @@ use crate::services::config_manager::ConfigManager;
 use crate::services::icons::IconsService;
 use crate::services::media::{MediaService, PlaybackStatus};
 use crate::services::surfaces::SurfaceStyleManager;
+use crate::services::tooltip::set_tooltip;
 use crate::styles::{button, color, icon, media, qs, surface};
 use crate::widgets::base::configure_popover;
 use crate::widgets::media_components::{
@@ -80,7 +81,7 @@ where
     player_icon.widget().set_valign(Align::Center);
     player_btn.set_child(Some(&player_icon.widget()));
 
-    player_btn.set_tooltip_text(Some(&tr!("Select player")));
+    set_tooltip(&player_btn, Some(&tr!("Select player")));
     player_btn.connect_clicked(|btn| {
         show_player_menu(btn);
     });
@@ -99,7 +100,7 @@ where
     popout_icon.widget().set_valign(Align::Center);
     popout_btn.set_child(Some(&popout_icon.widget()));
 
-    popout_btn.set_tooltip_text(Some(&tr!("Pop out")));
+    set_tooltip(&popout_btn, Some(&tr!("Pop out")));
     popout_btn.connect_clicked(move |_| on_popout());
     buttons_row.append(&popout_btn);
 

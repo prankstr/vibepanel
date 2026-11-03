@@ -7,7 +7,6 @@
 //!
 //! Uses:
 //! - `IconsService` (via BaseWidget) for themed battery icons
-//! - `TooltipManager` for styled tooltips
 
 use gtk4::Label;
 use gtk4::prelude::*;
@@ -26,7 +25,7 @@ use std::rc::Rc;
 
 use crate::services::config_manager::ConfigManager;
 use crate::services::power_profile::{PowerProfileService, PowerProfileSnapshot};
-use crate::services::tooltip::TooltipManager;
+use crate::services::tooltip::set_tooltip;
 use crate::widgets::WidgetConfig;
 use crate::widgets::base::BaseWidget;
 use crate::widgets::battery_popover::{
@@ -266,8 +265,7 @@ fn update_widgets_from_state_impl(
             percentage_label.set_visible(false);
         }
 
-        let tooltip_manager = TooltipManager::global();
-        tooltip_manager.set_styled_tooltip(container, &tr!("Battery: Service unavailable"));
+        set_tooltip(container, Some(&tr!("Battery: Service unavailable")));
         return;
     }
     container.remove_css_class(state::SERVICE_UNAVAILABLE);
@@ -316,7 +314,6 @@ fn update_widgets_from_state_impl(
     }
 
     // Build tooltip text with battery percentage and state.
-    // Use TooltipManager for styled tooltips.
     let tooltip = match (percent, state) {
         (None, _) => tr!("Battery: unknown"),
         (Some(p), Some(s)) => {
@@ -340,8 +337,7 @@ fn update_widgets_from_state_impl(
         }
     };
 
-    let tooltip_manager = TooltipManager::global();
-    tooltip_manager.set_styled_tooltip(container, &tooltip);
+    set_tooltip(container, Some(&tooltip));
 }
 
 /// Format a rounded percentage value as readable text, e.g. "57%".

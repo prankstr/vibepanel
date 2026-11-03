@@ -24,7 +24,7 @@ use crate::services::background_effect::BackgroundEffectManager;
 use crate::services::callbacks::CallbackId;
 use crate::services::config_manager::ConfigManager;
 use crate::services::surfaces::SurfaceStyleManager;
-use crate::services::tooltip::TooltipManager;
+use crate::services::tooltip::set_tooltip;
 use crate::services::tray::{TrayItem, TrayMenuEntry, TrayPixmap, TrayService};
 use crate::styles::{button as btn, color, icon, surface, widget};
 use crate::widgets::WidgetConfig;
@@ -380,7 +380,6 @@ fn create_button(state: &Rc<RefCell<WidgetState>>, identifier: &str) -> Button {
     let identifier_owned = identifier.to_string();
     let state_for_click = state.clone();
     button.connect_clicked(move |btn| {
-        TooltipManager::global().cancel_and_hide();
         on_button_clicked(&state_for_click, btn, &identifier_owned);
     });
 
@@ -432,8 +431,7 @@ fn update_button(state: &Rc<RefCell<WidgetState>>, button: &Button, snapshot: &T
         })
         .unwrap_or_else(|| snapshot.identifier.clone());
 
-    let tooltip_manager = TooltipManager::global();
-    tooltip_manager.set_styled_tooltip(button, &tooltip);
+    set_tooltip(button, Some(&tooltip));
 
     // Determine which icon/pixmap to use
     let needs_attention = snapshot.status.to_lowercase() == "needsattention";

@@ -16,7 +16,7 @@ use std::time::Duration;
 use crate::popover_tracker::{PopoverId, PopoverTracker};
 use crate::services::config_manager::ConfigManager;
 use crate::services::icons::{IconHandle, IconsService};
-use crate::services::tooltip::TooltipManager;
+use crate::services::tooltip::set_tooltip;
 use crate::styles::{class, state, surface, widget};
 use crate::widgets::layer_shell_popover::{Dismissible, LayerShellPopover, PopoverAnchor};
 use gtk4::gio;
@@ -710,8 +710,6 @@ impl BaseWidget {
                         .map(|m| m.is_visible())
                         .unwrap_or(false);
 
-                    TooltipManager::global().cancel_and_hide();
-
                     // Dismiss active popover for seamless transitions
                     PopoverTracker::global().dismiss_active();
 
@@ -1094,10 +1092,9 @@ impl BaseWidget {
         label
     }
 
-    /// Set a styled tooltip on the root container using `TooltipManager`.
+    /// Set the tooltip on the root container.
     pub fn set_tooltip(&self, text: &str) {
-        let tooltip_manager = TooltipManager::global();
-        tooltip_manager.set_styled_tooltip(&self.container, text);
+        set_tooltip(&self.container, Some(text));
     }
 
     /// Create a menu popover for this widget.

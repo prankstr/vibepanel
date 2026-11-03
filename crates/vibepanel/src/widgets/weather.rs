@@ -12,7 +12,7 @@ use vibepanel_core::config::{WeatherUnits, WeatherWindUnits, WidgetEntry};
 use crate::services::callbacks::CallbackId;
 use crate::services::config_manager::ConfigManager;
 use crate::services::icons::IconHandle;
-use crate::services::tooltip::TooltipManager;
+use crate::services::tooltip::set_tooltip;
 use crate::services::weather::{CurrentWeather, WeatherService, WeatherSnapshot};
 use crate::styles::{class, widget};
 use crate::widgets::base::BaseWidget;
@@ -188,7 +188,7 @@ fn update_weather_widget(
     label.set_label(&label_text);
 
     let tooltip = format_tooltip(snapshot);
-    TooltipManager::global().set_styled_tooltip(container, &tooltip);
+    set_tooltip(container, Some(&tooltip));
 }
 
 /// Placeholder shown when no current weather data is available (no cached

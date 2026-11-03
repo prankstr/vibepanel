@@ -20,7 +20,7 @@ use crate::services::callbacks::CallbackId;
 use crate::services::compositor::WindowInfo;
 use crate::services::config_manager::ConfigManager;
 use crate::services::icons::get_app_icon_name;
-use crate::services::tooltip::TooltipManager;
+use crate::services::tooltip::set_tooltip;
 use crate::services::window_title::WindowTitleService;
 use crate::styles::{icon, widget as wgt};
 use crate::widgets::WidgetConfig;
@@ -694,7 +694,7 @@ fn update_tooltip(
         lines.join("\n")
     };
 
-    TooltipManager::global().set_styled_tooltip(base_widget, &tooltip_text);
+    set_tooltip(base_widget, Some(&tooltip_text));
 }
 
 /// Convert a string to title case.

@@ -8,7 +8,7 @@
 //! - **battery**: UPower-backed battery state monitoring
 //! - **config_manager**: Configuration hot-reload with file watching
 //! - **icons**: Icon theme management (Material Symbols font, icon name mapping)
-//! - **tooltip**: Styled GTK tooltips
+//! - **tooltip**: Widget tooltips (custom layer-shell surface on the bar, native elsewhere)
 //! - **surfaces**: Shared surface styling for popovers, menus, overlays
 //! - **compositor**: Pluggable compositor backend abstraction
 //! - **workspaces**: Workspace state monitoring

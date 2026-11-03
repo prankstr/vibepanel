@@ -21,7 +21,7 @@ use crate::services::config_manager::ConfigManager;
 use crate::services::icons::{IconHandle, resolve_app_icon_name, set_image_from_app_id};
 use crate::services::media::{MediaService, MediaSnapshot, PlaybackStatus};
 use crate::services::state;
-use crate::services::tooltip::TooltipManager;
+use crate::services::tooltip::set_tooltip;
 use crate::styles::media;
 use crate::widgets::base::{BaseWidget, MenuHandle};
 use crate::widgets::marquee_label::MarqueeLabel;
@@ -477,7 +477,6 @@ impl CallbackWidgetRefs {
 
 fn create_controls(_parent_widget: &gtk4::Box, is_vertical: bool) -> ControlsHandle {
     use crate::services::icons::IconsService;
-    use crate::services::tooltip::TooltipManager;
     use crate::styles::{button, icon};
     use crate::widgets::media_components::create_media_control_button;
 
@@ -489,15 +488,6 @@ fn create_controls(_parent_widget: &gtk4::Box, is_vertical: bool) -> ControlsHan
         container.set_halign(gtk4::Align::Center);
     }
     container.set_visible(false);
-
-    // Add motion controller to hide parent tooltip when hovering over controls.
-    // This allows individual button tooltips to show without conflicting with
-    // the parent widget's tooltip.
-    let motion = gtk4::EventControllerMotion::new();
-    motion.connect_enter(|_, _, _| {
-        TooltipManager::global().cancel_and_hide();
-    });
-    container.add_controller(motion);
 
     let prev_btn = create_media_control_button(
         &icons,
@@ -518,7 +508,7 @@ fn create_controls(_parent_widget: &gtk4::Box, is_vertical: bool) -> ControlsHan
     play_pause_btn.add_css_class(media::CONTROL_BTN);
     play_pause_btn.add_css_class(media::CONTROL_BTN_PRIMARY);
     play_pause_btn.add_css_class(button::COMPACT);
-    play_pause_btn.set_tooltip_text(Some(&tr!("Play/Pause")));
+    set_tooltip(&play_pause_btn, Some(&tr!("Play/Pause")));
     play_pause_btn.connect_clicked(|_| {
         MediaService::global().play_pause();
     });
@@ -729,9 +719,6 @@ impl MediaWidget {
 
         // Create the on_popout callback that will be called when the pop-out button is clicked.
         let on_popout = move || {
-            // Hide any visible tooltip to prevent orphaned tooltips
-            TooltipManager::global().cancel_and_hide();
-
             // Close the popover first
             if let Some(cell) = menu_handle_weak.upgrade()
                 && let Some(menu_handle) = cell.borrow().as_ref()
@@ -1021,8 +1008,7 @@ fn perform_hide(
         container.remove_css_class(media::PAUSED);
         container.add_css_class(media::STOPPED);
 
-        let tooltip_manager = TooltipManager::global();
-        tooltip_manager.set_styled_tooltip(container, &tr!("No media playing"));
+        set_tooltip(container, Some(&tr!("No media playing")));
     }
 }
 
@@ -1249,8 +1235,7 @@ fn update_widgets_from_snapshot_impl(ctx: &WidgetUpdateContext<'_>, snapshot: &M
     }
 
     let tooltip = build_tooltip(snapshot);
-    let tooltip_manager = TooltipManager::global();
-    tooltip_manager.set_styled_tooltip(ctx.container, &tooltip);
+    set_tooltip(ctx.container, Some(&tooltip));
 }
 
 /// Show the player's app icon as fallback for album art.

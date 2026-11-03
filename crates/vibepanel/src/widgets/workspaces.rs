@@ -70,7 +70,7 @@ use vibepanel_core::config::WidgetEntry;
 use crate::services::callbacks::CallbackId;
 use crate::services::compositor::{CompositorManager, Window};
 use crate::services::config_manager::ConfigManager;
-use crate::services::tooltip::TooltipManager;
+use crate::services::tooltip::{hide_tooltip, set_tooltip};
 use crate::services::window_list::WindowListService;
 use crate::services::workspace::{Workspace, WorkspaceService, WorkspaceServiceSnapshot};
 use crate::styles::{state, widget};
@@ -1636,7 +1636,7 @@ impl WindowIcon {
             item.focused.is_some().then_some(state::FOCUSED),
         );
         sync_exclusive_class(root, &[state::URGENT], item.urgent.then_some(state::URGENT));
-        TooltipManager::global().set_styled_tooltip(&self.root, &item.tooltip);
+        set_tooltip(&self.root, Some(&item.tooltip));
         *current = item;
     }
 }
@@ -1871,7 +1871,7 @@ impl WorkspacesWidget {
                 );
                 if let Some(workspace_id) = next {
                     focus_for_scroll.set_target(workspace_id);
-                    TooltipManager::global().cancel_and_hide();
+                    hide_tooltip();
                     debug!("Switching to workspace {} by scrolling", workspace_id);
 
                     let window = if CompositorManager::global().backend_name() == "Niri" {
@@ -2144,7 +2144,6 @@ fn create_single_indicator(
         if gesture.current_button() != BUTTON_PRIMARY {
             return;
         }
-        TooltipManager::global().cancel_and_hide();
         scroll_focus.clear();
         scroll_focus.set_target(workspace_id);
         debug!("Switching to workspace {}", workspace_id);
@@ -2436,7 +2435,7 @@ fn update_indicators(
         }
 
         let tooltip_text = build_tooltip(workspace, snapshot.occupancy_known);
-        TooltipManager::global().set_styled_tooltip(root, &tooltip_text);
+        set_tooltip(root, Some(&tooltip_text));
     }
     drop(indicators);
 

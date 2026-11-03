@@ -53,6 +53,9 @@ impl PopoverTracker {
     /// If there's already an active popover, it will be dismissed first.
     #[must_use = "the returned PopoverId must be stored and passed to clear_if_active() on close"]
     pub fn set_active(&self, popover: Rc<dyn Dismissible>, output: Option<String>) -> PopoverId {
+        // Covers popovers opened from keybinds and IPC, not just clicks.
+        crate::services::tooltip::hide_tooltip();
+
         // Dismiss any existing active popover
         self.dismiss_active();
 

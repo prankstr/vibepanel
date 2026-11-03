@@ -14,7 +14,7 @@ use crate::services::callbacks::CallbackId;
 use crate::services::compositor::mango_layouts::{self, MANGO_LAYOUTS, MangoLayout};
 use crate::services::compositor::{CompositorManager, WindowLayoutInfo};
 use crate::services::icons::{IconsService, material_symbol_name};
-use crate::services::tooltip::TooltipManager;
+use crate::services::tooltip::set_tooltip;
 use crate::styles::{button, class, icon, surface, widget};
 use crate::widgets::base::{BaseWidget, MenuHandle, vp_button};
 use crate::widgets::{WidgetConfig, warn_unknown_options};
@@ -176,9 +176,9 @@ fn update_widget(
     if let Some(info) = info.filter(|info| is_overview(info)) {
         icon.set_layout("grid");
         label.set_label("OV");
-        TooltipManager::global().set_styled_tooltip(
+        set_tooltip(
             container,
-            &tr!("Mango overview ({output})", output = info.output),
+            Some(&tr!("Mango overview ({output})", output = info.output)),
         );
         return;
     }
@@ -196,7 +196,7 @@ fn update_widget(
     };
     icon.set_layout(info.map(|info| info.layout_name.as_str()).unwrap_or("grid"));
     label.set_label(symbol);
-    TooltipManager::global().set_styled_tooltip(container, &tooltip);
+    set_tooltip(container, Some(&tooltip));
 }
 
 fn display_name(info: &WindowLayoutInfo) -> String {
