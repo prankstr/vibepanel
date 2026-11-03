@@ -70,7 +70,8 @@ pub struct TaskbarConfig {
     pub show_workspace_separator: bool,
     /// Optional workspace identity rendered inside workspace separators.
     pub workspace_separator_label: WorkspaceSeparatorLabel,
-    /// Whether to show visible scratchpad windows (MangoWC, Sway) in the taskbar.
+    /// Whether to show visible scratchpad windows (MangoWC, Sway, Hyprland
+    /// special workspaces) in the taskbar.
     /// Dismissed scratchpads and special-overlay-workspace (tag 0) windows
     /// are never shown.
     pub show_scratchpad_windows: bool,

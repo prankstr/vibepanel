@@ -220,8 +220,9 @@ pub struct Window {
     /// Whether this window is requesting attention.
     pub is_urgent: bool,
     /// Whether this window is a (currently visible) scratchpad client, such as
-    /// a regular or named MangoWC scratchpad or a Sway scratchpad window.
-    /// Compositors without a scratchpad concept always report `false`.
+    /// a regular or named MangoWC scratchpad, a Sway scratchpad window or a
+    /// window on a shown Hyprland special workspace. Compositors without a
+    /// scratchpad concept always report `false`.
     pub is_scratchpad: bool,
     /// Whether this window is minimized. Only reported by the
     /// wlr-foreign-toplevel window list.
