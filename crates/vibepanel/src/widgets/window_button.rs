@@ -10,7 +10,6 @@ use gtk4::{Align, GestureClick, Image, Widget};
 
 use crate::services::compositor::Window;
 use crate::services::icons::resolve_app_icon_name;
-use crate::services::tooltip::TooltipManager;
 use crate::services::window_list::WindowListService;
 use crate::styles::icon;
 use crate::widgets::window_title::friendly_app_name;
@@ -110,7 +109,6 @@ pub(crate) fn connect_window_click(
         if gesture.current_button() != BUTTON_PRIMARY {
             return;
         }
-        TooltipManager::global().cancel_and_hide();
         if let Some(window_id) = target() {
             action(window_id);
         }

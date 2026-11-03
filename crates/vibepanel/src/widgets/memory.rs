@@ -6,7 +6,6 @@
 //!
 //! Uses:
 //! - `IconsService` (via BaseWidget) for themed memory icon
-//! - `TooltipManager` for styled tooltips
 //! - Shared popover with CPU widget for detailed system info
 
 use gtk4::Label;
@@ -20,7 +19,7 @@ use crate::services::icons::IconHandle;
 use crate::services::system::{
     SystemService, SystemSnapshot, format_bytes, format_bytes_long, format_used_of_total,
 };
-use crate::services::tooltip::TooltipManager;
+use crate::services::tooltip::set_tooltip;
 use crate::styles::{class, widget};
 use crate::widgets::base::BaseWidget;
 use crate::widgets::system_popover::wire_system_popover;
@@ -232,8 +231,7 @@ fn update_memory_widget(
         memory_label.set_label("?");
         memory_label.set_visible(true);
 
-        let tooltip_manager = TooltipManager::global();
-        tooltip_manager.set_styled_tooltip(container, &tr!("Memory: Service unavailable"));
+        set_tooltip(container, Some(&tr!("Memory: Service unavailable")));
         return;
     }
 
@@ -261,8 +259,7 @@ fn update_memory_widget(
         used = format_bytes_long(snapshot.memory_used),
         total = format_bytes_long(snapshot.memory_total)
     );
-    let tooltip_manager = TooltipManager::global();
-    tooltip_manager.set_styled_tooltip(container, &tooltip);
+    set_tooltip(container, Some(&tooltip));
 }
 
 #[cfg(test)]

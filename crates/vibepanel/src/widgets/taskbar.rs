@@ -17,7 +17,7 @@ use crate::services::compositor::{
     CompositorManager, WindowListSnapshot, WorkspaceMeta, WorkspaceSnapshot,
 };
 use crate::services::config_manager::ConfigManager;
-use crate::services::tooltip::TooltipManager;
+use crate::services::tooltip::set_tooltip;
 use crate::services::window_list::WindowListService;
 use crate::styles::{state, widget};
 use crate::widgets::WidgetConfig;
@@ -808,7 +808,7 @@ fn create_window_button(
         |window_id| WindowListService::global().activate_or_minimize(window_id),
     );
 
-    TooltipManager::global().set_styled_tooltip(&button, &window_tooltip(window));
+    set_tooltip(&button, Some(&window_tooltip(window)));
 
     button.upcast()
 }
@@ -820,7 +820,7 @@ fn update_button_state(
 ) {
     sync_taskbar_button_state(button, window, config);
 
-    TooltipManager::global().set_styled_tooltip(button, &window_tooltip(window));
+    set_tooltip(button, Some(&window_tooltip(window)));
 
     // Update the label text if present (title may have changed)
     if let Some(container) = button.downcast_ref::<GtkBox>() {

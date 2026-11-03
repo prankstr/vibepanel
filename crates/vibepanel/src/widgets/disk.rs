@@ -16,7 +16,7 @@ use crate::services::system::{
     DISK_HIGH_THRESHOLD, SpaceUsage, SystemService, format_bytes, format_bytes_long,
     format_used_of_total,
 };
-use crate::services::tooltip::TooltipManager;
+use crate::services::tooltip::set_tooltip;
 use crate::styles::{class, widget};
 use crate::widgets::base::BaseWidget;
 use crate::widgets::system_popover::wire_system_popover;
@@ -206,7 +206,6 @@ fn update_disk_widget(
     is_vertical: bool,
     usage: Option<&Option<SpaceUsage>>,
 ) {
-    let tooltips = TooltipManager::global();
     let usage = match usage {
         Some(Some(usage)) => usage,
         pending_or_failed => {
@@ -217,9 +216,9 @@ fn update_disk_widget(
             label.set_label(text);
             container.remove_css_class(widget::DISK_HIGH);
             icon_handle.remove_css_class(widget::DISK_HIGH);
-            tooltips.set_styled_tooltip(
+            set_tooltip(
                 container,
-                &tr!("Disk {path}: {status}", path = config.path, status),
+                Some(&tr!("Disk {path}: {status}", path = config.path, status)),
             );
             return;
         }
@@ -239,16 +238,16 @@ fn update_disk_widget(
         label.set_width_chars(full.chars().count() as i32);
     }
     label.set_label(&format_disk(usage, &config.format, is_vertical));
-    tooltips.set_styled_tooltip(
+    set_tooltip(
         container,
-        &tr!(
+        Some(&tr!(
             "Disk {path}: {percent}%\n{used} / {total}\n{free} free",
             path = config.path,
             percent = format!("{:.1}", usage.percent()),
             used = format_bytes_long(usage.used),
             total = format_bytes_long(usage.total),
             free = format_bytes_long(usage.available)
-        ),
+        )),
     );
 }
 

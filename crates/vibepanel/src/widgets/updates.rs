@@ -19,7 +19,7 @@ use vibepanel_core::config::WidgetEntry;
 use crate::services::callbacks::CallbackId;
 use crate::services::config_manager::ConfigManager;
 use crate::services::icons::IconHandle;
-use crate::services::tooltip::TooltipManager;
+use crate::services::tooltip::set_tooltip;
 use crate::services::updates::{UpdatesService, UpdatesSnapshot};
 use crate::styles::{class, state, widget};
 use crate::widgets::base::BaseWidget;
@@ -184,8 +184,7 @@ fn update_widget_from_snapshot(
 
     // Update tooltip
     let tooltip = format_tooltip(snapshot);
-    let tooltip_manager = TooltipManager::global();
-    tooltip_manager.set_styled_tooltip(container, &tooltip);
+    set_tooltip(container, Some(&tooltip));
 }
 
 fn format_update_count(count: usize, is_vertical: bool) -> String {

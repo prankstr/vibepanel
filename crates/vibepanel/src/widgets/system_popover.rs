@@ -47,6 +47,7 @@ use crate::services::system::{
     DISK_HIGH_THRESHOLD, MountUsage, SYSTEM_HISTORY_SAMPLES, SpaceUsage, SystemService,
     SystemSnapshot, format_bytes_long, format_speed,
 };
+use crate::services::tooltip::set_tooltip;
 use crate::styles::{button, card, color, icon, surface, system_popover as sp};
 use crate::widgets::gpu_format;
 use crate::widgets::history_graph::{HistoryGraph, HistoryScale, HistorySeries};
@@ -320,7 +321,7 @@ impl SystemPopoverController {
             .set_visible(has_mounts);
         let tooltip = has_mounts.then(|| headline_tooltip(headline.map(|(mount, _)| mount)));
         if self.disk_header_btn.tooltip_text().as_deref() != tooltip.as_deref() {
-            self.disk_header_btn.set_tooltip_text(tooltip.as_deref());
+            set_tooltip(&self.disk_header_btn, tooltip.as_deref());
         }
         if let Some((mount, usage)) = headline {
             self.disk_usage_label.set_label(&format!(

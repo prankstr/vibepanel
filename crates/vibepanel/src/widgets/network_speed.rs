@@ -7,7 +7,6 @@
 //!
 //! Uses:
 //! - `IconsService` (via BaseWidget) for themed network icon
-//! - `TooltipManager` for styled tooltips
 //! - Shared popover with CPU/Memory widgets for detailed system info
 
 use gtk4::prelude::*;
@@ -19,7 +18,7 @@ use crate::services::callbacks::CallbackId;
 use crate::services::config_manager::ConfigManager;
 use crate::services::icons::IconHandle;
 use crate::services::system::{SystemService, SystemSnapshot, format_speed};
-use crate::services::tooltip::TooltipManager;
+use crate::services::tooltip::set_tooltip;
 use crate::styles::{class, widget};
 use crate::widgets::base::BaseWidget;
 use crate::widgets::system_popover::wire_system_popover;
@@ -335,8 +334,7 @@ fn update_network_widget(
             ul.set_visible(true);
         }
 
-        let tooltip_manager = TooltipManager::global();
-        tooltip_manager.set_styled_tooltip(container, &tr!("Network: Service unavailable"));
+        set_tooltip(container, Some(&tr!("Network: Service unavailable")));
         return;
     }
 
@@ -369,8 +367,7 @@ fn update_network_widget(
         NetworkSpeedFormat::Download => tr!("Download: {dl_text}", dl_text),
         NetworkSpeedFormat::Upload => tr!("Upload: {ul_text}", ul_text),
     };
-    let tooltip_manager = TooltipManager::global();
-    tooltip_manager.set_styled_tooltip(container, &tooltip);
+    set_tooltip(container, Some(&tooltip));
 }
 
 /// Update the speed label and apply a single-char centering compensation.

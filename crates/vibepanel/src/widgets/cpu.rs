@@ -6,7 +6,6 @@
 //!
 //! Uses:
 //! - `IconsService` (via BaseWidget) for themed CPU icon
-//! - `TooltipManager` for styled tooltips
 //! - Shared popover with Memory/GPU widgets for detailed system info
 
 use gtk4::Label;
@@ -18,7 +17,7 @@ use crate::services::callbacks::CallbackId;
 use crate::services::config_manager::ConfigManager;
 use crate::services::icons::IconHandle;
 use crate::services::system::{SystemService, SystemSnapshot};
-use crate::services::tooltip::TooltipManager;
+use crate::services::tooltip::set_tooltip;
 use crate::styles::{class, widget};
 use crate::widgets::base::BaseWidget;
 use crate::widgets::system_popover::wire_system_popover;
@@ -243,8 +242,7 @@ fn update_cpu_widget(
             percentage_label.set_visible(true);
         }
 
-        let tooltip_manager = TooltipManager::global();
-        tooltip_manager.set_styled_tooltip(container, &tr!("CPU: Service unavailable"));
+        set_tooltip(container, Some(&tr!("CPU: Service unavailable")));
         return;
     }
 
@@ -277,8 +275,7 @@ fn update_cpu_widget(
             cpu_core_count = snapshot.cpu_core_count
         ),
     };
-    let tooltip_manager = TooltipManager::global();
-    tooltip_manager.set_styled_tooltip(container, &tooltip);
+    set_tooltip(container, Some(&tooltip));
 }
 
 fn format_cpu_usage(cpu_usage: f32, is_vertical: bool) -> String {

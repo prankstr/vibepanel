@@ -19,6 +19,7 @@ use crate::services::calendar as calendar_service;
 use crate::services::callbacks::CallbackId;
 use crate::services::config_manager::ConfigManager;
 use crate::services::sleep_watcher::SleepWatcher;
+use crate::services::tooltip::set_tooltip;
 use crate::services::weather::WeatherService;
 use crate::styles::widget as wgt;
 use crate::widgets::WidgetConfig;
@@ -551,7 +552,7 @@ fn update_label(
     let text = formatted_clock_text(format, format_vertical, is_vertical, now);
     label.set_label(&text);
     if is_vertical {
-        label.set_tooltip_text(Some(&now.format(format).to_string()));
+        set_tooltip(label, Some(&now.format(format).to_string()));
     }
 }
 

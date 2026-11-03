@@ -24,7 +24,7 @@ use vibepanel_core::config::WidgetEntry;
 use crate::services::callbacks::CallbackId;
 use crate::services::icons::IconHandle;
 use crate::services::notification::{NotificationService, URGENCY_CRITICAL};
-use crate::services::tooltip::TooltipManager;
+use crate::services::tooltip::set_tooltip;
 use crate::styles::widget;
 use crate::widgets::base::MenuHandle;
 use crate::widgets::{BaseWidget, WidgetConfig, warn_unknown_options};
@@ -120,12 +120,13 @@ impl NotificationsWidgetInner {
         }
 
         // Update backend availability visual state
-        let tooltip_manager = TooltipManager::global();
         if !service.backend_available() {
             self.icon_handle.add_css_class(widget::BACKEND_UNAVAILABLE);
-            tooltip_manager.set_styled_tooltip(
+            set_tooltip(
                 &self.container,
-                &tr!("Notification daemon unavailable (another daemon is running)"),
+                Some(&tr!(
+                    "Notification daemon unavailable (another daemon is running)"
+                )),
             );
         } else {
             self.icon_handle
@@ -149,9 +150,9 @@ impl NotificationsWidgetInner {
                 } else {
                     tr!("{n} notification" | "{n} notifications" % count)
                 };
-                tooltip_manager.set_styled_tooltip(&self.container, &tooltip);
+                set_tooltip(&self.container, Some(&tooltip));
             } else {
-                tooltip_manager.set_styled_tooltip(&self.container, &tr!("No notifications"));
+                set_tooltip(&self.container, Some(&tr!("No notifications")));
             }
         }
 

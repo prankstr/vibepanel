@@ -13,7 +13,7 @@ use crate::services::compositor::CompositorManager;
 use crate::services::compositor::KeyboardLayoutInfo;
 use crate::services::compositor::layout_names;
 use crate::services::config_manager::ConfigManager;
-use crate::services::tooltip::TooltipManager;
+use crate::services::tooltip::set_tooltip;
 use crate::styles::{class, state, widget};
 use crate::widgets::base::BaseWidget;
 use crate::widgets::{WidgetConfig, warn_unknown_options};
@@ -249,8 +249,7 @@ fn update_keyboard_layout_widget(
             layout_name = info.layout_name
         )
     };
-    let tooltip_manager = TooltipManager::global();
-    tooltip_manager.set_styled_tooltip(container, &tooltip);
+    set_tooltip(container, Some(&tooltip));
 }
 
 #[cfg(test)]

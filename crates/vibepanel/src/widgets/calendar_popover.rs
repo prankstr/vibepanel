@@ -17,6 +17,7 @@ use tr::tr;
 
 use crate::services::calendar::{CalendarEvent, CalendarService, CalendarSnapshot};
 use crate::services::icons::IconsService;
+use crate::services::tooltip::set_tooltip;
 use crate::styles::{calendar as cal, color, icon, surface};
 use crate::widgets::weather_popover::build_weather_content_reactive;
 
@@ -104,7 +105,7 @@ pub fn build_clock_calendar_popover(
     today_button.add_css_class(surface::POPOVER_ICON_BTN);
     today_button.set_has_frame(false);
     today_button.set_focus_on_click(false);
-    today_button.set_tooltip_text(Some(&tr!("Go to today")));
+    set_tooltip(&today_button, Some(&tr!("Go to today")));
 
     let next_button = crate::widgets::base::vp_button_from_icon_name("go-next-symbolic");
     next_button.add_css_class(surface::POPOVER_ICON_BTN);

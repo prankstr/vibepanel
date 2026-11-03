@@ -19,6 +19,7 @@ use crate::services::icons::IconsService;
 use crate::services::notification::{
     Notification, NotificationService, URGENCY_CRITICAL, URGENCY_LOW,
 };
+use crate::services::tooltip::set_tooltip;
 use crate::styles::{button, card, color, notification as notif, surface};
 
 use super::css::DISMISS_ANIMATION_MS;
@@ -133,11 +134,14 @@ fn build_header(on_close: Option<ClosePopoverCallback>) -> GtkBox {
     mute_icon_widget.set_halign(Align::Center);
     mute_icon_widget.set_valign(Align::Center);
     mute_btn.set_child(Some(&mute_icon_widget));
-    mute_btn.set_tooltip_text(Some(&if is_muted {
-        tr!("Unmute notifications")
-    } else {
-        tr!("Mute notifications")
-    }));
+    set_tooltip(
+        &mute_btn,
+        Some(&if is_muted {
+            tr!("Unmute notifications")
+        } else {
+            tr!("Mute notifications")
+        }),
+    );
 
     // Store icon handle in RefCell for the click handler
     let mute_icon_handle = Rc::new(RefCell::new(mute_icon_handle));
@@ -154,11 +158,14 @@ fn build_header(on_close: Option<ClosePopoverCallback>) -> GtkBox {
         } else {
             "notifications"
         });
-        btn.set_tooltip_text(Some(&if is_muted {
-            tr!("Unmute notifications")
-        } else {
-            tr!("Mute notifications")
-        }));
+        set_tooltip(
+            btn,
+            Some(&if is_muted {
+                tr!("Unmute notifications")
+            } else {
+                tr!("Mute notifications")
+            }),
+        );
     });
 
     header.append(&mute_btn);
@@ -172,7 +179,7 @@ fn build_header(on_close: Option<ClosePopoverCallback>) -> GtkBox {
         clear_btn.set_focus_on_click(false);
         clear_btn.add_css_class(surface::POPOVER_ICON_BTN);
         clear_btn.set_valign(Align::Start);
-        clear_btn.set_tooltip_text(Some(&tr!("Clear all notifications")));
+        set_tooltip(&clear_btn, Some(&tr!("Clear all notifications")));
 
         let clear_icon =
             icons.create_icon("user-trash-symbolic", &[color::PRIMARY, notif::HEADER_ICON]);
@@ -376,7 +383,7 @@ fn build_notification_row(
     dismiss_btn.add_css_class(notif::DISMISS_BTN);
     dismiss_btn.add_css_class(button::RESET);
     dismiss_btn.set_valign(Align::Start);
-    dismiss_btn.set_tooltip_text(Some(&tr!("Dismiss")));
+    set_tooltip(&dismiss_btn, Some(&tr!("Dismiss")));
 
     let dismiss_icon = Image::from_icon_name("window-close-symbolic");
     dismiss_icon.add_css_class(notif::DISMISS_ICON);

@@ -14,7 +14,7 @@ use vibepanel_core::{Config, ThemePalette};
 use crate::popover_tracker::PopoverTracker;
 use crate::sectioned_bar::SectionedBar;
 use crate::services::config_manager::{ConfigManager, ThemeCallbackGuard};
-use crate::services::tooltip::TooltipManager;
+use crate::services::tooltip;
 use crate::styles::{class, state};
 use crate::widgets::{
     self, BarState, CalendarWeatherPopoverBinding, ClockConfig, EdgeInteraction, MenuHandle,
@@ -203,7 +203,6 @@ fn activate_edge_target(
     y: f64,
     interaction: &EdgeInteraction,
 ) {
-    TooltipManager::global().cancel_and_hide();
     interaction.popover.ipc_toggle();
     if let Some(ripple) = interaction.ripple.as_ref()
         && let Some(point) = reference.compute_point(
@@ -291,7 +290,6 @@ fn install_edge_click_handler(
 }
 
 fn dismiss_bar_popup(gesture: &GestureClick) {
-    TooltipManager::global().cancel_and_hide();
     PopoverTracker::global().dismiss_active();
     gesture.set_state(gtk4::EventSequenceState::Claimed);
 }
@@ -534,6 +532,7 @@ pub fn create_bar_window(
         .build();
 
     window.add_css_class(class::BAR_WINDOW);
+    tooltip::dismiss_on_bar_input(&window);
 
     // Initialize layer-shell
     window.init_layer_shell();
@@ -1235,7 +1234,6 @@ fn build_merge_group(
             if button == gdk::BUTTON_PRIMARY {
                 let my_menu_was_visible = menu_for_cb.is_visible();
 
-                TooltipManager::global().cancel_and_hide();
                 PopoverTracker::global().dismiss_active();
 
                 if !my_menu_was_visible {

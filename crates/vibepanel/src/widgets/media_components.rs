@@ -18,6 +18,7 @@ use crate::services::icons::{IconHandle, IconsService};
 use crate::services::media::{
     MediaService, MediaSnapshot, PlaybackStatus, format_duration, youtube_thumbnail_fallback_url,
 };
+use crate::services::tooltip::set_tooltip;
 use crate::styles::{button, color, icon, media};
 use crate::widgets::marquee_label::MarqueeLabel;
 use crate::widgets::media_visualizer::MediaVisualizer;
@@ -299,7 +300,7 @@ where
     for class in classes {
         btn.add_css_class(class);
     }
-    btn.set_tooltip_text(Some(tooltip));
+    set_tooltip(&btn, Some(tooltip));
     btn.connect_clicked(move |_| on_click());
     btn
 }
@@ -330,7 +331,7 @@ pub fn build_media_controls(
     for class in extra_classes {
         prev_btn.add_css_class(class);
     }
-    prev_btn.set_tooltip_text(Some(&tr!("Previous")));
+    set_tooltip(&prev_btn, Some(&tr!("Previous")));
     prev_btn.set_valign(Align::Center);
     prev_btn.connect_clicked(|_| MediaService::global().previous());
     container.append(&prev_btn);
@@ -348,7 +349,7 @@ pub fn build_media_controls(
     for class in extra_classes {
         play_pause_btn.add_css_class(class);
     }
-    play_pause_btn.set_tooltip_text(Some(&tr!("Play/Pause")));
+    set_tooltip(&play_pause_btn, Some(&tr!("Play/Pause")));
     play_pause_btn.set_valign(Align::Center);
     play_pause_btn.connect_clicked(|_| MediaService::global().play_pause());
     container.append(&play_pause_btn);
@@ -364,7 +365,7 @@ pub fn build_media_controls(
     for class in extra_classes {
         next_btn.add_css_class(class);
     }
-    next_btn.set_tooltip_text(Some(&tr!("Next")));
+    set_tooltip(&next_btn, Some(&tr!("Next")));
     next_btn.set_valign(Align::Center);
     next_btn.connect_clicked(|_| MediaService::global().next());
     container.append(&next_btn);
@@ -621,11 +622,11 @@ pub fn update_track_info(
         .as_deref()
         .unwrap_or(&unknown_artist);
     artist_label.set_label(artist);
-    artist_label.set_tooltip_text(Some(artist));
+    set_tooltip(artist_label, Some(artist));
 
     let album = snapshot.metadata.album.as_deref().unwrap_or("");
     album_label.set_label(album);
-    album_label.set_tooltip_text(if album.is_empty() { None } else { Some(album) });
+    set_tooltip(album_label, Some(album));
 }
 
 /// Update playback control states from a media snapshot.

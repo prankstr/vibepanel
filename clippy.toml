@@ -1,0 +1,4 @@
+disallowed-methods = [
+    { path = "gtk4::prelude::WidgetExt::set_tooltip_text", reason = "use crate::services::tooltip::set_tooltip" },
+    { path = "gtk4::prelude::WidgetExt::set_tooltip_markup", reason = "use crate::services::tooltip::set_tooltip" },
+]

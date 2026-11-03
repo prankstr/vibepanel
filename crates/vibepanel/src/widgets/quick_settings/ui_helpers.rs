@@ -6,6 +6,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use crate::services::icons::{IconHandle, IconsService};
+use crate::services::tooltip::set_tooltip;
 use crate::styles::{button, color, icon, qs, row, state};
 use crate::widgets::base::add_ripple_to_row;
 use crate::widgets::layer_shell_popover::animate_reveal;
@@ -744,7 +745,7 @@ impl ScanButton {
         button.add_css_class(qs::SCAN_BUTTON);
         button.set_has_frame(false);
         button.set_valign(Align::Center);
-        button.set_tooltip_text(Some(tooltip));
+        set_tooltip(&button, Some(tooltip));
 
         let icon = IconsService::global()
             .create_icon("view-refresh-symbolic", &[qs::SCAN_ICON, color::PRIMARY]);

@@ -42,7 +42,7 @@ use vibepanel_core::config::WidgetEntry;
 
 use crate::services::config_manager::ConfigManager;
 use crate::services::icons::{IconHandle, IconsService, has_material_mapping};
-use crate::services::tooltip::TooltipManager;
+use crate::services::tooltip::set_tooltip;
 use crate::styles::{icon, state, widget as wgt};
 use crate::widgets::base::{BaseWidget, VisibilityHandle, describe_exit_status};
 use crate::widgets::{WidgetConfig, warn_unknown_options};
@@ -577,11 +577,7 @@ fn apply_output(raw: &str, display: &DisplayContext, prev_classes: &mut Vec<Stri
 
     // Tooltip: each update fully defines the tooltip state.
     // JSON tooltip overrides, plain text falls back to static config or clears it.
-    if let Some(ref tip) = plan.tooltip {
-        TooltipManager::global().set_styled_tooltip(&display.widget, tip);
-    } else {
-        TooltipManager::global().clear_tooltip(&display.widget);
-    }
+    set_tooltip(&display.widget, plan.tooltip.as_deref());
 
     // Waybar-style dynamic icons: JSON `alt` selects from config `icons`.
     // Plain text or unmatched alt falls back to the static `icon`.

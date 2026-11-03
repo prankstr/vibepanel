@@ -176,11 +176,13 @@ window.layer-shell-click-catcher.vp-click-catcher {{
     padding-bottom: calc(var(--vp-widget-padding) + 1px);
 }}
 
-/* ===== NATIVE GTK TOOLTIPS ===== */
-/* Style GTK's native tooltips (used in popovers/windows where layer-shell tooltips don't work) */
+/* ===== TOOLTIPS ===== */
+/* Shared by native tooltips and the custom bar tooltip. The custom tooltip's
+ * padding is on its label because that's what gets measured. */
 tooltip,
-tooltip.background {{
-    background-color: color-mix(in srgb, color-mix(in srgb, var(--widget-background-color) var(--widget-background-opacity), transparent) 90%, var(--widget-hover-tint));
+tooltip.background,
+.vibepanel-tooltip {{
+    background-color: color-mix(in srgb, {popover_bg} 90%, var(--widget-hover-tint));
     border-radius: var(--radius-surface);
     border: none;
     padding: 0;
@@ -188,26 +190,13 @@ tooltip.background {{
 }}
 
 tooltip > box,
-tooltip.background > box {{
+tooltip.background > box,
+.vibepanel-tooltip-label {{
     padding: 6px 10px;
 }}
 
 tooltip label,
-tooltip.background label {{
-    font-family: var(--font-family);
-    font-size: var(--font-size);
-    color: var(--color-foreground-primary);
-}}
-
-/* Layer-shell tooltips use custom windows so they share the same styling as native tooltips. */
-.vibepanel-tooltip {{
-    background-color: color-mix(in srgb, {popover_bg} 90%, var(--widget-hover-tint));
-    border-radius: var(--radius-surface);
-    border: none;
-    padding: 6px 10px;
-    opacity: 0.90;
-}}
-
+tooltip.background label,
 .vibepanel-tooltip-label {{
     font-family: var(--font-family);
     font-size: var(--font-size);

@@ -24,6 +24,7 @@ use crate::services::audio::{AudioService, AudioSnapshot, SourceInfoSnapshot};
 use crate::services::config_manager::ConfigManager;
 use crate::services::icons::IconHandle;
 use crate::services::surfaces::SurfaceStyleManager;
+use crate::services::tooltip::set_tooltip;
 use crate::styles::{color, qs, state};
 
 /// Get the appropriate mic icon name based on volume level and mute state.
@@ -145,7 +146,7 @@ pub fn set_mic_slider_display(slider: &Scale, volume: u32) {
     let max_percent = AudioService::global().user_max_percent().max(1);
     slider.set_range(0.0, max_percent as f64);
     slider.set_value(volume as f64);
-    slider.set_tooltip_text(Some(&format!("{volume}%")));
+    set_tooltip(slider, Some(&format!("{volume}%")));
 }
 
 /// Container for mic details (source list) widgets.

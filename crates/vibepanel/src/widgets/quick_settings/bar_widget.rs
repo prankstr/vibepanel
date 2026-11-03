@@ -20,7 +20,7 @@ use crate::services::audio::{AudioService, AudioSnapshot};
 use crate::services::bluetooth::{BluetoothService, BluetoothSnapshot};
 use crate::services::callbacks::CallbackId;
 use crate::services::network::{NetworkService, NetworkSnapshot};
-use crate::services::tooltip::TooltipManager;
+use crate::services::tooltip::set_tooltip;
 use crate::services::vpn::{VpnService, VpnSnapshot};
 use crate::styles::{icon, qs, state, widget};
 use crate::widgets::BaseWidget;
@@ -265,8 +265,7 @@ impl QuickSettingsWidget {
                     if !snapshot.available {
                         widget.add_css_class(state::SERVICE_UNAVAILABLE);
                         audio_icon_handle.set_icon("audio-volume-muted-symbolic");
-                        TooltipManager::global()
-                            .set_styled_tooltip(&widget, &tr!("Audio: Service unavailable"));
+                        set_tooltip(&widget, Some(&tr!("Audio: Service unavailable")));
                         return;
                     }
 
@@ -274,8 +273,7 @@ impl QuickSettingsWidget {
                     if !snapshot.control_available {
                         widget.add_css_class(state::SERVICE_UNAVAILABLE);
                         audio_icon_handle.set_icon("audio-volume-muted-symbolic");
-                        TooltipManager::global()
-                            .set_styled_tooltip(&widget, &tr!("Volume control unavailable"));
+                        set_tooltip(&widget, Some(&tr!("Volume control unavailable")));
                         return;
                     }
 
@@ -289,7 +287,7 @@ impl QuickSettingsWidget {
                     } else {
                         tr!("Volume: {volume}%", volume = snapshot.volume)
                     };
-                    TooltipManager::global().set_styled_tooltip(&widget, &tooltip);
+                    set_tooltip(&widget, Some(&tooltip));
                 },
             ));
 
@@ -325,8 +323,7 @@ impl QuickSettingsWidget {
                         widget.add_css_class(state::SERVICE_UNAVAILABLE);
                         widget.remove_css_class(state::ICON_ACTIVE);
                         bt_icon_handle.set_icon("bluetooth-disabled-symbolic");
-                        TooltipManager::global()
-                            .set_styled_tooltip(&widget, &tr!("Bluetooth: No adapter found"));
+                        set_tooltip(&widget, Some(&tr!("Bluetooth: No adapter found")));
                         return;
                     }
 
@@ -367,7 +364,7 @@ impl QuickSettingsWidget {
                     } else {
                         tr!("Bluetooth Off")
                     };
-                    TooltipManager::global().set_styled_tooltip(&widget, &tooltip);
+                    set_tooltip(&widget, Some(&tooltip));
                 },
             ));
         }
@@ -407,8 +404,7 @@ impl QuickSettingsWidget {
                         widget.remove_css_class(state::ICON_ACTIVE);
                         wifi_icon_handle.set_spinning(false);
                         wifi_icon_handle.set_icon("network-wireless-offline-symbolic");
-                        TooltipManager::global()
-                            .set_styled_tooltip(&widget, &tr!("Wi-Fi: Service unavailable"));
+                        set_tooltip(&widget, Some(&tr!("Wi-Fi: Service unavailable")));
                         return;
                     }
                     widget.remove_css_class(state::SERVICE_UNAVAILABLE);
@@ -457,7 +453,7 @@ impl QuickSettingsWidget {
                     } else {
                         tr!("Disconnected")
                     };
-                    TooltipManager::global().set_styled_tooltip(&widget, &tooltip);
+                    set_tooltip(&widget, Some(&tooltip));
                 },
             ));
         }
@@ -536,7 +532,7 @@ impl QuickSettingsWidget {
                     } else {
                         tr!("{carrier}\nDisconnected", carrier)
                     };
-                    TooltipManager::global().set_styled_tooltip(&widget, &tooltip);
+                    set_tooltip(&widget, Some(&tooltip));
                 },
             ));
         }
@@ -589,7 +585,7 @@ impl QuickSettingsWidget {
                 } else {
                     tr!("VPN Disconnected")
                 };
-                TooltipManager::global().set_styled_tooltip(&widget, &tooltip);
+                set_tooltip(&widget, Some(&tooltip));
             }));
         }
 
@@ -614,8 +610,6 @@ impl QuickSettingsWidget {
                     "QuickSettingsWidget press: button={}",
                     gesture.current_button()
                 );
-
-                TooltipManager::global().cancel_and_hide();
 
                 // Claim the sequence to prevent BaseWidget's handler from firing
                 gesture.set_state(gtk4::EventSequenceState::Claimed);

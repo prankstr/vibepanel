@@ -26,6 +26,7 @@ use crate::services::audio::{AppVolumeSnapshot, AudioService, AudioSnapshot, Sin
 use crate::services::config_manager::ConfigManager;
 use crate::services::icons::{IconHandle, IconsService, resolve_app_icon_name};
 use crate::services::surfaces::SurfaceStyleManager;
+use crate::services::tooltip::set_tooltip;
 use crate::styles::{color, qs, row, state};
 use crate::widgets::base::vp_button;
 
@@ -199,7 +200,7 @@ pub fn set_volume_slider_display(slider: &Scale, volume: u32) {
     let max_percent = AudioService::global().user_max_percent().max(1);
     slider.set_range(0.0, max_percent as f64);
     slider.set_value(volume as f64);
-    slider.set_tooltip_text(Some(&format!("{volume}%")));
+    set_tooltip(slider, Some(&format!("{volume}%")));
 }
 
 /// Container for audio details (sink list) widgets.
@@ -433,7 +434,7 @@ fn create_app_volume_row(stream: &AppVolumeSnapshot, scroll_step: i32) -> AppVol
     title_label.set_xalign(0.0);
     title_label.set_ellipsize(EllipsizeMode::End);
     title_label.set_single_line_mode(true);
-    title_label.set_tooltip_text(Some(&stream.app_name));
+    set_tooltip(&title_label, Some(&stream.app_name));
     top_row.append(&title_label);
 
     let description_label = Label::new(None);
@@ -501,17 +502,16 @@ impl AppVolumeRowState {
         let description = format!("- {}", stream.media_description);
         if self.description_label.text() != description {
             self.description_label.set_text(&description);
-            self.description_label
-                .set_tooltip_text(Some(&stream.media_description));
+            set_tooltip(&self.description_label, Some(&stream.media_description));
         }
         let tooltip = format!("{}%", stream.volume);
         self.value_label.set_text(&tooltip);
-        self.value_label.set_tooltip_text(Some(&tooltip));
+        set_tooltip(&self.value_label, Some(&tooltip));
         self.updating.set(true);
         self.slider
             .set_range(0.0, AudioService::global().user_max_percent().max(1) as f64);
         self.slider.set_value(stream.volume as f64);
-        self.slider.set_tooltip_text(Some(&tooltip));
+        set_tooltip(&self.slider, Some(&tooltip));
         self.updating.set(false);
 
         let icon_name = volume_icon_name(stream.volume, stream.muted);
@@ -528,7 +528,7 @@ impl AppVolumeRowState {
             tr!("Mute")
         };
         if self.mute_button.tooltip_text().as_deref() != Some(mute_tooltip.as_str()) {
-            self.mute_button.set_tooltip_text(Some(&mute_tooltip));
+            set_tooltip(&self.mute_button, Some(&mute_tooltip));
         }
     }
 }

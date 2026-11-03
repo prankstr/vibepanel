@@ -15,6 +15,7 @@ use crate::services::background_effect::attach_blur_surface_lifecycle;
 use crate::services::config_manager::{ConfigManager, ThemeCallbackGuard};
 use crate::services::network::{NetworkService, WifiAuthentication, WifiCredentials};
 use crate::services::surfaces::{SHADOW_MARGIN, SurfaceStyleManager};
+use crate::services::tooltip::set_tooltip;
 use crate::styles::{button, color, qs, surface};
 use crate::widgets::layer_shell_popover::{
     AnimDirection, SurfaceAnimation, create_click_catcher, popover_keyboard_mode, setup_esc_handler,
@@ -73,7 +74,7 @@ impl WifiQrWindow {
         let close = Button::new();
         close.add_css_class(surface::POPOVER_ICON_BTN);
         close.set_has_frame(false);
-        close.set_tooltip_text(Some(&tr!("Close")));
+        set_tooltip(&close, Some(&tr!("Close")));
         close.set_valign(Align::Start);
         close.set_child(Some(&Image::from_icon_name("window-close-symbolic")));
         header.append(&close);
@@ -154,7 +155,7 @@ impl WifiQrWindow {
         let fetch_generation = self.fetch_generation.get().wrapping_add(1);
         self.fetch_generation.set(fetch_generation);
         self.ssid_label.set_label(ssid);
-        self.ssid_label.set_tooltip_text(Some(ssid));
+        set_tooltip(&self.ssid_label, Some(ssid));
         self.show_loading();
         let reversing = self.anim.can_reverse_on(&self.window, monitor);
         if !reversing {
@@ -270,7 +271,10 @@ impl WifiQrWindow {
                 picture.set_corner_radius(radius as f32);
                 picture.set_margin_bottom(42);
                 picture.set_paintable(Some(&texture));
-                picture.set_tooltip_text(Some(&tr!("QR code for Wi-Fi network {ssid}", ssid)));
+                set_tooltip(
+                    &picture,
+                    Some(&tr!("QR code for Wi-Fi network {ssid}", ssid)),
+                );
                 self.body.append(&picture);
 
                 if let Some(password) = password {
