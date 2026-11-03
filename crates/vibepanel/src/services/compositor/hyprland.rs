@@ -6,7 +6,7 @@
 //!
 //! Reference: https://wiki.hyprland.org/IPC/
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::env;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
@@ -19,9 +19,11 @@ use parking_lot::RwLock;
 use serde_json::Value;
 use tracing::{debug, error, info, trace, warn};
 
+use super::visibility::hyprland_workspace_key;
 use super::{
-    CompositorBackend, KeyboardLayoutCallback, KeyboardLayoutInfo, WindowCallback, WindowInfo,
-    WorkspaceCallback, WorkspaceMeta, WorkspaceSnapshot, synthetic_id_for_name,
+    CompositorBackend, KeyboardLayoutCallback, KeyboardLayoutInfo, Window, WindowCallback,
+    WindowInfo, WindowListCallback, WindowListSnapshot, WorkspaceCallback, WorkspaceMeta,
+    WorkspaceSnapshot, synthetic_id_for_name,
 };
 
 /// Default workspaces for Hyprland (dynamic workspaces, but we expose 1-10).
@@ -46,6 +48,12 @@ struct SharedState {
     keyboard_layout: RwLock<Option<KeyboardLayoutInfo>>,
     /// Name of the main keyboard device (auto-detected from `hyprctl devices`).
     main_keyboard_name: RwLock<Option<String>>,
+    /// Shown special workspaces, as in `HyprlandState`.
+    shown_special: RwLock<HashMap<String, (String, Option<i32>)>>,
+    /// Listed windows, in taskbar order.
+    windows: RwLock<Vec<Window>>,
+    /// Window state that `j/clients` doesn't report.
+    tracking: RwLock<WindowTracking>,
 }
 
 impl Default for SharedState {
@@ -59,7 +67,38 @@ impl Default for SharedState {
             monitor_names: RwLock::new(HashMap::new()),
             keyboard_layout: RwLock::new(None),
             main_keyboard_name: RwLock::new(None),
+            shown_special: RwLock::new(HashMap::new()),
+            windows: RwLock::new(Vec::new()),
+            tracking: RwLock::new(WindowTracking::default()),
         }
+    }
+}
+
+/// Window state kept across `j/clients` queries, by window address.
+#[derive(Debug, Default)]
+struct WindowTracking {
+    /// Last position outside fullscreen, which moves a window to the corner.
+    positions: HashMap<u64, (i64, i64)>,
+    /// Hyprland only reports urgency as an event; cleared on focus.
+    urgent: HashSet<u64>,
+    focused: Option<u64>,
+}
+
+/// What a handled event or refresh changed.
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+struct EventChanges {
+    workspaces: bool,
+    window: bool,
+    window_list: bool,
+    keyboard_layout: bool,
+}
+
+impl std::ops::BitOrAssign for EventChanges {
+    fn bitor_assign(&mut self, other: Self) {
+        self.workspaces |= other.workspaces;
+        self.window |= other.window;
+        self.window_list |= other.window_list;
+        self.keyboard_layout |= other.keyboard_layout;
     }
 }
 
@@ -81,7 +120,31 @@ struct HyprlandState {
     named_addresses: HashMap<i32, String>,
     focused_monitor: Option<String>,
     monitor_names: HashMap<i64, String>,
+    /// Shown special workspaces, by `hyprland_workspace_key`, with the
+    /// monitor showing each and that monitor's regular active workspace.
+    shown_special: HashMap<String, (String, Option<i32>)>,
 }
+
+impl HyprlandState {
+    fn window_context(&self) -> WindowContext<'_> {
+        WindowContext {
+            monitor_names: &self.monitor_names,
+            shown_special: &self.shown_special,
+            workspaces: &self.workspaces,
+        }
+    }
+}
+
+/// Monitor and workspace state needed to build the window list.
+struct WindowContext<'a> {
+    monitor_names: &'a HashMap<i64, String>,
+    shown_special: &'a HashMap<String, (String, Option<i32>)>,
+    workspaces: &'a [WorkspaceMeta],
+}
+
+/// Windows whose left edges are closer than this (px) are in one column, so
+/// borders and gaps don't split a column.
+const COLUMN_TOLERANCE: i64 = 48;
 
 pub struct HyprlandBackend {
     running: Arc<AtomicBool>,
@@ -92,6 +155,8 @@ pub struct HyprlandBackend {
     callbacks: Mutex<Option<(WorkspaceCallback, WindowCallback)>>,
     /// Callback for keyboard layout changes, set by CompositorManager.
     keyboard_layout_callback: Mutex<Option<KeyboardLayoutCallback>>,
+    /// Callback for window list changes, set by CompositorManager.
+    window_list_callback: Mutex<Option<WindowListCallback>>,
     /// Whether this Hyprland instance supports the Lua dispatch API.
     supports_lua_dispatch: AtomicBool,
 }
@@ -106,6 +171,7 @@ impl HyprlandBackend {
             shared: Arc::new(SharedState::default()),
             callbacks: Mutex::new(None),
             keyboard_layout_callback: Mutex::new(None),
+            window_list_callback: Mutex::new(None),
             supports_lua_dispatch: AtomicBool::new(false),
         }
     }
@@ -128,6 +194,12 @@ impl HyprlandBackend {
             ),
             keyboard_layout_callback: Mutex::new(
                 self.keyboard_layout_callback
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone(),
+            ),
+            window_list_callback: Mutex::new(
+                self.window_list_callback
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .clone(),
@@ -500,7 +572,7 @@ impl HyprlandBackend {
     /// Build workspace state from `j/monitors` and `j/workspaces`.
     ///
     /// Hyprland's JSON has no urgency, so the urgent set is left empty and
-    /// carried over by `apply_state`.
+    /// filled in by `apply_state` from the urgent windows.
     fn build_state(monitors: &[Value], workspaces: &[Value]) -> HyprlandState {
         let mut state = HyprlandState::default();
         let snapshot = &mut state.snapshot;
@@ -517,11 +589,17 @@ impl HyprlandBackend {
                 state.focused_monitor = Some(name.to_string());
             }
             let per_output = snapshot.per_output.entry(name.to_string()).or_default();
-            if let Some(ws_id) = mon.get("activeWorkspace").and_then(Self::workspace_id) {
+            let active = mon.get("activeWorkspace").and_then(Self::workspace_id);
+            if let Some(ws_id) = active {
                 per_output.active_workspace.insert(ws_id);
                 if focused {
                     snapshot.active_workspace.insert(ws_id);
                 }
+            }
+            if let Some(special) = mon.get("specialWorkspace").and_then(hyprland_workspace_key) {
+                state
+                    .shown_special
+                    .insert(special, (name.to_string(), active));
             }
         }
 
@@ -564,6 +642,201 @@ impl HyprlandBackend {
         state
     }
 
+    /// Parse a window address, as `j/clients` (`0x55d0c0ffee`) or events
+    /// (`55d0c0ffee`) report it.
+    fn parse_address(address: &str) -> Option<u64> {
+        let hex = address.strip_prefix("0x").unwrap_or(address);
+        u64::from_str_radix(hex, 16).ok().filter(|id| *id != 0)
+    }
+
+    fn client_address(client: &Value) -> Option<u64> {
+        client
+            .get("address")
+            .and_then(Value::as_str)
+            .and_then(Self::parse_address)
+    }
+
+    /// Build the window list from `j/clients`, by output and workspace like
+    /// the workspaces widget, then by position: Hyprland exposes no layout
+    /// order, and `j/clients` is in stacking order.
+    ///
+    /// Windows on a shown special workspace are listed as scratchpads on the
+    /// workspace they cover; hidden special, unmapped and swallowed windows
+    /// are skipped.
+    fn build_windows(
+        clients: &[Value],
+        context: &WindowContext,
+        tracking: &mut WindowTracking,
+    ) -> Vec<Window> {
+        let addresses: HashSet<u64> = clients.iter().filter_map(Self::client_address).collect();
+        tracking.positions.retain(|id, _| addresses.contains(id));
+        tracking.urgent.retain(|id| addresses.contains(id));
+
+        let swallowed: HashSet<u64> = clients
+            .iter()
+            .filter_map(|c| c.get("swallowing").and_then(Value::as_str))
+            .filter_map(Self::parse_address)
+            .collect();
+
+        let mut entries: Vec<(Window, (i64, i64), usize)> = Vec::new();
+        for client in clients {
+            let Some(id) = Self::client_address(client) else {
+                continue;
+            };
+            if client.get("mapped").and_then(Value::as_bool) == Some(false)
+                || swallowed.contains(&id)
+            {
+                continue;
+            }
+
+            let workspace = client.get("workspace").unwrap_or(&Value::Null);
+            let monitor = client
+                .get("monitor")
+                .and_then(Value::as_i64)
+                .and_then(|id| context.monitor_names.get(&id).cloned());
+            let (workspace_id, output, is_scratchpad) =
+                if let Some(ws_id) = Self::workspace_id(workspace) {
+                    (Some(ws_id), monitor, false)
+                } else if let Some((shown_on, active)) = hyprland_workspace_key(workspace)
+                    .and_then(|key| context.shown_special.get(&key))
+                {
+                    (*active, Some(shown_on.clone()), true)
+                } else {
+                    continue;
+                };
+
+            let at = client
+                .get("at")
+                .and_then(Value::as_array)
+                .and_then(|at| Some((at.first()?.as_i64()?, at.get(1)?.as_i64()?)))
+                .unwrap_or((i64::MAX, i64::MAX));
+            // Newer Hyprland reports a mode (0 = none), older a bool.
+            let fullscreen = client.get("fullscreen").is_some_and(|f| {
+                f.as_u64().is_some_and(|mode| mode > 0) || f.as_bool() == Some(true)
+            });
+            let position = if fullscreen {
+                tracking.positions.get(&id).copied().unwrap_or(at)
+            } else {
+                tracking.positions.insert(id, at);
+                at
+            };
+            // Tabs share a position.
+            let tab = client
+                .get("grouped")
+                .and_then(Value::as_array)
+                .and_then(|group| {
+                    group.iter().position(|member| {
+                        member.as_str().and_then(Self::parse_address) == Some(id)
+                    })
+                })
+                .unwrap_or(0);
+
+            let str_field = |key: &str| {
+                client
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string()
+            };
+
+            let window = Window {
+                id,
+                title: str_field("title"),
+                app_id: str_field("class"),
+                workspace_id,
+                output,
+                is_focused: tracking.focused == Some(id),
+                is_urgent: tracking.urgent.contains(&id),
+                is_scratchpad,
+                ..Default::default()
+            };
+            entries.push((window, position, tab));
+        }
+
+        // Column left edges, per group of windows sorted together.
+        type Group = (Option<String>, Option<i32>, bool);
+        let group_of =
+            |win: &Window| -> Group { (win.output.clone(), win.workspace_id, win.is_scratchpad) };
+        let mut columns: HashMap<Group, Vec<i64>> = HashMap::new();
+        for (win, (x, _), _) in &entries {
+            columns.entry(group_of(win)).or_default().push(*x);
+        }
+        for xs in columns.values_mut() {
+            xs.sort_unstable();
+            let mut starts: Vec<i64> = Vec::new();
+            for &x in xs.iter() {
+                if starts
+                    .last()
+                    .is_none_or(|start| x.saturating_sub(*start) >= COLUMN_TOLERANCE)
+                {
+                    starts.push(x);
+                }
+            }
+            *xs = starts;
+        }
+        let column_of =
+            |win: &Window, x: i64| columns[&group_of(win)].partition_point(|start| *start <= x);
+
+        let ws_position: HashMap<i32, usize> = context
+            .workspaces
+            .iter()
+            .enumerate()
+            .map(|(pos, ws)| (ws.id, pos))
+            .collect();
+        entries.sort_by_cached_key(|(win, (x, y), tab)| {
+            (
+                win.output.clone(),
+                win.workspace_id
+                    .and_then(|id| ws_position.get(&id).copied())
+                    .unwrap_or(usize::MAX),
+                win.is_scratchpad,
+                column_of(win, *x),
+                *y,
+                *tab,
+                win.id,
+            )
+        });
+        entries.into_iter().map(|(win, _, _)| win).collect()
+    }
+
+    /// Scratchpads don't count: they're only shown over a workspace.
+    fn urgent_workspaces(windows: &[Window]) -> HashSet<i32> {
+        windows
+            .iter()
+            .filter(|win| win.is_urgent && !win.is_scratchpad)
+            .filter_map(|win| win.workspace_id)
+            .collect()
+    }
+
+    fn sync_urgent_workspaces(&self) -> bool {
+        let urgent = Self::urgent_workspaces(&self.shared.windows.read());
+        let mut snapshot = self.shared.workspace_snapshot.write();
+        let changed = snapshot.urgent_workspaces != urgent;
+        snapshot.urgent_workspaces = urgent;
+        changed
+    }
+
+    /// Reapply tracked focus and urgency to the listed windows.
+    fn sync_window_flags(&self) -> bool {
+        let tracking = self.shared.tracking.read();
+        let mut changed = false;
+        for win in self.shared.windows.write().iter_mut() {
+            let is_focused = tracking.focused == Some(win.id);
+            let is_urgent = tracking.urgent.contains(&win.id);
+            changed |= win.is_focused != is_focused || win.is_urgent != is_urgent;
+            win.is_focused = is_focused;
+            win.is_urgent = is_urgent;
+        }
+        changed
+    }
+
+    fn apply_windows(&self, windows: Vec<Window>) -> bool {
+        let mut current = self.shared.windows.write();
+        let changed = *current != windows;
+        *current = windows;
+        changed
+    }
+
     /// Store a rebuilt state. Returns true if the workspace snapshot or
     /// metadata changed.
     fn apply_state(&self, state: HyprlandState) -> bool {
@@ -573,10 +846,12 @@ impl HyprlandBackend {
             named_addresses,
             focused_monitor,
             monitor_names,
+            shown_special,
         } = state;
         *self.shared.named_addresses.write() = named_addresses;
         *self.shared.focused_monitor.write() = focused_monitor;
         *self.shared.monitor_names.write() = monitor_names;
+        *self.shared.shown_special.write() = shown_special;
 
         let metadata_changed = {
             let mut current = self.shared.workspaces.write();
@@ -587,19 +862,8 @@ impl HyprlandBackend {
             changed
         };
 
+        snapshot.urgent_workspaces = Self::urgent_workspaces(&self.shared.windows.read());
         let mut current = self.shared.workspace_snapshot.write();
-        // Urgency only arrives as events. Keep it while the workspace has
-        // windows, and treat switching to the workspace as acknowledging it.
-        snapshot.urgent_workspaces = current
-            .urgent_workspaces
-            .iter()
-            .copied()
-            .filter(|id| {
-                snapshot.occupied_workspaces.contains(id)
-                    && (!snapshot.active_workspace.contains(id)
-                        || current.active_workspace.contains(id))
-            })
-            .collect();
         let snapshot_changed = *current != snapshot;
         if snapshot_changed {
             *current = snapshot;
@@ -608,26 +872,73 @@ impl HyprlandBackend {
         metadata_changed || snapshot_changed
     }
 
-    /// Re-query monitors and workspaces and store the result.
-    /// Returns true if the workspace snapshot or metadata changed.
-    fn refresh_workspaces(&self) -> bool {
+    /// Re-query monitors, workspaces and clients and store the result.
+    fn refresh(&self) -> EventChanges {
         let monitors = self.query_json("monitors");
         let workspaces = self.query_json("workspaces");
+        let clients = self.query_json("clients");
         let (Some(monitors), Some(workspaces)) = (
             monitors.as_ref().and_then(Value::as_array),
             workspaces.as_ref().and_then(Value::as_array),
         ) else {
             warn!("Failed to query Hyprland monitors or workspaces");
-            return false;
+            return EventChanges::default();
         };
-        self.apply_state(Self::build_state(monitors, workspaces))
+        let state = Self::build_state(monitors, workspaces);
+
+        // Before `apply_state`, which takes urgency from the window list.
+        let window_list = match clients.as_ref().and_then(Value::as_array) {
+            Some(clients) => {
+                let windows = Self::build_windows(
+                    clients,
+                    &state.window_context(),
+                    &mut self.shared.tracking.write(),
+                );
+                self.apply_windows(windows)
+            }
+            None => {
+                warn!("Failed to query Hyprland clients");
+                false
+            }
+        };
+
+        EventChanges {
+            workspaces: self.apply_state(state),
+            window_list,
+            ..Default::default()
+        }
     }
 
-    /// Fetch initial state from Hyprland.
-    fn fetch_initial_state(&self) {
-        self.refresh_workspaces();
+    /// Re-query only the clients, reusing the last monitor and workspace state.
+    fn refresh_windows(&self) -> EventChanges {
+        let clients = self.query_json("clients");
+        let Some(clients) = clients.as_ref().and_then(Value::as_array) else {
+            warn!("Failed to query Hyprland clients");
+            return EventChanges::default();
+        };
+        let windows = {
+            let monitor_names = self.shared.monitor_names.read();
+            let shown_special = self.shared.shown_special.read();
+            let workspaces = self.shared.workspaces.read();
+            let context = WindowContext {
+                monitor_names: &monitor_names,
+                shown_special: &shown_special,
+                workspaces: &workspaces,
+            };
+            Self::build_windows(clients, &context, &mut self.shared.tracking.write())
+        };
+        EventChanges {
+            window_list: self.apply_windows(windows),
+            workspaces: self.sync_urgent_workspaces(),
+            ..Default::default()
+        }
+    }
+
+    /// Fetch the full state from Hyprland.
+    fn fetch_all(&self) {
+        self.refresh();
         self.refresh_active_window(true);
-        debug!("Fetched initial Hyprland state");
+        debug!("Fetched Hyprland state");
     }
 
     /// Fetch keyboard layout info from Hyprland devices.
@@ -683,26 +994,76 @@ impl HyprlandBackend {
         });
     }
 
-    fn clear_urgent_workspace(&self, ws_id: i32) -> bool {
-        // Hyprland exposes urgency as an event only, not in clients/workspaces JSON.
-        // Treat focusing a window on the workspace as acknowledging workspace-level urgency.
-        // TODO: When Hyprland list_windows support lands, replace workspace-level
-        // urgency with address-based tracking so multiple urgent clients on the same
-        // workspace survive focusing/viewing only one client.
-        self.shared
-            .workspace_snapshot
-            .write()
-            .urgent_workspaces
-            .remove(&ws_id)
+    /// Skips the focused window, as no later focus event would clear it.
+    fn mark_urgent(&self, address: &str) -> EventChanges {
+        let Some(id) = Self::parse_address(address) else {
+            return EventChanges::default();
+        };
+        let inserted = {
+            let mut tracking = self.shared.tracking.write();
+            tracking.focused != Some(id) && tracking.urgent.insert(id)
+        };
+        if !inserted {
+            return EventChanges::default();
+        }
+        EventChanges {
+            window_list: self.sync_window_flags(),
+            workspaces: self.sync_urgent_workspaces(),
+            ..Default::default()
+        }
     }
 
-    /// Refresh the focused window from `activewindow`. Pass `workspaces_fresh`
-    /// when the caller has just called `refresh_workspaces`.
-    /// Returns (window_changed, workspace_changed).
-    fn refresh_active_window(&self, workspaces_fresh: bool) -> (bool, bool) {
-        let Some(active_window) = self.query_json("activewindow") else {
-            return (false, false);
+    /// Focusing a window clears its urgency, not that of others on its workspace.
+    fn set_focused_window(&self, id: Option<u64>) -> EventChanges {
+        {
+            let mut tracking = self.shared.tracking.write();
+            tracking.focused = id;
+            if let Some(id) = id {
+                tracking.urgent.remove(&id);
+            }
+        }
+        EventChanges {
+            window_list: self.sync_window_flags(),
+            workspaces: self.sync_urgent_workspaces(),
+            ..Default::default()
+        }
+    }
+
+    /// From `windowtitlev2>>ADDRESS,TITLE`.
+    fn update_window_title(&self, data: &str) -> bool {
+        let Some((address, title)) = data.split_once(',') else {
+            return false;
         };
+        let Some(id) = Self::parse_address(address) else {
+            return false;
+        };
+        let mut windows = self.shared.windows.write();
+        match windows.iter_mut().find(|win| win.id == id) {
+            Some(win) if win.title != title => {
+                win.title = title.to_string();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Refresh the focused window from `activewindow`. Pass `fresh` when the
+    /// caller has just called `refresh`.
+    fn refresh_active_window(&self, mut fresh: bool) -> EventChanges {
+        let Some(active_window) = self.query_json("activewindow") else {
+            return EventChanges::default();
+        };
+        let focus_key = || {
+            (
+                self.shared.tracking.read().focused,
+                self.shared
+                    .focused_window
+                    .read()
+                    .as_ref()
+                    .map(|w| (w.app_id.clone(), w.output.clone())),
+            )
+        };
+        let before = focus_key();
 
         let parse =
             || Self::window_info_from_ipc(&active_window, &self.shared.monitor_names.read());
@@ -715,22 +1076,28 @@ impl HyprlandBackend {
         // Monitors can be added after the last rebuild. With no focused window,
         // the empty update is scoped to the focused monitor, so query it now
         // rather than trusting `focusedmon` to have arrived first.
-        let mut workspace_changed = false;
-        if !workspaces_fresh && (unknown_monitor || new_focused.is_none()) {
-            workspace_changed = self.refresh_workspaces();
+        let mut changes = EventChanges::default();
+        if !fresh && (unknown_monitor || new_focused.is_none()) {
+            changes = self.refresh();
             new_focused = parse();
+            fresh = true;
         }
 
-        if let Some(ws_id) = active_window.get("workspace").and_then(Self::workspace_id) {
-            workspace_changed |= self.clear_urgent_workspace(ws_id);
-        }
+        changes |= self.set_focused_window(Self::client_address(&active_window));
 
-        let mut focused = self.shared.focused_window.write();
-        let window_changed = *focused != new_focused;
-        if window_changed {
-            *focused = new_focused;
+        {
+            let mut focused = self.shared.focused_window.write();
+            changes.window = *focused != new_focused;
+            if changes.window {
+                *focused = new_focused;
+            }
         }
-        (window_changed, workspace_changed)
+        // Also sent on title changes, which `windowtitlev2` applies.
+        // Swapped tiles are picked up on the next focus change.
+        if !fresh && focus_key() != before {
+            changes |= self.refresh_windows();
+        }
+        changes
     }
 
     /// Parse `activewindow` JSON. Hyprland returns `{}` when no window is
@@ -779,72 +1146,61 @@ impl HyprlandBackend {
     }
 
     /// Handle a Hyprland event line.
-    /// Returns (workspace_changed, window_changed, keyboard_layout_changed).
-    fn handle_event(&self, line: &str) -> (bool, bool, bool) {
+    fn handle_event(&self, line: &str) -> EventChanges {
         super::visibility::notify_changed();
         let Some((event, data)) = line.split_once(">>") else {
-            return (false, false, false);
+            return EventChanges::default();
         };
 
         trace!(
             "Hyprland event: {}>>{}...",
             event,
-            &data[..data.len().min(50)]
+            &data[..data.floor_char_boundary(50)]
         );
 
-        let mut workspace_changed = false;
-        let mut window_changed = false;
-        let mut keyboard_layout_changed = false;
+        let mut changes = EventChanges::default();
 
-        // Hyprland sends most events twice, as v1 and v2. Their payloads aren't
-        // used, so handle only the v1 name, which every version sends.
+        // Hyprland sends most events twice, as v1 and v2. Where the payload
+        // isn't used, handle only the v1 name, which every version sends.
         match event {
+            // `workspace` also moves pinned windows and shown scratchpads;
+            // a config reload can move every window.
             "workspace" | "createworkspace" | "destroyworkspace" | "renameworkspace"
             | "changeworkspaceid" | "openwindow" | "closewindow" | "monitoradded"
-            | "monitorremoved" => {
-                workspace_changed = self.refresh_workspaces();
+            | "monitorremoved" | "activespecial" | "configreloaded" => {
+                changes = self.refresh();
             }
             "focusedmon" => {
-                workspace_changed = self.refresh_workspaces();
+                changes = self.refresh();
                 // With no focused window, refresh before emitting: the new
                 // monitor may have a window whose `activewindow` event hasn't
                 // arrived yet, and emitting the empty title first would flicker.
                 // Always emit: the focused window stays `None`, but the empty
                 // update has to move to the newly focused monitor.
                 if self.shared.focused_window.read().is_none() {
-                    workspace_changed |= self.refresh_active_window(true).1;
-                    window_changed = true;
+                    changes |= self.refresh_active_window(true);
+                    changes.window = true;
                 }
             }
             "movewindow" | "moveworkspace" => {
                 // The focused window may have changed monitor while keeping
                 // focus, which emits no `activewindow`; refresh its output.
-                workspace_changed = self.refresh_workspaces();
-                let (win, ws) = self.refresh_active_window(true);
-                window_changed = win;
-                workspace_changed |= ws;
+                changes = self.refresh();
+                changes |= self.refresh_active_window(true);
             }
             "activewindow" => {
-                (window_changed, workspace_changed) = self.refresh_active_window(false);
+                changes = self.refresh_active_window(false);
+            }
+            "changefloatingmode" | "togglegroup" | "moveintogroup" | "moveoutofgroup" => {
+                changes = self.refresh_windows();
+            }
+            // The v2 payload carries the title, so no query is needed.
+            "windowtitlev2" => {
+                changes.window_list = self.update_window_title(data);
             }
             "urgent" => {
                 // urgent>>WINDOW_ADDRESS
-                if let Some(clients) = self.query_json("clients")
-                    && let Some(clients) = clients.as_array()
-                {
-                    for client in clients {
-                        let addr = client.get("address").and_then(|v| v.as_str()).unwrap_or("");
-                        if addr == data || addr == format!("0x{}", data) {
-                            if let Some(ws) = client.get("workspace")
-                                && let Some(ws_id) = Self::workspace_id(ws)
-                            {
-                                let mut snapshot = self.shared.workspace_snapshot.write();
-                                workspace_changed = snapshot.urgent_workspaces.insert(ws_id);
-                            }
-                            break;
-                        }
-                    }
-                }
+                changes = self.mark_urgent(data);
             }
             "activelayout" => {
                 // activelayout>>KEYBOARD_NAME,LAYOUT_NAME
@@ -867,7 +1223,7 @@ impl HyprlandBackend {
                                 .and_then(|i| i.layout_count),
                         };
                         *self.shared.keyboard_layout.write() = Some(info);
-                        keyboard_layout_changed = true;
+                        changes.keyboard_layout = true;
                     } else {
                         let previous = self.shared.keyboard_layout.read().clone();
                         debug!(
@@ -876,7 +1232,7 @@ impl HyprlandBackend {
                             "Refreshing keyboard layout after non-main activelayout event"
                         );
                         self.fetch_keyboard_layout();
-                        keyboard_layout_changed =
+                        changes.keyboard_layout =
                             self.shared.keyboard_layout.read().as_ref() != previous.as_ref();
                     }
                 }
@@ -884,7 +1240,44 @@ impl HyprlandBackend {
             _ => {}
         }
 
-        (workspace_changed, window_changed, keyboard_layout_changed)
+        changes
+    }
+
+    /// Invoke the callbacks for what changed.
+    fn emit(&self, changes: EventChanges) {
+        if let Some((ws_cb, win_cb)) = self
+            .callbacks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            if changes.workspaces {
+                ws_cb(self.shared.workspace_snapshot.read().clone());
+            }
+            if changes.window {
+                win_cb(self.window_update());
+            }
+        }
+
+        if changes.window_list
+            && let Some(ref cb) = *self
+                .window_list_callback
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+        {
+            let windows = self.shared.windows.read().clone();
+            cb(WindowListSnapshot { windows });
+        }
+
+        if changes.keyboard_layout
+            && let Some(ref kb_cb) = *self
+                .keyboard_layout_callback
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+            && let Some(ref info) = *self.shared.keyboard_layout.read()
+        {
+            kb_cb(info.clone());
+        }
     }
 
     /// Run the event loop (in background thread).
@@ -899,32 +1292,6 @@ impl HyprlandBackend {
                 }
             }
         };
-
-        // Fetch initial state and emit
-        backend.fetch_initial_state();
-
-        // Fetch initial keyboard layout (queries devices, auto-detects main keyboard)
-        backend.fetch_keyboard_layout();
-
-        // Emit initial state
-        if let Some((ws_cb, win_cb)) = backend
-            .callbacks
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
-        {
-            ws_cb(backend.shared.workspace_snapshot.read().clone());
-            win_cb(backend.window_update());
-        }
-        // Emit initial keyboard layout
-        if let Some(ref kb_cb) = *backend
-            .keyboard_layout_callback
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            && let Some(ref info) = *backend.shared.keyboard_layout.read()
-        {
-            kb_cb(info.clone());
-        }
 
         // Exponential backoff state
         let mut backoff_ms = RECONNECT_INITIAL_MS;
@@ -954,6 +1321,17 @@ impl HyprlandBackend {
                 }
             };
 
+            // Fetch after connecting so changes made while disconnected
+            // aren't missed.
+            backend.fetch_all();
+            backend.fetch_keyboard_layout();
+            backend.emit(EventChanges {
+                workspaces: true,
+                window: true,
+                window_list: true,
+                keyboard_layout: true,
+            });
+
             // Set read timeout for graceful shutdown
             let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
 
@@ -966,31 +1344,8 @@ impl HyprlandBackend {
 
                 match line {
                     Ok(line) => {
-                        let (ws_changed, win_changed, kb_changed) = backend.handle_event(&line);
-
-                        if let Some((ws_cb, win_cb)) = backend
-                            .callbacks
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .as_ref()
-                        {
-                            if ws_changed {
-                                ws_cb(backend.shared.workspace_snapshot.read().clone());
-                            }
-                            if win_changed {
-                                win_cb(backend.window_update());
-                            }
-                        }
-
-                        if kb_changed
-                            && let Some(ref kb_cb) = *backend
-                                .keyboard_layout_callback
-                                .lock()
-                                .unwrap_or_else(|e| e.into_inner())
-                            && let Some(ref info) = *backend.shared.keyboard_layout.read()
-                        {
-                            kb_cb(info.clone());
-                        }
+                        let changes = backend.handle_event(&line);
+                        backend.emit(changes);
                     }
                     Err(e) => {
                         // Timeout is expected, other errors should be logged
@@ -1093,6 +1448,35 @@ impl CompositorBackend for HyprlandBackend {
 
     fn get_focused_output(&self) -> Option<String> {
         self.shared.focused_monitor.read().clone()
+    }
+
+    fn list_windows(&self) -> Vec<Window> {
+        self.shared.windows.read().clone()
+    }
+
+    fn provides_window_list(&self) -> bool {
+        true
+    }
+
+    fn set_window_list_callback(&self, callback: WindowListCallback) {
+        *self
+            .window_list_callback
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(callback);
+    }
+
+    fn focus_window(&self, window_id: u64) {
+        // Hyprland switches to the window's workspace and monitor, and to its
+        // tab if it's grouped.
+        let selector = format!("address:0x{window_id:x}");
+        self.send_dispatch(
+            "focus_window",
+            &format!(
+                "dispatch hl.dsp.focus({{ window = {} }})",
+                Self::lua_string(&selector)
+            ),
+            &format!("dispatch focuswindow {selector}"),
+        );
     }
 
     fn switch_workspace(&self, workspace_id: i32) {
@@ -1393,27 +1777,6 @@ mod tests {
     }
 
     #[test]
-    fn clear_urgent_workspace_removes_matching_workspace() {
-        let backend = HyprlandBackend::new();
-        backend
-            .shared
-            .workspace_snapshot
-            .write()
-            .urgent_workspaces
-            .insert(4);
-
-        assert!(backend.clear_urgent_workspace(4));
-        assert!(
-            !backend
-                .shared
-                .workspace_snapshot
-                .read()
-                .urgent_workspaces
-                .contains(&4)
-        );
-    }
-
-    #[test]
     fn activelayout_main_keyboard_updates_layout_from_event() {
         let backend = HyprlandBackend::new();
         *backend.shared.main_keyboard_name.write() = Some("keyboard-a".to_string());
@@ -1422,9 +1785,9 @@ mod tests {
             layout_count: Some(2),
         });
 
-        let (_, _, keyboard_changed) = backend.handle_event("activelayout>>keyboard-a,German");
+        let changes = backend.handle_event("activelayout>>keyboard-a,German");
 
-        assert!(keyboard_changed);
+        assert!(changes.keyboard_layout);
         assert_eq!(
             backend
                 .shared
@@ -1547,55 +1910,189 @@ mod tests {
         );
     }
 
-    #[test]
-    fn apply_state_clears_urgency_when_workspace_becomes_active() {
-        let backend = HyprlandBackend::new();
-        let workspaces = json!([
-            {"id": 1, "name": "1", "monitor": "DP-1", "windows": 1},
-            {"id": 2, "name": "2", "monitor": "DP-1", "windows": 1}
-        ]);
-        backend.apply_state(state(two_monitors(1, 5), workspaces.clone()));
-        backend
-            .shared
-            .workspace_snapshot
-            .write()
-            .urgent_workspaces
-            .extend([1, 2]);
+    fn client(address: u64, workspace: Value, at: (i64, i64)) -> Value {
+        json!({
+            "address": format!("0x{address:x}"),
+            "workspace": workspace,
+            "monitor": 0,
+            "at": [at.0, at.1],
+            "class": "app",
+            "title": "title",
+        })
+    }
 
-        // Urgency survives rebuilds that don't switch to the workspace.
-        backend.apply_state(state(two_monitors(1, 5), workspaces.clone()));
-        assert_eq!(
-            backend.get_workspace_snapshot().urgent_workspaces,
-            HashSet::from([1, 2])
+    fn ws(id: i32) -> Value {
+        json!({ "id": id, "name": id.to_string() })
+    }
+
+    /// Rebuild the backend's windows and workspace state, as `refresh` does.
+    fn apply_clients(backend: &HyprlandBackend, monitors: Value, clients: Value) {
+        let state = state(monitors, json!([]));
+        let windows = HyprlandBackend::build_windows(
+            clients.as_array().unwrap(),
+            &state.window_context(),
+            &mut backend.shared.tracking.write(),
         );
+        backend.apply_windows(windows);
+        backend.apply_state(state);
+    }
 
-        assert!(backend.apply_state(state(two_monitors(2, 5), workspaces)));
+    fn order(backend: &HyprlandBackend) -> Vec<u64> {
+        backend.list_windows().iter().map(|w| w.id).collect()
+    }
+
+    #[test]
+    fn window_list_orders_by_output_workspace_then_position() {
+        let backend = HyprlandBackend::new();
+        let mut other_monitor = client(0x9, ws(5), (0, 0));
+        other_monitor["monitor"] = 1.into();
+        let group = json!(["0x6", "0x5"]);
+        let mut tab_b = client(0x5, ws(1), (1720, 58));
+        tab_b["grouped"] = group.clone();
+        let mut tab_a = client(0x6, ws(1), (1720, 58));
+        tab_a["grouped"] = group;
+        let mut no_position = client(0x8, ws(2), (0, 0));
+        no_position.as_object_mut().unwrap().remove("at");
+        // Stacking order. 0x4 is offset, but within the left column. On
+        // workspace 2, a window without a position follows one at negative x.
+        let clients = json!([
+            other_monitor,
+            client(0x7, ws(3), (0, 0)),
+            no_position,
+            tab_b,
+            client(0x2, ws(1), (22, 745)),
+            tab_a,
+            client(0x3, ws(2), (-1920, 0)),
+            client(0x4, ws(1), (40, 400)),
+            client(0x1, ws(1), (22, 58)),
+        ]);
+
+        apply_clients(&backend, two_monitors(1, 5), clients);
+
         assert_eq!(
-            backend.get_workspace_snapshot().urgent_workspaces,
-            HashSet::from([1])
+            order(&backend),
+            [0x1, 0x4, 0x2, 0x6, 0x5, 0x3, 0x8, 0x7, 0x9]
         );
     }
 
     #[test]
-    fn apply_state_drops_urgency_for_empty_workspaces() {
+    fn fullscreen_window_keeps_its_slot() {
         let backend = HyprlandBackend::new();
-        backend
-            .shared
-            .workspace_snapshot
-            .write()
-            .urgent_workspaces
-            .insert(3);
+        let left = client(0x2, ws(1), (22, 58));
+        let tiled = json!([client(0x1, ws(1), (1720, 58)), left.clone()]);
+        apply_clients(&backend, two_monitors(1, 5), tiled);
 
-        backend.apply_state(state(
-            two_monitors(1, 5),
-            json!([{"id": 3, "name": "3", "monitor": "DP-1", "windows": 0}]),
-        ));
+        // Newer Hyprland reports a mode, older a bool.
+        for fullscreen in [json!(2), json!(true)] {
+            let mut full = client(0x1, ws(1), (0, 0));
+            full["fullscreen"] = fullscreen;
+            apply_clients(&backend, two_monitors(1, 5), json!([full, left.clone()]));
+            assert_eq!(order(&backend), [0x2, 0x1]);
+        }
+    }
 
+    #[test]
+    fn window_list_shows_only_shown_special_workspaces() {
+        let new = |name: &str| json!({ "address": name, "type": "special", "name": name });
+        let old = |id: i32, name: &str| json!({ "id": id, "name": name });
+        let formats = [
+            (
+                new("special:a"),
+                new("special:b"),
+                json!({ "address": "", "name": "" }),
+            ),
+            (
+                old(-98, "special:a"),
+                old(-97, "special:b"),
+                json!({ "id": 0, "name": "" }),
+            ),
+        ];
+        for (shown, hidden, none) in formats {
+            let backend = HyprlandBackend::new();
+            let monitors = json!([
+                {"id": 0, "name": "DP-1", "activeWorkspace": ws(2), "specialWorkspace": shown.clone()},
+                {"id": 1, "name": "HDMI-A-1", "activeWorkspace": ws(5), "specialWorkspace": none}
+            ]);
+            let mut unmapped = client(0x4, ws(2), (0, 0));
+            unmapped["mapped"] = false.into();
+            let mut swallowing = client(0x5, ws(2), (0, 0));
+            swallowing["swallowing"] = "0x6".into();
+            let clients = json!([
+                client(0x1, shown, (0, 0)),
+                client(0x3, hidden, (0, 0)),
+                unmapped,
+                swallowing,
+                client(0x6, ws(2), (0, 0)),
+            ]);
+
+            apply_clients(&backend, monitors, clients);
+
+            let listed: Vec<_> = backend
+                .list_windows()
+                .iter()
+                .map(|w| (w.id, w.workspace_id, w.is_scratchpad))
+                .collect();
+            assert_eq!(listed, [(0x5, Some(2), false), (0x1, Some(2), true)]);
+        }
+    }
+
+    #[test]
+    fn urgency_is_tracked_per_window() {
+        let backend = HyprlandBackend::new();
+        let clients = json!([client(0x1, ws(3), (0, 0)), client(0x2, ws(3), (0, 1))]);
+        apply_clients(&backend, two_monitors(1, 5), clients.clone());
+        let urgent = |backend: &HyprlandBackend| -> Vec<u64> {
+            let windows = backend.list_windows();
+            windows
+                .iter()
+                .filter(|w| w.is_urgent)
+                .map(|w| w.id)
+                .collect()
+        };
+
+        // Event payloads have no `0x` prefix.
+        backend.handle_event("urgent>>1");
+        backend.handle_event("urgent>>2");
+        backend.set_focused_window(Some(0x1));
+        assert_eq!(urgent(&backend), [0x2]);
+        assert_eq!(
+            backend.get_workspace_snapshot().urgent_workspaces,
+            HashSet::from([3])
+        );
+
+        // The focused window doesn't become urgent, and rebuilds keep urgency.
+        backend.handle_event("urgent>>1");
+        apply_clients(&backend, two_monitors(3, 5), clients);
+        assert_eq!(urgent(&backend), [0x2]);
+
+        // Closing the window drops its urgency.
+        apply_clients(
+            &backend,
+            two_monitors(3, 5),
+            json!([client(0x1, ws(3), (0, 0))]),
+        );
         assert!(
             backend
                 .get_workspace_snapshot()
                 .urgent_workspaces
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn focus_window_dispatches_window_address() {
+        let (backend, socket) = backend_with_fake_socket("focus-window", vec![]);
+
+        backend.focus_window(0x55d0c0ffee);
+        backend.supports_lua_dispatch.store(true, Ordering::Relaxed);
+        backend.focus_window(0x55d0c0ffee);
+
+        assert_eq!(
+            *socket.commands.lock().unwrap(),
+            [
+                "dispatch focuswindow address:0x55d0c0ffee",
+                "dispatch hl.dsp.focus({ window = \"address:0x55d0c0ffee\" })",
+            ]
         );
     }
 
@@ -1618,8 +2115,7 @@ mod tests {
         let backend = HyprlandBackend::new();
         backend.apply_state(state(two_monitors(2, 5), json!([])));
 
-        let (_, window_changed, _) = backend.handle_event("focusedmon>>DP-1,2");
-        assert!(window_changed);
+        assert!(backend.handle_event("focusedmon>>DP-1,2").window);
         assert_eq!(backend.window_update().output, Some("DP-1".to_string()));
         assert!(backend.window_update().title.is_empty());
 
@@ -1629,8 +2125,7 @@ mod tests {
             output: Some("DP-1".to_string()),
             focused: true,
         });
-        let (_, window_changed, _) = backend.handle_event("focusedmon>>DP-1,2");
-        assert!(!window_changed);
+        assert!(!backend.handle_event("focusedmon>>DP-1,2").window);
     }
 
     #[test]
@@ -1640,6 +2135,7 @@ mod tests {
             vec![
                 ("monitors", two_monitors(2, 5)),
                 ("workspaces", json!([])),
+                ("clients", json!([client(0xabc, ws(2), (0, 0))])),
                 ("activewindow", json!({"address": "0xabc", "monitor": 0})),
             ],
         );
@@ -1654,18 +2150,73 @@ mod tests {
             "moveworkspacev2>>2,2,DP-1",
             "monitoraddedv2>>1,DP-1,desc",
             "monitorremovedv2>>1,DP-1,desc",
+            "movewindowv2>>abc,2,2",
+            "activespecialv2>>,,DP-1",
+            // The v2 twin updates titles without a query.
+            "windowtitle>>abc",
+            "windowtitlev2>>abc,vim: a, b",
         ] {
             backend.handle_event(line);
         }
 
         assert_eq!(
             *socket.commands.lock().unwrap(),
-            ["j/monitors", "j/workspaces", "j/activewindow"]
+            [
+                "j/monitors",
+                "j/workspaces",
+                "j/clients",
+                "j/activewindow",
+                "j/clients"
+            ]
         );
         assert_eq!(
             backend.get_workspace_snapshot().active_workspace,
             HashSet::from([2])
         );
+        let windows = backend.list_windows();
+        assert_eq!(windows.len(), 1);
+        assert!(windows[0].is_focused);
+        assert_eq!(windows[0].title, "vim: a, b");
+    }
+
+    #[test]
+    fn activewindow_requeries_clients_only_when_focus_changes() {
+        let a = json!({"address": "0xa", "class": "app", "monitor": 0});
+        // (active window, previous focus, previous class, expected queries)
+        let cases = [
+            (a.clone(), 0xa, "app", vec!["j/activewindow"]),
+            (a.clone(), 0xb, "app", vec!["j/activewindow", "j/clients"]),
+            (a, 0xa, "old", vec!["j/activewindow", "j/clients"]),
+            // The fallback full refresh already queries the clients.
+            (
+                json!({}),
+                0xa,
+                "app",
+                vec!["j/activewindow", "j/monitors", "j/workspaces", "j/clients"],
+            ),
+        ];
+        for (i, (active, focused, class, expected)) in cases.into_iter().enumerate() {
+            let (backend, socket) = backend_with_fake_socket(
+                &format!("activewindow-{i}"),
+                vec![
+                    ("activewindow", active),
+                    ("monitors", two_monitors(1, 5)),
+                    ("workspaces", json!([])),
+                ],
+            );
+            backend.apply_state(state(two_monitors(1, 5), json!([])));
+            backend.set_focused_window(Some(focused));
+            *backend.shared.focused_window.write() = Some(WindowInfo {
+                app_id: class.to_string(),
+                output: Some("DP-1".to_string()),
+                focused: true,
+                ..Default::default()
+            });
+
+            backend.handle_event("activewindow>>app,new title");
+
+            assert_eq!(*socket.commands.lock().unwrap(), expected, "case {i}");
+        }
     }
 
     #[test]
@@ -1683,7 +2234,7 @@ mod tests {
 
         assert_eq!(
             *socket.commands.lock().unwrap(),
-            ["j/monitors", "j/workspaces", "j/activewindow"]
+            ["j/monitors", "j/workspaces", "j/clients", "j/activewindow"]
         );
     }
 
@@ -1707,9 +2258,7 @@ mod tests {
             ],
         );
 
-        let (workspace_changed, _, _) = backend.handle_event("workspace>>web");
-
-        assert!(workspace_changed);
+        assert!(backend.handle_event("workspace>>web").workspaces);
         let snapshot = backend.get_workspace_snapshot();
         assert_eq!(snapshot.active_workspace, HashSet::from([named_id("web")]));
         assert_eq!(

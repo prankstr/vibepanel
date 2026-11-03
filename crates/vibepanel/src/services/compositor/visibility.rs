@@ -543,7 +543,7 @@ fn niri_scene(workspaces: &Value, windows: &Value, overview: bool) -> Option<Sna
 /// Hyprland, which omits `id` for named and special workspaces, else its `id`.
 /// The type matters because a normal and a special workspace can share an
 /// address. An empty address or ID 0 means no workspace.
-fn hyprland_workspace_key(workspace: &Value) -> Option<String> {
+pub(super) fn hyprland_workspace_key(workspace: &Value) -> Option<String> {
     match workspace["address"].as_str() {
         Some(address) => (!address.is_empty())
             .then(|| format!("{}:{address}", workspace["type"].as_str().unwrap_or(""))),

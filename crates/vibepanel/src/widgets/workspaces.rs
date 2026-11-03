@@ -18,7 +18,7 @@
 //! - `show_windows`: `false` (default). When `true`, each indicator also shows
 //!   the app icons of its workspace's windows. Clicking an icon focuses that
 //!   window; clicking elsewhere on the indicator switches workspace. Needs a
-//!   backend that reports windows (Niri, MangoWC, Sway); otherwise ignored. Always
+//!   backend that reports windows (Niri, MangoWC, Sway, Hyprland); otherwise ignored. Always
 //!   shows a label: `"none"` and `"icons"` fall back to `"index"`.
 //! - `max_windows`: icons per workspace, `3` (default); `0` = unlimited. The
 //!   rest are summarized as "+N".
