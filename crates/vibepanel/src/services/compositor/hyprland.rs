@@ -767,7 +767,7 @@ impl HyprlandBackend {
             for &x in xs.iter() {
                 if starts
                     .last()
-                    .is_none_or(|start| x - start >= COLUMN_TOLERANCE)
+                    .is_none_or(|start| x.saturating_sub(*start) >= COLUMN_TOLERANCE)
                 {
                     starts.push(x);
                 }
@@ -1049,10 +1049,21 @@ impl HyprlandBackend {
 
     /// Refresh the focused window from `activewindow`. Pass `fresh` when the
     /// caller has just called `refresh`.
-    fn refresh_active_window(&self, fresh: bool) -> EventChanges {
+    fn refresh_active_window(&self, mut fresh: bool) -> EventChanges {
         let Some(active_window) = self.query_json("activewindow") else {
             return EventChanges::default();
         };
+        let focus_key = || {
+            (
+                self.shared.tracking.read().focused,
+                self.shared
+                    .focused_window
+                    .read()
+                    .as_ref()
+                    .map(|w| (w.app_id.clone(), w.output.clone())),
+            )
+        };
+        let before = focus_key();
 
         let parse =
             || Self::window_info_from_ipc(&active_window, &self.shared.monitor_names.read());
@@ -1069,14 +1080,22 @@ impl HyprlandBackend {
         if !fresh && (unknown_monitor || new_focused.is_none()) {
             changes = self.refresh();
             new_focused = parse();
+            fresh = true;
         }
 
         changes |= self.set_focused_window(Self::client_address(&active_window));
 
-        let mut focused = self.shared.focused_window.write();
-        changes.window = *focused != new_focused;
-        if changes.window {
-            *focused = new_focused;
+        {
+            let mut focused = self.shared.focused_window.write();
+            changes.window = *focused != new_focused;
+            if changes.window {
+                *focused = new_focused;
+            }
+        }
+        // Also sent on title changes, which `windowtitlev2` applies.
+        // Swapped tiles are picked up on the next focus change.
+        if !fresh && focus_key() != before {
+            changes |= self.refresh_windows();
         }
         changes
     }
@@ -1170,23 +1189,7 @@ impl HyprlandBackend {
                 changes |= self.refresh_active_window(true);
             }
             "activewindow" => {
-                let focus_key = || {
-                    (
-                        self.shared.tracking.read().focused,
-                        self.shared
-                            .focused_window
-                            .read()
-                            .as_ref()
-                            .map(|w| (w.app_id.clone(), w.output.clone())),
-                    )
-                };
-                let before = focus_key();
                 changes = self.refresh_active_window(false);
-                // Also sent on title changes, which `windowtitlev2` applies.
-                // Swapped tiles are picked up on the next focus change.
-                if focus_key() != before {
-                    changes |= self.refresh_windows();
-                }
             }
             "changefloatingmode" | "togglegroup" | "moveintogroup" | "moveoutofgroup" => {
                 changes = self.refresh_windows();
@@ -1948,20 +1951,28 @@ mod tests {
         tab_b["grouped"] = group.clone();
         let mut tab_a = client(0x6, ws(1), (1720, 58));
         tab_a["grouped"] = group;
-        // Stacking order. 0x4 is offset, but within the left column.
+        let mut no_position = client(0x8, ws(2), (0, 0));
+        no_position.as_object_mut().unwrap().remove("at");
+        // Stacking order. 0x4 is offset, but within the left column. On
+        // workspace 2, a window without a position follows one at negative x.
         let clients = json!([
             other_monitor,
             client(0x7, ws(3), (0, 0)),
+            no_position,
             tab_b,
             client(0x2, ws(1), (22, 745)),
             tab_a,
+            client(0x3, ws(2), (-1920, 0)),
             client(0x4, ws(1), (40, 400)),
             client(0x1, ws(1), (22, 58)),
         ]);
 
         apply_clients(&backend, two_monitors(1, 5), clients);
 
-        assert_eq!(order(&backend), [0x1, 0x4, 0x2, 0x6, 0x5, 0x7, 0x9]);
+        assert_eq!(
+            order(&backend),
+            [0x1, 0x4, 0x2, 0x6, 0x5, 0x3, 0x8, 0x7, 0x9]
+        );
     }
 
     #[test]
@@ -2170,17 +2181,28 @@ mod tests {
 
     #[test]
     fn activewindow_requeries_clients_only_when_focus_changes() {
-        // (previous focus, previous class, expected queries)
+        let a = json!({"address": "0xa", "class": "app", "monitor": 0});
+        // (active window, previous focus, previous class, expected queries)
         let cases = [
-            (0xa, "app", vec!["j/activewindow"]),
-            (0xb, "app", vec!["j/activewindow", "j/clients"]),
-            (0xa, "old", vec!["j/activewindow", "j/clients"]),
+            (a.clone(), 0xa, "app", vec!["j/activewindow"]),
+            (a.clone(), 0xb, "app", vec!["j/activewindow", "j/clients"]),
+            (a, 0xa, "old", vec!["j/activewindow", "j/clients"]),
+            // The fallback full refresh already queries the clients.
+            (
+                json!({}),
+                0xa,
+                "app",
+                vec!["j/activewindow", "j/monitors", "j/workspaces", "j/clients"],
+            ),
         ];
-        for (i, (focused, class, expected)) in cases.into_iter().enumerate() {
-            let active = json!({"address": "0xa", "class": "app", "monitor": 0});
+        for (i, (active, focused, class, expected)) in cases.into_iter().enumerate() {
             let (backend, socket) = backend_with_fake_socket(
                 &format!("activewindow-{i}"),
-                vec![("activewindow", active)],
+                vec![
+                    ("activewindow", active),
+                    ("monitors", two_monitors(1, 5)),
+                    ("workspaces", json!([])),
+                ],
             );
             backend.apply_state(state(two_monitors(1, 5), json!([])));
             backend.set_focused_window(Some(focused));
