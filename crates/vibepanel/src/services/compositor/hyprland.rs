@@ -1155,7 +1155,7 @@ impl HyprlandBackend {
         trace!(
             "Hyprland event: {}>>{}...",
             event,
-            &data[..data.len().min(50)]
+            &data[..data.floor_char_boundary(50)]
         );
 
         let mut changes = EventChanges::default();
