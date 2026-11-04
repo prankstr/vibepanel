@@ -530,6 +530,53 @@ fn try_parse_entity(s: &str) -> Option<&str> {
     if valid { Some(entity) } else { None }
 }
 
+/// The non-empty `href` value from an `<a>` tag's attributes, quoted or not.
+fn link_href(attrs: &str) -> Option<&str> {
+    let mut rest = attrs.trim_start();
+    while !rest.is_empty() {
+        let name_len = rest
+            .find(|c: char| c == '=' || c.is_whitespace())
+            .unwrap_or(rest.len());
+        if name_len == 0 {
+            return None;
+        }
+        let (name, after) = rest.split_at(name_len);
+        let after = after.trim_start();
+
+        let (value, next) = match after.strip_prefix('=').map(str::trim_start) {
+            Some(quoted) if quoted.starts_with(['"', '\'']) => {
+                let quote = quoted.chars().next()?;
+                let body = &quoted[1..];
+                let end = body.find(quote)?;
+                (&body[..end], &body[end + 1..])
+            }
+            Some(bare) => bare.split_at(bare.find(char::is_whitespace).unwrap_or(bare.len())),
+            None => ("", after),
+        };
+
+        if name.eq_ignore_ascii_case("href") {
+            return (!value.is_empty()).then_some(value);
+        }
+        rest = next.trim_start();
+    }
+    None
+}
+
+/// Escape a value for a double-quoted attribute. `&` that already starts an
+/// entity is kept.
+fn escape_attribute_value(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for (i, c) in value.char_indices() {
+        match c {
+            '&' if try_parse_entity(&value[i..]).is_none() => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '"' => escaped.push_str("&quot;"),
+            _ => escaped.push(c),
+        }
+    }
+    escaped
+}
+
 fn numeric_line_separator(entity: &str) -> Option<char> {
     let value = entity.strip_prefix("&#")?.strip_suffix(';')?;
     let value = if let Some(hex) = value.strip_prefix('x') {
@@ -591,14 +638,16 @@ fn try_parse_tag(s: &str) -> Option<(String, usize, TagBalance)> {
                     full_len,
                     TagBalance::Close("a".to_string()),
                 ))
-            } else {
-                // Preserve <a> with its attributes (href, etc.)
-                let attrs = &tag_rest[tag_name_end..];
+            } else if let Some(href) = link_href(&tag_rest[tag_name_end..]) {
+                // GTK only accepts a few <a> attributes and requires href, so keep just that.
                 Some((
-                    format!("<a{}>", attrs),
+                    format!("<a href=\"{}\">", escape_attribute_value(href)),
                     full_len,
                     TagBalance::Open("a".to_string()),
                 ))
+            } else {
+                // No link to keep. The text stays and the unmatched </a> is ignored.
+                Some((String::new(), full_len, TagBalance::None))
             }
         }
         "br" => Some(("\n".to_string(), full_len, TagBalance::None)),
@@ -862,6 +911,24 @@ mod tests {
         assert_eq!(
             sanitize_body_markup(r#"<a href="https://example.com">Link</a>"#),
             r#"<a href="https://example.com">Link</a>"#
+        );
+        // A bare & in an attribute would make GTK reject the whole body.
+        assert_eq!(
+            sanitize_body_markup(r#"<a href="https://e.com/?a=1&b=2&amp;c=3">Link</a>"#),
+            r#"<a href="https://e.com/?a=1&amp;b=2&amp;c=3">Link</a>"#
+        );
+        // GTK rejects any other attribute, or a link without href, for the whole body.
+        assert_eq!(
+            sanitize_body_markup(r#"<a target="_blank" HREF='https://e.com'>Link</a>"#),
+            r#"<a href="https://e.com">Link</a>"#
+        );
+        assert_eq!(sanitize_body_markup("<a name=top>Top</a>"), "Top");
+        // "href" inside another attribute's value isn't the link.
+        assert_eq!(
+            sanitize_body_markup(
+                r#"<a title="Docs href='https://wrong.example'" href="https://right.example">Docs</a>"#
+            ),
+            r#"<a href="https://right.example">Docs</a>"#
         );
     }
 
