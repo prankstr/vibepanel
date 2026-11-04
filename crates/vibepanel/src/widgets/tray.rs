@@ -388,14 +388,62 @@ fn create_button(state: &Rc<RefCell<WidgetState>>, identifier: &str) -> Button {
     secondary.set_button(3); // GDK_BUTTON_SECONDARY
     let identifier_for_secondary = identifier.to_string();
     let state_for_secondary = state.clone();
-    secondary.connect_released(move |gesture, _n_press, _x, _y| {
+    secondary.connect_released(move |gesture, _n_press, x, y| {
         if let Some(widget) = gesture.widget() {
-            toggle_menu(&state_for_secondary, &identifier_for_secondary, &widget);
+            toggle_menu(
+                &state_for_secondary,
+                &identifier_for_secondary,
+                &widget,
+                Some((x, y)),
+            );
         }
     });
     button.add_controller(secondary);
 
+    // Middle-click handler
+    let middle = GestureClick::new();
+    middle.set_button(gdk::BUTTON_MIDDLE);
+    let identifier_for_middle = identifier.to_string();
+    middle.connect_released(move |gesture, _n_press, x, y| {
+        let Some(widget) = gesture.widget() else {
+            return;
+        };
+        let (x, y) = item_event_position(&widget, Some((x, y)));
+        TrayService::global().secondary_activate(&identifier_for_middle, x, y);
+    });
+    button.add_controller(middle);
+
     button
+}
+
+/// Click position on the bar plus the monitor origin; Wayland hides the global
+/// pointer position (same approach as Waybar). Defaults to the widget centre.
+fn item_event_position(widget: &Widget, local: Option<(f64, f64)>) -> (i32, i32) {
+    let (x, y) = local.unwrap_or_else(|| {
+        (
+            f64::from(widget.width()) / 2.0,
+            f64::from(widget.height()) / 2.0,
+        )
+    });
+
+    let Some(native) = widget.native() else {
+        return (x as i32, y as i32);
+    };
+    let point = widget
+        .compute_point(&native, &gtk4::graphene::Point::new(x as f32, y as f32))
+        .map(|p| (f64::from(p.x()), f64::from(p.y())))
+        .unwrap_or((x, y));
+
+    let origin = native
+        .surface()
+        .and_then(|surface| widget.display().monitor_at_surface(&surface))
+        .map(|monitor| {
+            let geometry = monitor.geometry();
+            (geometry.x(), geometry.y())
+        })
+        .unwrap_or((0, 0));
+
+    (origin.0 + point.0 as i32, origin.1 + point.1 as i32)
 }
 
 fn update_button(state: &Rc<RefCell<WidgetState>>, button: &Button, snapshot: &TrayItem) {
@@ -863,14 +911,56 @@ fn on_button_clicked(state: &Rc<RefCell<WidgetState>>, button: &Button, identifi
     if let Some((_, snapshot)) = items.iter().find(|(id, _)| id == identifier)
         && snapshot.item_is_menu
     {
-        toggle_menu(state, identifier, button.upcast_ref::<Widget>());
+        toggle_menu(state, identifier, button.upcast_ref::<Widget>(), None);
         return;
     }
 
-    service.activate(identifier, -1, -1);
+    let (x, y) = item_event_position(button.upcast_ref(), None);
+    service.activate(identifier, x, y);
 }
 
-fn toggle_menu(state: &Rc<RefCell<WidgetState>>, identifier: &str, parent: &Widget) {
+fn close_open_menu(state: &Rc<RefCell<WidgetState>>) {
+    let old_menu = state.borrow_mut().menu.take();
+    if let Some(old_menu) = old_menu {
+        old_menu
+            .parent
+            .remove_css_class(widget::TRAY_ITEM_MENU_OPEN);
+        close_menu_popover(&old_menu.popover);
+    }
+}
+
+/// Hand the menu over to the item itself (`ContextMenu`).
+fn request_item_context_menu(
+    state: &Rc<RefCell<WidgetState>>,
+    identifier: &str,
+    parent: &Widget,
+    click: Option<(f64, f64)>,
+) {
+    close_open_menu(state);
+    let (x, y) = item_event_position(parent, click);
+    debug!(
+        "Requesting ContextMenu for {} at ({}, {})",
+        identifier, x, y
+    );
+    TrayService::global().context_menu(identifier, x, y);
+}
+
+fn toggle_menu(
+    state: &Rc<RefCell<WidgetState>>,
+    identifier: &str,
+    parent: &Widget,
+    click: Option<(f64, f64)>,
+) {
+    let service = TrayService::global();
+    let has_dbus_menu = service
+        .items()
+        .iter()
+        .any(|(id, item)| id == identifier && item.menu_path.is_some());
+    if !has_dbus_menu {
+        request_item_context_menu(state, identifier, parent, click);
+        return;
+    }
+
     // If menu is already open for this identifier, close it
     {
         let mut st = state.borrow_mut();
@@ -887,27 +977,25 @@ fn toggle_menu(state: &Rc<RefCell<WidgetState>>, identifier: &str, parent: &Widg
         }
     }
 
-    // Close existing menu if any - extract surface first to avoid borrow conflict
-    let old_menu = {
-        let mut st = state.borrow_mut();
-        st.menu.take()
-    };
-    if let Some(old_menu) = old_menu {
-        old_menu
-            .parent
-            .remove_css_class(widget::TRAY_ITEM_MENU_OPEN);
-        close_menu_popover(&old_menu.popover);
-    }
+    close_open_menu(state);
 
     // Fetch menu entries asynchronously, then create and show the popover
-    let service = TrayService::global();
     let state_clone = state.clone();
     let identifier_owned = identifier.to_string();
     let parent_clone = parent.clone();
 
     service.get_menu(identifier, move |entries| {
         if entries.is_empty() {
-            debug!("No menu entries for {}", identifier_owned);
+            // Empty or unreachable DBusMenu: let the item draw its own, unless
+            // the button is gone or another menu opened meanwhile.
+            let other_menu_open = state_clone.borrow().menu.is_some();
+            if parent_clone.is_realized() && !other_menu_open {
+                debug!(
+                    "No menu entries for {}, falling back to ContextMenu",
+                    identifier_owned
+                );
+                request_item_context_menu(&state_clone, &identifier_owned, &parent_clone, click);
+            }
             return;
         }
 

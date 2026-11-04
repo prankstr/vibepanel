@@ -63,6 +63,12 @@ const SNAPSHOT_SIGNAL_NAMES: &[&str] = &[
 /// Signals that invalidate menu proxies.
 const MENU_RESET_SIGNALS: &[&str] = &["NewMenu"];
 
+/// Wine/Proton and some Qt items advertise `/` or `/NO_DBUSMENU` instead of a
+/// DBusMenu.
+fn is_usable_menu_path(path: &str) -> bool {
+    !path.is_empty() && path != "/" && path != "/NO_DBUSMENU"
+}
+
 /// Raw pixmap data from a tray item.
 #[derive(Debug, Clone)]
 pub struct TrayPixmap {
@@ -222,21 +228,35 @@ impl TrayService {
 
     /// Activate a tray item (left-click action).
     pub fn activate(&self, identifier: &str, x: i32, y: i32) {
+        self.call_item_method(identifier, "Activate", x, y);
+    }
+
+    /// Secondary-activate a tray item (middle-click action).
+    pub fn secondary_activate(&self, identifier: &str, x: i32, y: i32) {
+        self.call_item_method(identifier, "SecondaryActivate", x, y);
+    }
+
+    /// Ask an item without a DBusMenu to draw its own context menu.
+    pub fn context_menu(&self, identifier: &str, x: i32, y: i32) {
+        self.call_item_method(identifier, "ContextMenu", x, y);
+    }
+
+    fn call_item_method(&self, identifier: &str, method: &'static str, x: i32, y: i32) {
         let proxies = self.proxies.borrow();
         let Some(proxy) = proxies.get(identifier) else {
-            debug!("No proxy for activate: {}", identifier);
+            debug!("No proxy for {}: {}", method, identifier);
             return;
         };
 
         proxy.call(
-            "Activate",
+            method,
             Some(&(x, y).to_variant()),
             gio::DBusCallFlags::NONE,
             5000,
             None::<&gio::Cancellable>,
-            |result| {
+            move |result| {
                 if let Err(e) = result {
-                    debug!("Activate call failed: {}", e);
+                    debug!("{} call failed: {}", method, e);
                 }
             },
         );
@@ -858,9 +878,19 @@ impl TrayService {
                     Ok(p) => p,
                     Err(e) => {
                         error!("Failed to create proxy for {}: {}", key_clone, e);
+                        this.on_item_name_vanished(&key_clone);
                         return;
                     }
                 };
+
+                // The item may have exited between registering and proxy
+                // creation. notify::g-name-owner never fires for a name that
+                // is already gone, so drop it here or it lingers forever.
+                if proxy.name_owner().is_none() {
+                    debug!("Item {} has no owner after proxy creation", key_clone);
+                    this.on_item_name_vanished(&key_clone);
+                    return;
+                }
 
                 this.setup_item_proxy(&key_clone, proxy);
             },
@@ -1066,7 +1096,7 @@ impl TrayService {
 
                 // Check if proxy still has an owner
                 if proxy.name_owner().is_none() {
-                    this.remove_item(&identifier_owned);
+                    this.on_item_name_vanished(&identifier_owned);
                     return;
                 }
 
@@ -1079,7 +1109,7 @@ impl TrayService {
                                 "TrayService: item {} disappeared or is not activatable while refreshing properties: {}",
                                 identifier_owned, msg
                             );
-                            this.remove_item(&identifier_owned);
+                            this.on_item_name_vanished(&identifier_owned);
                         } else {
                             error!(
                                 "TrayService: failed to refresh properties for {}: {}",
@@ -1151,7 +1181,9 @@ impl TrayService {
             .and_then(|v| v.str().map(|s| s.to_string()))
             .unwrap_or_default();
         let tooltip = self.extract_tooltip(get_prop("ToolTip"));
-        let menu_path = get_prop("Menu").and_then(|v| v.str().map(|s| s.to_string()));
+        let menu_path = get_prop("Menu")
+            .and_then(|v| v.str().map(|s| s.to_string()))
+            .filter(|path| is_usable_menu_path(path));
         let item_is_menu = get_prop("ItemIsMenu")
             .and_then(|v| v.get::<bool>())
             .unwrap_or(false);
@@ -1497,5 +1529,18 @@ impl TrayService {
 impl Drop for TrayService {
     fn drop(&mut self) {
         debug!("TrayService dropped");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_usable_menu_path;
+
+    #[test]
+    fn placeholder_menu_paths_are_not_usable() {
+        assert!(is_usable_menu_path("/MenuBar"));
+        assert!(!is_usable_menu_path(""));
+        assert!(!is_usable_menu_path("/"));
+        assert!(!is_usable_menu_path("/NO_DBUSMENU"));
     }
 }
