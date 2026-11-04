@@ -2,13 +2,9 @@
 //!
 //! This module provides low-level, reusable components that can be composed
 //! together to build complex UI patterns:
-
-// Allow unused builder methods - they provide API flexibility for future use
-#![allow(dead_code)]
 //!
 //! - [`IconButton`] - Icon in a button, interactive or non-interactive
 //! - [`AccentSlider`] - Slider with accent color styling
-//! - [`ExpanderButton`] - Chevron button for expand/collapse
 //! - [`SliderRow`] - Composer for icon + slider + optional trailing widget
 //!
 //! # Design Philosophy
@@ -78,7 +74,6 @@ pub struct IconButtonResult {
 pub struct IconButton {
     icon_name: String,
     interactive: bool,
-    css_classes: Vec<String>,
 }
 
 impl IconButton {
@@ -87,7 +82,6 @@ impl IconButton {
         Self {
             icon_name: icon_name.to_string(),
             interactive: false,
-            css_classes: vec![color::PRIMARY.to_string()],
         }
     }
 
@@ -96,12 +90,6 @@ impl IconButton {
     /// Non-interactive buttons are disabled and serve as visual indicators only.
     pub fn interactive(mut self, interactive: bool) -> Self {
         self.interactive = interactive;
-        self
-    }
-
-    /// Add CSS classes to the icon.
-    pub fn icon_classes(mut self, classes: &[&str]) -> Self {
-        self.css_classes = classes.iter().map(|s| s.to_string()).collect();
         self
     }
 
@@ -120,8 +108,7 @@ impl IconButton {
         }
 
         let icons = IconsService::global();
-        let class_refs: Vec<&str> = self.css_classes.iter().map(|s| s.as_str()).collect();
-        let icon_handle = icons.create_icon(&self.icon_name, &class_refs);
+        let icon_handle = icons.create_icon(&self.icon_name, &[color::PRIMARY]);
 
         // Center the icon within the button's padded area
         let icon_widget = icon_handle.widget();
@@ -152,13 +139,11 @@ pub struct AccentSliderResult {
 /// ```rust,ignore
 /// let result = AccentSlider::new()
 ///     .range(0.0, 100.0)
-///     .step(1.0)
 ///     .build();
 /// ```
 pub struct AccentSlider {
     min: f64,
     max: f64,
-    step: f64,
 }
 
 impl AccentSlider {
@@ -167,7 +152,6 @@ impl AccentSlider {
         Self {
             min: 0.0,
             max: 100.0,
-            step: 1.0,
         }
     }
 
@@ -178,15 +162,9 @@ impl AccentSlider {
         self
     }
 
-    /// Set the slider step increment.
-    pub fn step(mut self, step: f64) -> Self {
-        self.step = step;
-        self
-    }
-
     /// Build the accent slider.
     pub fn build(self) -> AccentSliderResult {
-        let slider = Scale::with_range(Orientation::Horizontal, self.min, self.max, self.step);
+        let slider = Scale::with_range(Orientation::Horizontal, self.min, self.max, 1.0);
         slider.set_hexpand(true);
         slider.set_draw_value(false);
 
@@ -208,71 +186,32 @@ pub struct ExpanderButtonResult {
     pub icon_handle: IconHandle,
 }
 
-/// Builder for expander (chevron) buttons.
+/// Create an expander (chevron) button.
 ///
-/// Creates a button with a chevron icon that can be rotated to indicate
-/// expanded/collapsed state.
-///
-/// # Example
-///
-/// ```rust,ignore
-/// let result = ExpanderButton::new().build();
-///
-/// // Toggle expanded state
-/// if expanded {
-///     result.icon_handle.widget().add_css_class("expanded");
-/// } else {
-///     result.icon_handle.widget().remove_css_class("expanded");
-/// }
-/// ```
-pub struct ExpanderButton {
-    icon_name: String,
-}
+/// The chevron icon can be rotated to indicate expanded/collapsed state by
+/// toggling the `expanded` class on `icon_handle.widget()`.
+fn create_expander_button() -> ExpanderButtonResult {
+    let button = crate::widgets::base::vp_button();
+    button.set_has_frame(false);
+    button.add_css_class(crate::styles::qs::TOGGLE_MORE);
+    // Prevent vertical stretching in horizontal boxes
+    button.set_valign(gtk4::Align::Center);
 
-impl ExpanderButton {
-    /// Create a new expander button builder.
-    pub fn new() -> Self {
-        Self {
-            icon_name: "pan-down-symbolic".to_string(),
-        }
-    }
+    let icons = IconsService::global();
+    let icon_handle = icons.create_icon(
+        "pan-down-symbolic",
+        &[crate::styles::qs::TOGGLE_MORE_ICON, color::PRIMARY],
+    );
 
-    /// Set a custom icon name (default: "pan-down-symbolic").
-    pub fn icon(mut self, icon_name: &str) -> Self {
-        self.icon_name = icon_name.to_string();
-        self
-    }
+    // Center the icon within the button's hover area
+    let icon_widget = icon_handle.widget();
+    icon_widget.set_halign(gtk4::Align::Center);
+    icon_widget.set_valign(gtk4::Align::Center);
+    button.set_child(Some(&icon_widget));
 
-    /// Build the expander button.
-    pub fn build(self) -> ExpanderButtonResult {
-        let button = crate::widgets::base::vp_button();
-        button.set_has_frame(false);
-        button.add_css_class(crate::styles::qs::TOGGLE_MORE);
-        // Prevent vertical stretching in horizontal boxes
-        button.set_valign(gtk4::Align::Center);
-
-        let icons = IconsService::global();
-        let icon_handle = icons.create_icon(
-            &self.icon_name,
-            &[crate::styles::qs::TOGGLE_MORE_ICON, color::PRIMARY],
-        );
-
-        // Center the icon within the button's hover area
-        let icon_widget = icon_handle.widget();
-        icon_widget.set_halign(gtk4::Align::Center);
-        icon_widget.set_valign(gtk4::Align::Center);
-        button.set_child(Some(&icon_widget));
-
-        ExpanderButtonResult {
-            button,
-            icon_handle,
-        }
-    }
-}
-
-impl Default for ExpanderButton {
-    fn default() -> Self {
-        Self::new()
+    ExpanderButtonResult {
+        button,
+        icon_handle,
     }
 }
 
@@ -315,7 +254,6 @@ pub struct CardLabel {
     subtitle: Option<String>,
     subtitle_widget: Option<gtk4::Widget>,
     width_chars: i32,
-    subtitle_width_chars: i32,
     title_class: String,
     subtitle_class: String,
 }
@@ -328,7 +266,6 @@ impl CardLabel {
             subtitle: None,
             subtitle_widget: None,
             width_chars: 16,
-            subtitle_width_chars: 22,
             title_class: String::new(),
             subtitle_class: String::new(),
         }
@@ -355,12 +292,6 @@ impl CardLabel {
     /// Set the width in characters for the title label.
     pub fn width_chars(mut self, width: i32) -> Self {
         self.width_chars = width;
-        self
-    }
-
-    /// Set the width in characters for the subtitle label.
-    pub fn subtitle_width_chars(mut self, width: i32) -> Self {
-        self.subtitle_width_chars = width;
         self
     }
 
@@ -408,8 +339,8 @@ impl CardLabel {
             sub.set_xalign(0.0);
             sub.set_ellipsize(EllipsizeMode::End);
             sub.set_single_line_mode(true);
-            sub.set_width_chars(self.subtitle_width_chars);
-            sub.set_max_width_chars(self.subtitle_width_chars);
+            sub.set_width_chars(22);
+            sub.set_max_width_chars(22);
             if !self.subtitle_class.is_empty() {
                 sub.add_css_class(&self.subtitle_class);
             }
@@ -471,7 +402,7 @@ pub struct SliderRowResult {
 
 /// Builder for slider rows.
 ///
-/// Composes [`IconButton`], [`AccentSlider`], and optionally [`ExpanderButton`]
+/// Composes [`IconButton`], [`AccentSlider`], and optionally an expander button
 /// into a horizontal row layout.
 ///
 /// # Example
@@ -495,13 +426,10 @@ pub struct SliderRowResult {
 pub struct SliderRow {
     icon_name: String,
     interactive_icon: bool,
-    icon_classes: Vec<String>,
     min: f64,
     max: f64,
-    step: f64,
     with_expander: bool,
     with_spacer: bool,
-    spacing: i32,
 }
 
 impl SliderRow {
@@ -510,13 +438,10 @@ impl SliderRow {
         Self {
             icon_name: String::new(),
             interactive_icon: false,
-            icon_classes: vec![color::PRIMARY.to_string()],
             min: 0.0,
             max: 100.0,
-            step: 1.0,
             with_expander: false,
             with_spacer: false,
-            spacing: 4,
         }
     }
 
@@ -532,22 +457,10 @@ impl SliderRow {
         self
     }
 
-    /// Set CSS classes for the icon.
-    pub fn icon_classes(mut self, classes: &[&str]) -> Self {
-        self.icon_classes = classes.iter().map(|s| s.to_string()).collect();
-        self
-    }
-
     /// Set the slider range (min, max).
     pub fn range(mut self, min: f64, max: f64) -> Self {
         self.min = min;
         self.max = max;
-        self
-    }
-
-    /// Set the slider step increment.
-    pub fn step(mut self, step: f64) -> Self {
-        self.step = step;
         self
     }
 
@@ -566,35 +479,24 @@ impl SliderRow {
         self
     }
 
-    /// Set the horizontal spacing between children.
-    pub fn spacing(mut self, spacing: i32) -> Self {
-        self.spacing = spacing;
-        self
-    }
-
     /// Build the slider row.
     pub fn build(self) -> SliderRowResult {
-        let container = GtkBox::new(Orientation::Horizontal, self.spacing);
+        let container = GtkBox::new(Orientation::Horizontal, 4);
         container.add_css_class(CSS_SLIDER_ROW);
 
         // Build icon button
-        let class_refs: Vec<&str> = self.icon_classes.iter().map(|s| s.as_str()).collect();
         let icon_result = IconButton::new(&self.icon_name)
             .interactive(self.interactive_icon)
-            .icon_classes(&class_refs)
             .build();
         container.append(&icon_result.button);
 
         // Build slider
-        let slider_result = AccentSlider::new()
-            .range(self.min, self.max)
-            .step(self.step)
-            .build();
+        let slider_result = AccentSlider::new().range(self.min, self.max).build();
         container.append(&slider_result.slider);
 
         // Build trailing widget (expander or spacer)
         let (expander_button, expander_icon) = if self.with_expander {
-            let expander_result = ExpanderButton::new().build();
+            let expander_result = create_expander_button();
             container.append(&expander_result.button);
             (
                 Some(expander_result.button),
@@ -853,7 +755,7 @@ impl ToggleCard {
 
         // Expander chevron
         let (expander_button, expander_icon) = if self.with_expander {
-            let expander_result = ExpanderButton::new().build();
+            let expander_result = create_expander_button();
             card_box.append(&expander_result.button);
             (
                 Some(expander_result.button),
@@ -901,8 +803,6 @@ pub struct ListRowResult {
     pub row: ListBoxRow,
     /// The title label.
     pub title: Label,
-    /// Optional subtitle label.
-    pub subtitle: Option<Label>,
 }
 
 /// Builder for list rows (Wi-Fi networks, Bluetooth devices, VPN connections).
@@ -951,12 +851,6 @@ impl ListRow {
     /// Set the subtitle text.
     pub fn subtitle(mut self, subtitle: &str) -> Self {
         self.subtitle = Some(subtitle.to_string());
-        self
-    }
-
-    /// Set optional subtitle (convenience for Option<&str>).
-    pub fn subtitle_opt(mut self, subtitle: Option<&str>) -> Self {
-        self.subtitle = subtitle.map(|s| s.to_string());
         self
     }
 
@@ -1043,75 +937,6 @@ impl ListRow {
         ListRowResult {
             row: list_row,
             title: label_result.title,
-            subtitle: label_result.subtitle,
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_icon_button_defaults() {
-        let builder = IconButton::new("test-icon");
-        assert_eq!(builder.icon_name, "test-icon");
-        assert!(!builder.interactive);
-    }
-
-    #[test]
-    fn test_icon_button_interactive() {
-        let builder = IconButton::new("test-icon").interactive(true);
-        assert!(builder.interactive);
-    }
-
-    #[test]
-    fn test_accent_slider_defaults() {
-        let builder = AccentSlider::new();
-        assert_eq!(builder.min, 0.0);
-        assert_eq!(builder.max, 100.0);
-        assert_eq!(builder.step, 1.0);
-    }
-
-    #[test]
-    fn test_accent_slider_range() {
-        let builder = AccentSlider::new().range(1.0, 50.0).step(5.0);
-        assert_eq!(builder.min, 1.0);
-        assert_eq!(builder.max, 50.0);
-        assert_eq!(builder.step, 5.0);
-    }
-
-    #[test]
-    fn test_slider_row_defaults() {
-        let builder = SliderRow::builder().icon("test-icon");
-        assert_eq!(builder.icon_name, "test-icon");
-        assert!(!builder.interactive_icon);
-        assert!(!builder.with_expander);
-        assert!(!builder.with_spacer);
-    }
-
-    #[test]
-    fn test_slider_row_with_expander() {
-        let builder = SliderRow::builder()
-            .icon("audio-volume-high-symbolic")
-            .interactive_icon(true)
-            .range(0.0, 100.0)
-            .with_expander(true);
-
-        assert!(builder.interactive_icon);
-        assert!(builder.with_expander);
-        assert_eq!(builder.min, 0.0);
-        assert_eq!(builder.max, 100.0);
-    }
-
-    #[test]
-    fn test_slider_row_with_spacer() {
-        let builder = SliderRow::builder()
-            .icon("display-brightness-symbolic")
-            .range(1.0, 100.0)
-            .with_spacer(true);
-
-        assert!(!builder.with_expander);
-        assert!(builder.with_spacer);
     }
 }

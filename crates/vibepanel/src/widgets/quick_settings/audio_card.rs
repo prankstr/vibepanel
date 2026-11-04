@@ -176,7 +176,6 @@ pub fn build_audio_row() -> AudioRowWidgets {
         // what Vibepanel is allowed to request. Programmatic updates are
         // guarded to avoid writing external over-cap values back to Pulse.
         .range(0.0, AudioService::global().user_max_percent() as f64)
-        .step(1.0)
         .with_expander(true) // Sink list expander
         .build();
 

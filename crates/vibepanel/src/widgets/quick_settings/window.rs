@@ -630,7 +630,7 @@ impl QuickSettingsWindow {
     /// Build the network card and its revealer.
     ///
     /// Returns `(card, revealer, expander_button)` - caller is responsible for
-    /// accordion registration via `AccordionManager::setup_expander`.
+    /// accordion registration via `AccordionManager::setup_expander_with_callback`.
     fn build_network_card(qs: &Rc<Self>) -> (gtk4::Widget, Revealer, Option<Button>) {
         let network_service = NetworkService::global();
         let snapshot = network_service.snapshot();
@@ -747,7 +747,7 @@ impl QuickSettingsWindow {
     /// Build the Bluetooth card and its revealer.
     ///
     /// Returns `(card, revealer, expander_button)` - caller is responsible for
-    /// accordion registration via `AccordionManager::setup_expander`.
+    /// accordion registration via `AccordionManager::setup_expander_with_callback`.
     fn build_bluetooth_card(qs: &Rc<Self>) -> (gtk4::Widget, Revealer, Option<Button>) {
         let bt_service = BluetoothService::global();
         let bt_snapshot = bt_service.snapshot();
@@ -834,7 +834,7 @@ impl QuickSettingsWindow {
     /// Build the VPN card and its revealer.
     ///
     /// Returns `(card, revealer, expander_button)` - caller is responsible for
-    /// accordion registration via `AccordionManager::setup_expander`.
+    /// accordion registration via `AccordionManager::setup_expander_with_callback`.
     fn build_vpn_card(qs: &Rc<Self>) -> (gtk4::Widget, Revealer, Option<Button>) {
         let vpn_service = VpnService::global();
         let vpn_snapshot = vpn_service.snapshot();

@@ -68,7 +68,6 @@ pub fn build_brightness_row() -> BrightnessRowWidgets {
     let result = SliderRow::builder()
         .icon("display-brightness-symbolic")
         .range(1.0, 100.0) // Min 1 to avoid black screen
-        .step(1.0)
         .with_spacer(true) // Match audio row width
         .build();
 
