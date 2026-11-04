@@ -2213,13 +2213,10 @@ mod tests {
             // Bar radius is computed from rendered height (bar_size + 2*padding config)
             // With default padding=4, max radius = (bar_size + 8) / 2
             let bar_rendered_height = bar_size + 2 * config.bar.padding;
-            let max_possible_bar_radius = bar_rendered_height / 2;
-            assert!(
-                palette.bar_border_radius <= max_possible_bar_radius,
-                "Bar radius {} exceeds max {} for bar_size={}",
+            assert_eq!(
                 palette.bar_border_radius,
-                max_possible_bar_radius,
-                bar_size
+                bar_rendered_height / 2,
+                "Bar radius should clamp to half the rendered height for bar_size={bar_size}"
             );
 
             // Widgets fill the bar height, so a 100% radius clamps to half of it.
