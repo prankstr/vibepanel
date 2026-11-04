@@ -1840,13 +1840,24 @@ mod tests {
 
     #[test]
     fn test_generate_per_widget_css_empty_without_overrides() {
-        let config = Config::default();
+        use crate::config::WidgetOptions;
+
+        let mut config = Config::default();
+        let mut options = WidgetOptions::default();
+        options.options.insert(
+            "format".to_string(),
+            toml::Value::String("%H:%M".to_string()),
+        );
+        config
+            .widgets
+            .widget_configs
+            .insert("clock".to_string(), options);
+
         let css = ThemePalette::generate_per_widget_css(&config);
 
-        // No widget configs with background_color = empty CSS
-        assert!(
-            css.is_empty() || !css.contains("--widget-background-color"),
-            "should not generate CSS when no overrides configured"
+        assert_eq!(
+            css, "",
+            "widgets without colour overrides should not generate CSS"
         );
     }
 
@@ -2196,6 +2207,7 @@ mod tests {
             let mut config = Config::default();
             config.bar.size = bar_size;
             config.bar.border_radius = 100; // Request maximum radius
+            config.widgets.border_radius = 100;
             let palette = ThemePalette::from_config(&config, None, None);
 
             // Bar radius is computed from rendered height (bar_size + 2*padding config)
@@ -2210,15 +2222,11 @@ mod tests {
                 bar_size
             );
 
-            let widget_rendered_height =
-                palette.sizes.widget_height + 2 * palette.sizes.widget_padding_y;
-            let max_widget_radius = widget_rendered_height / 2;
-            assert!(
-                palette.widget_border_radius <= max_widget_radius,
-                "Widget radius {} exceeds max {} for bar_size={}",
+            // Widgets fill the bar height, so a 100% radius clamps to half of it.
+            assert_eq!(
                 palette.widget_border_radius,
-                max_widget_radius,
-                bar_size
+                bar_size / 2,
+                "Widget radius should clamp to half the bar size for bar_size={bar_size}"
             );
         }
     }
