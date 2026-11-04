@@ -862,12 +862,19 @@ impl NotificationService {
             notification.urgency
         );
 
+        self.accept_notification(notification, |id| {
+            invocation.return_value(Some(&(id,).to_variant()));
+        });
+    }
+
+    /// Store a new notification and send `reply` its ID before any close signal.
+    fn accept_notification(&self, notification: Notification, reply: impl FnOnce(u32)) {
+        let id = notification.id;
         let is_transient = notification.transient;
 
         self.store_notification(notification);
 
-        // Return the notification ID
-        invocation.return_value(Some(&(id,).to_variant()));
+        reply(id);
 
         // Muted transients never get a toast and never appear in the popover,
         // so without this they'd linger in the map until evicted.
@@ -1177,15 +1184,11 @@ mod tests {
         assert!(interface.lookup_signal("ActivationToken").is_some());
     }
 
-    /// Mirror of the post-insert tail in handle_notify, which we can't call
-    /// directly because it consumes D-Bus types.
-    fn simulate_handle_notify(svc: &NotificationService, n: Notification) {
+    fn accept(svc: &NotificationService, n: Notification) {
         let id = n.id;
-        let is_transient = n.transient;
-        svc.store_notification(n);
-        if is_transient && svc.is_muted() {
-            svc.close_internal(id, CLOSE_REASON_DISMISSED);
-        }
+        let mut replied = None;
+        svc.accept_notification(n, |reply_id| replied = Some(reply_id));
+        assert_eq!(replied, Some(id), "Notify must reply with the stored ID");
     }
 
     #[test]
@@ -1193,7 +1196,7 @@ mod tests {
         let svc = make_service();
         svc.muted.set(true);
 
-        simulate_handle_notify(&svc, make_notification(1, true, 1.0));
+        accept(&svc, make_notification(1, true, 1.0));
 
         assert!(
             !svc.notifications.borrow().contains_key(&1),
@@ -1206,7 +1209,7 @@ mod tests {
         let svc = make_service();
         // muted = false (default)
 
-        simulate_handle_notify(&svc, make_notification(1, true, 1.0));
+        accept(&svc, make_notification(1, true, 1.0));
 
         assert!(
             svc.notifications.borrow().contains_key(&1),
@@ -1219,7 +1222,7 @@ mod tests {
         let svc = make_service();
         svc.muted.set(true);
 
-        simulate_handle_notify(&svc, make_notification(1, false, 1.0));
+        accept(&svc, make_notification(1, false, 1.0));
 
         assert!(
             svc.notifications.borrow().contains_key(&1),
@@ -1364,10 +1367,10 @@ mod tests {
     fn replacement_marks_notification_unread_again() {
         let svc = make_service();
         svc.backend_available.set(true);
-        simulate_handle_notify(&svc, make_notification(1, false, 1.0));
+        accept(&svc, make_notification(1, false, 1.0));
         svc.mark_as_seen();
 
-        simulate_handle_notify(&svc, make_notification(1, false, 2.0));
+        accept(&svc, make_notification(1, false, 2.0));
 
         assert_eq!(svc.unread_count(), 1);
         assert!(!svc.seen_ids.borrow().contains(&1));
