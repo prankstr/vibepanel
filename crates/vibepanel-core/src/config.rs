@@ -198,13 +198,6 @@ impl Config {
         Ok(config)
     }
 
-    /// Ensure DEFAULT_CONFIG_TOML parses to the same structure as a given Config.
-    /// Useful for tests that compare the raw TOML with the typed defaults.
-    pub fn from_strict_default_toml() -> Result<Self> {
-        let config: Config = toml::from_str(DEFAULT_CONFIG_TOML)?;
-        Ok(config)
-    }
-
     /// Load configuration from a TOML file, merging with embedded defaults.
     ///
     /// User-provided values override defaults, but any missing sections or
