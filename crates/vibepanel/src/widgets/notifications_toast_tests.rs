@@ -214,10 +214,7 @@ fn test_notification_toast_critical_class_does_not_apply_visual_tokens() {
 }
 
 fn run_test_notification_toast_structure() {
-    if !init_gtk_or_skip(
-        "notification toast UI regression test",
-        Some("VIBEPANEL_UI_REGRESSION_REQUIRED"),
-    ) {
+    if !init_gtk_or_skip("notification toast UI regression test") {
         return;
     }
 
@@ -499,10 +496,7 @@ fn edge_pixel_of_toast(window: &gtk4::Window, surface: &gtk4::Widget) -> Rgba8 {
 }
 
 fn run_test_notification_toast_surface_pixels() {
-    if !init_gtk_or_skip(
-        "notification toast pixel UI regression test",
-        Some("VIBEPANEL_UI_REGRESSION_REQUIRED"),
-    ) {
+    if !init_gtk_or_skip("notification toast pixel UI regression test") {
         return;
     }
 
@@ -535,10 +529,7 @@ fn run_test_notification_toast_surface_pixels() {
 }
 
 fn run_test_notification_toast_user_css_outline_pixel() {
-    if !init_gtk_or_skip(
-        "notification toast pixel UI regression test",
-        Some("VIBEPANEL_UI_REGRESSION_REQUIRED"),
-    ) {
+    if !init_gtk_or_skip("notification toast pixel UI regression test") {
         return;
     }
 
@@ -701,10 +692,7 @@ fn run_test_notification_toast_layer_shell_structure() {
 }
 
 fn run_test_notification_toast_window_freed_after_close() {
-    if !init_gtk_or_skip(
-        "notification toast UI regression test",
-        Some("VIBEPANEL_UI_REGRESSION_REQUIRED"),
-    ) {
+    if !init_gtk_or_skip("notification toast UI regression test") {
         return;
     }
 

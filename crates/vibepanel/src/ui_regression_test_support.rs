@@ -63,7 +63,7 @@ pub(crate) fn run_ignored_contract_subprocess(
             .arg("--nocapture")
             .arg("--test-threads=1")
             .env(env_name, contract)
-            .env("VIBEPANEL_UI_REGRESSION_REQUIRED", "1");
+            .env(UI_REGRESSION_REQUIRED_ENV, "1");
         if std::env::var_os("GSK_RENDERER").is_none() {
             command.env("GSK_RENDERER", "cairo");
         }
@@ -87,16 +87,14 @@ fn env_truthy(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn skip_unless_required(context: &str, reason: &str, required_env: Option<&str>) {
-    if let Some(env_name) = required_env
-        && env_truthy(env_name)
-    {
-        panic!("{env_name} is set but {reason} ({context})");
+fn skip_unless_required(context: &str, reason: &str) {
+    if env_truthy(UI_REGRESSION_REQUIRED_ENV) {
+        panic!("{UI_REGRESSION_REQUIRED_ENV} is set but {reason} ({context})");
     }
     eprintln!("skipping {context}: {reason}");
 }
 
-pub(crate) fn init_gtk_or_skip(context: &str, required_env: Option<&str>) -> bool {
+pub(crate) fn init_gtk_or_skip(context: &str) -> bool {
     let init_ok = gtk4::init().is_ok();
     if gtk4::gdk::Display::default().is_some() {
         return true;
@@ -107,21 +105,17 @@ pub(crate) fn init_gtk_or_skip(context: &str, required_env: Option<&str>) -> boo
     } else {
         "GTK display is unavailable"
     };
-    skip_unless_required(context, reason, required_env);
+    skip_unless_required(context, reason);
     false
 }
 
 pub(crate) fn init_layer_shell_or_skip(context: &str) -> Option<gtk4::gdk::Display> {
-    if !init_gtk_or_skip(context, Some(UI_REGRESSION_REQUIRED_ENV)) {
+    if !init_gtk_or_skip(context) {
         return None;
     }
 
     if !gtk4_layer_shell::is_supported() {
-        skip_unless_required(
-            context,
-            "compositor does not support layer-shell",
-            Some(UI_REGRESSION_REQUIRED_ENV),
-        );
+        skip_unless_required(context, "compositor does not support layer-shell");
         return None;
     }
 
@@ -137,11 +131,7 @@ pub(crate) fn first_monitor_or_skip(
         .item(0)
         .and_then(|item| item.downcast::<gtk4::gdk::Monitor>().ok());
     if monitor.is_none() {
-        skip_unless_required(
-            context,
-            "no monitor available",
-            Some(UI_REGRESSION_REQUIRED_ENV),
-        );
+        skip_unless_required(context, "no monitor available");
     }
 
     monitor

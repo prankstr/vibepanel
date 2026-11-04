@@ -2907,10 +2907,7 @@ mod tests {
     }
 
     fn run_test_font_map_watch() {
-        if !init_gtk_or_skip(
-            "icons font map watch test",
-            Some("VIBEPANEL_UI_REGRESSION_REQUIRED"),
-        ) {
+        if !init_gtk_or_skip("icons font map watch test") {
             return;
         }
 
@@ -2941,10 +2938,7 @@ mod tests {
     /// Callers often keep only `handle.widget()`. The icon must still be
     /// reapplied on theme changes, and must be freed with its widget.
     fn run_test_handle_lifetime() {
-        if !init_gtk_or_skip(
-            "icons handle lifetime test",
-            Some("VIBEPANEL_UI_REGRESSION_REQUIRED"),
-        ) {
+        if !init_gtk_or_skip("icons handle lifetime test") {
             return;
         }
 
@@ -2985,10 +2979,7 @@ mod tests {
     }
 
     fn run_test_re_register_font() {
-        if !init_gtk_or_skip(
-            "icons font re-registration test",
-            Some("VIBEPANEL_UI_REGRESSION_REQUIRED"),
-        ) {
+        if !init_gtk_or_skip("icons font re-registration test") {
             return;
         }
 

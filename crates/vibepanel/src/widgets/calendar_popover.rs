@@ -858,10 +858,7 @@ mod tests {
     }
 
     fn run_test_calendar_popover() {
-        if !init_gtk_or_skip(
-            "calendar popover UI regression test",
-            Some("VIBEPANEL_UI_REGRESSION_REQUIRED"),
-        ) {
+        if !init_gtk_or_skip("calendar popover UI regression test") {
             return;
         }
 

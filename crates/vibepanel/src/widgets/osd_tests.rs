@@ -67,10 +67,7 @@ fn osd_surface_fixture(
 }
 
 fn run_test_osd_surface_pixels() {
-    if !init_gtk_or_skip(
-        "OSD pixel UI regression test",
-        Some("VIBEPANEL_UI_REGRESSION_REQUIRED"),
-    ) {
+    if !init_gtk_or_skip("OSD pixel UI regression test") {
         return;
     }
 
@@ -105,10 +102,7 @@ fn run_test_osd_surface_pixels() {
 }
 
 fn run_test_osd_user_css_outline_pixel() {
-    if !init_gtk_or_skip(
-        "OSD pixel UI regression test",
-        Some("VIBEPANEL_UI_REGRESSION_REQUIRED"),
-    ) {
+    if !init_gtk_or_skip("OSD pixel UI regression test") {
         return;
     }
 
