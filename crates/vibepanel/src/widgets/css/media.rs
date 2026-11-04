@@ -83,8 +83,7 @@ pub fn css(animations: bool) -> String {
     color: var(--color-foreground-disabled);
 }}
 
-.media-label,
-.media-title {{
+.media-label {{
     font-size: var(--font-size);
 }}
 
@@ -279,45 +278,6 @@ pub fn css(animations: bool) -> String {
 .media-time {{
     font-size: var(--font-size-xs);
     margin-top: -4px;
-}}
-
-/* Volume control (used in media window) */
-.media-volume {{
-    padding-top: 8px;
-}}
-
-.media-volume-slider {{
-    margin-left: 8px;
-}}
-
-.media-volume-slider trough {{
-    min-height: var(--slider-height);
-    border-radius: var(--slider-radius);
-    background-color: var(--color-slider-track);
-}}
-
-.media-volume-slider highlight {{
-    background-image: image(var(--color-accent-slider, var(--color-accent-primary)));
-    background-color: var(--color-accent-slider, var(--color-accent-primary));
-    border: none;
-    min-height: var(--slider-height);
-    border-radius: var(--slider-radius);
-}}
-
-.media-volume-slider slider {{
-    min-width: var(--slider-knob-size);
-    min-height: var(--slider-knob-size);
-    margin: -5px;
-    padding: 0;
-    background-color: var(--color-accent-primary);
-    border-radius: var(--slider-knob-radius);
-    border: none;
-    box-shadow: none;
-    {slider_transition}
-}}
-
-.media-volume-slider slider:active {{
-    transform: scale(1.15);
 }}
 
 /* Window-specific smaller controls */

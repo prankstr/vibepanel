@@ -130,9 +130,6 @@ pub mod color {
     /// Disabled/tertiary foreground color (`.vp-disabled`).
     pub const DISABLED: &str = "vp-disabled";
 
-    /// Faint foreground color for very subtle decorative elements (`.vp-faint`).
-    pub const FAINT: &str = "vp-faint";
-
     /// Accent color (`.vp-accent`).
     pub const ACCENT: &str = "vp-accent";
 
@@ -937,17 +934,8 @@ pub mod notification {
     /// Header container (`.notification-header`).
     pub const HEADER: &str = "notification-header";
 
-    /// Header title (`.notification-header-title`).
-    pub const HEADER_TITLE: &str = "notification-header-title";
-
-    /// Header icon button (`.notification-header-icon-btn`).
-    pub const HEADER_ICON_BTN: &str = "notification-header-icon-btn";
-
     /// Header icon (`.notification-header-icon`) - for icon sizing.
     pub const HEADER_ICON: &str = "notification-header-icon";
-
-    /// Clear label (`.notification-clear-label`).
-    pub const CLEAR_LABEL: &str = "notification-clear-label";
 
     // Empty state
     /// Empty state container (`.notification-empty`).
@@ -992,9 +980,6 @@ pub mod notification {
 
     /// Body container (`.notification-body-container`).
     pub const BODY_CONTAINER: &str = "notification-body-container";
-
-    /// Truncated body (`.notification-body-truncated`).
-    pub const BODY_TRUNCATED: &str = "notification-body-truncated";
 
     // Actions
     /// Actions container (`.notification-actions`).
@@ -1127,14 +1112,8 @@ pub mod polkit {
 
 /// Battery popover classes.
 pub mod battery {
-    /// Section title (`.vp-section-title`).
-    pub const SECTION_TITLE: &str = "vp-section-title";
-
     /// Battery popover container (`.battery-popover`).
     pub const POPOVER: &str = "battery-popover";
-
-    /// Battery popover section title (`.battery-popover-section-title`).
-    pub const POPOVER_SECTION_TITLE: &str = "battery-popover-section-title";
 
     /// Battery percentage (`.battery-popover-percent`).
     pub const POPOVER_PERCENT: &str = "battery-popover-percent";
@@ -1165,12 +1144,6 @@ pub mod calendar {
 
     /// Calendar and event side-by-side row (`.calendar-events-layout`).
     pub const EVENTS_LAYOUT: &str = "calendar-events-layout";
-
-    /// Calendar header (`.calendar-header`).
-    pub const HEADER: &str = "calendar-header";
-
-    /// Navigation button (`.calendar-nav-button`).
-    pub const NAV_BUTTON: &str = "calendar-nav-button";
 
     /// Calendar widget (`.calendar-widget`).
     pub const WIDGET: &str = "calendar-widget";
@@ -1366,30 +1339,9 @@ pub mod media {
     /// Duration label (`.media-duration`).
     pub const DURATION: &str = "media-duration";
 
-    /// Volume slider container (`.media-volume`).
-    pub const VOLUME: &str = "media-volume";
-
-    /// Volume slider (`.media-volume-slider`).
-    pub const VOLUME_SLIDER: &str = "media-volume-slider";
-
-    /// Volume icon (`.media-volume-icon`).
-    pub const VOLUME_ICON: &str = "media-volume-icon";
-
-    /// Player selector dropdown (`.media-player-selector`).
-    pub const PLAYER_SELECTOR: &str = "media-player-selector";
-
-    /// Player name label (`.media-player-name`).
-    pub const PLAYER_NAME: &str = "media-player-name";
-
     // Pop-out window
     /// Pop-out window (`.media-window`).
     pub const WINDOW: &str = "media-window";
-
-    /// Window header/drag area (`.media-window-header`).
-    pub const WINDOW_HEADER: &str = "media-window-header";
-
-    /// Window drag handle (`.media-window-drag`).
-    pub const WINDOW_DRAG: &str = "media-window-drag";
 
     /// Window control button - smaller than popover (`.media-window-control-btn`).
     pub const WINDOW_CONTROL_BTN: &str = "media-window-control-btn";
@@ -1429,14 +1381,8 @@ pub mod media {
     pub const PLAYER_MENU_CHECK: &str = "media-player-menu-check";
 
     // Empty state
-    /// No player available state (`.media-empty`).
-    pub const EMPTY: &str = "media-empty";
-
     /// Empty state icon (`.media-empty-icon`).
     pub const EMPTY_ICON: &str = "media-empty-icon";
-
-    /// Empty state label (`.media-empty-label`).
-    pub const EMPTY_LABEL: &str = "media-empty-label";
 
     /// Audio visualizer overlay (`.media-visualizer`).
     pub const VISUALIZER: &str = "media-visualizer";
@@ -1453,12 +1399,6 @@ pub mod media {
 
     /// Icon for playing state (shows pause button).
     pub const ICON_PAUSE: &str = "media-playback-pause";
-
-    /// Icon for skipping to next track.
-    pub const ICON_NEXT: &str = "media-skip-forward";
-
-    /// Icon for skipping to previous track.
-    pub const ICON_PREVIOUS: &str = "media-skip-backward";
 
     /// Generic audio/music icon (fallback when player icon unavailable).
     pub const ICON_AUDIO_GENERIC: &str = "audio-x-generic";
