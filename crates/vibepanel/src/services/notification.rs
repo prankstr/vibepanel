@@ -1187,7 +1187,13 @@ mod tests {
     fn accept(svc: &NotificationService, n: Notification) {
         let id = n.id;
         let mut replied = None;
-        svc.accept_notification(n, |reply_id| replied = Some(reply_id));
+        svc.accept_notification(n, |reply_id| {
+            assert!(
+                svc.notifications.borrow().contains_key(&reply_id),
+                "Notify must reply before closing the notification"
+            );
+            replied = Some(reply_id);
+        });
         assert_eq!(replied, Some(id), "Notify must reply with the stored ID");
     }
 
