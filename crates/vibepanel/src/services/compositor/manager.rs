@@ -1,7 +1,7 @@
 //! CompositorManager - shared backend singleton for workspace and window title services.
 //!
 //! This module provides a centralized compositor backend instance that can be shared
-//! across multiple services (WorkspaceService, WindowTitleService). This avoids the
+//! across multiple services and widgets (WorkspaceService, the window title widget). This avoids the
 //! problem of creating multiple backend instances that would duplicate IPC connections
 //! and monitoring threads.
 //!
@@ -242,8 +242,7 @@ impl CompositorManager {
         let id = self.window_callbacks.register(callback);
 
         // Immediately replay the latest update for every output, like the
-        // other register_* methods. WindowTitleService registers before it has
-        // subscribers and replays to them itself via `window_updates()`.
+        // other register_* methods.
         for info in self.window_updates() {
             self.window_callbacks.notify_single(id, &info);
         }
@@ -251,8 +250,13 @@ impl CompositorManager {
         id
     }
 
+    /// Unregister a window callback.
+    pub fn unregister_window_callback(&self, id: CallbackId) -> bool {
+        self.window_callbacks.unregister(id)
+    }
+
     /// Latest window update for every output, in replay order.
-    pub(crate) fn window_updates(&self) -> Vec<WindowInfo> {
+    fn window_updates(&self) -> Vec<WindowInfo> {
         window_updates_for_replay(&self.last_window_infos.borrow())
     }
 

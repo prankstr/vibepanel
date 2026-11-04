@@ -12,7 +12,6 @@
 //! - **surfaces**: Shared surface styling for popovers, menus, overlays
 //! - **compositor**: Pluggable compositor backend abstraction
 //! - **workspaces**: Workspace state monitoring
-//! - **window_title**: Focused window title monitoring
 //! - **tray**: StatusNotifierItem host for system tray icons
 //! - **vpn**: VPN connection management via NetworkManager
 //! - **idle_inhibitor**: System idle prevention
@@ -61,7 +60,6 @@ pub mod vpn;
 pub mod wallpaper;
 pub mod weather;
 pub mod window_list;
-pub mod window_title;
 pub mod workspace;
 
 /// Worker-only: distinguish daemon exit from a live daemon's timeout.
