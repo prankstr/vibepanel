@@ -1064,15 +1064,14 @@ impl WidgetsConfig {
 
         if base_name == "spacer"
             && let Some(arg) = inline_arg
-            && !arg.is_empty()
         {
-            match arg.parse::<i64>() {
-                Ok(width) if width > 0 => {
+            match parse_inline_spacer_width(arg) {
+                Some(width) => {
                     entry
                         .options
-                        .insert("width".to_string(), toml::Value::Integer(width));
+                        .insert("width".to_string(), toml::Value::from(width));
                 }
-                _ => {
+                None => {
                     tracing::warn!(
                         "Invalid spacer width '{}' - expected a positive integer",
                         arg
@@ -1133,7 +1132,8 @@ impl WidgetsConfig {
     /// Returns `false` for:
     /// - Non-spacer widgets
     /// - Disabled spacers
-    /// - Spacers with fixed width (via inline arg like `"spacer:50"` or TOML `width` option)
+    /// - Spacers with a usable fixed width (inline like `"spacer:50"` or the TOML `width`
+    ///   option). Widths that don't parse are ignored, as they are when the spacer is built.
     fn is_flexible_spacer(&self, name: &str) -> bool {
         let (base_name, inline_arg) = Self::parse_inline_arg(name);
 
@@ -1141,19 +1141,14 @@ impl WidgetsConfig {
             return false;
         }
 
-        // Fixed width via inline arg (e.g., "spacer:50")
-        if inline_arg.is_some() {
+        if inline_arg.and_then(parse_inline_spacer_width).is_some() {
             return false;
         }
 
-        // Fixed width via TOML options (e.g., [widgets.spacer] width = 50)
-        if let Some(opts) = self.get_options(base_name)
-            && opts.options.contains_key("width")
-        {
-            return false;
-        }
-
-        true
+        self.get_options(base_name)
+            .and_then(|opts| opts.options.get("width"))
+            .and_then(spacer_width)
+            .is_none()
     }
 
     /// Check if a section contains any expandable widgets (like spacer without fixed width).
@@ -1214,6 +1209,16 @@ fn widget_option_u32(value: &toml::Value) -> std::result::Result<u32, &'static s
         toml::Value::Integer(_) => Err("must be a non-negative integer"),
         _ => Err("must be an integer"),
     }
+}
+
+/// Fixed width from the spacer's `width` option, or `None` if it isn't usable.
+pub fn spacer_width(value: &toml::Value) -> Option<u32> {
+    widget_option_u32(value).ok()
+}
+
+/// Fixed width from inline spacer syntax like `"spacer:50"`.
+fn parse_inline_spacer_width(arg: &str) -> Option<u32> {
+    arg.parse().ok().filter(|width| *width > 0)
 }
 
 fn widget_option_bool(value: &toml::Value) -> std::result::Result<bool, &'static str> {
@@ -2600,6 +2605,33 @@ mod tests {
         let section = vec![WidgetPlacement::Single("spacer:".to_string())];
         let config = WidgetsConfig::default();
         assert!(config.section_has_expander(&section));
+    }
+
+    #[test]
+    fn test_section_has_expander_ignores_invalid_widths() {
+        // The spacer ignores widths it can't use and expands, so the section must too.
+        let cases = [
+            ("non-numeric inline width", "spacer:abc", None),
+            (
+                "non-numeric option width",
+                "spacer",
+                Some(toml::Value::from("abc")),
+            ),
+        ];
+        for (label, name, width) in cases {
+            let mut config = WidgetsConfig::default();
+            if let Some(width) = width {
+                config.widget_configs.insert(
+                    "spacer".to_string(),
+                    WidgetOptions {
+                        options: HashMap::from([("width".to_string(), width)]),
+                        ..Default::default()
+                    },
+                );
+            }
+            let section = vec![WidgetPlacement::Single(name.to_string())];
+            assert!(config.section_has_expander(&section), "{label}");
+        }
     }
 
     #[test]

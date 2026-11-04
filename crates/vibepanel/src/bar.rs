@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use tracing::{debug, info, warn};
 
-use vibepanel_core::config::{BarPosition, WidgetEntry, WidgetOrGroup};
+use vibepanel_core::config::{BarPosition, WidgetEntry, WidgetOrGroup, spacer_width};
 use vibepanel_core::{Config, ThemePalette};
 
 use crate::popover_tracker::PopoverTracker;
@@ -862,19 +862,10 @@ pub(crate) fn visible_islands(bar_box: &SectionedBar) -> Vec<gtk4::Widget> {
     result
 }
 
-/// Return true when a resolved entry's `width` option is a positive
-/// integer, mirroring `SpacerConfig::from_entry`.
-///
-/// Invalid or non-integer `width` values fall through to the flexible
-/// branch, keeping group expansion policy in sync with what the spacer
-/// widget itself does at build time.
+/// Return true when a resolved entry has a usable fixed `width`, parsed the
+/// same way the spacer widget parses it.
 fn entry_has_fixed_width_option(entry: &WidgetEntry) -> bool {
-    entry
-        .options
-        .get("width")
-        .and_then(|v| v.as_integer())
-        .and_then(|n| u32::try_from(n).ok())
-        .is_some()
+    entry.options.get("width").and_then(spacer_width).is_some()
 }
 
 /// Build a single widget or a group of widgets sharing one island.
