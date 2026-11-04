@@ -10,7 +10,7 @@
 use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4::subclass::prelude::*;
-use gtk4::{LayoutChild, LayoutManager, Orientation, Widget};
+use gtk4::{LayoutManager, Orientation, Widget};
 
 use crate::layout_math::{
     SectionSizes, compute_center_priority_allocation, compute_linear_allocation,
@@ -282,10 +282,6 @@ mod imp {
             }
 
             self.allocation_callbacks.notify(&());
-        }
-
-        fn create_layout_child(&self, widget: &Widget, for_child: &Widget) -> LayoutChild {
-            self.parent_create_layout_child(widget, for_child)
         }
     }
 }
