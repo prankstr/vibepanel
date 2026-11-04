@@ -565,10 +565,8 @@ fn run_test_notification_toast_user_css_outline_pixel() {
     flush_gtk();
 }
 
-#[test]
-#[ignore = "notification toast structure contract: requires a Wayland compositor with layer-shell support"]
-fn test_notification_toast_structure_contract() {
-    if init_layer_shell_or_skip("notification toast UI regression test").is_none() {
+fn run_test_notification_toast_layer_shell_structure() {
+    if init_layer_shell_or_skip("notification toast layer-shell contract").is_none() {
         return;
     }
 
@@ -589,6 +587,7 @@ fn test_notification_toast_structure_contract() {
         ]
         .map(|mode| (case, mode))
     }) {
+        let row = format!("{position:?}/{mode:?}");
         let mut config = Config::default();
         config.theme.mode = "dark".to_string();
         config.bar.auto_hide = mode;
@@ -633,27 +632,22 @@ fn test_notification_toast_structure_contract() {
             .expect("toast should render a styled notification container");
         let side_margin = (TOAST_SIDE_MARGIN - toast_surface_margin()).max(0);
 
-        assert!(toast.window.is_layer_window());
-        assert_eq!(toast.window.namespace().as_deref(), Some("vibepanel-toast"));
-        assert_eq!(toast.window.layer(), Layer::Overlay);
-        assert_eq!(toast.window.keyboard_mode(), KeyboardMode::None);
-        assert_eq!(toast.window.exclusive_zone(), 0);
+        assert!(toast.window.is_layer_window(), "{row}");
         assert_eq!(
-            toast.window.is_anchor(Edge::Top),
-            vertical_edge == Edge::Top
+            toast.window.namespace().as_deref(),
+            Some("vibepanel-toast"),
+            "{row}"
         );
-        assert_eq!(
-            toast.window.is_anchor(Edge::Bottom),
-            vertical_edge == Edge::Bottom
-        );
-        assert_eq!(
-            toast.window.is_anchor(Edge::Left),
-            horizontal_edge == Some(Edge::Left)
-        );
-        assert_eq!(
-            toast.window.is_anchor(Edge::Right),
-            horizontal_edge == Some(Edge::Right)
-        );
+        assert_eq!(toast.window.layer(), Layer::Overlay, "{row}");
+        assert_eq!(toast.window.keyboard_mode(), KeyboardMode::None, "{row}");
+        assert_eq!(toast.window.exclusive_zone(), 0, "{row}");
+        for edge in [Edge::Top, Edge::Bottom, Edge::Left, Edge::Right] {
+            assert_eq!(
+                toast.window.is_anchor(edge),
+                edge == vertical_edge || Some(edge) == horizontal_edge,
+                "{row}: anchor {edge:?}"
+            );
+        }
         let bar_offset =
             if mode == vibepanel_core::config::AutoHide::Always && vertical_edge == Edge::Top {
                 crate::widgets::layer_shell_popover::calculate_bar_exclusive_zone()
@@ -662,43 +656,43 @@ fn test_notification_toast_structure_contract() {
             };
         assert_eq!(
             toast.window.margin(vertical_edge),
-            TOAST_EDGE_MARGIN + bar_offset
+            TOAST_EDGE_MARGIN + bar_offset,
+            "{row}: initial edge margin"
         );
         toast.update_bar_margin(100, false);
-        assert_eq!(toast.window.margin(vertical_edge), 100 + bar_offset);
-
         assert_eq!(
-            toast.window.margin(Edge::Left),
-            if horizontal_edge == Some(Edge::Left) {
-                side_margin
-            } else {
-                0
-            }
-        );
-        assert_eq!(
-            toast.window.margin(Edge::Right),
-            if horizontal_edge == Some(Edge::Right) {
-                side_margin
-            } else {
-                0
-            }
+            toast.window.margin(vertical_edge),
+            100 + bar_offset,
+            "{row}: updated edge margin"
         );
 
-        assert!(toast.window.has_css_class(notif::TOAST_WRAPPER));
-        assert!(container.has_css_class(notif::TOAST));
-        assert!(container.has_css_class(notif::TOAST_CRITICAL));
-        assert!(!container.has_css_class(notif::TOAST_LOW));
+        for edge in [Edge::Left, Edge::Right] {
+            assert_eq!(
+                toast.window.margin(edge),
+                if horizontal_edge == Some(edge) {
+                    side_margin
+                } else {
+                    0
+                },
+                "{row}: side margin {edge:?}"
+            );
+        }
+
+        assert!(toast.window.has_css_class(notif::TOAST_WRAPPER), "{row}");
+        assert!(container.has_css_class(notif::TOAST), "{row}");
+        assert!(container.has_css_class(notif::TOAST_CRITICAL), "{row}");
+        assert!(!container.has_css_class(notif::TOAST_LOW), "{row}");
         assert!(
             label_with_text(&child, "UI Regression Test"),
-            "toast should render the notification app name"
+            "{row}: toast should render the notification app name"
         );
         assert!(
             label_with_text(&child, "Toast summary"),
-            "toast should render the notification summary"
+            "{row}: toast should render the notification summary"
         );
         assert!(
             label_with_text(&child, "Toast body"),
-            "toast should render the notification body"
+            "{row}: toast should render the notification body"
         );
 
         toast.window.close();
@@ -777,10 +771,17 @@ fn test_ui_regression_notification_toast_window_freed_after_close() {
 }
 
 #[test]
+#[ignore = "layer-shell contract: requires a Wayland compositor with layer-shell support"]
+fn test_layer_shell_notification_toast_structure() {
+    run_toast_ui_regression_subprocess("toast.layer_shell_structure");
+}
+
+#[test]
 #[ignore = "internal runner for one notification toast UI regression subprocess"]
 fn notification_toast_ui_regression_runner() {
     match std::env::var("VIBEPANEL_NOTIFICATION_TOAST_UI_REGRESSION_TEST").as_deref() {
         Ok("toast.structure") => run_test_notification_toast_structure(),
+        Ok("toast.layer_shell_structure") => run_test_notification_toast_layer_shell_structure(),
         Ok("toast.surface_pixels") => run_test_notification_toast_surface_pixels(),
         Ok("toast.user_css_outline_pixel") => run_test_notification_toast_user_css_outline_pixel(),
         Ok("toast.window_freed_after_close") => {
