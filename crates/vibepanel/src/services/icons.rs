@@ -2914,9 +2914,19 @@ mod tests {
             return;
         }
 
-        let service = IconsService::new("material".to_string(), 400);
         let font_map = default_font_map().expect("default font map should exist");
 
+        // Non-Material backends don't use the font, so a reset must not register
+        // it. Runs before any Material service registers the font; this only
+        // discriminates where fontconfig itself doesn't know Material Symbols.
+        let gtk_service = IconsService::new("Adwaita".to_string(), 400);
+        gtk_service.handle_font_map_change(&font_map);
+        assert!(
+            gtk_service.font_path.borrow().is_none(),
+            "a GTK-theme service must not re-register the Material font"
+        );
+
+        let service = IconsService::new("material".to_string(), 400);
         assert!(
             material_font_registered(&font_map),
             "Material Symbols should be in the Pango font map after init"
@@ -2926,11 +2936,6 @@ mod tests {
             service.font_map_watch.borrow().is_some(),
             "IconsService must subscribe to the Pango font map"
         );
-
-        // Non-Material backends don't use the font, so resets are irrelevant.
-        let gtk_service = IconsService::new("Adwaita".to_string(), 400);
-        gtk_service.handle_font_map_change(&font_map);
-        assert!(!gtk_service.uses_material());
     }
 
     /// Callers often keep only `handle.widget()`. The icon must still be
