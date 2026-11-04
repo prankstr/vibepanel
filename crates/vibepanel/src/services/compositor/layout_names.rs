@@ -44,8 +44,10 @@ const LAYOUTS: &[LayoutEntry] = &[
         code: "FR",
         language: "French",
     },
+    // xkb names every UK variant "English (UK, ...)", so English without a
+    // country is nearly always a US variant.
     LayoutEntry {
-        code: "GB",
+        code: "US",
         language: "English",
     },
     LayoutEntry {
