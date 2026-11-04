@@ -51,7 +51,7 @@ use super::network_card::{
     self, NetworkCardState, build_network_subtitle, build_wifi_details, is_material_unified,
     resolve_material_network_icon,
 };
-use super::power_card::{self, PowerCardBuildResult, PowerCardExpanderState};
+use super::power_card::{self, PowerCardExpanderState};
 use super::ui_helpers::{AccordionManager, ExpandableCard, collapse_revealer_instant};
 use super::updates_card::{self, UpdatesCardState, build_updates_card};
 use super::vpn_card::{self, VpnCardState, build_vpn_details, vpn_icon_name};
@@ -560,48 +560,31 @@ impl QuickSettingsWindow {
         }
         // Power card (always last in the grid)
         if cfg.power {
-            match power_card::build_power_card(qs.power_commands.clone()) {
-                PowerCardBuildResult::Popover { card, state: _ } => {
-                    toggle_cards.push(ToggleCardInfo {
-                        expander_handler: RefCell::new(None),
-                        card,
-                        revealer: None,
-                        expander_button: None,
-                        expandable: None,
-                        on_toggle: None,
-                    });
-                }
-                PowerCardBuildResult::Expander {
-                    card,
-                    revealer,
-                    state,
-                    expander_button,
-                } => {
-                    // Store the power card state on the QS window for reset_ui_state()
-                    *qs.power.borrow_mut() = Some(Rc::clone(&state));
+            let (card, revealer, state, expander_button) =
+                power_card::build_power_card_expander(qs.power_commands.clone());
+            // Store the power card state on the QS window for reset_ui_state()
+            *qs.power.borrow_mut() = Some(Rc::clone(&state));
 
-                    // Power card needs custom subtitle behavior on expand/collapse.
-                    // Capture state and borrow inside callback to handle cases where
-                    // subtitle might be set after callback creation.
-                    let state_clone = Rc::clone(&state);
-                    toggle_cards.push(ToggleCardInfo {
-                        expander_handler: RefCell::new(None),
-                        card,
-                        revealer: Some(revealer),
-                        expander_button,
-                        expandable: Some(state as Rc<dyn ExpandableCard>),
-                        on_toggle: Some(Rc::new(move |expanding| {
-                            if let Some(ref subtitle) = *state_clone.base.subtitle.borrow() {
-                                subtitle.set_label(&if expanding {
-                                    tr!("Hold to confirm")
-                                } else {
-                                    tr!("Hold to shut down")
-                                });
-                            }
-                        })),
-                    });
-                }
-            }
+            // Power card needs custom subtitle behavior on expand/collapse.
+            // Capture state and borrow inside callback to handle cases where
+            // subtitle might be set after callback creation.
+            let state_clone = Rc::clone(&state);
+            toggle_cards.push(ToggleCardInfo {
+                expander_handler: RefCell::new(None),
+                card,
+                revealer: Some(revealer),
+                expander_button,
+                expandable: Some(state as Rc<dyn ExpandableCard>),
+                on_toggle: Some(Rc::new(move |expanding| {
+                    if let Some(ref subtitle) = *state_clone.base.subtitle.borrow() {
+                        subtitle.set_label(&if expanding {
+                            tr!("Hold to confirm")
+                        } else {
+                            tr!("Hold to shut down")
+                        });
+                    }
+                })),
+            });
         }
 
         let grid = GtkBox::new(Orientation::Vertical, 0);
@@ -1243,7 +1226,7 @@ impl QuickSettingsWindow {
             }
         }
 
-        // Power card (only present in expander variant).
+        // Power card (only present when enabled).
         if let Some(ref power) = *qs.power.borrow()
             && let Some(r) = power.base.revealer.borrow().as_ref()
         {
