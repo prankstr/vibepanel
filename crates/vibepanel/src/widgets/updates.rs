@@ -47,7 +47,7 @@ impl WidgetConfig for UpdatesConfig {
             .options
             .get("check_interval")
             .and_then(|v| v.as_integer())
-            .map(|v| v as u64)
+            .and_then(|v| u64::try_from(v).ok())
             .unwrap_or(DEFAULT_CHECK_INTERVAL);
 
         Self { check_interval }

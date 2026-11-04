@@ -236,9 +236,9 @@ impl UpdatesService {
 
     fn schedule_periodic_checks(this: &Rc<Self>) {
         let this_weak = Rc::downgrade(this);
-        let interval = this.check_interval.get();
+        let interval = u32::try_from(this.check_interval.get()).unwrap_or(u32::MAX);
 
-        let source_id = glib::timeout_add_seconds_local(interval as u32, move || {
+        let source_id = glib::timeout_add_seconds_local(interval, move || {
             if let Some(this) = this_weak.upgrade() {
                 Self::run_scheduled_check(&this);
                 glib::ControlFlow::Continue
