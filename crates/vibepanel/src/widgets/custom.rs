@@ -102,7 +102,7 @@ fn parse_custom_icon_value(custom_id: &str, value: &str) -> Option<CustomIconVal
 }
 
 /// Configuration for a custom widget instance.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct CustomConfig {
     /// Side icon value. Unprefixed values are named icons; `glyph:<value>` renders
     /// a literal glyph/emoji/Nerd Font character.

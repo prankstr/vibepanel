@@ -151,19 +151,6 @@ impl WidgetConfig for MediaConfig {
     }
 }
 
-impl Default for MediaConfig {
-    fn default() -> Self {
-        Self {
-            template: DEFAULT_TEMPLATE.to_string(),
-            empty_text: String::new(),
-            max_chars: DEFAULT_MAX_CHARS,
-            popout_opacity: 1.0,
-            visualizer: true,
-            art_radius: None,
-        }
-    }
-}
-
 // ArtState is imported from media_components
 
 /// Widget tokens that create actual GTK widgets.

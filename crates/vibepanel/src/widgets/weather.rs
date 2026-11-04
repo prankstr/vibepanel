@@ -49,15 +49,6 @@ impl WidgetConfig for WeatherConfig {
     }
 }
 
-impl Default for WeatherConfig {
-    fn default() -> Self {
-        Self {
-            show_icon: DEFAULT_SHOW_ICON,
-            format: DEFAULT_FORMAT.to_string(),
-        }
-    }
-}
-
 /// Weather widget that renders current conditions from `WeatherService`.
 pub struct WeatherWidget {
     base: BaseWidget,

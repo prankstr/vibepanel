@@ -99,16 +99,6 @@ impl WidgetConfig for GpuConfig {
     }
 }
 
-impl Default for GpuConfig {
-    fn default() -> Self {
-        Self {
-            show_icon: DEFAULT_SHOW_ICON,
-            format: GpuFormat::default(),
-            stable_width: DEFAULT_STABLE_WIDTH,
-        }
-    }
-}
-
 /// GPU widget that displays icon, usage, and opens a shared system popover on click.
 pub struct GpuWidget {
     /// Shared base widget container.

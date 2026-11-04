@@ -139,21 +139,6 @@ impl WidgetConfig for WindowTitleConfig {
     }
 }
 
-impl Default for WindowTitleConfig {
-    fn default() -> Self {
-        Self {
-            empty_text: DEFAULT_EMPTY_TEXT.to_string(),
-            template: DEFAULT_TEMPLATE.to_string(),
-            show_app_fallback: DEFAULT_SHOW_APP_FALLBACK,
-            max_chars: DEFAULT_MAX_CHARS,
-            show_icon: DEFAULT_SHOW_ICON,
-            icon_size: None,
-            uppercase: DEFAULT_UPPERCASE,
-            filter_by_output: DEFAULT_FILTER_BY_OUTPUT,
-        }
-    }
-}
-
 /// Window title widget that displays the focused window's title.
 pub struct WindowTitleWidget {
     /// Shared base widget container.

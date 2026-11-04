@@ -160,7 +160,7 @@ use crate::services::gpu::GpuService;
 /// Trait for widget configuration types.
 ///
 /// All widget configs should implement this trait to provide a consistent
-/// interface for constructing configuration from TOML entries and defaulting.
+/// interface for constructing configuration from TOML entries.
 ///
 /// # Example
 ///
@@ -181,14 +181,8 @@ use crate::services::gpu::GpuService;
 ///         Self { enabled }
 ///     }
 /// }
-///
-/// impl Default for MyWidgetConfig {
-///     fn default() -> Self {
-///         Self { enabled: true }
-///     }
-/// }
 /// ```
-pub trait WidgetConfig: Sized + Default {
+pub trait WidgetConfig: Sized {
     /// Create configuration from a widget entry.
     ///
     /// Implementations should extract options from `entry.options` and

@@ -94,18 +94,6 @@ impl WidgetConfig for DiskConfig {
     }
 }
 
-impl Default for DiskConfig {
-    fn default() -> Self {
-        Self {
-            name: widget::DISK.to_string(),
-            path: DEFAULT_PATH.to_string(),
-            show_icon: DEFAULT_SHOW_ICON,
-            format: DiskFormat::default(),
-            stable_width: DEFAULT_STABLE_WIDTH,
-        }
-    }
-}
-
 /// Disk widget that displays icon, usage, and opens the shared system popover.
 pub struct DiskWidget {
     base: BaseWidget,
