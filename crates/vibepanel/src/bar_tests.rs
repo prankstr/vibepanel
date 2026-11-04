@@ -1086,21 +1086,24 @@ fn run_layer_shell_always_hotplug_contract() {
     let mut config = layer_shell_test_config();
     config.bar.background_opacity = 0.6;
     let height = crate::widgets::compute_max_scroll_height;
+    config.bar.auto_hide = vibepanel_core::config::AutoHide::Never;
     apply_layer_shell_config(&config, false);
-    let always_height = height(Some(context.monitor.clone()));
+    let never_height = height(Some(context.monitor.clone()));
+    // init_global ignores later calls, so each mode has to replace the config.
     for mode in [
         vibepanel_core::config::AutoHide::Always,
         vibepanel_core::config::AutoHide::Smart,
     ] {
         config.bar.auto_hide = mode;
-        apply_layer_shell_config(&config, false);
+        ConfigManager::replace_global_for_test(config.clone());
         assert_eq!(
             height(Some(context.monitor.clone())),
-            always_height,
-            "notification height must not count bar thickness twice"
+            never_height,
+            "{mode:?}: notification height must not count bar thickness twice"
         );
     }
     config.bar.auto_hide = vibepanel_core::config::AutoHide::Never;
+    ConfigManager::replace_global_for_test(config.clone());
     let bar = present_layer_shell_bar(&context, &config, false);
     let client = ApplicationWindow::builder()
         .application(&context.app)
