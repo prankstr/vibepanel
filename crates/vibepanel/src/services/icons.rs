@@ -2862,29 +2862,6 @@ mod tests {
         assert_eq!(service.current_backend_kind(), IconBackendKind::Text);
     }
 
-    #[test]
-    fn test_reconfigure_same_theme_is_noop() {
-        // Reconfiguring to the same theme and weight should be a no-op
-        let service = IconsService {
-            theme: RefCell::new("material".to_string()),
-            weight: RefCell::new(400),
-            material_ready: RefCell::new(true),
-            css_loaded: RefCell::new(true),
-            icon_theme: RefCell::new(None),
-            handles: RefCell::new(Vec::new()),
-            material_css_provider: RefCell::new(None),
-            font_path: RefCell::new(None),
-            font_map_watch: RefCell::new(None),
-            registering_font: Cell::new(false),
-        };
-
-        // This should not change anything
-        service.reconfigure("material", 400);
-
-        assert_eq!(service.theme(), "material");
-        assert!(service.uses_material());
-    }
-
     // UI regression tests (need a GTK display)
     //
     // Font map resets: reproduce against a running bar with

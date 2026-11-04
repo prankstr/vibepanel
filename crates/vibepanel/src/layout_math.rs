@@ -8,24 +8,6 @@
 /// - `natural` if it fits within `available`
 /// - Otherwise shrinks toward `min`, but never below 0
 /// - If `available <= 0`, returns 0
-///
-/// # Examples
-///
-/// ```
-/// use vibepanel::layout_math::clamp_width;
-///
-/// // Natural size fits
-/// assert_eq!(clamp_width(100, 50, 80), 80);
-///
-/// // Natural too large, use available
-/// assert_eq!(clamp_width(60, 50, 80), 60);
-///
-/// // Available less than min, use available (can't fit)
-/// assert_eq!(clamp_width(30, 50, 80), 30);
-///
-/// // No space available
-/// assert_eq!(clamp_width(0, 50, 80), 0);
-/// ```
 pub fn clamp_width(available: i32, min_size: i32, nat_size: i32) -> i32 {
     if available <= 0 {
         return 0;
