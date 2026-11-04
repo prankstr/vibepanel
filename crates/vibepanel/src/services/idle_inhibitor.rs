@@ -111,12 +111,6 @@ impl IdleInhibitorService {
         self.snapshot.borrow().clone()
     }
 
-    /// Whether the inhibitor is available.
-    #[allow(dead_code)]
-    pub fn available(&self) -> bool {
-        self.snapshot.borrow().available
-    }
-
     /// Toggle the inhibitor state.
     pub fn toggle(&self) {
         let current = self.snapshot.borrow().active;
@@ -133,14 +127,6 @@ impl IdleInhibitorService {
         if active {
             self.enable_inhibitor();
         } else {
-            self.disable_inhibitor();
-        }
-    }
-
-    /// Stop the service and release any inhibitor.
-    #[allow(dead_code)]
-    pub fn stop(&self) {
-        if self.snapshot.borrow().active {
             self.disable_inhibitor();
         }
     }

@@ -826,7 +826,6 @@ mod tests {
                 vpn_type: "wireguard".to_string(),
             }],
             any_active: state == VpnState::Activated,
-            active_count: if state == VpnState::Activated { 1 } else { 0 },
             is_ready: true,
             preferred_uuid: None,
             auth_request: None,

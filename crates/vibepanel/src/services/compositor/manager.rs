@@ -129,7 +129,6 @@ pub struct CompositorManager {
     last_keyboard_layout: RefCell<Option<KeyboardLayoutInfo>>,
     last_window_layouts: RefCell<Option<WindowLayoutSnapshot>>,
     last_window_list: RefCell<Option<super::WindowListSnapshot>>,
-    started: RefCell<bool>,
 }
 
 impl CompositorManager {
@@ -152,7 +151,6 @@ impl CompositorManager {
             last_keyboard_layout: RefCell::new(None),
             last_window_layouts: RefCell::new(None),
             last_window_list: RefCell::new(None),
-            started: RefCell::new(false),
         });
 
         // Initialize backend with config
@@ -206,7 +204,6 @@ impl CompositorManager {
                 last_keyboard_layout: RefCell::new(None),
                 last_window_layouts: RefCell::new(None),
                 last_window_list: RefCell::new(None),
-                started: RefCell::new(true),
             }));
         });
     }
@@ -760,7 +757,6 @@ impl CompositorManager {
 
         // Store backend
         *this.backend.borrow_mut() = Some(backend);
-        *this.started.borrow_mut() = true;
 
         // Only merge ext-workspace state where it fills a gap in native IPC:
         // Hyprland reports a single active workspace per monitor, while

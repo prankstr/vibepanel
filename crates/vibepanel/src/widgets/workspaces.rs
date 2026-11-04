@@ -2888,8 +2888,6 @@ mod tests {
         ];
         let snapshot = WorkspaceServiceSnapshot {
             active_workspace: active_workspaces.clone(),
-            occupied_workspaces: HashSet::from([4]),
-            window_counts: HashMap::from([(4, 1)]),
             workspaces: workspaces.clone(),
             per_output: HashMap::from([
                 (
@@ -2931,8 +2929,6 @@ mod tests {
         ];
         let snapshot = WorkspaceServiceSnapshot {
             active_workspace: active_workspaces.clone(),
-            occupied_workspaces: HashSet::from([2]),
-            window_counts: HashMap::from([(1, 0), (2, 1), (3, 0)]),
             workspaces: workspaces.clone(),
             per_output: HashMap::new(),
             occupancy_known: true,
@@ -2958,8 +2954,6 @@ mod tests {
         ];
         let snapshot = WorkspaceServiceSnapshot {
             active_workspace: active_workspaces.clone(),
-            occupied_workspaces: HashSet::new(),
-            window_counts: HashMap::new(),
             workspaces: workspaces.clone(),
             per_output: HashMap::new(),
             occupancy_known: false,
@@ -2987,7 +2981,6 @@ mod tests {
             occupied,
             urgent,
             window_count,
-            output: None,
         }
     }
 

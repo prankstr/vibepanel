@@ -97,8 +97,6 @@ pub struct VpnSnapshot {
     pub connections: Vec<VpnConnection>,
     /// Whether any VPN is currently active.
     pub any_active: bool,
-    /// Count of active VPN connections.
-    pub active_count: usize,
     /// Whether the service is ready (initial load complete).
     pub is_ready: bool,
     /// Preferred VPN UUID from last session (used for primary() selection when no VPN is active).
@@ -118,7 +116,6 @@ impl VpnSnapshot {
             available: false,
             connections: Vec::new(),
             any_active: false,
-            active_count: 0,
             is_ready: false,
             preferred_uuid: None,
             auth_request: None,
@@ -467,8 +464,7 @@ impl VpnService {
                 if generation != self.refresh_generation.get() {
                     return;
                 }
-                let active_count = connections.iter().filter(|c| c.active).count();
-                let any_active = active_count > 0;
+                let any_active = connections.iter().any(|c| c.active);
 
                 // Subscribe to state changes on active VPN connections.
                 // Clear old subscriptions first - they'll be dropped automatically.
@@ -538,7 +534,6 @@ impl VpnService {
                 snapshot.available = nm_running;
                 snapshot.connections = connections;
                 snapshot.any_active = any_active;
-                snapshot.active_count = active_count;
                 snapshot.is_ready = true;
                 // Preserve preferred_uuid from last_used_uuid
                 snapshot.preferred_uuid = preferred_uuid;

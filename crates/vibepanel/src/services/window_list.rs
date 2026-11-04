@@ -20,7 +20,6 @@ use super::compositor::{CompositorManager, WindowListSnapshot};
 pub struct WindowListService {
     current: RefCell<WindowListSnapshot>,
     callbacks: Callbacks<WindowListSnapshot>,
-    ready: RefCell<bool>,
     manager_callback_id: RefCell<Option<CallbackId>>,
 }
 
@@ -33,7 +32,6 @@ impl WindowListService {
         let service = Rc::new(Self {
             current: RefCell::new(initial),
             callbacks: Callbacks::new(),
-            ready: RefCell::new(true),
             manager_callback_id: RefCell::new(None),
         });
 
@@ -60,10 +58,8 @@ impl WindowListService {
     {
         let id = self.callbacks.register(callback);
 
-        if *self.ready.borrow() {
-            let snapshot = self.current.borrow().clone();
-            self.callbacks.notify_single(id, &snapshot);
-        }
+        let snapshot = self.current.borrow().clone();
+        self.callbacks.notify_single(id, &snapshot);
         id
     }
 
@@ -85,7 +81,6 @@ impl WindowListService {
 
     fn handle_update(&self, window_list: &WindowListSnapshot) {
         *self.current.borrow_mut() = window_list.clone();
-        *self.ready.borrow_mut() = true;
         self.callbacks.notify(window_list);
     }
 

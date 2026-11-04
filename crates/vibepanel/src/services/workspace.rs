@@ -36,11 +36,6 @@ pub struct Workspace {
     pub urgent: bool,
     /// Number of windows on this workspace (if available from backend).
     pub window_count: Option<u32>,
-    /// Output/monitor this workspace belongs to.
-    /// - For Niri: always set (workspaces are per-monitor).
-    /// - For MangoWC/Hyprland: always None (workspaces are global).
-    #[allow(dead_code)] // Part of public API for future use
-    pub output: Option<String>,
 }
 
 impl Workspace {
@@ -54,7 +49,6 @@ impl Workspace {
             occupied: snapshot.occupied_workspaces.contains(&meta.id),
             urgent: snapshot.urgent_workspaces.contains(&meta.id),
             window_count: snapshot.window_counts.get(&meta.id).copied(),
-            output: meta.output.clone(),
         }
     }
 
@@ -99,7 +93,6 @@ impl Workspace {
             occupied,
             urgent,
             window_count,
-            output: meta.output.clone(),
         }
     }
 }
@@ -172,12 +165,6 @@ pub struct WorkspaceServiceSnapshot {
     /// Most compositors have a single active workspace, but MangoWC
     /// supports viewing multiple tags simultaneously.
     pub active_workspace: HashSet<i32>,
-    /// Set of occupied workspace IDs.
-    #[allow(dead_code)] // Part of public API for future use
-    pub occupied_workspaces: HashSet<i32>,
-    /// Window count per workspace (workspace_id -> count).
-    #[allow(dead_code)] // Part of public API for future use
-    pub window_counts: HashMap<i32, u32>,
     /// All workspaces with their current state.
     pub workspaces: Vec<Workspace>,
     /// Per-output workspace state for multi-monitor setups.
@@ -202,8 +189,6 @@ pub struct WorkspaceService {
     workspaces: RefCell<Vec<WorkspaceMeta>>,
     /// Registered callbacks.
     callbacks: Callbacks<WorkspaceServiceSnapshot>,
-    /// Whether the service has received at least one update.
-    ready: RefCell<bool>,
 }
 
 impl WorkspaceService {
@@ -220,7 +205,6 @@ impl WorkspaceService {
             snapshot: RefCell::new(initial_snapshot),
             workspaces: RefCell::new(workspaces),
             callbacks: Callbacks::new(),
-            ready: RefCell::new(true), // Ready immediately since manager handles startup
         });
 
         // Register with compositor manager
@@ -247,7 +231,6 @@ impl WorkspaceService {
         let service = Self::global();
         *service.workspaces.borrow_mut() = workspaces;
         *service.snapshot.borrow_mut() = snapshot;
-        *service.ready.borrow_mut() = true;
         let service_snapshot = service.build_snapshot();
         service.callbacks.notify(&service_snapshot);
     }
@@ -261,10 +244,8 @@ impl WorkspaceService {
         let id = self.callbacks.register(callback);
 
         // Immediately send current state so widgets can render.
-        if *self.ready.borrow() {
-            let snapshot = self.build_snapshot();
-            self.callbacks.notify_single(id, &snapshot);
-        }
+        let snapshot = self.build_snapshot();
+        self.callbacks.notify_single(id, &snapshot);
         id
     }
 
@@ -281,7 +262,6 @@ impl WorkspaceService {
     fn handle_update(&self, snapshot: WorkspaceSnapshot) {
         // Update stored snapshot
         *self.snapshot.borrow_mut() = snapshot;
-        *self.ready.borrow_mut() = true;
 
         // Also refresh workspace list (in case of dynamic workspaces)
         *self.workspaces.borrow_mut() = self.manager.list_workspaces();
@@ -332,8 +312,6 @@ impl WorkspaceService {
 
         WorkspaceServiceSnapshot {
             active_workspace: snapshot.active_workspace.clone(),
-            occupied_workspaces: snapshot.occupied_workspaces.clone(),
-            window_counts: snapshot.window_counts.clone(),
             workspaces,
             per_output,
             occupancy_known: snapshot.occupancy_known,

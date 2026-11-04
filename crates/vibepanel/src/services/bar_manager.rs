@@ -38,7 +38,6 @@ use crate::widgets::BarState;
 /// State for a single bar instance on a specific monitor.
 struct BarInstance {
     /// The monitor this bar is displayed on.
-    #[allow(dead_code)]
     monitor: gtk4::gdk::Monitor,
     /// The bar window.
     window: ApplicationWindow,
@@ -297,12 +296,6 @@ impl BarManager {
     /// Get the number of active bars.
     pub fn bar_count(&self) -> usize {
         self.bars.borrow().len()
-    }
-
-    /// Check if a bar exists for the given monitor key.
-    #[allow(dead_code)]
-    pub fn has_bar(&self, key: &str) -> bool {
-        self.bars.borrow().contains_key(key)
     }
 
     /// Get all active monitor keys.

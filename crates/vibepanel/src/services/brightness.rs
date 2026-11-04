@@ -57,20 +57,6 @@ impl Default for BrightnessSnapshot {
     }
 }
 
-impl BrightnessSnapshot {
-    /// Convenience accessor for the current percentage.
-    #[allow(dead_code)]
-    pub fn percent(&self) -> u32 {
-        self.percent
-    }
-
-    /// Whether this snapshot corresponds to a usable backend.
-    #[allow(dead_code)]
-    pub fn is_available(&self) -> bool {
-        self.available
-    }
-}
-
 /// Internal representation of the selected backlight device.
 struct BacklightDevice {
     /// Device name (directory name under /sys/class/backlight).
@@ -182,14 +168,7 @@ impl BrightnessService {
         self.current.borrow().clone()
     }
 
-    /// Get the current brightness percentage.
-    #[allow(dead_code)]
-    pub fn percent(&self) -> u32 {
-        self.current.borrow().percent
-    }
-
     /// Whether the service has completed initialization.
-    #[allow(dead_code)]
     pub fn is_ready(&self) -> bool {
         self.ready.get()
     }
