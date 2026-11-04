@@ -71,13 +71,15 @@ pub(crate) fn run_ignored_contract_subprocess(
     }
     .unwrap_or_else(|_| panic!("{label} subprocess should run"));
 
+    let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        output.status.success(),
-        "{label} subprocess failed for {contract}\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
+        output.status.success() && stdout.contains("test result: ok. 1 passed;"),
+        "{label} subprocess failed or did not run exactly one test for {contract}\nstdout:\n{stdout}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+const UI_REGRESSION_REQUIRED_ENV: &str = "VIBEPANEL_UI_REGRESSION_REQUIRED";
 
 fn env_truthy(name: &str) -> bool {
     std::env::var(name)
@@ -85,35 +87,41 @@ fn env_truthy(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn skip_unless_required(context: &str, reason: &str, required_env: Option<&str>) {
+    if let Some(env_name) = required_env
+        && env_truthy(env_name)
+    {
+        panic!("{env_name} is set but {reason} ({context})");
+    }
+    eprintln!("skipping {context}: {reason}");
+}
+
 pub(crate) fn init_gtk_or_skip(context: &str, required_env: Option<&str>) -> bool {
     let init_ok = gtk4::init().is_ok();
-    let display_available = gtk4::gdk::Display::default().is_some();
-
-    if !init_ok && !display_available {
-        if let Some(env_name) = required_env
-            && env_truthy(env_name)
-        {
-            panic!("{env_name} is set but no GTK display is available");
-        }
-        eprintln!("skipping {context}: GTK display is unavailable");
-        return false;
+    if gtk4::gdk::Display::default().is_some() {
+        return true;
     }
 
-    if !display_available {
-        eprintln!("skipping {context}: no default GTK display");
-        return false;
-    }
-
-    true
+    let reason = if init_ok {
+        "no default GTK display"
+    } else {
+        "GTK display is unavailable"
+    };
+    skip_unless_required(context, reason, required_env);
+    false
 }
 
 pub(crate) fn init_layer_shell_or_skip(context: &str) -> Option<gtk4::gdk::Display> {
-    if !init_gtk_or_skip(context, None) {
+    if !init_gtk_or_skip(context, Some(UI_REGRESSION_REQUIRED_ENV)) {
         return None;
     }
 
     if !gtk4_layer_shell::is_supported() {
-        eprintln!("skipping {context}: compositor does not support layer-shell");
+        skip_unless_required(
+            context,
+            "compositor does not support layer-shell",
+            Some(UI_REGRESSION_REQUIRED_ENV),
+        );
         return None;
     }
 
@@ -126,11 +134,14 @@ pub(crate) fn first_monitor_or_skip(
 ) -> Option<gtk4::gdk::Monitor> {
     let monitor = display
         .monitors()
-        .item(0)?
-        .downcast::<gtk4::gdk::Monitor>()
-        .ok();
+        .item(0)
+        .and_then(|item| item.downcast::<gtk4::gdk::Monitor>().ok());
     if monitor.is_none() {
-        eprintln!("skipping {context}: no monitor available");
+        skip_unless_required(
+            context,
+            "no monitor available",
+            Some(UI_REGRESSION_REQUIRED_ENV),
+        );
     }
 
     monitor
