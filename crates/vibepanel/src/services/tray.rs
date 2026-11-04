@@ -372,7 +372,7 @@ impl TrayService {
                                 service.parse_layout_result(&r)
                             }
                             Err(e) => {
-                                error!("GetLayout failed for {}: {}", identifier_clone, e);
+                                debug!("GetLayout failed for {}: {}", identifier_clone, e);
                                 Vec::new()
                             }
                         };
@@ -882,15 +882,6 @@ impl TrayService {
                         return;
                     }
                 };
-
-                // The item may have exited between registering and proxy
-                // creation. notify::g-name-owner never fires for a name that
-                // is already gone, so drop it here or it lingers forever.
-                if proxy.name_owner().is_none() {
-                    debug!("Item {} has no owner after proxy creation", key_clone);
-                    this.on_item_name_vanished(&key_clone);
-                    return;
-                }
 
                 this.setup_item_proxy(&key_clone, proxy);
             },

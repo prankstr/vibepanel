@@ -154,6 +154,8 @@ struct WidgetState {
     /// Keyed by `"<path>:<mtime_nanos>"` to detect in-place file replacements.
     file_icon_cache: HashMap<String, gdk::Texture>,
     menu: Option<MenuState>,
+    /// Bumped on every menu request so late DBusMenu replies can be dropped.
+    menu_request: u64,
     /// Track the current button order to avoid unnecessary rebuilds.
     /// This prevents menu flickering when animated icons update rapidly.
     button_order: Vec<String>,
@@ -191,6 +193,7 @@ impl TrayWidget {
             pixmap_cache: HashMap::new(),
             file_icon_cache: HashMap::new(),
             menu: None,
+            menu_request: 0,
             button_order: Vec::new(),
             contrast_params: compute_contrast_params(),
         }));
@@ -385,7 +388,7 @@ fn create_button(state: &Rc<RefCell<WidgetState>>, identifier: &str) -> Button {
 
     // Right-click handler
     let secondary = GestureClick::new();
-    secondary.set_button(3); // GDK_BUTTON_SECONDARY
+    secondary.set_button(gdk::BUTTON_SECONDARY);
     let identifier_for_secondary = identifier.to_string();
     let state_for_secondary = state.clone();
     secondary.connect_released(move |gesture, _n_press, x, y| {
@@ -404,10 +407,12 @@ fn create_button(state: &Rc<RefCell<WidgetState>>, identifier: &str) -> Button {
     let middle = GestureClick::new();
     middle.set_button(gdk::BUTTON_MIDDLE);
     let identifier_for_middle = identifier.to_string();
+    let state_for_middle = state.clone();
     middle.connect_released(move |gesture, _n_press, x, y| {
         let Some(widget) = gesture.widget() else {
             return;
         };
+        invalidate_pending_menu(&state_for_middle);
         let (x, y) = item_event_position(&widget, Some((x, y)));
         TrayService::global().secondary_activate(&identifier_for_middle, x, y);
     });
@@ -417,7 +422,7 @@ fn create_button(state: &Rc<RefCell<WidgetState>>, identifier: &str) -> Button {
 }
 
 /// Click position on the bar plus the monitor origin; Wayland hides the global
-/// pointer position (same approach as Waybar). Defaults to the widget centre.
+/// pointer position. Defaults to the widget centre.
 fn item_event_position(widget: &Widget, local: Option<(f64, f64)>) -> (i32, i32) {
     let (x, y) = local.unwrap_or_else(|| {
         (
@@ -438,12 +443,34 @@ fn item_event_position(widget: &Widget, local: Option<(f64, f64)>) -> (i32, i32)
         .surface()
         .and_then(|surface| widget.display().monitor_at_surface(&surface))
         .map(|monitor| {
-            let geometry = monitor.geometry();
-            (geometry.x(), geometry.y())
+            bar_surface_origin(
+                ConfigManager::global().bar_position(),
+                &monitor.geometry(),
+                (native.width(), native.height()),
+            )
         })
         .unwrap_or((0, 0));
 
     (origin.0 + point.0 as i32, origin.1 + point.1 as i32)
+}
+
+/// Global position of the bar surface's top-left corner. The bar is anchored
+/// to its edge without margins, so bottom/right bars sit at the far side.
+fn bar_surface_origin(
+    position: BarPosition,
+    monitor: &gdk::Rectangle,
+    (bar_width, bar_height): (i32, i32),
+) -> (i32, i32) {
+    let (x, y) = (monitor.x(), monitor.y());
+    match position {
+        BarPosition::Top | BarPosition::Left => (x, y),
+        BarPosition::Bottom => (x, y + monitor.height() - bar_height),
+        BarPosition::Right => (x + monitor.width() - bar_width, y),
+    }
+}
+
+fn invalidate_pending_menu(state: &Rc<RefCell<WidgetState>>) {
+    state.borrow_mut().menu_request += 1;
 }
 
 fn update_button(state: &Rc<RefCell<WidgetState>>, button: &Button, snapshot: &TrayItem) {
@@ -904,6 +931,7 @@ fn load_icon_from_theme_path(
 }
 
 fn on_button_clicked(state: &Rc<RefCell<WidgetState>>, button: &Button, identifier: &str) {
+    invalidate_pending_menu(state);
     let service = TrayService::global();
     let items = service.items();
 
@@ -951,6 +979,9 @@ fn toggle_menu(
     parent: &Widget,
     click: Option<(f64, f64)>,
 ) {
+    invalidate_pending_menu(state);
+    let request = state.borrow().menu_request;
+
     let service = TrayService::global();
     let has_dbus_menu = service
         .items()
@@ -985,17 +1016,8 @@ fn toggle_menu(
     let parent_clone = parent.clone();
 
     service.get_menu(identifier, move |entries| {
-        if entries.is_empty() {
-            // Empty or unreachable DBusMenu: let the item draw its own, unless
-            // the button is gone or another menu opened meanwhile.
-            let other_menu_open = state_clone.borrow().menu.is_some();
-            if parent_clone.is_realized() && !other_menu_open {
-                debug!(
-                    "No menu entries for {}, falling back to ContextMenu",
-                    identifier_owned
-                );
-                request_item_context_menu(&state_clone, &identifier_owned, &parent_clone, click);
-            }
+        // A newer click superseded this request while it was in flight.
+        if state_clone.borrow().menu_request != request {
             return;
         }
 
@@ -1005,15 +1027,13 @@ fn toggle_menu(
             return;
         }
 
-        // Check if a different menu was opened while we were fetching
-        {
-            let st = state_clone.borrow();
-            if let Some(ref menu) = st.menu
-                && menu.identifier != identifier_owned
-            {
-                // A different menu is now open, don't interrupt
-                return;
-            }
+        if entries.is_empty() {
+            debug!(
+                "No menu entries for {}, falling back to ContextMenu",
+                identifier_owned
+            );
+            request_item_context_menu(&state_clone, &identifier_owned, &parent_clone, click);
+            return;
         }
 
         let container = GtkBox::new(Orientation::Vertical, 2);
@@ -1027,16 +1047,10 @@ fn toggle_menu(
 
         let popover = create_menu_popover(&state_clone, &parent_clone, &container);
 
-        // Set up menu state
+        // Popdown fires `closed`, which borrows state, so close before borrowing.
+        close_open_menu(&state_clone);
         {
             let mut st = state_clone.borrow_mut();
-            // Close any existing menu first
-            if let Some(old_menu) = st.menu.take() {
-                old_menu
-                    .parent
-                    .remove_css_class(widget::TRAY_ITEM_MENU_OPEN);
-                close_menu_popover(&old_menu.popover);
-            }
             st.menu = Some(MenuState {
                 popover: popover.clone(),
                 container: container.clone(),
@@ -1341,6 +1355,23 @@ mod tests {
                 .iter()
                 .all(|pixel| pixel == &[235, 235, 235, 255])
         );
+    }
+
+    #[test]
+    fn bar_surface_origin_follows_anchored_edge() {
+        let monitor = gdk::Rectangle::new(1920, 100, 2560, 1440);
+        for (position, bar, expected) in [
+            (BarPosition::Top, (2560, 32), (1920, 100)),
+            (BarPosition::Left, (32, 1440), (1920, 100)),
+            (BarPosition::Bottom, (2560, 32), (1920, 1508)),
+            (BarPosition::Right, (32, 1440), (4448, 100)),
+        ] {
+            assert_eq!(
+                bar_surface_origin(position, &monitor, bar),
+                expected,
+                "{position:?}"
+            );
+        }
     }
 
     #[test]
