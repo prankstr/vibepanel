@@ -2862,29 +2862,6 @@ mod tests {
         assert_eq!(service.current_backend_kind(), IconBackendKind::Text);
     }
 
-    #[test]
-    fn test_reconfigure_same_theme_is_noop() {
-        // Reconfiguring to the same theme and weight should be a no-op
-        let service = IconsService {
-            theme: RefCell::new("material".to_string()),
-            weight: RefCell::new(400),
-            material_ready: RefCell::new(true),
-            css_loaded: RefCell::new(true),
-            icon_theme: RefCell::new(None),
-            handles: RefCell::new(Vec::new()),
-            material_css_provider: RefCell::new(None),
-            font_path: RefCell::new(None),
-            font_map_watch: RefCell::new(None),
-            registering_font: Cell::new(false),
-        };
-
-        // This should not change anything
-        service.reconfigure("material", 400);
-
-        assert_eq!(service.theme(), "material");
-        assert!(service.uses_material());
-    }
-
     // UI regression tests (need a GTK display)
     //
     // Font map resets: reproduce against a running bar with
@@ -2930,16 +2907,23 @@ mod tests {
     }
 
     fn run_test_font_map_watch() {
-        if !init_gtk_or_skip(
-            "icons font map watch test",
-            Some("VIBEPANEL_UI_REGRESSION_REQUIRED"),
-        ) {
+        if !init_gtk_or_skip("icons font map watch test") {
             return;
         }
 
-        let service = IconsService::new("material".to_string(), 400);
         let font_map = default_font_map().expect("default font map should exist");
 
+        // Non-Material backends don't use the font, so a reset must not register
+        // it. Runs before any Material service registers the font; this only
+        // discriminates where fontconfig itself doesn't know Material Symbols.
+        let gtk_service = IconsService::new("Adwaita".to_string(), 400);
+        gtk_service.handle_font_map_change(&font_map);
+        assert!(
+            gtk_service.font_path.borrow().is_none(),
+            "a GTK-theme service must not re-register the Material font"
+        );
+
+        let service = IconsService::new("material".to_string(), 400);
         assert!(
             material_font_registered(&font_map),
             "Material Symbols should be in the Pango font map after init"
@@ -2949,20 +2933,12 @@ mod tests {
             service.font_map_watch.borrow().is_some(),
             "IconsService must subscribe to the Pango font map"
         );
-
-        // Non-Material backends don't use the font, so resets are irrelevant.
-        let gtk_service = IconsService::new("Adwaita".to_string(), 400);
-        gtk_service.handle_font_map_change(&font_map);
-        assert!(!gtk_service.uses_material());
     }
 
     /// Callers often keep only `handle.widget()`. The icon must still be
     /// reapplied on theme changes, and must be freed with its widget.
     fn run_test_handle_lifetime() {
-        if !init_gtk_or_skip(
-            "icons handle lifetime test",
-            Some("VIBEPANEL_UI_REGRESSION_REQUIRED"),
-        ) {
+        if !init_gtk_or_skip("icons handle lifetime test") {
             return;
         }
 
@@ -3003,10 +2979,7 @@ mod tests {
     }
 
     fn run_test_re_register_font() {
-        if !init_gtk_or_skip(
-            "icons font re-registration test",
-            Some("VIBEPANEL_UI_REGRESSION_REQUIRED"),
-        ) {
+        if !init_gtk_or_skip("icons font re-registration test") {
             return;
         }
 

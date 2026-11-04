@@ -2383,7 +2383,7 @@ macro_rules! ui_regression_config_tests {
         #[test]
         #[ignore = "internal runner for one UI regression config subprocess"]
         fn ui_regression_config_runner() {
-            if !init_gtk_or_skip("UI regression config test", Some("VIBEPANEL_UI_REGRESSION_REQUIRED")) {
+            if !init_gtk_or_skip("UI regression config test") {
                 return;
             }
             set_ui_regression_config(&test_config());

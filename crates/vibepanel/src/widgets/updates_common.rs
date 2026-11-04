@@ -305,6 +305,7 @@ fn build_upgrade_command(package_manager: PackageManager) -> String {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+    use std::time::Duration;
 
     fn make_snapshot(updates: Vec<(&str, Vec<&str>)>) -> UpdatesSnapshot {
         let mut by_repo = HashMap::new();
@@ -417,10 +418,23 @@ mod tests {
     fn test_format_last_check() {
         assert_eq!(format_last_check(None), "Never");
 
-        // Just now
+        // Ages sit mid-bucket so the time spent running the test can't cross a threshold.
         let now = SystemTime::now();
-        let result = format_last_check(Some(now));
-        assert!(result.contains("Just now") || result.contains("minute"));
+        for (age_secs, expected) in [
+            (5, "Just now"),
+            (90, "1 minute ago"),
+            (30 * 60, "30 minutes ago"),
+            (2 * 3600 + 60, "2 hours ago"),
+            (3 * 86400 + 60, "3 days ago"),
+        ] {
+            let time = now - Duration::from_secs(age_secs);
+            assert_eq!(format_last_check(Some(time)), expected, "age {age_secs}s");
+        }
+        assert_eq!(
+            format_last_check(Some(now + Duration::from_secs(3600))),
+            "Unknown",
+            "a check time in the future"
+        );
     }
 
     #[test]

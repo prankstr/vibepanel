@@ -832,11 +832,33 @@ fn event_detail_text(event: &CalendarEvent, date: NaiveDate) -> String {
 mod tests {
     use super::*;
     use crate::styles::weather_popover as wp;
-    use crate::ui_regression_test_support::{find_descendant_with_class, init_gtk_or_skip};
+    use crate::ui_regression_test_support::{
+        find_descendant_with_class, init_gtk_or_skip, run_ignored_contract_subprocess,
+    };
 
     #[test]
-    fn clock_calendar_popover_tracks_config() {
-        if !init_gtk_or_skip("clock calendar popover test", None) {
+    #[ignore = "UI regression test: requires a GTK display; run under Xvfb"]
+    fn test_ui_regression_calendar_popover() {
+        run_ignored_contract_subprocess(
+            "calendar_popover_ui_runner",
+            "VIBEPANEL_CALENDAR_POPOVER_UI_TEST",
+            "calendar.popover",
+            "calendar popover UI test",
+        );
+    }
+
+    #[test]
+    #[ignore = "internal runner for the calendar popover UI regression wrapper"]
+    fn calendar_popover_ui_runner() {
+        match std::env::var("VIBEPANEL_CALENDAR_POPOVER_UI_TEST").as_deref() {
+            Ok("calendar.popover") => run_test_calendar_popover(),
+            Ok(other) => panic!("unknown calendar popover UI test: {other}"),
+            Err(_) => eprintln!("skipping calendar popover UI test: no test case selected"),
+        }
+    }
+
+    fn run_test_calendar_popover() {
+        if !init_gtk_or_skip("calendar popover UI regression test") {
             return;
         }
 

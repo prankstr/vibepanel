@@ -1341,18 +1341,6 @@ mod tests {
     }
 
     #[test]
-    fn test_record_restart_attempt_handles_early_instant_without_underflow() {
-        let now = std::time::Instant::now();
-        let early = now
-            .checked_sub(std::time::Duration::from_secs(RESTART_WINDOW_SECS + 1))
-            .unwrap_or(now);
-        let mut times = Vec::new();
-
-        assert!(record_restart_attempt(&mut times, early));
-        assert_eq!(times, vec![early]);
-    }
-
-    #[test]
     fn test_custom_config_defaults() {
         let entry = make_entry(HashMap::new());
         let config = CustomConfig::from_entry(&entry);

@@ -2203,10 +2203,7 @@ mod tests {
     /// update would break silently.
     fn run_test_popover_keynav() {
         use crate::ui_regression_test_support::{flush_gtk, init_gtk_or_skip};
-        if !init_gtk_or_skip(
-            "popover keynav test",
-            Some("VIBEPANEL_UI_REGRESSION_REQUIRED"),
-        ) {
+        if !init_gtk_or_skip("popover keynav test") {
             return;
         }
 

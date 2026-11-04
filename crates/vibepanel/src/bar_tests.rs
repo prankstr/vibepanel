@@ -53,7 +53,7 @@ fn layer_shell_context_or_skip() -> Option<LayerShellContext> {
 }
 
 fn apply_layer_shell_config(config: &Config, init_compositor: bool) {
-    ConfigManager::init_global(config.clone(), None);
+    ConfigManager::replace_global_for_test(config.clone());
     if init_compositor {
         CompositorManager::init_global(&config.advanced);
     }
@@ -1009,7 +1009,6 @@ fn run_layer_shell_intellihide_sway_contract() {
     // and reverse the slide.
     let mut animated = config.clone();
     animated.theme.animations = true;
-    ConfigManager::replace_global_for_test(animated.clone());
     let island = present_layer_shell_bar(&context, &animated, false);
     wait_for_bar_contract(|| island._visibility.test_progress() == 1.0);
     std::fs::write(&pointer, "250 10").unwrap();
@@ -1086,8 +1085,9 @@ fn run_layer_shell_always_hotplug_contract() {
     let mut config = layer_shell_test_config();
     config.bar.background_opacity = 0.6;
     let height = crate::widgets::compute_max_scroll_height;
+    config.bar.auto_hide = vibepanel_core::config::AutoHide::Never;
     apply_layer_shell_config(&config, false);
-    let always_height = height(Some(context.monitor.clone()));
+    let never_height = height(Some(context.monitor.clone()));
     for mode in [
         vibepanel_core::config::AutoHide::Always,
         vibepanel_core::config::AutoHide::Smart,
@@ -1096,8 +1096,8 @@ fn run_layer_shell_always_hotplug_contract() {
         apply_layer_shell_config(&config, false);
         assert_eq!(
             height(Some(context.monitor.clone())),
-            always_height,
-            "notification height must not count bar thickness twice"
+            never_height,
+            "{mode:?}: notification height must not count bar thickness twice"
         );
     }
     config.bar.auto_hide = vibepanel_core::config::AutoHide::Never;
