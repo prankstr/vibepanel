@@ -159,26 +159,6 @@ impl Default for AudioSnapshot {
     }
 }
 
-impl AudioSnapshot {
-    /// Convenience accessor for the current volume percentage.
-    #[allow(dead_code)]
-    pub fn volume(&self) -> u32 {
-        self.volume
-    }
-
-    /// Whether the default sink is muted.
-    #[allow(dead_code)]
-    pub fn is_muted(&self) -> bool {
-        self.muted
-    }
-
-    /// Whether the audio backend is available.
-    #[allow(dead_code)]
-    pub fn is_available(&self) -> bool {
-        self.available
-    }
-}
-
 /// Commands sent from the main thread to the Pulse worker thread.
 ///
 /// These commands are processed asynchronously by the PulseAudio worker thread.
@@ -199,12 +179,6 @@ enum AudioCommand {
     /// to `max_percent` before applying further decreases.
     SetVolumeRelative { delta: i32, max_percent: u32 },
 
-    /// Set the mute state for the default audio output sink.
-    ///
-    /// Pass `true` to mute, `false` to unmute. The UI is notified immediately
-    /// for responsiveness, before the PulseAudio operation completes.
-    SetMuted(bool),
-
     /// Toggle the mute state for the default audio output sink.
     ///
     /// If currently muted, unmutes; if currently unmuted, mutes.
@@ -223,12 +197,6 @@ enum AudioCommand {
     /// Toggle the mute state for an application playback stream.
     ToggleAppMute { index: u32 },
 
-    /// Set the mute state for the default audio input source (microphone).
-    ///
-    /// Pass `true` to mute, `false` to unmute. The UI is notified immediately
-    /// for responsiveness, before the PulseAudio operation completes.
-    SetMicMuted(bool),
-
     /// Toggle the mute state for the default audio input source (microphone).
     ///
     /// If currently muted, unmutes; if currently unmuted, mutes.
@@ -245,12 +213,6 @@ enum AudioCommand {
     /// The name should match the `name` field from `SourceInfoSnapshot`.
     /// A server event will trigger a full state refresh after the change.
     SetDefaultSource(String),
-
-    /// Request a full state refresh from PulseAudio.
-    ///
-    /// Fetches server info, sink list, source list, and default device details.
-    /// Useful for recovering from missed events or forcing a sync.
-    Refresh,
 
     /// Record that an external tool requested a volume change.
     ///
@@ -322,23 +284,6 @@ fn bounded_relative_volume_target(current: u32, delta: i32, max_percent: u32) ->
     } else {
         None
     }
-}
-
-/// Internal state update sent from the Pulse thread to the main thread.
-#[derive(Debug, Clone)]
-struct AudioStateUpdate {
-    volume: u32,
-    muted: bool,
-    mic_muted: Option<bool>,
-    mic_volume: Option<u32>,
-    sinks: Vec<SinkInfoSnapshot>,
-    default_sink_name: Option<String>,
-    sources: Vec<SourceInfoSnapshot>,
-    default_source_name: Option<String>,
-    available: bool,
-    control_available: bool,
-    mic_control_available: bool,
-    app_volumes: Vec<AppVolumeSnapshot>,
 }
 
 /// Shared, process-wide audio service.
@@ -415,20 +360,7 @@ impl AudioService {
         self.current.borrow().clone()
     }
 
-    /// Get the current volume percentage.
-    #[allow(dead_code)]
-    pub fn volume(&self) -> u32 {
-        self.current.borrow().volume
-    }
-
-    /// Whether the default sink is muted.
-    #[allow(dead_code)]
-    pub fn is_muted(&self) -> bool {
-        self.current.borrow().muted
-    }
-
     /// Whether the service has completed initialization.
-    #[allow(dead_code)]
     pub fn is_ready(&self) -> bool {
         self.ready.get()
     }
@@ -441,12 +373,6 @@ impl AudioService {
             None => true,
             Some(t) => t.elapsed() < Duration::from_millis(INITIAL_SETTLE_MS),
         }
-    }
-
-    /// Whether the audio backend is available.
-    #[allow(dead_code)]
-    pub fn is_available(&self) -> bool {
-        self.current.borrow().available
     }
 
     /// Configure the user-facing volume cap from audio settings.
@@ -480,25 +406,12 @@ impl AudioService {
             .send(AudioCommand::SetVolumeRelative { delta, max_percent });
     }
 
-    /// Set the mute state for the default sink.
-    #[allow(dead_code)]
-    pub fn set_muted(&self, muted: bool) {
-        let _ = self.command_tx.send(AudioCommand::SetMuted(muted));
-    }
-
     /// Toggle the mute state for the default sink.
     pub fn toggle_mute(&self) {
         let _ = self.command_tx.send(AudioCommand::ToggleMute);
     }
 
-    /// Set the mute state for the default source (mic).
-    #[allow(dead_code)]
-    pub fn set_mic_muted(&self, muted: bool) {
-        let _ = self.command_tx.send(AudioCommand::SetMicMuted(muted));
-    }
-
     /// Toggle the mute state for the default source (mic).
-    #[allow(dead_code)]
     pub fn toggle_mic_mute(&self) {
         let _ = self.command_tx.send(AudioCommand::ToggleMicMute);
     }
@@ -539,12 +452,6 @@ impl AudioService {
             .send(AudioCommand::SetDefaultSource(name.to_string()));
     }
 
-    /// Request a full state refresh.
-    #[allow(dead_code)]
-    pub fn refresh(&self) {
-        let _ = self.command_tx.send(AudioCommand::Refresh);
-    }
-
     /// Record that an external tool requested a volume change.
     ///
     /// This is used for behavioral detection: when volume changes are made
@@ -560,28 +467,7 @@ impl AudioService {
             .send(AudioCommand::NoteExternalVolumeRequest(percent));
     }
 
-    /// Get a list of available sinks.
-    #[allow(dead_code)]
-    pub fn sinks(&self) -> Vec<SinkInfoSnapshot> {
-        self.current.borrow().sinks.clone()
-    }
-
-    fn apply_state_update(&self, update: AudioStateUpdate) {
-        let new_snapshot = AudioSnapshot {
-            volume: update.volume,
-            muted: update.muted,
-            mic_muted: update.mic_muted,
-            mic_volume: update.mic_volume,
-            sinks: update.sinks,
-            default_sink_name: update.default_sink_name,
-            sources: update.sources,
-            default_source_name: update.default_source_name,
-            available: update.available,
-            control_available: update.control_available,
-            mic_control_available: update.mic_control_available,
-            app_volumes: update.app_volumes,
-        };
-
+    fn apply_state_update(&self, new_snapshot: AudioSnapshot) {
         if *self.current.borrow() == new_snapshot {
             return;
         }
@@ -612,7 +498,7 @@ impl Drop for AudioService {
 /// This state is shared between the worker thread and PulseAudio callbacks
 /// via `Arc<Mutex<PulseWorkerState>>`. All fields are updated asynchronously
 /// from PulseAudio events and polled by the main thread when building
-/// `AudioStateUpdate` snapshots.
+/// `AudioSnapshot` updates.
 ///
 /// # Field Groups
 ///
@@ -992,14 +878,6 @@ fn handle_command(
                 );
             }
         }
-        AudioCommand::SetMuted(muted) => {
-            set_sink_mute(
-                Arc::clone(&mainloop),
-                Arc::clone(&context),
-                Arc::clone(&state),
-                muted,
-            );
-        }
         AudioCommand::ToggleMute => {
             let current_muted = state.lock().muted;
             set_sink_mute(
@@ -1007,14 +885,6 @@ fn handle_command(
                 Arc::clone(&context),
                 Arc::clone(&state),
                 !current_muted,
-            );
-        }
-        AudioCommand::SetMicMuted(muted) => {
-            set_source_mute(
-                Arc::clone(&mainloop),
-                Arc::clone(&context),
-                Arc::clone(&state),
-                muted,
             );
         }
         AudioCommand::ToggleMicMute => {
@@ -1047,9 +917,6 @@ fn handle_command(
         AudioCommand::SetDefaultSource(name) => {
             set_default_source(Arc::clone(&mainloop), Arc::clone(&context), &name);
             // The server event will trigger a full state refresh.
-        }
-        AudioCommand::Refresh => {
-            fetch_full_state(mainloop, context, state);
         }
         AudioCommand::NoteExternalVolumeRequest(percent) => {
             // Record the externally-requested volume for behavioral detection.
@@ -2035,8 +1902,8 @@ fn set_default_source(mainloop: Arc<Mutex<Mainloop>>, context: Arc<Mutex<Context
     ml.unlock();
 }
 
-fn build_state_update(state: &PulseWorkerState) -> AudioStateUpdate {
-    AudioStateUpdate {
+fn build_state_update(state: &PulseWorkerState) -> AudioSnapshot {
+    AudioSnapshot {
         volume: state.volume,
         muted: state.muted,
         mic_muted: state.mic_muted,

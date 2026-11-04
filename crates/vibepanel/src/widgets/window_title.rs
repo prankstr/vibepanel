@@ -17,11 +17,10 @@ use tracing::{debug, trace};
 use vibepanel_core::config::WidgetEntry;
 
 use crate::services::callbacks::CallbackId;
-use crate::services::compositor::WindowInfo;
+use crate::services::compositor::{CompositorManager, WindowInfo};
 use crate::services::config_manager::ConfigManager;
 use crate::services::icons::get_app_icon_name;
 use crate::services::tooltip::set_tooltip;
-use crate::services::window_title::WindowTitleService;
 use crate::styles::{icon, widget as wgt};
 use crate::widgets::WidgetConfig;
 use crate::widgets::base::BaseWidget;
@@ -139,26 +138,11 @@ impl WidgetConfig for WindowTitleConfig {
     }
 }
 
-impl Default for WindowTitleConfig {
-    fn default() -> Self {
-        Self {
-            empty_text: DEFAULT_EMPTY_TEXT.to_string(),
-            template: DEFAULT_TEMPLATE.to_string(),
-            show_app_fallback: DEFAULT_SHOW_APP_FALLBACK,
-            max_chars: DEFAULT_MAX_CHARS,
-            show_icon: DEFAULT_SHOW_ICON,
-            icon_size: None,
-            uppercase: DEFAULT_UPPERCASE,
-            filter_by_output: DEFAULT_FILTER_BY_OUTPUT,
-        }
-    }
-}
-
 /// Window title widget that displays the focused window's title.
 pub struct WindowTitleWidget {
     /// Shared base widget container.
     base: BaseWidget,
-    /// Callback ID for WindowTitleService, used to disconnect on drop.
+    /// Callback ID for CompositorManager window updates, used to disconnect on drop.
     window_title_callback_id: CallbackId,
 }
 
@@ -258,26 +242,27 @@ impl WindowTitleWidget {
         // Connect to window title service.
         // The callback owns clones of the GTK widgets and config.
         // Backends emit one update per output; keep the ones this widget follows.
-        let window_title_callback_id = WindowTitleService::global().connect(move |snapshot| {
-            if !accepts_update(output_id.as_deref(), snapshot) {
-                trace!(
-                    "WindowTitle: ignoring update for {:?} (focused={}), widget follows {:?}",
-                    snapshot.output, snapshot.focused, output_id
-                );
-                return;
-            }
+        let window_title_callback_id =
+            CompositorManager::global().register_window_callback(move |snapshot| {
+                if !accepts_update(output_id.as_deref(), snapshot) {
+                    trace!(
+                        "WindowTitle: ignoring update for {:?} (focused={}), widget follows {:?}",
+                        snapshot.output, snapshot.focused, output_id
+                    );
+                    return;
+                }
 
-            // Update the widget with the new window info
-            update_window_title(
-                &title_label,
-                icon_widgets.as_ref(),
-                &base_widget,
-                &config,
-                &app_name_cache,
-                snapshot,
-                is_vertical,
-            );
-        });
+                // Update the widget with the new window info
+                update_window_title(
+                    &title_label,
+                    icon_widgets.as_ref(),
+                    &base_widget,
+                    &config,
+                    &app_name_cache,
+                    snapshot,
+                    is_vertical,
+                );
+            });
 
         debug!(
             "WindowTitleWidget created (output_id={:?})",
@@ -340,7 +325,7 @@ fn window_title_icon_size_from_values(
 
 impl Drop for WindowTitleWidget {
     fn drop(&mut self) {
-        WindowTitleService::global().disconnect(self.window_title_callback_id);
+        CompositorManager::global().unregister_window_callback(self.window_title_callback_id);
     }
 }
 

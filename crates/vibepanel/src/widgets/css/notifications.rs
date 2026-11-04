@@ -153,10 +153,6 @@ pub fn css(animations: bool) -> String {
     margin-left: 1px;
 }}
 
-.notification-clear-label {{
-    font-size: var(--font-size-sm);
-}}
-
 .notification-list {{
     padding: 8px 16px 0 0;
 }}

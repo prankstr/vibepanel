@@ -96,16 +96,6 @@ impl WidgetConfig for MemoryConfig {
     }
 }
 
-impl Default for MemoryConfig {
-    fn default() -> Self {
-        Self {
-            show_icon: DEFAULT_SHOW_ICON,
-            format: MemoryFormat::default(),
-            stable_width: DEFAULT_STABLE_WIDTH,
-        }
-    }
-}
-
 /// Memory widget that displays icon, usage, and opens a shared system popover
 /// on click.
 pub struct MemoryWidget {

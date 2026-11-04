@@ -40,7 +40,7 @@ use crate::widgets::{WidgetConfig, warn_unknown_options};
 ///
 /// Note: Unlike other widgets, SpacerConfig intentionally omits the `color` field
 /// since the spacer is invisible by design and cannot be styled.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct SpacerConfig {
     /// Fixed width in pixels, or None for flexible (expand to fill).
     pub width: Option<u32>,

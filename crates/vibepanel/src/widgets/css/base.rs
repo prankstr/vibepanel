@@ -207,7 +207,6 @@ tooltip.background label,
 .vp-primary {{ color: var(--color-foreground-primary); }}
 .vp-muted {{ color: var(--color-foreground-muted); }}
 .vp-disabled {{ color: var(--color-foreground-disabled); }}
-.vp-faint {{ color: var(--color-foreground-faint); }}
 .vp-accent {{ color: var(--color-accent-primary); }}
 .vp-error {{ color: var(--color-state-urgent); }}
 

@@ -111,17 +111,6 @@ impl WidgetConfig for CpuConfig {
     }
 }
 
-impl Default for CpuConfig {
-    fn default() -> Self {
-        Self {
-            show_icon: DEFAULT_SHOW_ICON,
-            show_percentage: DEFAULT_SHOW_PERCENTAGE,
-            format: CpuFormat::default(),
-            stable_width: DEFAULT_STABLE_WIDTH,
-        }
-    }
-}
-
 /// CPU widget that displays icon, usage/temperature label, and opens a shared system
 /// popover on click.
 pub struct CpuWidget {

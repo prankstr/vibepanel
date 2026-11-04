@@ -88,16 +88,6 @@ impl WidgetConfig for BatteryConfig {
     }
 }
 
-impl Default for BatteryConfig {
-    fn default() -> Self {
-        Self {
-            show_percentage: DEFAULT_SHOW_PERCENTAGE,
-            show_icon: DEFAULT_SHOW_ICON,
-            low_threshold: DEFAULT_BATTERY_LOW_THRESHOLD,
-        }
-    }
-}
-
 /// Battery widget that displays icon, percentage, and opens a popover on click.
 pub struct BatteryWidget {
     /// Shared base widget container.

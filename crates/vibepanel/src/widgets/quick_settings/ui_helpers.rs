@@ -322,12 +322,6 @@ impl AccordionManager {
         }
     }
 
-    /// Register an expandable card with the accordion.
-    #[allow(dead_code)]
-    pub fn register<T: ExpandableCard + 'static>(&self, card: Rc<T>) {
-        self.cards.borrow_mut().push(card);
-    }
-
     /// Register an expandable card trait object with the accordion.
     pub fn register_dyn(&self, card: Rc<dyn ExpandableCard>) {
         self.cards.borrow_mut().push(card);
@@ -355,28 +349,9 @@ impl AccordionManager {
         }
     }
 
-    /// Set up accordion behavior for a card's expander button.
-    ///
-    /// This connects the expander button to toggle the revealer and
-    /// automatically collapse other cards when expanding.
-    #[allow(dead_code)]
-    pub fn setup_expander<T: ExpandableCard + 'static>(
-        accordion: &Rc<Self>,
-        card: &Rc<T>,
-        expander_btn: &Button,
-    ) {
-        Self::setup_expander_with_callback(
-            accordion,
-            &(Rc::clone(card) as Rc<dyn ExpandableCard>),
-            expander_btn,
-            None,
-        );
-    }
-
     /// Set up accordion behavior with an optional post-toggle callback.
     ///
-    /// This is the more flexible version of `setup_expander` that accepts
-    /// a callback invoked after the revealer and arrow state are updated.
+    /// The callback is invoked after the revealer and arrow state are updated.
     /// The callback receives `true` if expanding, `false` if collapsing.
     ///
     /// Use this for cards that need custom behavior on expand/collapse,

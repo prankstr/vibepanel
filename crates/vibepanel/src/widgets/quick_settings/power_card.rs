@@ -5,10 +5,6 @@
 //! - Toggle card: Hold for [`HOLD_DURATION_MS`] to execute Shutdown (default action)
 //! - Chevron: Click to expand/collapse action list
 //! - Action rows: Hold for [`HOLD_DURATION_MS`] to execute
-//!
-//! Two UI variants for prototyping:
-//! - Popover: Actions appear in a popover menu
-//! - Expander: Actions appear as ListRows in accordion
 
 use std::cell::{Cell, RefCell};
 use std::process::{Command, Stdio};
@@ -19,17 +15,16 @@ use gtk4::gdk::BUTTON_PRIMARY;
 use gtk4::glib::{self, SourceId};
 use gtk4::prelude::*;
 use gtk4::{
-    Align, Box as GtkBox, Button, EventControllerKey, GestureClick, Label, ListBox, ListBoxRow,
-    Orientation, Overlay, Popover, Revealer, RevealerTransitionType,
+    Align, Box as GtkBox, Button, EventControllerKey, GestureClick, ListBox, ListBoxRow,
+    Orientation, Overlay, Revealer, RevealerTransitionType,
 };
 use tr::tr;
 use tracing::{debug, warn};
 
 use crate::services::compositor::CompositorManager;
 use crate::services::config_manager::ConfigManager;
-use crate::services::icons::{IconHandle, IconsService};
-use crate::styles::{button, card, color, qs, row, surface};
-use crate::widgets::base::configure_popover;
+use crate::services::icons::IconsService;
+use crate::styles::{color, qs, row};
 
 use super::bar_widget::PowerCommandsConfig;
 use super::components::{CardLabel, ToggleCard};
@@ -37,10 +32,6 @@ use super::ui_helpers::{ExpandableCard, ExpandableCardBase, create_qs_list_box};
 
 /// Animation duration for hold-to-confirm (ms).
 const HOLD_DURATION_MS: u64 = 800;
-
-/// Set to `true` for popover variant, `false` for expander variant.
-/// Change this to compare both approaches.
-pub const USE_POPOVER_VARIANT: bool = false;
 
 /// A power action definition.
 struct PowerAction {
@@ -380,95 +371,6 @@ fn is_confirm_key(keyval: gtk4::gdk::Key) -> bool {
     )
 }
 
-/// Create a card-like button with hold-to-confirm overlay.
-///
-/// Returns (overlay_container, progress_box) where:
-/// - overlay_container should be used as the card widget
-/// - progress_box is the progress overlay for CSS animation
-fn create_hold_button_card(
-    icon_name: &str,
-    label_text: &str,
-    subtitle_text: &str,
-) -> (Overlay, GtkBox, Button, IconHandle, Option<Label>) {
-    let overlay = Overlay::new();
-    overlay.add_css_class(card::QS);
-    overlay.add_css_class(card::BASE);
-    overlay.add_css_class(qs::POWER_CARD);
-    overlay.set_hexpand(true);
-    overlay.set_overflow(gtk4::Overflow::Hidden);
-
-    // Progress bar (behind content, animates width)
-    let progress = GtkBox::new(Orientation::Horizontal, 0);
-    progress.add_css_class(qs::POWER_PROGRESS);
-    progress.set_halign(Align::Start);
-    progress.set_valign(Align::Fill);
-    progress.set_vexpand(true);
-    overlay.set_child(Some(&progress));
-
-    // Button with card content (on top)
-    let button = Button::new();
-    button.set_hexpand(true);
-    button.set_vexpand(true);
-    button.set_halign(Align::Fill);
-    button.set_valign(Align::Fill);
-    button.add_css_class(button::RESET);
-
-    let content = GtkBox::new(Orientation::Horizontal, 6);
-    content.set_hexpand(true);
-    content.set_margin_start(8);
-    content.set_margin_end(8);
-    content.set_margin_top(8);
-    content.set_margin_bottom(8);
-
-    // Icon
-    let icons = IconsService::global();
-    let icon_handle = icons.create_icon(icon_name, &[qs::TOGGLE_ICON, color::PRIMARY]);
-    content.append(&icon_handle.widget());
-
-    // Label + subtitle
-    let label_result = CardLabel::new(label_text)
-        .subtitle(subtitle_text)
-        .width_chars(16)
-        .title_class(qs::TOGGLE_LABEL)
-        .subtitle_class(qs::TOGGLE_SUBTITLE)
-        .build();
-    content.append(&label_result.container);
-
-    button.set_child(Some(&content));
-    overlay.add_overlay(&button);
-
-    (
-        overlay,
-        progress,
-        button,
-        icon_handle,
-        label_result.subtitle,
-    )
-}
-
-/// State for the Power card (shared between both variants).
-pub struct PowerCardState {
-    /// Card icon handle.
-    pub card_icon: RefCell<Option<IconHandle>>,
-    /// Card subtitle label.
-    pub subtitle: RefCell<Option<Label>>,
-}
-
-impl PowerCardState {
-    pub fn new() -> Self {
-        Self {
-            card_icon: RefCell::new(None),
-            subtitle: RefCell::new(None),
-        }
-    }
-}
-
-impl Default for PowerCardState {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 /// State for the Power card (expander variant).
 pub struct PowerCardExpanderState {
     /// Base expandable card state.
@@ -493,119 +395,6 @@ impl ExpandableCard for PowerCardExpanderState {
     fn base(&self) -> &ExpandableCardBase {
         &self.base
     }
-}
-
-/// Build power card with popover menu (hold-to-open).
-pub fn build_power_card_popover(
-    commands: PowerCommandsConfig,
-) -> (gtk4::Widget, Rc<PowerCardState>) {
-    let state = Rc::new(PowerCardState::new());
-
-    // Create the card wrapper box
-    let card_box = GtkBox::new(Orientation::Horizontal, 0);
-    card_box.set_hexpand(true);
-
-    // Create hold button card
-    let (overlay, progress, button, icon_handle, subtitle) = create_hold_button_card(
-        "system-shutdown-symbolic",
-        &tr!("Power"),
-        &tr!("Hold to open"),
-    );
-
-    // Store references
-    *state.card_icon.borrow_mut() = Some(icon_handle);
-    *state.subtitle.borrow_mut() = subtitle;
-
-    // Set up hold-to-confirm that opens popover
-    let button_weak = button.downgrade();
-    let commands_for_popover = commands.clone();
-    setup_hold_to_confirm(&button, &button, &progress, move || {
-        let Some(btn) = button_weak.upgrade() else {
-            return;
-        };
-        show_power_popover(&btn, commands_for_popover.clone());
-    });
-
-    card_box.append(&overlay);
-    (card_box.upcast(), state)
-}
-
-/// Show the power actions popover.
-fn show_power_popover(parent: &Button, commands: PowerCommandsConfig) {
-    let popover = Popover::new();
-    configure_popover(&popover);
-
-    let content = GtkBox::new(Orientation::Vertical, 2);
-    content.add_css_class(surface::POPOVER);
-    content.add_css_class(surface::SURFACE_POPOVER);
-    content.add_css_class(surface::WIDGET_MENU_CONTENT);
-    content.add_css_class(qs::ROW_MENU_CONTENT);
-    content.set_margin_top(4);
-    content.set_margin_bottom(4);
-    content.set_margin_start(4);
-    content.set_margin_end(4);
-
-    // Add a hold-to-confirm button for each power action
-    for action in POWER_ACTIONS {
-        let command = command_for_action(action, &commands).to_string();
-        let action_widget = create_power_popover_action(action, command);
-        content.append(&action_widget);
-    }
-
-    popover.set_child(Some(&content));
-    popover.set_parent(parent);
-    popover.popup();
-
-    // Unparent popover when closed
-    popover.connect_closed(|p| {
-        p.unparent();
-    });
-}
-
-/// Create a power action button for the popover (with hold-to-confirm).
-fn create_power_popover_action(action: &'static PowerAction, command: String) -> Overlay {
-    let overlay = Overlay::new();
-    overlay.add_css_class(qs::POWER_ROW);
-
-    // Progress overlay
-    let progress = GtkBox::new(Orientation::Horizontal, 0);
-    progress.add_css_class(qs::POWER_PROGRESS);
-    progress.set_halign(Align::Start);
-    progress.set_valign(Align::Fill);
-    progress.set_vexpand(true);
-    overlay.set_child(Some(&progress));
-
-    // Action button
-    let btn = Button::new();
-    btn.set_has_frame(false);
-    btn.add_css_class(qs::ROW_MENU_ITEM);
-    btn.add_css_class(button::GHOST);
-
-    let hbox = GtkBox::new(Orientation::Horizontal, 8);
-    hbox.set_margin_start(4);
-    hbox.set_margin_end(8);
-
-    // Icon
-    let icons = IconsService::global();
-    let icon = icons.create_icon(action.icon, &[row::QS_ICON, color::PRIMARY]);
-    hbox.append(&icon.widget());
-
-    // Label
-    let label = Label::new(Some(&action.label()));
-    label.set_xalign(0.0);
-    label.set_hexpand(true);
-    label.add_css_class(color::PRIMARY);
-    hbox.append(&label);
-
-    btn.set_child(Some(&hbox));
-    overlay.add_overlay(&btn);
-
-    // Set up hold-to-confirm
-    setup_hold_to_confirm(&btn, &btn, &progress, move || {
-        execute_power_action(action, &command);
-    });
-
-    overlay
 }
 
 /// Build power card with expander and ListRows.
@@ -781,43 +570,4 @@ fn build_power_action_row_with_command(
     });
 
     list_row
-}
-
-/// Build result for power card.
-#[allow(dead_code)]
-pub enum PowerCardBuildResult {
-    /// Popover variant result.
-    Popover {
-        card: gtk4::Widget,
-        state: Rc<PowerCardState>,
-    },
-    /// Expander variant result.
-    Expander {
-        card: gtk4::Widget,
-        revealer: Revealer,
-        state: Rc<PowerCardExpanderState>,
-        /// Expander button for accordion registration (if caller wants to add accordion behavior)
-        expander_button: Option<Button>,
-    },
-}
-
-/// Build the power card using the configured variant.
-///
-/// For the Expander variant, returns an expander_button that can be used to set up
-/// accordion behavior. Note that the Power card already handles its own expand/collapse
-/// with subtitle updates, so the caller should use a custom accordion setup that
-/// calls `accordion.collapse_others()` before the card's built-in handler runs.
-pub fn build_power_card(commands: PowerCommandsConfig) -> PowerCardBuildResult {
-    if USE_POPOVER_VARIANT {
-        let (card, state) = build_power_card_popover(commands);
-        PowerCardBuildResult::Popover { card, state }
-    } else {
-        let (card, revealer, state, expander_button) = build_power_card_expander(commands);
-        PowerCardBuildResult::Expander {
-            card,
-            revealer,
-            state,
-            expander_button,
-        }
-    }
 }

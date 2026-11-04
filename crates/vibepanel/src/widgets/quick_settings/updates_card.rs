@@ -65,7 +65,7 @@ impl ExpandableCard for UpdatesCardState {
 /// Build the Updates card and revealer for the Quick Settings panel.
 ///
 /// Returns `(card, revealer, expander_button)` - caller is responsible for
-/// accordion registration via `AccordionManager::setup_expander`.
+/// accordion registration via `AccordionManager::setup_expander_with_callback`.
 pub fn build_updates_card(
     state: &Rc<UpdatesCardState>,
 ) -> (gtk4::Widget, Revealer, Option<Button>) {

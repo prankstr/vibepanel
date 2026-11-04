@@ -68,21 +68,8 @@ pub struct MediaConfig {
     pub empty_text: String,
     /// Maximum text length (0 = unlimited).
     pub max_chars: usize,
-    /// Opacity for the pop-out window (0.0 = fully transparent, 1.0 = fully opaque).
-    ///
-    /// Note: This field is parsed for config validation but read dynamically from
-    /// `ConfigManager::get_widget_option()` at runtime to support live-reload.
-    #[allow(dead_code)]
-    pub popout_opacity: f64,
     /// Enable the audio visualizer (requires cava). Default: true.
     pub visualizer: bool,
-    /// Override border radius for album art (0-100 percentage).
-    /// When `None`, uses the global `widgets.border_radius`.
-    ///
-    /// Note: This field is parsed for config validation but read dynamically from
-    /// `ConfigManager::get_widget_option()` at runtime to support live-reload.
-    #[allow(dead_code)]
-    pub art_radius: Option<u32>,
 }
 
 impl WidgetConfig for MediaConfig {
@@ -121,45 +108,17 @@ impl WidgetConfig for MediaConfig {
             .map(|v| v.max(0) as usize)
             .unwrap_or(DEFAULT_MAX_CHARS);
 
-        let popout_opacity = entry
-            .options
-            .get("popout_opacity")
-            .and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64)))
-            .map(|v| v.clamp(0.0, 1.0))
-            .unwrap_or(1.0);
-
         let visualizer = entry
             .options
             .get("visualizer")
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
 
-        let art_radius = entry
-            .options
-            .get("art_radius")
-            .and_then(|v| v.as_integer())
-            .map(|v| v.clamp(0, 100) as u32);
-
         Self {
             template,
             empty_text,
             max_chars,
-            popout_opacity,
             visualizer,
-            art_radius,
-        }
-    }
-}
-
-impl Default for MediaConfig {
-    fn default() -> Self {
-        Self {
-            template: DEFAULT_TEMPLATE.to_string(),
-            empty_text: String::new(),
-            max_chars: DEFAULT_MAX_CHARS,
-            popout_opacity: 1.0,
-            visualizer: true,
-            art_radius: None,
         }
     }
 }
@@ -1317,31 +1276,6 @@ mod tests {
         assert_eq!(config.template, "{art}{artist} - {title}{controls}");
         assert_eq!(config.empty_text, "");
         assert_eq!(config.max_chars, 20);
-        assert_eq!(config.art_radius, None);
-    }
-
-    #[test]
-    fn test_media_config_art_radius() {
-        let mut options = std::collections::HashMap::new();
-        options.insert("art_radius".to_string(), toml::Value::Integer(10));
-        let entry = WidgetEntry {
-            name: "media".to_string(),
-            options,
-        };
-        let config = MediaConfig::from_entry(&entry);
-        assert_eq!(config.art_radius, Some(10));
-    }
-
-    #[test]
-    fn test_media_config_art_radius_clamped() {
-        let mut options = std::collections::HashMap::new();
-        options.insert("art_radius".to_string(), toml::Value::Integer(200));
-        let entry = WidgetEntry {
-            name: "media".to_string(),
-            options,
-        };
-        let config = MediaConfig::from_entry(&entry);
-        assert_eq!(config.art_radius, Some(100));
     }
 
     #[test]

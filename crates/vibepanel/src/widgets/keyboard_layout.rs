@@ -84,16 +84,6 @@ impl WidgetConfig for KeyboardLayoutConfig {
     }
 }
 
-impl Default for KeyboardLayoutConfig {
-    fn default() -> Self {
-        Self {
-            show_icon: DEFAULT_SHOW_ICON,
-            show_label: DEFAULT_SHOW_LABEL,
-            format: LayoutFormat::default(),
-        }
-    }
-}
-
 /// Keyboard layout widget that displays the active layout and supports click-to-cycle.
 pub struct KeyboardLayoutWidget {
     base: BaseWidget,

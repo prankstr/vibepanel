@@ -150,7 +150,7 @@ impl<T> Callbacks<T> {
     }
 
     /// Returns the number of registered callbacks.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Only used by tests.
     pub fn len(&self) -> usize {
         self.inner.borrow().len()
     }

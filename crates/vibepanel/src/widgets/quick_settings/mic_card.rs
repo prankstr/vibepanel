@@ -122,7 +122,6 @@ pub fn build_mic_row() -> MicRowWidgets {
         // what Vibepanel is allowed to request. Programmatic updates are
         // guarded to avoid writing external over-cap values back to Pulse.
         .range(0.0, AudioService::global().user_max_percent() as f64)
-        .step(1.0)
         .with_expander(true) // Source list expander
         .build();
 

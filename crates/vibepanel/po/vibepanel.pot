@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vibepanel VERSION\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-19 17:53+0000\n"
+"POT-Creation-Date: 2026-11-04 14:12+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -567,7 +567,7 @@ msgstr ""
 msgid "Authentication required"
 msgstr ""
 
-#: ../src/widgets/polkit_window.rs ../src/widgets/quick_settings/bluetooth_card.rs ../src/widgets/quick_settings/network_card.rs ../src/widgets/quick_settings/vpn_card.rs
+#: ../src/widgets/polkit_window.rs ../src/widgets/quick_settings/bluetooth_card.rs ../src/widgets/quick_settings/network_card.rs ../src/widgets/quick_settings/network_card.rs ../src/widgets/quick_settings/vpn_card.rs
 msgid "Cancel"
 msgstr ""
 
@@ -834,6 +834,12 @@ msgid "Output: {output}"
 msgstr ""
 
 #: ../src/widgets/workspaces.rs ../src/widgets/workspaces.rs
+msgid "{n} window"
+msgid_plural "{n} windows"
+msgstr[0] ""
+msgstr[1] ""
+
+#: ../src/widgets/workspaces.rs ../src/widgets/workspaces.rs
 msgid "Workspace {name}"
 msgstr ""
 
@@ -849,12 +855,6 @@ msgstr ""
 #: ../src/widgets/workspaces.rs
 msgid "Urgent"
 msgstr ""
-
-#: ../src/widgets/workspaces.rs
-msgid "{n} window"
-msgid_plural "{n} windows"
-msgstr[0] ""
-msgstr[1] ""
 
 #: ../src/widgets/workspaces.rs
 msgid "Has windows"
@@ -1231,12 +1231,8 @@ msgstr ""
 msgid "Log Out"
 msgstr ""
 
-#: ../src/widgets/quick_settings/power_card.rs ../src/widgets/quick_settings/power_card.rs
-msgid "Power"
-msgstr ""
-
 #: ../src/widgets/quick_settings/power_card.rs
-msgid "Hold to open"
+msgid "Power"
 msgstr ""
 
 #: ../src/widgets/quick_settings/power_card.rs ../src/widgets/quick_settings/window.rs ../src/widgets/quick_settings/window.rs

@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vibepanel\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-19 17:53+0000\n"
+"POT-Creation-Date: 2026-11-04 14:12+0000\n"
 "PO-Revision-Date: 2026-10-15 14:18+0800\n"
 "Last-Translator: Automatically generated\n"
 "Language-Team: none\n"
@@ -863,6 +863,11 @@ msgid "Output: {output}"
 msgstr "输出：{output}"
 
 #: ../src/widgets/workspaces.rs
+msgid "{n} window"
+msgid_plural "{n} windows"
+msgstr[0] "{n} 个窗口"
+
+#: ../src/widgets/workspaces.rs
 msgid "Workspace {name}"
 msgstr "工作区 {name}"
 
@@ -878,11 +883,6 @@ msgstr "当前"
 #: ../src/widgets/workspaces.rs
 msgid "Urgent"
 msgstr "紧急"
-
-#: ../src/widgets/workspaces.rs
-msgid "{n} window"
-msgid_plural "{n} windows"
-msgstr[0] "{n} 个窗口"
 
 #: ../src/widgets/workspaces.rs
 msgid "Has windows"
@@ -1307,10 +1307,6 @@ msgid "Power"
 msgstr "电源"
 
 #: ../src/widgets/quick_settings/power_card.rs
-msgid "Hold to open"
-msgstr "长按打开"
-
-#: ../src/widgets/quick_settings/power_card.rs
 #: ../src/widgets/quick_settings/window.rs
 msgid "Hold to shut down"
 msgstr "长按关机"
@@ -1395,3 +1391,6 @@ msgstr "长按确认"
 #: ../src/widgets/quick_settings/window.rs
 msgid "Idle Inhibitor"
 msgstr "空闲抑制"
+
+#~ msgid "Hold to open"
+#~ msgstr "长按打开"

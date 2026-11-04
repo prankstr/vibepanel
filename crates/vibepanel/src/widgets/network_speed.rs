@@ -104,16 +104,6 @@ impl WidgetConfig for NetworkSpeedConfig {
     }
 }
 
-impl Default for NetworkSpeedConfig {
-    fn default() -> Self {
-        Self {
-            show_icon: DEFAULT_SHOW_ICON,
-            show_arrows: DEFAULT_SHOW_ARROWS,
-            format: NetworkSpeedFormat::default(),
-        }
-    }
-}
-
 /// Network throughput widget that displays download/upload speeds and opens a
 /// shared system popover on click.
 pub struct NetworkSpeedWidget {

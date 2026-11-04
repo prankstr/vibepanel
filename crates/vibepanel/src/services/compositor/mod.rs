@@ -11,7 +11,7 @@
 //!
 //! The backend trait feeds both:
 //! - `WorkspaceService` (workspace/tag state)
-//! - `WindowTitleService` (focused window info)
+//! - the window title widget (focused window info)
 //!
 //! # Usage
 //!

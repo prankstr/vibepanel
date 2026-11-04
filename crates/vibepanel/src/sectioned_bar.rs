@@ -10,7 +10,7 @@
 use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4::subclass::prelude::*;
-use gtk4::{LayoutChild, LayoutManager, Orientation, Widget};
+use gtk4::{LayoutManager, Orientation, Widget};
 
 use crate::layout_math::{
     SectionSizes, compute_center_priority_allocation, compute_linear_allocation,
@@ -139,7 +139,7 @@ mod imp {
         /// - `edge`: margin from container edges to first/last widget
         /// - `interior`: usable width after edge margins (`width - 2*edge`)
         /// - All x-coordinates are relative to the container's allocation
-        fn allocate(&self, widget: &Widget, width: i32, height: i32, baseline: i32) {
+        fn allocate(&self, widget: &Widget, width: i32, height: i32, _baseline: i32) {
             let bar = widget.downcast_ref::<super::SectionedBar>().unwrap();
             let orientation = self.orientation.get();
             let spacing = self.spacing.get();
@@ -197,7 +197,6 @@ mod imp {
                         alloc.left_width,
                         cross,
                         orientation,
-                        baseline,
                     );
                 }
                 if let Some(right_widget) = right {
@@ -207,7 +206,6 @@ mod imp {
                         alloc.right_width,
                         cross,
                         orientation,
-                        baseline,
                     );
                 }
 
@@ -262,7 +260,6 @@ mod imp {
                     alloc.left_width,
                     cross,
                     orientation,
-                    baseline,
                 );
             }
 
@@ -272,7 +269,6 @@ mod imp {
                 alloc.center_width,
                 cross,
                 orientation,
-                baseline,
             );
 
             if let Some(right_widget) = right {
@@ -282,15 +278,10 @@ mod imp {
                     alloc.right_width,
                     cross,
                     orientation,
-                    baseline,
                 );
             }
 
             self.allocation_callbacks.notify(&());
-        }
-
-        fn create_layout_child(&self, widget: &Widget, for_child: &Widget) -> LayoutChild {
-            self.parent_create_layout_child(widget, for_child)
         }
     }
 }
@@ -317,22 +308,6 @@ impl CenterPriorityLayout {
         obj
     }
 
-    pub fn set_spacing(&self, spacing: i32) {
-        self.imp().spacing.set(spacing);
-    }
-
-    pub fn set_edge_margin(&self, edge_margin: i32) {
-        self.imp().edge_margin.set(edge_margin);
-    }
-
-    pub fn set_left_expand(&self, expand: bool) {
-        self.imp().left_expand.set(expand);
-    }
-
-    pub fn set_right_expand(&self, expand: bool) {
-        self.imp().right_expand.set(expand);
-    }
-
     pub(crate) fn connect_allocated(
         &self,
         callback: impl Fn() + 'static,
@@ -347,12 +322,6 @@ impl CenterPriorityLayout {
     }
 }
 
-impl Default for CenterPriorityLayout {
-    fn default() -> Self {
-        Self::new(Orientation::Horizontal, 8, 12, false, false)
-    }
-}
-
 /// Allocate a child widget at a specific x position.
 ///
 /// Uses a translation transform to position the child horizontally.
@@ -364,7 +333,6 @@ fn allocate_child_at(
     primary: i32,
     cross: i32,
     orientation: Orientation,
-    _baseline: i32,
 ) {
     let primary = primary.max(0);
     let cross = cross.max(0);
@@ -425,12 +393,7 @@ mod bar_imp {
         }
     }
 
-    impl WidgetImpl for SectionedBar {
-        fn snapshot(&self, snapshot: &gtk4::Snapshot) {
-            // Use default snapshot behavior - let GTK handle clipping
-            self.parent_snapshot(snapshot);
-        }
-    }
+    impl WidgetImpl for SectionedBar {}
 }
 
 glib::wrapper! {
@@ -497,12 +460,6 @@ impl SectionedBar {
 
     pub fn set_end_widget(&self, widget: Option<&impl IsA<Widget>>) {
         self.set_section("right", widget.map(|w| w.upcast_ref::<Widget>().clone()));
-    }
-}
-
-impl Default for SectionedBar {
-    fn default() -> Self {
-        Self::new(Orientation::Horizontal, 8, 12, false, false)
     }
 }
 

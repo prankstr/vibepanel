@@ -686,15 +686,6 @@ impl ConfigManager {
         }
     }
 
-    /// Get the pill radius (used for rounded indicators, thumbnails, etc.).
-    ///
-    /// This is derived from the widget border radius configuration.
-    /// Used by CSS variable generation in ThemePalette.
-    #[allow(dead_code)]
-    pub fn radius_pill(&self) -> u32 {
-        self.palette.borrow().radius_pill
-    }
-
     /// Get the raw widget border radius percentage (0-100) from config.
     ///
     /// This is the raw config value, useful for scaling other elements proportionally.

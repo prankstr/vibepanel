@@ -54,14 +54,6 @@ impl WidgetConfig for UpdatesConfig {
     }
 }
 
-impl Default for UpdatesConfig {
-    fn default() -> Self {
-        Self {
-            check_interval: DEFAULT_CHECK_INTERVAL,
-        }
-    }
-}
-
 /// Updates widget that displays available package updates.
 pub struct UpdatesWidget {
     /// Shared base widget container.

@@ -247,7 +247,6 @@ pub struct ThemeSizes {
     pub font_size: u32,
     pub text_icon_size: u32,
     pub pixmap_icon_size: u32,
-    pub internal_spacing: u32,
     /// Roomy content padding inside widgets. User CSS can tune this via the
     /// additive `--widget-padding-adjust` value.
     pub widget_content_padding: u32,
@@ -274,7 +273,6 @@ impl Default for ThemeSizes {
             font_size: 14,
             text_icon_size: 16,
             pixmap_icon_size: 15,
-            internal_spacing: 9,
             widget_content_padding: 10,
             widget_content_gap: 10,
             widget_content_padding_vertical: 7,
@@ -1390,7 +1388,6 @@ impl ThemePalette {
             font_size,
             text_icon_size,
             pixmap_icon_size,
-            internal_spacing,
             widget_content_padding,
             widget_content_gap,
             widget_content_padding_vertical: widget_content_padding.saturating_sub(3),
