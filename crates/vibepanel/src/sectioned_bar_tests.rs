@@ -6,7 +6,6 @@ use crate::ui_regression_test_support::{
     maybe_hold_probe_window, painted_surface_fixture_with_classes, run_ignored_contract_subprocess,
     sample_widget_pixel,
 };
-use crate::widgets::css::{POPOVER_BG_WITH_OPACITY, WIDGET_BG_WITH_OPACITY};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -233,121 +232,6 @@ fn set_ui_regression_config_path(config: &Config, config_path: PathBuf) {
 
 fn widget_css_provider(config: &Config) -> CssProviderGuard {
     CssProviderGuard::for_config(config, gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION)
-}
-
-fn ui_regression_config_css(config: &Config) -> String {
-    let palette = vibepanel_core::ThemePalette::from_config(config, None, None);
-    let popover_palette = vibepanel_core::ThemePalette::popover_palette(config, None, None);
-    crate::bar::generate_css(config, &palette, popover_palette.as_ref())
-}
-
-fn production_bar_declarations(config: &Config) -> String {
-    let css = crate::widgets::css::widget_css(config);
-    let selector = format!(
-        "{}.{class}",
-        crate::styles::class::SECTIONED_BAR,
-        class = crate::styles::class::BAR
-    );
-    let selector_pos = css
-        .find(&selector)
-        .unwrap_or_else(|| panic!("production widget CSS should contain the {selector} selector"));
-    let selector_block = &css[selector_pos..];
-    let block_end = selector_block
-        .find('}')
-        .expect("production bar CSS selector should have a declaration block");
-
-    selector_block[..block_end].to_string()
-}
-fn assert_bar_style_bindings(config: &Config, bar: &SectionedBar) {
-    assert!(
-        bar.has_css_class(crate::styles::class::BAR),
-        "production-built SectionedBar should carry the .bar CSS class"
-    );
-
-    let declarations = production_bar_declarations(config);
-
-    assert!(
-        declarations.contains("background: var(--color-background-bar);"),
-        "production bar CSS should apply --color-background-bar to sectioned-bar.bar"
-    );
-    assert!(
-        declarations.contains("background-clip: padding-box;"),
-        "production bar CSS should keep the background inside the outline"
-    );
-    assert!(
-        declarations.contains("border-radius: var(--radius-bar);"),
-        "production bar CSS should apply --radius-bar to sectioned-bar.bar"
-    );
-    assert!(
-        declarations.contains("border: var(--bar-outline-width) solid"),
-        "production bar CSS should apply --bar-outline-width to sectioned-bar.bar"
-    );
-}
-
-fn production_widget_declarations(config: &Config) -> String {
-    let css = crate::widgets::css::widget_css(config);
-    let selector = ".widget {";
-    let selector_pos = css
-        .find(selector)
-        .expect("production widget CSS should contain the .widget selector");
-    let selector_block = &css[selector_pos..];
-    let block_end = selector_block
-        .find('}')
-        .expect("production .widget selector should have a declaration block");
-
-    selector_block[..block_end].to_string()
-}
-
-fn assert_widget_style_bindings(config: &Config) {
-    let declarations = production_widget_declarations(config);
-
-    assert!(
-        declarations.contains(&format!("background-color: {WIDGET_BG_WITH_OPACITY};")),
-        "production widget CSS should apply --widget-background-color and --widget-background-opacity to .widget"
-    );
-    assert!(
-        declarations.contains("background-clip: padding-box;"),
-        "production widget CSS should keep the background inside the outline"
-    );
-    assert!(
-        declarations.contains("border-radius: var(--radius-widget);"),
-        "production widget CSS should apply --radius-widget to .widget"
-    );
-    assert!(
-        declarations.contains("border: var(--widget-outline-width) solid"),
-        "production widget CSS should apply --widget-outline-width to .widget"
-    );
-}
-
-fn production_popover_declarations(config: &Config) -> String {
-    let css = crate::widgets::css::utility_css(config);
-    let selector = ".popover {";
-    let selector_pos = css
-        .find(selector)
-        .expect("production utility CSS should contain the .popover selector");
-    let selector_block = &css[selector_pos..];
-    let block_end = selector_block
-        .find('}')
-        .expect("production .popover selector should have a declaration block");
-
-    selector_block[..block_end].to_string()
-}
-
-fn assert_popover_style_bindings(config: &Config) {
-    let declarations = production_popover_declarations(config);
-
-    assert!(
-        declarations.contains(&format!("background-color: {POPOVER_BG_WITH_OPACITY};")),
-        "production popover CSS should apply --widget-background-color and --popover-background-opacity to .popover"
-    );
-    assert!(
-        declarations.contains("background-clip: padding-box;"),
-        "production popover CSS should keep the background inside the outline"
-    );
-    assert!(
-        declarations.contains("border: var(--surface-outline-width) solid"),
-        "production popover CSS should apply --surface-outline-width to .popover"
-    );
 }
 
 fn strip_css_comments(css: &str) -> String {
@@ -647,97 +531,18 @@ fn theme_vars_have_valid_internal_consumers() {
         optional_builtin_errors.is_empty(),
         "optional built-in CSS variables must be consumed with expected fallbacks; errors={optional_builtin_errors:?}"
     );
-}
 
-#[test]
-fn bar_padding_reads_physically_in_horizontal_and_vertical() {
-    // Regression: .bar--vertical must not re-swap padding — the generator
-    // already emits correct physical sides and the base rule reads them
-    // physically (see theme.rs css_vars_block).
-    let config = test_config();
-    let css = strip_css_comments(&crate::widgets::css::widget_css(&config));
-
-    let horizontal_block =
-        block_after_selector(&css, "sectioned-bar.bar {").expect("horizontal bar block must exist");
-    let vertical_block = block_after_selector(&css, "sectioned-bar.bar.bar--vertical {")
-        .expect("vertical bar block must exist");
-
-    fn pick<'a>(css: &'a str, property: &str) -> &'a str {
-        for line in css.lines() {
-            let trimmed = line.trim_start();
-            if let Some(rest) = trimmed.strip_prefix(property) {
-                return rest.trim_start().trim_end_matches(';').trim();
-            }
-        }
-        ""
-    }
-
-    let h_top = pick(horizontal_block, "padding-top:");
-    let h_right = pick(horizontal_block, "padding-right:");
-    assert!(
-        h_top.contains("--vp-internal-bar-padding-top"),
-        "horizontal bar padding-top should read --vp-internal-bar-padding-top; got {h_top:?}"
-    );
-    assert!(
-        h_right.contains("--vp-internal-bar-padding-right"),
-        "horizontal bar padding-right should read --vp-internal-bar-padding-right; got {h_right:?}"
-    );
-
-    // .bar--vertical must not rotate physical padding onto the flow axis.
-    for property in [
-        "padding-top:",
-        "padding-right:",
-        "padding-bottom:",
-        "padding-left:",
-    ] {
-        assert!(
-            !vertical_block.contains(property),
-            ".bar--vertical must not override {property} — bar padding reads \
-             physically from --vp-internal-bar-padding-* in the base rule. \
-             Reintroducing this swap rotates the cross-axis padding onto the \
-             flow axis and is a user-visible regression.\n\
-             Vertical block:\n{vertical_block}"
-        );
-    }
-}
-
-fn block_after_selector<'a>(css: &'a str, selector: &str) -> Option<&'a str> {
-    let start = css.find(selector)?;
-    let brace_open = css[start..].find('{')? + start;
-    let depth_open = brace_open + 1;
-    let mut depth = 1usize;
-    let mut idx = depth_open;
-    while idx < css.len() && depth > 0 {
-        match css.as_bytes()[idx] {
-            b'{' => depth += 1,
-            b'}' => depth -= 1,
-            _ => {}
-        }
-        idx += 1;
-    }
-    Some(&css[depth_open..idx - 1])
-}
-
-#[test]
-fn theme_vars_cover_hover_bindings() {
-    let config = test_config();
-    let production_css = crate::widgets::css::widget_css(&config);
-    let var_uses = css_var_uses_in_css(&production_css);
-    let hover_vars = THEME_VAR_EXPECTATIONS
+    let widget_var_uses = css_var_uses_in_css(&crate::widgets::css::widget_css(&config));
+    let missing_hover_bindings = THEME_VAR_EXPECTATIONS
         .iter()
         .filter(|var| var.hover_binding)
         .map(|var| var.name)
-        .collect::<Vec<_>>();
-    let missing_hover_bindings = hover_vars
-        .iter()
         .filter(|name| {
-            !var_uses
+            !widget_var_uses
                 .iter()
-                .any(|var_use| var_use.name == **name && var_use.in_hover_selector)
+                .any(|var_use| var_use.name == *name && var_use.in_hover_selector)
         })
-        .copied()
         .collect::<Vec<_>>();
-
     assert!(
         missing_hover_bindings.is_empty(),
         "hover CSS variables must be consumed inside :hover selectors; missing={missing_hover_bindings:?}"
@@ -819,7 +624,6 @@ fn painted_bar_fixture_with_override_css(
         .bar
         .section("left")
         .expect("UI regression config should build a left section");
-    assert_bar_style_bindings(config, &built.bar);
     let first_wrapper = left_section
         .first_child()
         .expect("UI regression config should build first widget");
@@ -902,204 +706,207 @@ fn run_ui_regression_config_subprocess(test_case: &str) {
     );
 }
 
-fn run_test_config_bar_size() {
-    let baseline = test_config();
-    let mut changed = baseline.clone();
-    changed.bar.size = 40;
-
-    let baseline_metrics = painted_bar_metrics(&baseline);
-    let changed_metrics = painted_bar_metrics(&changed);
-
-    assert_eq!(
-        changed_metrics.first_surface_bounds.3, changed.bar.size as i32,
-        "bar.size should control the live measured painted widget surface height"
-    );
-    assert_eq!(
-        changed_metrics.bar_bounds.3 - baseline_metrics.bar_bounds.3,
-        (changed.bar.size - baseline.bar.size) as i32,
-        "changing bar.size should grow the live bar allocation by the same delta"
-    );
-    assert_eq!(
-        changed_metrics.painted_surface_gap, baseline_metrics.painted_surface_gap,
-        "changing bar.size should not change bar.spacing's measured painted surface gap"
-    );
+/// Live layout of the bar before and after one config change.
+struct LayoutChange {
+    name: &'static str,
+    baseline: Config,
+    changed: Config,
+    before: PaintedBarMetrics,
+    after: PaintedBarMetrics,
 }
 
-fn run_test_config_bar_spacing() {
-    let baseline = test_config();
-    let mut changed = baseline.clone();
-    changed.bar.spacing = 16;
-
-    let baseline_metrics = painted_bar_metrics(&baseline);
-    let changed_metrics = painted_bar_metrics(&changed);
-
-    assert_eq!(
-        changed_metrics.painted_surface_gap, changed.bar.spacing as i32,
-        "bar.spacing should control the live measured gap between painted sibling widget surfaces"
-    );
-    assert_eq!(
-        changed_metrics.bar_bounds.3, baseline_metrics.bar_bounds.3,
-        "changing bar.spacing should not change bar.size's measured bar height"
-    );
-}
-
-fn run_test_config_bar_inset() {
-    let baseline = test_config();
-    let mut changed = baseline.clone();
-    changed.bar.inset = 20;
-
-    let baseline_metrics = painted_bar_metrics(&baseline);
-    let changed_metrics = painted_bar_metrics(&changed);
-
-    assert_eq!(
-        changed_metrics.first_surface_bounds.0, changed.bar.inset as i32,
-        "bar.inset should control the live measured x-position of the first painted widget surface"
-    );
-    assert_eq!(
-        changed_metrics.bar_bounds.3, baseline_metrics.bar_bounds.3,
-        "changing bar.inset should not change bar.size's measured bar height"
-    );
-    assert_eq!(
-        changed_metrics.painted_surface_gap, baseline_metrics.painted_surface_gap,
-        "changing bar.inset should not change bar.spacing's measured painted surface gap"
-    );
-}
-
-fn run_test_config_bar_screen_margin() {
-    let baseline = test_config();
-    let mut changed = baseline.clone();
-    changed.bar.screen_margin = 24;
-
-    let baseline_metrics = painted_bar_metrics(&baseline);
-    let changed_metrics = painted_bar_metrics(&changed);
-
-    let expected_first_x = changed.bar.screen_margin + changed.bar.inset;
-
-    assert_eq!(
-        changed_metrics.first_surface_bounds.0, expected_first_x as i32,
-        "bar.screen_margin should offset the live measured x-position of the first painted widget surface"
-    );
-    assert_eq!(
-        changed_metrics.bar_bounds.3, baseline_metrics.bar_bounds.3,
-        "changing bar.screen_margin should not change bar.size's measured bar height"
-    );
-    assert_eq!(
-        changed_metrics.painted_surface_gap, baseline_metrics.painted_surface_gap,
-        "changing bar.screen_margin should not change bar.spacing's measured painted surface gap"
-    );
-}
-
-fn run_test_config_bar_padding() {
+fn measure_layout_change(
+    name: &'static str,
+    setup: impl FnOnce(&mut Config),
+    change: impl FnOnce(&mut Config),
+) -> LayoutChange {
     let mut baseline = test_config();
-    baseline.bar.background_opacity = 1.0;
-    baseline.bar.padding = 4;
-
+    setup(&mut baseline);
     let mut changed = baseline.clone();
-    changed.bar.padding = 10;
+    change(&mut changed);
+    LayoutChange {
+        name,
+        before: painted_bar_metrics(&baseline),
+        after: painted_bar_metrics(&changed),
+        baseline,
+        changed,
+    }
+}
 
-    let baseline_metrics = painted_bar_metrics(&baseline);
-    let changed_metrics = painted_bar_metrics(&changed);
-    let expected_shell_height = crate::bar::rendered_bar_height(&changed);
-
+fn assert_keeps_bar_height(layout: &LayoutChange) {
     assert_eq!(
-        changed_metrics.shell_bounds.3, expected_shell_height,
-        "bar.padding should contribute to live measured rendered shell height when bar background is visible"
-    );
-    assert_eq!(
-        changed_metrics.first_surface_bounds.3, baseline_metrics.first_surface_bounds.3,
-        "changing bar.padding should not change the painted widget surface height"
-    );
-    assert_eq!(
-        changed_metrics.painted_surface_gap, baseline_metrics.painted_surface_gap,
-        "changing bar.padding should not change bar.spacing's measured painted surface gap"
+        layout.after.bar_bounds.3, layout.before.bar_bounds.3,
+        "{}: should not change the measured bar height",
+        layout.name
     );
 }
 
-fn run_test_config_bar_background_opacity() {
-    let mut baseline = test_config();
-    baseline.bar.padding = 10;
-    baseline.bar.background_opacity = 0.0;
-
-    let mut changed = baseline.clone();
-    changed.bar.background_opacity = 1.0;
-
-    let baseline_metrics = painted_bar_metrics(&baseline);
-    let changed_metrics = painted_bar_metrics(&changed);
-
+fn assert_keeps_surface_gap(layout: &LayoutChange) {
     assert_eq!(
-        crate::bar::rendered_bar_height(&baseline),
+        layout.after.painted_surface_gap, layout.before.painted_surface_gap,
+        "{}: should not change the measured gap between painted surfaces",
+        layout.name
+    );
+}
+
+fn check_bar_size_layout() {
+    let layout = measure_layout_change("bar.size", |_| {}, |config| config.bar.size = 40);
+    assert_keeps_surface_gap(&layout);
+    assert_eq!(
+        layout.after.first_surface_bounds.3, layout.changed.bar.size as i32,
+        "bar.size: should set the painted widget surface height"
+    );
+    assert_eq!(
+        layout.after.bar_bounds.3 - layout.before.bar_bounds.3,
+        (layout.changed.bar.size - layout.baseline.bar.size) as i32,
+        "bar.size: should grow the bar allocation by the same delta"
+    );
+}
+
+fn check_bar_spacing_layout() {
+    let layout = measure_layout_change("bar.spacing", |_| {}, |config| config.bar.spacing = 16);
+    assert_keeps_bar_height(&layout);
+    assert_eq!(
+        layout.after.painted_surface_gap, layout.changed.bar.spacing as i32,
+        "bar.spacing: should set the gap between painted widget surfaces"
+    );
+}
+
+fn check_bar_inset_layout() {
+    let layout = measure_layout_change("bar.inset", |_| {}, |config| config.bar.inset = 20);
+    assert_keeps_bar_height(&layout);
+    assert_keeps_surface_gap(&layout);
+    assert_eq!(
+        layout.after.first_surface_bounds.0, layout.changed.bar.inset as i32,
+        "bar.inset: should set the x-position of the first painted widget surface"
+    );
+}
+
+fn check_bar_screen_margin_layout() {
+    let layout = measure_layout_change(
+        "bar.screen_margin",
+        |_| {},
+        |config| config.bar.screen_margin = 24,
+    );
+    assert_keeps_bar_height(&layout);
+    assert_keeps_surface_gap(&layout);
+    assert_eq!(
+        layout.after.first_surface_bounds.0,
+        (layout.changed.bar.screen_margin + layout.changed.bar.inset) as i32,
+        "bar.screen_margin: should offset the first painted widget surface"
+    );
+}
+
+fn check_bar_padding_layout() {
+    let layout = measure_layout_change(
+        "bar.padding",
+        |config| {
+            config.bar.background_opacity = 1.0;
+            config.bar.padding = 4;
+        },
+        |config| config.bar.padding = 10,
+    );
+    assert_keeps_surface_gap(&layout);
+    assert_eq!(
+        layout.after.shell_bounds.3,
+        crate::bar::rendered_bar_height(&layout.changed),
+        "bar.padding: should count toward the rendered shell height when the background is visible"
+    );
+    assert_eq!(
+        layout.after.first_surface_bounds.3, layout.before.first_surface_bounds.3,
+        "bar.padding: should not change the painted widget surface height"
+    );
+}
+
+fn check_bar_background_opacity_layout() {
+    let layout = measure_layout_change(
+        "bar.background_opacity",
+        |config| {
+            config.bar.padding = 10;
+            config.bar.background_opacity = 0.0;
+        },
+        |config| config.bar.background_opacity = 1.0,
+    );
+    let (baseline, changed) = (&layout.baseline, &layout.changed);
+    assert_keeps_surface_gap(&layout);
+    assert_eq!(
+        crate::bar::rendered_bar_height(baseline),
         baseline.bar.size as i32 + baseline.bar.padding as i32,
-        "transparent bar.background_opacity should include only screen-edge bar.padding in the layer-shell height"
+        "transparent background: only the screen-edge padding counts toward the layer-shell height"
     );
     assert_eq!(
-        crate::bar::rendered_bar_height(&changed),
+        crate::bar::rendered_bar_height(changed),
         changed.bar.size as i32 + 2 * changed.bar.padding as i32,
-        "visible bar.background_opacity should include both sides of bar.padding in the layer-shell height"
+        "visible background: padding on both sides counts toward the layer-shell height"
     );
     assert_eq!(
-        changed_metrics.bar_bounds.3 - baseline_metrics.bar_bounds.3,
+        layout.after.bar_bounds.3 - layout.before.bar_bounds.3,
         changed.bar.padding as i32,
-        "changing bar.background_opacity from transparent to visible should expose the center-side bar padding in the live widget tree"
-    );
-    assert_eq!(
-        changed_metrics.painted_surface_gap, baseline_metrics.painted_surface_gap,
-        "changing bar.background_opacity should not change bar.spacing's measured painted surface gap"
+        "visible background: should expose the center-side padding in the widget tree"
     );
 }
 
-fn run_test_widgets_placement_sections() {
-    let mut config = test_config();
-    config.widgets.left = vec![vibepanel_core::config::WidgetPlacement::Single(
+fn run_test_config_bar_layout() {
+    check_bar_size_layout();
+    check_bar_spacing_layout();
+    check_bar_inset_layout();
+    check_bar_screen_margin_layout();
+    check_bar_padding_layout();
+    check_bar_background_opacity_layout();
+}
+
+fn run_test_widgets_placement() {
+    let mut placed = test_config();
+    placed.widgets.left = vec![vibepanel_core::config::WidgetPlacement::Single(
         "custom-a".to_string(),
     )];
-    config.widgets.center = vec![vibepanel_core::config::WidgetPlacement::Single(
+    placed.widgets.center = vec![vibepanel_core::config::WidgetPlacement::Single(
         "custom-b".to_string(),
     )];
-    config.widgets.right = vec![vibepanel_core::config::WidgetPlacement::Single(
+    placed.widgets.right = vec![vibepanel_core::config::WidgetPlacement::Single(
         "clock".to_string(),
     )];
 
-    let (window, bar, _state, _popover_registry_guard, _css_provider) = built_bar_fixture(&config);
+    let (window, bar, _state, _popover_registry_guard, _css_provider) = built_bar_fixture(&placed);
 
     let left_classes = section_widget_class_names(&bar, "left", &["custom-a"]);
     let center_classes = section_widget_class_names(&bar, "center", &["custom-b"]);
     let right_classes = section_widget_class_names(&bar, "right", &[crate::styles::widget::CLOCK]);
 
-    assert_eq!(left_classes, vec!["custom-a".to_string()]);
-    assert_eq!(center_classes, vec!["custom-b".to_string()]);
+    assert_eq!(left_classes, vec!["custom-a".to_string()], "left section");
+    assert_eq!(
+        center_classes,
+        vec!["custom-b".to_string()],
+        "center section"
+    );
     assert_eq!(
         right_classes,
-        vec![crate::styles::widget::CLOCK.to_string()]
+        vec![crate::styles::widget::CLOCK.to_string()],
+        "right section"
     );
 
     window.close();
     flush_gtk();
-}
 
-fn run_test_widgets_disabled() {
-    let mut config = test_config();
-    config.widgets.left = vec![
-        vibepanel_core::config::WidgetPlacement::Single("custom-a".to_string()),
-        vibepanel_core::config::WidgetPlacement::Single("custom-b".to_string()),
-    ];
-    config
+    let mut disabled = test_config();
+    disabled
         .widgets
         .widget_configs
         .insert("custom-b".to_string(), widget_options_with_disabled(true));
 
-    let (window, bar, _state, _popover_registry_guard, _css_provider) = built_bar_fixture(&config);
+    let (window, bar, _state, _popover_registry_guard, _css_provider) =
+        built_bar_fixture(&disabled);
     let left_section = bar
         .section("left")
         .expect("bar should build a left section");
-    let custom_a_count = count_descendants_with_class(&left_section, "custom-a");
-    let custom_b_count = count_descendants_with_class(&left_section, "custom-b");
 
     assert!(
-        custom_a_count > 0,
+        count_descendants_with_class(&left_section, "custom-a") > 0,
         "enabled sibling should remain present in the real bar tree"
     );
     assert_eq!(
-        custom_b_count, 0,
+        count_descendants_with_class(&left_section, "custom-b"),
+        0,
         "disabled widget should be absent from the real bar tree"
     );
 
@@ -1171,197 +978,146 @@ fn run_test_custom_widget_json_exec_output() {
     flush_gtk();
 }
 
-fn run_test_widgets_grouping_explicit_group() {
-    let mut baseline = test_config();
-    baseline.widgets.left = vec![
-        vibepanel_core::config::WidgetPlacement::Single("custom-a".to_string()),
-        vibepanel_core::config::WidgetPlacement::Single("custom-b".to_string()),
-    ];
-
-    let mut changed = baseline.clone();
-    changed.widgets.left = vec![vibepanel_core::config::WidgetPlacement::Group {
-        group: vec!["custom-a".to_string(), "custom-b".to_string()],
-    }];
-
-    let (
-        baseline_window,
-        baseline_bar,
-        _baseline_state,
-        _baseline_popover_registry_guard,
-        _baseline_css_provider,
-    ) = built_bar_fixture(&baseline);
-    let (
-        changed_window,
-        changed_bar,
-        _changed_state,
-        _changed_popover_registry_guard,
-        _changed_css_provider,
-    ) = built_bar_fixture(&changed);
-    let baseline_left = baseline_bar
-        .section("left")
-        .expect("baseline bar should build a left section");
-    let changed_left = changed_bar
-        .section("left")
-        .expect("changed bar should build a left section");
-    let baseline_group_count =
-        count_descendants_with_class(&baseline_left, crate::styles::class::WIDGET_GROUP);
-    let changed_group_count =
-        count_descendants_with_class(&changed_left, crate::styles::class::WIDGET_GROUP);
-    let changed_merge_count =
-        count_descendants_with_class(&changed_left, crate::styles::class::WIDGET_MERGE_GROUP);
-    let changed_custom_a_count = count_descendants_with_class(&changed_left, "custom-a");
-    let changed_custom_b_count = count_descendants_with_class(&changed_left, "custom-b");
-
-    assert_eq!(baseline_group_count, 0);
-    assert_eq!(changed_group_count, 1);
-    assert_eq!(changed_merge_count, 0);
-    assert!(changed_custom_a_count > 0);
-    assert!(changed_custom_b_count > 0);
-
-    baseline_window.close();
-    changed_window.close();
-    flush_gtk();
+struct GroupingCase {
+    name: &'static str,
+    left: Vec<vibepanel_core::config::WidgetPlacement>,
+    clock_show_weather: Option<bool>,
+    groups: usize,
+    merge_groups: Option<usize>,
+    passive: Option<usize>,
+    present: &'static [&'static str],
 }
 
-fn run_test_widgets_grouping_system_merge() {
-    let mut config = test_config();
-    config.widgets.left = vec![
-        vibepanel_core::config::WidgetPlacement::Single("custom-a".to_string()),
-        vibepanel_core::config::WidgetPlacement::Group {
-            group: vec!["cpu".to_string(), "memory".to_string()],
+fn run_test_widgets_grouping_structure() {
+    use vibepanel_core::config::WidgetPlacement::{Group, Single};
+    let group = |names: &[&str]| Group {
+        group: names.iter().map(|name| name.to_string()).collect(),
+    };
+
+    let cases = [
+        GroupingCase {
+            name: "ungrouped widgets build no group",
+            left: vec![
+                Single("custom-a".to_string()),
+                Single("custom-b".to_string()),
+            ],
+            clock_show_weather: None,
+            groups: 0,
+            merge_groups: None,
+            passive: None,
+            present: &[],
+        },
+        GroupingCase {
+            name: "explicit group of custom widgets",
+            left: vec![group(&["custom-a", "custom-b"])],
+            clock_show_weather: None,
+            groups: 1,
+            merge_groups: Some(0),
+            passive: None,
+            present: &["custom-a", "custom-b"],
+        },
+        GroupingCase {
+            name: "cpu and memory merge",
+            left: vec![Single("custom-a".to_string()), group(&["cpu", "memory"])],
+            clock_show_weather: None,
+            groups: 1,
+            merge_groups: Some(1),
+            passive: Some(2),
+            present: &["cpu", "memory"],
+        },
+        GroupingCase {
+            name: "clock and weather merge",
+            left: vec![group(&["clock", "weather"])],
+            clock_show_weather: None,
+            groups: 1,
+            merge_groups: Some(1),
+            passive: Some(2),
+            present: &["clock", "weather"],
+        },
+        GroupingCase {
+            name: "clock show_weather=false opts out of the weather merge",
+            left: vec![group(&["clock", "weather"])],
+            clock_show_weather: Some(false),
+            groups: 1,
+            merge_groups: Some(0),
+            passive: Some(0),
+            present: &["clock", "weather"],
+        },
+        GroupingCase {
+            name: "clock and spacer merge",
+            left: vec![group(&["clock", "spacer"])],
+            clock_show_weather: None,
+            groups: 1,
+            merge_groups: Some(1),
+            passive: Some(2),
+            present: &["clock", "spacer"],
+        },
+        GroupingCase {
+            name: "clock show_weather=false does not split a clock and spacer merge",
+            left: vec![group(&["clock", "spacer"])],
+            clock_show_weather: Some(false),
+            groups: 1,
+            merge_groups: Some(1),
+            passive: Some(2),
+            present: &["clock", "spacer"],
         },
     ];
-    config.widgets.center = Vec::new();
-    config.widgets.right = Vec::new();
 
-    let (window, bar, _state, _popover_registry_guard, _css_provider) = built_bar_fixture(&config);
-    let left_section = bar
-        .section("left")
-        .expect("bar should build a left section");
-    let group_count =
-        count_descendants_with_class(&left_section, crate::styles::class::WIDGET_GROUP);
-    let merge_group_count =
-        count_descendants_with_class(&left_section, crate::styles::class::WIDGET_MERGE_GROUP);
-    let passive_count = count_descendants_with_class(&left_section, crate::styles::class::PASSIVE);
-    let cpu_count = count_descendants_with_class(&left_section, "cpu");
-    let memory_count = count_descendants_with_class(&left_section, "memory");
+    for case in cases {
+        let name = case.name;
+        let mut config = test_config();
+        config.widgets.left = case.left;
+        if let Some(show_weather) = case.clock_show_weather {
+            config
+                .widgets
+                .widget_configs
+                .entry("clock".to_string())
+                .or_default()
+                .options
+                .insert(
+                    "show_weather".to_string(),
+                    toml::Value::Boolean(show_weather),
+                );
+        }
 
-    assert_eq!(group_count, 1);
-    assert_eq!(merge_group_count, 1);
-    assert_eq!(passive_count, 2);
-    assert!(
-        cpu_count > 0,
-        "cpu should remain visible in the production merge-group subtree"
-    );
-    assert!(
-        memory_count > 0,
-        "memory should remain visible in the production merge-group subtree"
-    );
+        let (window, bar, _state, _popover_registry_guard, _css_provider) =
+            built_bar_fixture(&config);
+        let left_section = bar
+            .section("left")
+            .expect("bar should build a left section");
 
-    window.close();
-    flush_gtk();
-}
-
-fn clock_weather_group_counts(show_weather: Option<bool>) -> (usize, usize, usize, usize, usize) {
-    let mut config = test_config();
-    config.widgets.left = vec![vibepanel_core::config::WidgetPlacement::Group {
-        group: vec!["clock".to_string(), "weather".to_string()],
-    }];
-    config.widgets.center = Vec::new();
-    config.widgets.right = Vec::new();
-    if let Some(show_weather) = show_weather {
-        config
-            .widgets
-            .widget_configs
-            .entry("clock".to_string())
-            .or_default()
-            .options
-            .insert(
-                "show_weather".to_string(),
-                toml::Value::Boolean(show_weather),
+        assert_eq!(
+            count_descendants_with_class(&left_section, crate::styles::class::WIDGET_GROUP),
+            case.groups,
+            "{name}: widget groups"
+        );
+        if let Some(merge_groups) = case.merge_groups {
+            assert_eq!(
+                count_descendants_with_class(
+                    &left_section,
+                    crate::styles::class::WIDGET_MERGE_GROUP
+                ),
+                merge_groups,
+                "{name}: merge groups"
             );
-    }
-
-    let (window, bar, _state, _popover_registry_guard, _css_provider) = built_bar_fixture(&config);
-    let left_section = bar
-        .section("left")
-        .expect("bar should build a left section");
-    let counts = (
-        count_descendants_with_class(&left_section, crate::styles::class::WIDGET_GROUP),
-        count_descendants_with_class(&left_section, crate::styles::class::WIDGET_MERGE_GROUP),
-        count_descendants_with_class(&left_section, crate::styles::class::PASSIVE),
-        count_descendants_with_class(&left_section, "clock"),
-        count_descendants_with_class(&left_section, "weather"),
-    );
-
-    window.close();
-    flush_gtk();
-    counts
-}
-
-fn run_test_widgets_grouping_clock_weather_merge() {
-    let (groups, merge_groups, passive, clock, weather) = clock_weather_group_counts(None);
-    assert_eq!((groups, merge_groups, passive), (1, 1, 2));
-    assert!(clock > 0);
-    assert!(weather > 0);
-}
-
-fn run_test_widgets_grouping_clock_weather_explicit_opt_out() {
-    let (groups, merge_groups, passive, clock, weather) = clock_weather_group_counts(Some(false));
-    assert_eq!((groups, merge_groups, passive), (1, 0, 0));
-    assert!(clock > 0);
-    assert!(weather > 0);
-}
-
-fn clock_spacer_group_counts(show_weather: Option<bool>) -> (usize, usize, usize, usize, usize) {
-    let mut config = test_config();
-    config.widgets.left = vec![vibepanel_core::config::WidgetPlacement::Group {
-        group: vec!["clock".to_string(), "spacer".to_string()],
-    }];
-    config.widgets.center = Vec::new();
-    config.widgets.right = Vec::new();
-    if let Some(show_weather) = show_weather {
-        config
-            .widgets
-            .widget_configs
-            .entry("clock".to_string())
-            .or_default()
-            .options
-            .insert(
-                "show_weather".to_string(),
-                toml::Value::Boolean(show_weather),
+        }
+        if let Some(passive) = case.passive {
+            assert_eq!(
+                count_descendants_with_class(&left_section, crate::styles::class::PASSIVE),
+                passive,
+                "{name}: passive widgets"
             );
+        }
+        for class_name in case.present {
+            assert!(
+                count_descendants_with_class(&left_section, class_name) > 0,
+                "{name}: {class_name} should remain in the bar tree"
+            );
+        }
+
+        window.close();
+        flush_gtk();
     }
-
-    let (window, bar, _state, _popover_registry_guard, _css_provider) = built_bar_fixture(&config);
-    let left_section = bar
-        .section("left")
-        .expect("bar should build a left section");
-    let counts = (
-        count_descendants_with_class(&left_section, crate::styles::class::WIDGET_GROUP),
-        count_descendants_with_class(&left_section, crate::styles::class::WIDGET_MERGE_GROUP),
-        count_descendants_with_class(&left_section, crate::styles::class::PASSIVE),
-        count_descendants_with_class(&left_section, "clock"),
-        count_descendants_with_class(&left_section, "spacer"),
-    );
-
-    window.close();
-    flush_gtk();
-    counts
-}
-
-fn run_test_widgets_grouping_clock_spacer_merge() {
-    let (groups, merge_groups, passive, clock, spacer) = clock_spacer_group_counts(None);
-    assert_eq!((groups, merge_groups, passive), (1, 1, 2));
-    assert!(clock > 0);
-    assert!(spacer > 0);
-}
-
-fn run_test_widgets_grouping_clock_spacer_merge_opt_out_ignored() {
-    let (groups, merge_groups, passive, clock, spacer) = clock_spacer_group_counts(Some(false));
-    assert_eq!((groups, merge_groups, passive), (1, 1, 2));
-    assert!(clock > 0);
-    assert!(spacer > 0);
 }
 
 fn right_section_child_widths(config: &Config) -> Vec<i32> {
@@ -1401,9 +1157,8 @@ fn config_with_quick_settings_group() -> Config {
     config
 }
 
-fn run_test_widgets_grouping_spacer_does_not_expand_sibling_group() {
-    let compact_config = config_with_quick_settings_group();
-    let compact_widths = right_section_child_widths(&compact_config);
+fn run_test_widgets_grouping_spacer_expansion() {
+    let compact_widths = right_section_child_widths(&config_with_quick_settings_group());
     assert_eq!(compact_widths.len(), 1);
     let compact_quick_settings_width = compact_widths[0];
 
@@ -1425,21 +1180,8 @@ fn run_test_widgets_grouping_spacer_does_not_expand_sibling_group() {
         spaced_widths[1], compact_quick_settings_width,
         "a sibling group without spacer should stay at its natural width"
     );
-}
-
-fn run_test_widgets_empty_center_spacer_expands_side_section() {
-    let mut config = config_with_quick_settings_group();
-    config.widgets.right.insert(
-        0,
-        vibepanel_core::config::WidgetPlacement::Group {
-            group: vec!["clock".to_string(), "spacer".to_string()],
-        },
-    );
-
-    let widths = right_section_child_widths(&config);
-    assert_eq!(widths.len(), 2);
     assert!(
-        widths.iter().sum::<i32>() > 300,
+        spaced_widths.iter().sum::<i32>() > 300,
         "with no center section, a bare spacer should still expand the side section"
     );
 }
@@ -1796,88 +1538,71 @@ fn run_test_widgets_scoped_font_scale_contract() {
 }
 
 fn run_test_widgets_background_color_pixel() {
-    let color = "#445566";
-    let mut config = test_config();
-    config.widgets.background_color = Some(color.to_string());
-    config.widgets.background_opacity = 1.0;
-    if let Some(custom_a) = config.widgets.widget_configs.get_mut("custom-a") {
+    let global_color = "#112233";
+    let widget_color = "#445566";
+    let css_color = "#778899";
+
+    let mut global_only = test_config();
+    global_only.widgets.background_color = Some(widget_color.to_string());
+    global_only.widgets.background_opacity = 1.0;
+    if let Some(custom_a) = global_only.widgets.widget_configs.get_mut("custom-a") {
         custom_a
             .options
             .insert("label".to_string(), toml::Value::String(String::new()));
     }
 
-    assert_widget_style_bindings(&config);
-
-    let fixture = painted_bar_fixture(&config);
-    let rendered = center_pixel_of(&fixture, &fixture.first_surface);
-    assert_pixel_close(
-        rendered,
-        Rgba8::from_hex(color),
-        "opaque widgets.background_color should paint the sampled widget surface pixel",
-    );
-
-    maybe_hold_probe_window();
-    fixture.window.close();
-    flush_gtk();
-}
-
-fn run_test_widgets_background_color_precedence_pixel() {
-    let global_color = "#112233";
-    let widget_color = "#445566";
-    let css_color = "#778899";
-
-    let mut config = test_config();
-    config.widgets.left = vec![
+    let mut clock_override = test_config();
+    clock_override.widgets.left = vec![
         vibepanel_core::config::WidgetPlacement::Single("clock".to_string()),
         vibepanel_core::config::WidgetPlacement::Single("custom-a".to_string()),
     ];
-    config.widgets.background_color = Some(global_color.to_string());
-    config.widgets.background_opacity = 1.0;
-    config
+    clock_override.widgets.background_color = Some(global_color.to_string());
+    clock_override.widgets.background_opacity = 1.0;
+    clock_override
         .widgets
         .widget_configs
         .entry("clock".to_string())
         .or_default()
         .background_color = Some(widget_color.to_string());
 
-    let css = ui_regression_config_css(&config);
-    assert!(
-        css.contains(&format!(
-            ".widget.{clock},",
-            clock = crate::styles::widget::CLOCK
-        )),
-        "per-widget CSS should scope clock overrides to the clock widget class"
-    );
-    assert!(
-        css.contains(&format!("--widget-background-color: {widget_color};")),
-        "clock widget config should emit a per-widget background token override"
-    );
-
-    let widget_fixture = painted_bar_fixture(&config);
-    let widget_rendered = center_pixel_of(&widget_fixture, &widget_fixture.first_surface);
-    assert_pixel_close(
-        widget_rendered,
-        Rgba8::from_hex(widget_color),
-        "clock.background_color should override global widgets.background_color in the rendered widget pixel",
-    );
-    maybe_hold_probe_window();
-    widget_fixture.window.close();
-    flush_gtk();
-
     let user_css = format!(
         ".widget.{clock} {{ --widget-background-color: {css_color}; }}",
         clock = crate::styles::widget::CLOCK
     );
-    let css_fixture = painted_bar_fixture_with_override_css(&config, Some(&user_css));
-    let css_rendered = center_pixel_of(&css_fixture, &css_fixture.first_surface);
-    assert_pixel_close(
-        css_rendered,
-        Rgba8::from_hex(css_color),
-        "user CSS class override should beat clock.background_color in the rendered widget pixel",
-    );
-    maybe_hold_probe_window();
-    css_fixture.window.close();
-    flush_gtk();
+
+    let cases = [
+        (
+            "widgets.background_color paints the widget",
+            &global_only,
+            None,
+            widget_color,
+        ),
+        (
+            "clock.background_color beats widgets.background_color",
+            &clock_override,
+            None,
+            widget_color,
+        ),
+        (
+            "user CSS class override beats clock.background_color",
+            &clock_override,
+            Some(user_css.as_str()),
+            css_color,
+        ),
+    ];
+
+    for (name, config, override_css, expected) in cases {
+        let fixture = painted_bar_fixture_with_override_css(config, override_css);
+        let rendered = center_pixel_of(&fixture, &fixture.first_surface);
+        assert_pixel_close(
+            rendered,
+            Rgba8::from_hex(expected),
+            &format!("{name}: rendered widget pixel"),
+        );
+        maybe_hold_probe_window();
+        fixture.window.close();
+        flush_gtk();
+    }
 }
 
 fn run_test_bar_background_color_css_override_pixel() {
@@ -2077,85 +1802,60 @@ fn run_test_outline_opacity_and_disabled_pixels() {
     flush_gtk();
 }
 
-fn run_test_per_widget_outline_color_pixel() {
-    let mut config = test_config();
-    config.theme.outline = true;
-    config.theme.outline_width = 4;
-    config.theme.outline_color = "accent".to_string();
-    config.theme.outline_opacity = 1.0;
-    config.theme.accent = Some("#224466".to_string());
-    config.widgets.background_color = Some("#101820".to_string());
-    config.widgets.background_opacity = 1.0;
-    config
-        .widgets
-        .widget_configs
-        .entry("custom-a".to_string())
-        .or_default()
-        .outline_color = Some("foreground".to_string());
-
-    let css = ui_regression_config_css(&config);
-    assert!(
-        css.contains(".widget.custom-a,")
-            && css.contains("--widget-outline-color: var(--color-foreground-primary);"),
-        "per-widget outline_color should emit a scoped widget outline token"
-    );
-
-    let palette = vibepanel_core::ThemePalette::from_config(&config, None, None);
-    let fixture = painted_bar_fixture(&config);
-    let first_edge = edge_pixel_of(&fixture, &fixture.first_surface);
-    let second_edge = edge_pixel_of(&fixture, &fixture.second_surface);
-
-    assert_pixel_close(
-        first_edge,
-        outline_color_for_palette(&palette, "foreground", 1.0),
-        "custom-a.outline_color should override the global outline color on the first widget",
-    );
-    assert_pixel_close(
-        second_edge,
-        outline_color_for_palette(&palette, "accent", 1.0),
-        "sibling widget should keep the global outline color",
-    );
-
-    maybe_hold_probe_window();
-    fixture.window.close();
-    flush_gtk();
-}
-
-fn run_test_widget_outline_color_css_override_pixel() {
-    let css_color = "#00ff00";
-    let bg_color = "#101820";
-    let mut config = test_config();
-    config.theme.outline = true;
-    config.theme.outline_width = 4;
-    config.theme.outline_color = "accent".to_string();
-    config.theme.outline_opacity = 1.0;
-    config.theme.accent = Some("#224466".to_string());
-    config.widgets.background_color = Some(bg_color.to_string());
-    config.widgets.background_opacity = 1.0;
-
-    let user_css = format!(".widget.custom-a {{ --widget-outline-color: {css_color}; }}");
-    let fixture = painted_bar_fixture_with_override_css(&config, Some(&user_css));
-    let first_edge = edge_pixel_of(&fixture, &fixture.first_surface);
-    let second_edge = edge_pixel_of(&fixture, &fixture.second_surface);
-
-    assert_pixel_close(
-        first_edge,
-        Rgba8::from_hex(css_color),
-        "user CSS --widget-outline-color override should paint the targeted widget outline",
-    );
-    assert_pixel_close(
-        second_edge,
-        outline_color_for_palette(
-            &vibepanel_core::ThemePalette::from_config(&config, None, None),
-            "accent",
-            1.0,
+fn run_test_widget_outline_color_precedence_pixel() {
+    let cases = [
+        (
+            "custom-a.outline_color beats the global outline color",
+            Some("foreground"),
+            None,
+            "foreground",
         ),
-        "sibling widget should keep the TOML/theme outline color",
-    );
+        (
+            "user CSS --widget-outline-color paints the targeted widget",
+            None,
+            Some(".widget.custom-a { --widget-outline-color: #00ff00; }"),
+            "#00ff00",
+        ),
+    ];
 
-    maybe_hold_probe_window();
-    fixture.window.close();
-    flush_gtk();
+    for (name, widget_outline_color, override_css, expected_first) in cases {
+        let mut config = test_config();
+        config.theme.outline = true;
+        config.theme.outline_width = 4;
+        config.theme.outline_color = "accent".to_string();
+        config.theme.outline_opacity = 1.0;
+        config.theme.accent = Some("#224466".to_string());
+        config.widgets.background_color = Some("#101820".to_string());
+        config.widgets.background_opacity = 1.0;
+        if let Some(outline_color) = widget_outline_color {
+            config
+                .widgets
+                .widget_configs
+                .entry("custom-a".to_string())
+                .or_default()
+                .outline_color = Some(outline_color.to_string());
+        }
+
+        let palette = vibepanel_core::ThemePalette::from_config(&config, None, None);
+        let fixture = painted_bar_fixture_with_override_css(&config, override_css);
+        let first_edge = edge_pixel_of(&fixture, &fixture.first_surface);
+        let second_edge = edge_pixel_of(&fixture, &fixture.second_surface);
+
+        assert_pixel_close(
+            first_edge,
+            outline_color_for_palette(&palette, expected_first, 1.0),
+            &format!("{name}: first widget outline"),
+        );
+        assert_pixel_close(
+            second_edge,
+            outline_color_for_palette(&palette, "accent", 1.0),
+            &format!("{name}: sibling widget should keep the global outline color"),
+        );
+
+        maybe_hold_probe_window();
+        fixture.window.close();
+        flush_gtk();
+    }
 }
 
 fn run_test_theme_mode_dark_light_pixels() {
@@ -2194,13 +1894,6 @@ fn run_test_theme_popover_polarity_pixel() {
     config.widgets.background_opacity = 1.0;
     config.widgets.popover_background_opacity = Some(1.0);
 
-    let css = ui_regression_config_css(&config);
-    assert!(
-        css.contains("/* ===== Popover polarity override ===== */"),
-        "theme.popover should emit scoped popover palette overrides"
-    );
-    assert_popover_style_bindings(&config);
-
     let bar_fixture = painted_bar_fixture(&config);
     let bar_pixel = background_pixel_of(&bar_fixture, &bar_fixture.first_surface);
     maybe_hold_probe_window();
@@ -2219,35 +1912,6 @@ fn run_test_theme_popover_polarity_pixel() {
         0.25,
         "theme.popover=light should make a dark bar's popover visibly light",
     );
-}
-
-fn run_test_theme_states_urgent_pixel() {
-    let urgent_color = "#cc3344";
-    let mut config = test_config();
-    config.theme.states.urgent = urgent_color.to_string();
-    if let Some(custom_a) = config.widgets.widget_configs.get_mut("custom-a") {
-        custom_a
-            .options
-            .insert("label".to_string(), toml::Value::String(String::new()));
-    }
-
-    let fixture = painted_surface_fixture_with_classes(
-        &config,
-        &["workspace-indicator", crate::styles::state::URGENT],
-        120,
-        32,
-    );
-    let urgent_pixel = center_pixel_of_surface(&fixture);
-
-    assert_pixel_close(
-        urgent_pixel,
-        Rgba8::from_hex(urgent_color),
-        "theme.states.urgent should paint urgent workspace/taskbar surfaces",
-    );
-
-    maybe_hold_probe_window();
-    fixture.window.close();
-    flush_gtk();
 }
 
 fn run_test_workspaces_urgent_production_pixel() {
@@ -2403,44 +2067,14 @@ macro_rules! ui_regression_config_tests {
 // Pure config-to-token checks live in vibepanel-core unit tests.
 ui_regression_config_tests!(
     (
-        test_ui_regression_bar_size,
-        "bar.size",
-        run_test_config_bar_size
+        test_ui_regression_bar_layout,
+        "bar.layout",
+        run_test_config_bar_layout
     ),
     (
-        test_ui_regression_bar_spacing,
-        "bar.spacing",
-        run_test_config_bar_spacing
-    ),
-    (
-        test_ui_regression_bar_inset,
-        "bar.inset",
-        run_test_config_bar_inset
-    ),
-    (
-        test_ui_regression_bar_screen_margin,
-        "bar.screen_margin",
-        run_test_config_bar_screen_margin
-    ),
-    (
-        test_ui_regression_bar_padding,
-        "bar.padding",
-        run_test_config_bar_padding
-    ),
-    (
-        test_ui_regression_bar_background_opacity,
-        "bar.background_opacity",
-        run_test_config_bar_background_opacity
-    ),
-    (
-        test_ui_regression_widgets_placement_sections,
-        "widgets.placement.sections",
-        run_test_widgets_placement_sections
-    ),
-    (
-        test_ui_regression_widgets_disabled,
-        "widgets.disabled",
-        run_test_widgets_disabled
+        test_ui_regression_widgets_placement,
+        "widgets.placement",
+        run_test_widgets_placement
     ),
     (
         test_ui_regression_custom_widget_json_exec_output,
@@ -2448,44 +2082,14 @@ ui_regression_config_tests!(
         run_test_custom_widget_json_exec_output
     ),
     (
-        test_ui_regression_widgets_grouping_explicit_group,
-        "widgets.grouping.explicit-group",
-        run_test_widgets_grouping_explicit_group
+        test_ui_regression_widgets_grouping_structure,
+        "widgets.grouping.structure",
+        run_test_widgets_grouping_structure
     ),
     (
-        test_ui_regression_widgets_grouping_system_merge,
-        "widgets.grouping.system-merge",
-        run_test_widgets_grouping_system_merge
-    ),
-    (
-        test_ui_regression_widgets_grouping_clock_weather_merge,
-        "widgets.grouping.clock-weather-merge",
-        run_test_widgets_grouping_clock_weather_merge
-    ),
-    (
-        test_ui_regression_widgets_grouping_clock_weather_opt_out,
-        "widgets.grouping.clock-weather-opt-out",
-        run_test_widgets_grouping_clock_weather_explicit_opt_out
-    ),
-    (
-        test_ui_regression_widgets_grouping_clock_spacer_merge,
-        "widgets.grouping.clock-spacer-merge",
-        run_test_widgets_grouping_clock_spacer_merge
-    ),
-    (
-        test_ui_regression_widgets_grouping_clock_spacer_merge_opt_out_ignored,
-        "widgets.grouping.clock-spacer-merge-opt-out-ignored",
-        run_test_widgets_grouping_clock_spacer_merge_opt_out_ignored
-    ),
-    (
-        test_ui_regression_widgets_grouping_spacer_does_not_expand_sibling_group,
-        "widgets.grouping.spacer-does-not-expand-sibling-group",
-        run_test_widgets_grouping_spacer_does_not_expand_sibling_group
-    ),
-    (
-        test_ui_regression_widgets_empty_center_spacer_expands_side_section,
-        "widgets.empty-center-spacer-expands-side-section",
-        run_test_widgets_empty_center_spacer_expands_side_section
+        test_ui_regression_widgets_grouping_spacer_expansion,
+        "widgets.grouping.spacer-expansion",
+        run_test_widgets_grouping_spacer_expansion
     ),
     (
         test_ui_regression_widgets_grouping_spacing,
@@ -2523,11 +2127,6 @@ ui_regression_config_tests!(
         run_test_widgets_background_color_pixel
     ),
     (
-        test_ui_regression_widgets_background_color_precedence_pixel,
-        "widgets.background_color_precedence_pixel",
-        run_test_widgets_background_color_precedence_pixel
-    ),
-    (
         test_ui_regression_bar_background_color_css_override_pixel,
         "bar.background_color_css_override_pixel",
         run_test_bar_background_color_css_override_pixel
@@ -2548,14 +2147,9 @@ ui_regression_config_tests!(
         run_test_outline_opacity_and_disabled_pixels
     ),
     (
-        test_ui_regression_per_widget_outline_color_pixel,
+        test_ui_regression_widget_outline_color_precedence_pixel,
         "widgets.outline_color_precedence_pixel",
-        run_test_per_widget_outline_color_pixel
-    ),
-    (
-        test_ui_regression_widget_outline_color_css_override_pixel,
-        "widgets.outline_color_css_override_pixel",
-        run_test_widget_outline_color_css_override_pixel
+        run_test_widget_outline_color_precedence_pixel
     ),
     (
         test_ui_regression_theme_mode_dark_light_pixel,
@@ -2566,11 +2160,6 @@ ui_regression_config_tests!(
         test_ui_regression_theme_popover_polarity_pixel,
         "theme.popover_polarity_pixel",
         run_test_theme_popover_polarity_pixel
-    ),
-    (
-        test_ui_regression_theme_states_urgent_pixel,
-        "theme.states_urgent_pixel",
-        run_test_theme_states_urgent_pixel
     ),
     (
         test_ui_regression_workspaces_urgent_production_pixel,

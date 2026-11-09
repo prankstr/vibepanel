@@ -759,4 +759,20 @@ pub(super) mod tests {
             "hover rule must precede entry chrome rule"
         );
     }
+
+    // Regression (27912f76): with an outline and rounded corners, the
+    // background must stay inside the border instead of bleeding past it.
+    #[test]
+    fn surface_backgrounds_stay_inside_the_outline() {
+        let css = css(false);
+        for selector in [
+            ".popover",
+            ".notification-toast, window.media-window > .media-content, .osd",
+        ] {
+            assert!(
+                declarations(&css, selector).contains(&"background-clip: padding-box".to_string()),
+                "{selector}"
+            );
+        }
+    }
 }

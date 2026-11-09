@@ -71,62 +71,60 @@ fn run_test_osd_surface_pixels() {
         return;
     }
 
-    let background_color = "#445566";
-    let outline_color = "#80a0c0";
-    let mut config = osd_pixel_config(background_color);
-    config.theme.outline = true;
-    config.theme.outline_width = 4;
-    config.theme.outline_color = outline_color.to_string();
-    config.theme.outline_opacity = 1.0;
+    {
+        let background_color = "#445566";
+        let outline_color = "#80a0c0";
+        let mut config = osd_pixel_config(background_color);
+        config.theme.outline = true;
+        config.theme.outline_width = 4;
+        config.theme.outline_color = outline_color.to_string();
+        config.theme.outline_opacity = 1.0;
 
-    let (window, _css_provider, _override_css_provider, surface) =
-        osd_surface_fixture(&config, None);
-    assert_pixel_close(
-        sample_widget_pixel(&window, &surface, 8, surface.height() / 2),
-        Rgba8::from_hex(background_color),
-        "production OSD surface should use popover opacity, not transparent widget opacity",
-    );
-    assert_pixel_close(
-        sample_widget_pixel(&window, &surface, 1, surface.height() / 2),
-        Rgba8::from_hex(outline_color),
-        "production OSD surface should render configured surface outline color",
-    );
-    let corner = sample_widget_pixel(&window, &surface, 1, 1);
-    assert!(
-        corner.a <= 2,
-        "production OSD surface should render transparent rounded corners; corner={corner:?}"
-    );
+        let (window, _css_provider, _override_css_provider, surface) =
+            osd_surface_fixture(&config, None);
+        assert_pixel_close(
+            sample_widget_pixel(&window, &surface, 8, surface.height() / 2),
+            Rgba8::from_hex(background_color),
+            "production OSD surface should use popover opacity, not transparent widget opacity",
+        );
+        assert_pixel_close(
+            sample_widget_pixel(&window, &surface, 1, surface.height() / 2),
+            Rgba8::from_hex(outline_color),
+            "production OSD surface should render configured surface outline color",
+        );
+        let corner = sample_widget_pixel(&window, &surface, 1, 1);
+        assert!(
+            corner.a <= 2,
+            "production OSD surface should render transparent rounded corners; corner={corner:?}"
+        );
 
-    window.close();
-    flush_gtk();
-}
-
-fn run_test_osd_user_css_outline_pixel() {
-    if !init_gtk_or_skip("OSD pixel UI regression test") {
-        return;
+        window.close();
+        flush_gtk();
     }
 
-    let background_color = "#101820";
-    let css_color = "#00ff00";
-    let mut config = osd_pixel_config(background_color);
-    config.theme.outline = true;
-    config.theme.outline_width = 4;
-    config.theme.outline_color = "accent".to_string();
-    config.theme.outline_opacity = 1.0;
-    config.theme.accent = Some("#224466".to_string());
+    {
+        let background_color = "#101820";
+        let css_color = "#00ff00";
+        let mut config = osd_pixel_config(background_color);
+        config.theme.outline = true;
+        config.theme.outline_width = 4;
+        config.theme.outline_color = "accent".to_string();
+        config.theme.outline_opacity = 1.0;
+        config.theme.accent = Some("#224466".to_string());
 
-    let user_css = format!(".osd {{ --surface-outline-color: {css_color}; }}");
-    let (window, _css_provider, _override_css_provider, surface) =
-        osd_surface_fixture(&config, Some(&user_css));
+        let user_css = format!(".osd {{ --surface-outline-color: {css_color}; }}");
+        let (window, _css_provider, _override_css_provider, surface) =
+            osd_surface_fixture(&config, Some(&user_css));
 
-    assert_pixel_close(
-        sample_widget_pixel(&window, &surface, 1, surface.height() / 2),
-        Rgba8::from_hex(css_color),
-        "user CSS should override production OSD surface outline color",
-    );
+        assert_pixel_close(
+            sample_widget_pixel(&window, &surface, 1, surface.height() / 2),
+            Rgba8::from_hex(css_color),
+            "user CSS should override production OSD surface outline color",
+        );
 
-    window.close();
-    flush_gtk();
+        window.close();
+        flush_gtk();
+    }
 }
 
 #[test]
@@ -136,17 +134,10 @@ fn test_ui_regression_osd_surface_pixels() {
 }
 
 #[test]
-#[ignore = "UI regression test: opens GTK windows; run under Xvfb"]
-fn test_ui_regression_osd_user_css_outline_pixel() {
-    run_osd_ui_regression_subprocess("osd.user_css_outline_pixel");
-}
-
-#[test]
 #[ignore = "internal runner for one OSD UI regression subprocess"]
 fn osd_ui_regression_runner() {
     match std::env::var("VIBEPANEL_OSD_UI_REGRESSION_TEST").as_deref() {
         Ok("osd.surface_pixels") => run_test_osd_surface_pixels(),
-        Ok("osd.user_css_outline_pixel") => run_test_osd_user_css_outline_pixel(),
         Ok(other) => panic!("unknown OSD UI regression test: {other}"),
         Err(_) => eprintln!("skipping OSD UI regression test: no test case selected"),
     }

@@ -223,3 +223,39 @@ window.notification-toast-wrapper,
 "#
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::css;
+    use crate::widgets::css::base::tests::rules;
+
+    #[test]
+    fn critical_rows_are_highlighted_but_critical_toasts_stay_neutral() {
+        let rules = rules(&css(false));
+
+        let row: Vec<&String> = rules
+            .iter()
+            .filter(|(selector, _)| selector == ".notification-row.notification-critical")
+            .flat_map(|(_, declarations)| declarations)
+            .collect();
+        for expected in [
+            "border-left: 3px solid var(--color-state-warning)",
+            "background-color: var(--color-row-critical-background)",
+        ] {
+            assert!(row.iter().any(|d| *d == expected), "row missing {expected}");
+        }
+
+        // Rules may style descendants of a critical toast, but not the toast itself.
+        let styled_toasts: Vec<&str> = rules
+            .iter()
+            .flat_map(|(selector, _)| selector.split(", "))
+            .filter(|selector| {
+                selector
+                    .rsplit(' ')
+                    .next()
+                    .is_some_and(|target| target.contains("notification-toast-critical"))
+            })
+            .collect();
+        assert!(styled_toasts.is_empty(), "{styled_toasts:?}");
+    }
+}
