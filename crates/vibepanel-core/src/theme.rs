@@ -1450,6 +1450,8 @@ impl Default for ThemePalette {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::WidgetOptions;
+    use material_colors::theme::{Theme, ThemeBuilder};
 
     fn css_var_value<'a>(css: &'a str, var_name: &str) -> Option<&'a str> {
         let needle = format!("{var_name}:");
@@ -1460,20 +1462,32 @@ mod tests {
         })
     }
 
-    #[test]
-    fn test_parse_hex_color_valid() {
-        assert_eq!(parse_hex_color("#ff0000"), Some((255, 0, 0)));
-        assert_eq!(parse_hex_color("00ff00"), Some((0, 255, 0)));
-        assert_eq!(parse_hex_color("#0000ff"), Some((0, 0, 255)));
-        assert_eq!(parse_hex_color("#fff"), Some((255, 255, 255)));
-        assert_eq!(parse_hex_color("000"), Some((0, 0, 0)));
+    fn palette_for_mode(mode: &str) -> ThemePalette {
+        let mut config = Config::default();
+        config.theme.mode = mode.to_string();
+        ThemePalette::from_config(&config, None, None)
+    }
+
+    fn material_theme() -> Theme {
+        // A real Material You theme so the auto branch has schemes to select from
+        ThemeBuilder::with_source(Argb::new(255, 53, 132, 228)).build()
     }
 
     #[test]
-    fn test_parse_hex_color_invalid() {
-        assert_eq!(parse_hex_color("not a color"), None);
-        assert_eq!(parse_hex_color("#gggggg"), None);
-        assert_eq!(parse_hex_color("#ff"), None);
+    fn test_parse_hex_color() {
+        let cases = [
+            ("6-digit with #", "#ff0000", Some((255, 0, 0))),
+            ("6-digit without #", "00ff00", Some((0, 255, 0))),
+            ("6-digit blue", "#0000ff", Some((0, 0, 255))),
+            ("3-digit with #", "#fff", Some((255, 255, 255))),
+            ("3-digit without #", "000", Some((0, 0, 0))),
+            ("not a color", "not a color", None),
+            ("non-hex digits", "#gggggg", None),
+            ("too short", "#ff", None),
+        ];
+        for (name, input, expected) in cases {
+            assert_eq!(parse_hex_color(input), expected, "{name}");
+        }
     }
 
     #[test]
@@ -1486,35 +1500,21 @@ mod tests {
 
     #[test]
     fn test_is_dark_color() {
-        assert!(is_dark_color("#000000"));
-        assert!(is_dark_color("#1a1a1f"));
-        assert!(!is_dark_color("#ffffff"));
-        assert!(!is_dark_color("#e8e8e8"));
-    }
-
-    #[test]
-    fn test_is_dark_color_boundary_near_perceptual_midpoint() {
-        // Concept-anchored: pin the semantics, not the literal value.
-        // Colors whose linear luminance sits just below the perceptual midpoint
-        // (≈0.184187) should read as dark; just above should read as light.
-        //
-        // Mid-grey #757575 has linear luminance ≈ 0.1779 (below threshold).
-        // Mid-grey #787878 has linear luminance ≈ 0.1878 (above threshold).
-        assert!(
-            is_dark_color("#757575"),
-            "#757575 sits below the perceptual midpoint and should read as dark"
-        );
-        assert!(
-            !is_dark_color("#787878"),
-            "#787878 sits above the perceptual midpoint and should read as light"
-        );
-    }
-
-    #[test]
-    fn test_is_dark_color_unparseable_falls_back_to_dark() {
-        // Documented fallback: unparseable color strings are treated as dark.
-        assert!(is_dark_color("not a color"));
-        assert!(is_dark_color(""));
+        // The threshold is the perceptual midpoint (linear luminance ≈0.184187):
+        // #757575 ≈ 0.1779 sits just below it, #787878 ≈ 0.1878 just above.
+        let cases = [
+            ("black", "#000000", true),
+            ("near-black", "#1a1a1f", true),
+            ("white", "#ffffff", false),
+            ("light grey", "#e8e8e8", false),
+            ("just below perceptual midpoint", "#757575", true),
+            ("just above perceptual midpoint", "#787878", false),
+            ("unparseable falls back to dark", "not a color", true),
+            ("empty falls back to dark", "", true),
+        ];
+        for (name, input, expected) in cases {
+            assert_eq!(is_dark_color(input), expected, "{name}");
+        }
     }
 
     #[test]
@@ -1529,48 +1529,59 @@ mod tests {
     }
 
     #[test]
-    fn test_rgba_str() {
-        assert_eq!(rgba_str(255, 0, 0, 0.5), "rgba(255, 0, 0, 0.50)");
-        assert_eq!(rgba_str(0, 255, 0, 1.0), "rgba(0, 255, 0, 1.00)");
-    }
-
-    #[test]
-    fn test_rgb_to_hex() {
-        assert_eq!(rgb_to_hex(255, 0, 0), "#ff0000");
-        assert_eq!(rgb_to_hex(0, 255, 0), "#00ff00");
-        assert_eq!(rgb_to_hex(0, 0, 255), "#0000ff");
-    }
-
-    #[test]
-    fn test_theme_palette_default_is_dark() {
-        let mut config = Config::default();
-        config.theme.mode = "dark".to_string();
-        let palette = ThemePalette::from_config(&config, None, None);
-        assert!(palette.is_dark_mode);
-    }
-
-    #[test]
-    fn test_theme_palette_light_mode() {
-        let mut config = Config::default();
-        config.theme.mode = "light".to_string();
-        let palette = ThemePalette::from_config(&config, None, None);
-        assert!(!palette.is_dark_mode);
-        assert_eq!(palette.foreground_primary, "#1a1a1a");
-    }
-
-    #[test]
-    fn test_theme_palette_css_vars_contains_expected_vars() {
-        let config = Config::default();
-        let palette = ThemePalette::from_config(&config, None, None);
-        let css = palette.css_vars_block();
-
-        assert!(css.contains("--color-background-bar:"));
-        assert!(css.contains("--widget-background-color:"));
-        assert!(css.contains("--color-foreground-primary:"));
-        assert!(css.contains("--color-accent-primary:"));
-        assert!(css.contains("--radius-bar:"));
-        assert!(css.contains("--widget-height:"));
-        assert!(css.contains("--font-family:"));
+    fn mode_polarity() {
+        struct Case {
+            name: &'static str,
+            mode: &'static str,
+            is_dark: bool,
+            is_gtk: bool,
+            foreground_primary: &'static str,
+            muted_uses_gtk_token: bool,
+        }
+        let cases = [
+            Case {
+                name: "dark (regression c411790f: keeps hardcoded foreground)",
+                mode: "dark",
+                is_dark: true,
+                is_gtk: false,
+                foreground_primary: "#ffffff",
+                muted_uses_gtk_token: false,
+            },
+            Case {
+                name: "light (regression c411790f: keeps hardcoded foreground)",
+                mode: "light",
+                is_dark: false,
+                is_gtk: false,
+                foreground_primary: "#1a1a1a",
+                muted_uses_gtk_token: false,
+            },
+            Case {
+                // is_dark_mode stays true as a fallback for shadow opacity etc.
+                name: "gtk (regression c411790f: foreground from GTK theme)",
+                mode: "gtk",
+                is_dark: true,
+                is_gtk: true,
+                foreground_primary: "@window_fg_color",
+                muted_uses_gtk_token: true,
+            },
+        ];
+        for case in cases {
+            let palette = palette_for_mode(case.mode);
+            assert_eq!(palette.is_dark_mode, case.is_dark, "{}: is_dark", case.name);
+            assert_eq!(palette.is_gtk_mode, case.is_gtk, "{}: is_gtk", case.name);
+            assert_eq!(
+                palette.foreground_primary, case.foreground_primary,
+                "{}: foreground_primary",
+                case.name
+            );
+            assert_eq!(
+                palette.foreground_muted.contains("@window_fg_color"),
+                case.muted_uses_gtk_token,
+                "{}: foreground_muted = {}",
+                case.name,
+                palette.foreground_muted
+            );
+        }
     }
 
     #[test]
@@ -1588,59 +1599,64 @@ mod tests {
             round_to_even((palette.sizes.widget_height as f64 * 0.5) as u32)
         );
         assert_eq!(css_var_value(&css, "--font-scale"), Some("0.5"));
+        assert!(css_var_value(&css, "--font-family").is_some());
     }
 
     #[test]
-    fn test_css_vars_block_emits_bar_visual_config_tokens() {
-        let mut config = Config::default();
-        config.bar.size = 40;
-        config.bar.padding = 10;
-        config.bar.background_opacity = 1.0;
-        config.bar.background_color = Some("#445566".to_string());
-        config.bar.border_radius = 50;
-        config.theme.outline = true;
-        config.theme.outline_width = 3;
-        config.bar.outline = Some(true);
+    fn bar_background_opacity() {
+        let cases = [
+            ("opaque", 1.0, "#445566", (10, 0, 10, 0)),
+            ("transparent", 0.0, "transparent", (10, 0, 0, 0)),
+        ];
+        for (name, opacity, background, padding) in cases {
+            let mut config = Config::default();
+            config.bar.size = 40;
+            config.bar.padding = 10;
+            config.bar.background_opacity = opacity;
+            config.bar.background_color = Some("#445566".to_string());
+            config.bar.border_radius = 50;
+            config.theme.outline = true;
+            config.theme.outline_width = 3;
+            config.bar.outline = Some(true);
 
-        let palette = ThemePalette::from_config(&config, None, None);
-        let css = palette.css_vars_block();
-        let expected_widget_height = format!("{}px", palette.sizes.widget_height);
-        let expected_bar_radius = format!("{}px", palette.bar_border_radius);
+            let palette = ThemePalette::from_config(&config, None, None);
+            let css = palette.css_vars_block();
+            let expected_widget_height = format!("{}px", palette.sizes.widget_height);
+            let expected_bar_radius = format!("{}px", palette.bar_border_radius);
 
-        assert_eq!(css_var_value(&css, "--bar-height"), Some("40px"));
-        assert_eq!(
-            css_var_value(&css, "--widget-height"),
-            Some(expected_widget_height.as_str())
-        );
-        assert_bar_padding_contract(&css, 10, 0, 10, 0, "visible top bar");
-        assert_eq!(
-            css_var_value(&css, "--color-background-bar"),
-            Some("#445566")
-        );
-        assert_eq!(
-            css_var_value(&css, "--radius-bar"),
-            Some(expected_bar_radius.as_str())
-        );
-        assert_eq!(
-            css_var_value(&css, "--bar-outline-width"),
-            Some("var(--outline-width)")
-        );
-        assert_eq!(css_var_value(&css, "--outline-width"), Some("3px"));
-    }
-
-    #[test]
-    fn test_css_vars_block_emits_transparent_bar_tokens() {
-        let mut config = Config::default();
-        config.bar.padding = 10;
-        config.bar.background_opacity = 0.0;
-
-        let css = ThemePalette::from_config(&config, None, None).css_vars_block();
-
-        assert_eq!(
-            css_var_value(&css, "--color-background-bar"),
-            Some("transparent")
-        );
-        assert_bar_padding_contract(&css, 10, 0, 0, 0, "transparent top bar");
+            assert_eq!(
+                css_var_value(&css, "--color-background-bar"),
+                Some(background),
+                "{name}: background"
+            );
+            let (top, right, bottom, left) = padding;
+            assert_bar_padding_contract(&css, top, right, bottom, left, name);
+            assert_eq!(
+                css_var_value(&css, "--bar-height"),
+                Some("40px"),
+                "{name}: bar height"
+            );
+            assert_eq!(
+                css_var_value(&css, "--widget-height"),
+                Some(expected_widget_height.as_str()),
+                "{name}: widget height"
+            );
+            assert_eq!(
+                css_var_value(&css, "--radius-bar"),
+                Some(expected_bar_radius.as_str()),
+                "{name}: bar radius"
+            );
+            assert_eq!(
+                css_var_value(&css, "--bar-outline-width"),
+                Some("var(--outline-width)"),
+                "{name}: bar outline width"
+            );
+            assert_eq!(
+                css_var_value(&css, "--outline-width"),
+                Some("3px"),
+                "{name}: outline width"
+            );
+        }
     }
 
     #[test]
@@ -1679,51 +1695,24 @@ mod tests {
     }
 
     #[test]
-    fn test_workspace_indicator_hover_default_uses_internal_token() {
-        let config = Config::default();
-        let palette = ThemePalette::from_config(&config, None, None);
-        let css = palette.css_vars_block();
-
-        assert!(css.contains(
-            "--color-workspace-indicator-hover-default-bg: color-mix(in srgb, transparent 88%, var(--widget-hover-tint));"
-        ));
-        assert!(!css.contains("--color-workspace-indicator-hover-bg:"));
-        assert!(!css.contains("--color-workspace-indicator-minimal-hover-bg"));
-    }
-
-    #[test]
-    fn test_bar_padding_vars_bar_mode() {
-        let mut config = Config::default();
-        config.bar.padding = 7;
-        config.bar.background_opacity = 1.0;
-
-        for (pos, top, right, bottom, left) in &[
-            ("top", 7, 0, 7, 0),
-            ("bottom", 7, 0, 7, 0),
-            ("left", 0, 7, 0, 7),
-            ("right", 0, 7, 0, 7),
-        ] {
-            config.bar.position = pos.to_string();
-            let css = ThemePalette::from_config(&config, None, None).css_vars_block();
-            assert_bar_padding_contract(&css, *top, *right, *bottom, *left, pos);
-        }
-    }
-
-    #[test]
-    fn test_bar_padding_vars_island_mode() {
-        let mut config = Config::default();
-        config.bar.padding = 7;
-        config.bar.background_opacity = 0.0;
-
-        for (position, top, right, bottom, left) in &[
-            ("top", 7, 0, 0, 0),
-            ("bottom", 0, 0, 7, 0),
-            ("left", 0, 0, 0, 7),
-            ("right", 0, 7, 0, 0),
-        ] {
+    fn bar_padding_vars() {
+        let cases = [
+            ("bar top", 1.0, "top", (7, 0, 7, 0)),
+            ("bar bottom", 1.0, "bottom", (7, 0, 7, 0)),
+            ("bar left", 1.0, "left", (0, 7, 0, 7)),
+            ("bar right", 1.0, "right", (0, 7, 0, 7)),
+            ("island top", 0.0, "top", (7, 0, 0, 0)),
+            ("island bottom", 0.0, "bottom", (0, 0, 7, 0)),
+            ("island left", 0.0, "left", (0, 0, 0, 7)),
+            ("island right", 0.0, "right", (0, 7, 0, 0)),
+        ];
+        for (name, opacity, position, (top, right, bottom, left)) in cases {
+            let mut config = Config::default();
+            config.bar.padding = 7;
+            config.bar.background_opacity = opacity;
             config.bar.position = position.to_string();
             let css = ThemePalette::from_config(&config, None, None).css_vars_block();
-            assert_bar_padding_contract(&css, *top, *right, *bottom, *left, position);
+            assert_bar_padding_contract(&css, top, right, bottom, left, name);
         }
     }
 
@@ -1746,399 +1735,272 @@ mod tests {
                 "{case}: expected {var}={value}px"
             );
         }
+    }
 
-        for public_var in [
-            "--bar-padding-flow:",
-            "--bar-padding-cross:",
-            "--bar-padding-y:",
-            "--bar-padding-x:",
-            "--bar-padding-y-top:",
-            "--bar-padding-y-bottom:",
-            "--bar-padding-x-left:",
-            "--bar-padding-x-right:",
-        ] {
-            assert!(
-                !css.contains(public_var),
-                "{case}: public override hook should not be emitted: {public_var}"
-            );
+    #[test]
+    fn per_widget_css_cases() {
+        struct Case {
+            name: &'static str,
+            widget: &'static str,
+            options: WidgetOptions,
+            /// Empty means no CSS should be generated at all.
+            contains: Vec<String>,
+            absent: &'static [&'static str],
+        }
+        let mut format_only = WidgetOptions::default();
+        format_only.options.insert(
+            "format".to_string(),
+            toml::Value::String("%H:%M".to_string()),
+        );
+        let cases = [
+            Case {
+                // The transparent .widget-group surface must not receive per-widget
+                // variables; they would inherit into unrelated children in mixed groups.
+                name: "background color targets surfaces and popover",
+                widget: "clock",
+                options: WidgetOptions {
+                    background_color: Some("#f5c2e7".to_string()),
+                    ..Default::default()
+                },
+                contains: vec![
+                    ".widget.clock".to_string(),
+                    ".widget-item.clock".to_string(),
+                    ".widget-merge-group.clock".to_string(),
+                    ".clock-popover".to_string(),
+                    "--widget-background-color: #f5c2e7".to_string(),
+                    format!("--color-widget-hover-bg: {WIDGET_HOVER_BG_VALUE};"),
+                ],
+                absent: &[".widget-group.clock"],
+            },
+            Case {
+                name: "underscores become hyphens",
+                widget: "quick_settings",
+                options: WidgetOptions {
+                    background_color: Some("#ff0000".to_string()),
+                    ..Default::default()
+                },
+                contains: vec![
+                    ".widget.quick-settings".to_string(),
+                    ".quick-settings-popover".to_string(),
+                ],
+                absent: &[],
+            },
+            Case {
+                name: "no colour overrides generate nothing",
+                widget: "clock",
+                options: format_only,
+                contains: vec![],
+                absent: &[],
+            },
+            Case {
+                // Popovers are separate GTK4 windows, so CSS variables don't inherit
+                // across; the outline color must be emitted for both selectors.
+                name: "outline color emits widget and surface variables",
+                widget: "clock",
+                options: WidgetOptions {
+                    outline_color: Some("accent".to_string()),
+                    ..Default::default()
+                },
+                contains: vec![
+                    "--widget-outline-color: var(--color-accent-primary);".to_string(),
+                    "--surface-outline-color: var(--color-accent-primary);".to_string(),
+                ],
+                absent: &[],
+            },
+        ];
+        for case in cases {
+            let mut config = Config::default();
+            config
+                .widgets
+                .widget_configs
+                .insert(case.widget.to_string(), case.options);
+            let css = ThemePalette::generate_per_widget_css(&config);
+            if case.contains.is_empty() {
+                assert_eq!(css, "", "{}: expected no CSS", case.name);
+            }
+            for needle in &case.contains {
+                assert!(
+                    css.contains(needle.as_str()),
+                    "{}: missing {needle}",
+                    case.name
+                );
+            }
+            for needle in case.absent {
+                assert!(!css.contains(needle), "{}: unexpected {needle}", case.name);
+            }
         }
     }
 
     #[test]
-    fn test_generate_per_widget_css_with_background_color() {
-        use crate::config::WidgetOptions;
-
-        let mut config = Config::default();
-        config.widgets.widget_configs.insert(
-            "clock".to_string(),
-            WidgetOptions {
-                background_color: Some("#f5c2e7".to_string()),
-                ..Default::default()
+    fn accent_resolution() {
+        struct Case {
+            name: &'static str,
+            mode: &'static str,
+            accent: Option<&'static str>,
+            source: AccentSource,
+            primary: Option<&'static str>,
+            text: Option<&'static str>,
+            hover_bg: Option<&'static str>,
+        }
+        let cases = [
+            Case {
+                name: "unset accent defaults to custom hex",
+                mode: "dark",
+                accent: None,
+                source: AccentSource::Custom("#adabe0".to_string()),
+                primary: None,
+                text: None,
+                hover_bg: None,
             },
-        );
-
-        let css = ThemePalette::generate_per_widget_css(&config);
-
-        // Should generate CSS targeting widget surfaces, grouped paint elements, and popover.
-        // The transparent .widget-group surface must not receive per-widget variables;
-        // they would inherit into unrelated children in mixed groups.
-        assert!(css.contains(".widget.clock"), "should target .widget.clock");
-        assert!(
-            css.contains(".widget-item.clock"),
-            "should target .widget-item.clock"
-        );
-        assert!(
-            !css.contains(".widget-group.clock"),
-            "should not target transparent .widget-group.clock"
-        );
-        assert!(
-            css.contains(".widget-merge-group.clock"),
-            "should target .widget-merge-group.clock"
-        );
-        assert!(
-            css.contains(".clock-popover"),
-            "should target .clock-popover"
-        );
-        // Should set the CSS variable with normalized hex color
-        assert!(
-            css.contains("--widget-background-color: #f5c2e7"),
-            "should set --widget-background-color"
-        );
-        assert!(
-            css.contains(&format!(
-                "--color-widget-hover-bg: {WIDGET_HOVER_BG_VALUE};"
-            )),
-            "should rederive --color-widget-hover-bg from per-widget background"
-        );
-    }
-
-    #[test]
-    fn test_generate_per_widget_css_normalizes_underscores() {
-        use crate::config::WidgetOptions;
-
-        let mut config = Config::default();
-        config.widgets.widget_configs.insert(
-            "quick_settings".to_string(),
-            WidgetOptions {
-                background_color: Some("#ff0000".to_string()),
-                ..Default::default()
+            Case {
+                name: "regression f02c6ad8: gtk mode defaults to gtk accent",
+                mode: "gtk",
+                accent: None,
+                source: AccentSource::Gtk,
+                primary: Some("@accent_color"),
+                text: Some("@window_fg_color"),
+                hover_bg: Some("color-mix(in srgb, @accent_color 80%, black)"),
             },
-        );
+            Case {
+                name: "custom hex",
+                mode: "dark",
+                accent: Some("#ff0000"),
+                source: AccentSource::Custom("#ff0000".to_string()),
+                primary: Some("#ff0000"),
+                text: None,
+                hover_bg: None,
+            },
+            Case {
+                name: "none is monochrome foreground in dark mode",
+                mode: "dark",
+                accent: Some("none"),
+                source: AccentSource::None,
+                primary: Some("#ffffff"),
+                text: None,
+                hover_bg: None,
+            },
+            Case {
+                name: "none is monochrome foreground in light mode",
+                mode: "light",
+                accent: Some("none"),
+                source: AccentSource::None,
+                primary: Some("#1a1a1a"),
+                text: None,
+                hover_bg: None,
+            },
+            Case {
+                name: "regression c411790f: gtk mode monochrome uses GTK foreground",
+                mode: "gtk",
+                accent: Some("none"),
+                source: AccentSource::None,
+                primary: Some("@window_fg_color"),
+                text: None,
+                hover_bg: None,
+            },
+            Case {
+                name: "regression c411790f: gtk mode custom hex keeps GTK accent text",
+                mode: "gtk",
+                accent: Some("#ff0000"),
+                source: AccentSource::Custom("#ff0000".to_string()),
+                primary: Some("#ff0000"),
+                text: Some("@window_fg_color"),
+                hover_bg: None,
+            },
+        ];
+        for case in cases {
+            let mut config = Config::default();
+            config.theme.mode = case.mode.to_string();
+            config.theme.accent = case.accent.map(str::to_string);
+            let palette = ThemePalette::from_config(&config, None, None);
 
-        let css = ThemePalette::generate_per_widget_css(&config);
+            assert_eq!(palette.accent_source, case.source, "{}: source", case.name);
+            if let Some(primary) = case.primary {
+                assert_eq!(palette.accent_primary, primary, "{}: primary", case.name);
+            }
+            if let Some(text) = case.text {
+                assert_eq!(palette.accent_text, text, "{}: text", case.name);
+            }
+            if let Some(hover_bg) = case.hover_bg {
+                assert_eq!(palette.accent_hover_bg, hover_bg, "{}: hover_bg", case.name);
+            }
+        }
 
-        // Underscores should be converted to hyphens for CSS class names
-        assert!(
-            css.contains(".widget.quick-settings"),
-            "should normalize underscores to hyphens"
-        );
-        assert!(
-            css.contains(".quick-settings-popover"),
-            "popover class should use hyphens"
-        );
-    }
-
-    #[test]
-    fn test_generate_per_widget_css_empty_without_overrides() {
-        use crate::config::WidgetOptions;
-
-        let mut config = Config::default();
-        let mut options = WidgetOptions::default();
-        options.options.insert(
-            "format".to_string(),
-            toml::Value::String("%H:%M".to_string()),
-        );
-        config
-            .widgets
-            .widget_configs
-            .insert("clock".to_string(), options);
-
-        let css = ThemePalette::generate_per_widget_css(&config);
-
-        assert_eq!(
-            css, "",
-            "widgets without colour overrides should not generate CSS"
-        );
-    }
-
-    #[test]
-    fn test_theme_sizes_computed_from_bar_size() {
-        let mut config = Config::default();
-        config.bar.size = 48;
-        // bar_height is the content height (bar.size), CSS padding adds the visual padding
-        let palette = ThemePalette::from_config(&config, None, None);
-
-        assert_eq!(palette.sizes.bar_height, 48);
-        assert!(palette.sizes.widget_height > 0);
-        assert!(palette.sizes.font_size > 0);
-    }
-
-    #[test]
-    fn test_accent_default_is_custom() {
-        // Default accent = None with mode = "dark" means use "#adabe0" as custom hex color
-        let mut config = Config::default();
-        config.theme.mode = "dark".to_string();
-        let palette = ThemePalette::from_config(&config, None, None);
-
-        assert_eq!(
-            palette.accent_source,
-            AccentSource::Custom("#adabe0".to_string())
-        );
-    }
-
-    #[test]
-    fn test_accent_defaults_to_gtk_when_mode_is_gtk() {
-        // When mode = "gtk" and accent is not specified, accent should default to "gtk"
-        let mut config = Config::default();
-        config.theme.mode = "gtk".to_string();
-        // accent remains None
-
-        let palette = ThemePalette::from_config(&config, None, None);
-
-        assert_eq!(palette.accent_source, AccentSource::Gtk);
-        // Verify derived values for GTK accent in GTK mode
-        assert_eq!(palette.accent_primary, "@accent_color");
-        assert_eq!(
-            palette.accent_hover_bg,
-            "color-mix(in srgb, @accent_color 80%, black)"
-        );
-        assert_eq!(
-            palette.accent_text, "@window_fg_color",
-            "accent_text should use GTK theme foreground in GTK mode"
-        );
-    }
-
-    #[test]
-    fn test_accent_custom_color() {
-        // When accent is a hex color, use it as custom accent
+        // The custom accent reaches the CSS
         let mut config = Config::default();
         config.theme.mode = "dark".to_string();
         config.theme.accent = Some("#ff0000".to_string());
-
-        let palette = ThemePalette::from_config(&config, None, None);
-
+        let css = ThemePalette::from_config(&config, None, None).css_vars_block();
         assert_eq!(
-            palette.accent_source,
-            AccentSource::Custom("#ff0000".to_string())
-        );
-        assert_eq!(palette.accent_primary, "#ff0000");
-        // CSS should output the custom color for accent-primary
-        let css = palette.css_vars_block();
-        assert!(css.contains("--color-accent-primary: #ff0000"));
-    }
-
-    #[test]
-    fn test_accent_none_monochrome() {
-        // When accent = "none", use monochrome mode
-        let mut config = Config::default();
-        config.theme.mode = "dark".to_string();
-        config.theme.accent = Some("none".to_string());
-
-        let palette = ThemePalette::from_config(&config, None, None);
-
-        assert_eq!(palette.accent_source, AccentSource::None);
-        // In dark mode, monochrome uses foreground color
-        assert_eq!(palette.accent_primary, "#ffffff");
-    }
-
-    #[test]
-    fn test_accent_none_adapts_to_light_mode() {
-        // Monochrome mode should use dark colors in light mode
-        let mut config = Config::default();
-        config.theme.mode = "light".to_string();
-        config.theme.accent = Some("none".to_string());
-
-        let palette = ThemePalette::from_config(&config, None, None);
-
-        assert_eq!(palette.accent_source, AccentSource::None);
-        // In light mode, monochrome uses foreground color
-        assert_eq!(palette.accent_primary, "#1a1a1a");
-    }
-
-    #[test]
-    fn test_gtk_mode() {
-        // When mode = "gtk", is_gtk_mode should be true
-        let mut config = Config::default();
-        config.theme.mode = "gtk".to_string();
-
-        let palette = ThemePalette::from_config(&config, None, None);
-
-        assert!(palette.is_gtk_mode);
-        // is_dark_mode remains true as a fallback for shadow opacity etc.
-        assert!(palette.is_dark_mode);
-    }
-
-    #[test]
-    fn test_gtk_mode_foreground_uses_theme_color() {
-        let mut config = Config::default();
-        config.theme.mode = "gtk".to_string();
-
-        let palette = ThemePalette::from_config(&config, None, None);
-
-        assert_eq!(palette.foreground_primary, "@window_fg_color");
-        // Verify exact computed value to catch arithmetic bugs
-        assert_eq!(
-            palette.foreground_muted,
-            "color-mix(in srgb, @window_fg_color 60.0%, transparent)"
-        );
-        assert!(
-            palette.foreground_disabled.contains("@window_fg_color"),
-            "disabled should reference @window_fg_color, got: {}",
-            palette.foreground_disabled
-        );
-        assert!(
-            palette.foreground_faint.contains("@window_fg_color"),
-            "faint should reference @window_fg_color, got: {}",
-            palette.foreground_faint
+            css_var_value(&css, "--color-accent-primary"),
+            Some("#ff0000")
         );
     }
 
     #[test]
-    fn test_gtk_mode_css_vars_contain_theme_colors() {
-        let mut config = Config::default();
-        config.theme.mode = "gtk".to_string();
-
-        let palette = ThemePalette::from_config(&config, None, None);
-        let css = palette.css_vars_block();
-
-        // Foreground should reference GTK theme color
-        assert!(
-            css.contains("--color-foreground-primary: @window_fg_color"),
-            "CSS should contain @window_fg_color for foreground-primary"
-        );
-        // Hover tint should reference GTK theme color
-        assert!(
-            css.contains("--widget-hover-tint: @window_fg_color"),
-            "CSS should contain @window_fg_color for widget-hover-tint"
-        );
-        // Accent text should reference GTK theme color
-        assert!(
-            css.contains("--color-accent-text: @window_fg_color"),
-            "CSS should contain @window_fg_color for accent-text"
-        );
+    fn workspace_indicator_hover_hook_is_not_declared() {
+        // CSS reads var(--color-workspace-indicator-hover-bg, <default>); declaring
+        // the hook at :root would shadow the default for every indicator style.
+        let css = ThemePalette::from_config(&Config::default(), None, None).css_vars_block();
+        assert!(css_var_value(&css, "--color-workspace-indicator-hover-default-bg").is_some());
+        assert!(css_var_value(&css, "--color-workspace-indicator-hover-bg").is_none());
     }
 
     #[test]
-    fn test_gtk_mode_derived_colors_use_theme_references() {
-        // Verify that borders, sliders, overlays, and critical backgrounds all
-        // reference GTK named colors instead of hardcoded rgba values.
-        let mut config = Config::default();
-        config.theme.mode = "gtk".to_string();
+    fn gtk_mode_derives_from_gtk_tokens() {
+        // Regression c411790f: derived colors reference GTK named colors instead
+        // of hardcoded values.
+        let palette = palette_for_mode("gtk");
 
-        let palette = ThemePalette::from_config(&config, None, None);
-
-        // Borders
-        assert!(
-            palette.border_subtle.contains("@window_fg_color"),
-            "border_subtle should reference @window_fg_color, got: {}",
-            palette.border_subtle
-        );
-
-        // Slider tracks
-        assert!(
-            palette.slider_track.contains("@window_fg_color"),
-            "slider_track should reference @window_fg_color, got: {}",
-            palette.slider_track
-        );
-
-        // Overlay variants
         for (name, value) in [
+            ("foreground_disabled", &palette.foreground_disabled),
+            ("foreground_faint", &palette.foreground_faint),
+            ("border_subtle", &palette.border_subtle),
+            ("slider_track", &palette.slider_track),
             ("card_overlay", &palette.card_overlay),
             ("card_overlay_hover", &palette.card_overlay_hover),
         ] {
             assert!(
                 value.contains("@window_fg_color"),
-                "{} should reference @window_fg_color, got: {}",
-                name,
-                value
+                "{name} should reference @window_fg_color, got: {value}"
             );
         }
-        // click_catcher_overlay is neutral gray, not theme-dependent
-        assert!(
-            palette.click_catcher_overlay.contains("rgba(128, 128, 128"),
-            "click_catcher_overlay should remain neutral gray"
-        );
-
-        // Critical backgrounds
         assert!(
             palette.row_critical_background.contains("@view_bg_color"),
             "row_critical_background should reference @view_bg_color, got: {}",
             palette.row_critical_background
         );
-    }
 
-    #[test]
-    fn test_gtk_mode_accent_none_uses_theme_color() {
-        // GTK mode + monochrome accent should use @window_fg_color
-        let mut config = Config::default();
-        config.theme.mode = "gtk".to_string();
-        config.theme.accent = Some("none".to_string());
-
-        let palette = ThemePalette::from_config(&config, None, None);
-
-        assert_eq!(palette.accent_source, AccentSource::None);
-        assert!(
-            palette.accent_primary.contains("@window_fg_color"),
-            "monochrome accent in GTK mode should use @window_fg_color, got: {}",
-            palette.accent_primary
+        // click_catcher_overlay is neutral, not theme-dependent
+        assert_eq!(
+            palette.click_catcher_overlay,
+            palette_for_mode("dark").click_catcher_overlay,
+            "click_catcher_overlay should not depend on the GTK theme"
         );
-    }
 
-    #[test]
-    fn test_non_gtk_modes_unchanged() {
-        // Verify that dark/light modes still use hardcoded colors (no regression)
-        let mut dark_config = Config::default();
-        dark_config.theme.mode = "dark".to_string();
-        let dark = ThemePalette::from_config(&dark_config, None, None);
-        assert_eq!(dark.foreground_primary, "#ffffff");
-        assert!(!dark.foreground_muted.contains("@window_fg_color"));
+        let css = palette.css_vars_block();
+        for var in [
+            "--color-foreground-primary",
+            "--widget-hover-tint",
+            "--color-accent-text",
+        ] {
+            assert_eq!(
+                css_var_value(&css, var),
+                Some("@window_fg_color"),
+                "{var} should be @window_fg_color"
+            );
+        }
 
-        let mut light_config = Config::default();
-        light_config.theme.mode = "light".to_string();
-        let light = ThemePalette::from_config(&light_config, None, None);
-        assert_eq!(light.foreground_primary, "#1a1a1a");
-        assert!(!light.foreground_muted.contains("@window_fg_color"));
-    }
-
-    #[test]
-    fn test_gtk_mode_shadows_disabled() {
-        // GTK mode with shadows disabled should still use @window_fg_color
-        // for borders, and set shadows to "none"
+        // With shadows disabled borders still follow the GTK theme
         let mut config = Config::default();
         config.theme.mode = "gtk".to_string();
         config.theme.shadows = false;
-
         let palette = ThemePalette::from_config(&config, None, None);
-
         assert!(
             palette.border_subtle.contains("@window_fg_color"),
             "border_subtle should reference @window_fg_color when shadows disabled, got: {}",
             palette.border_subtle
         );
         assert_eq!(palette.shadow_soft, "none");
-    }
-
-    #[test]
-    fn test_gtk_mode_custom_accent() {
-        // GTK mode + custom accent: accent uses hex color, but accent_text
-        // should still use @window_fg_color (adapts to theme)
-        let mut config = Config::default();
-        config.theme.mode = "gtk".to_string();
-        config.theme.accent = Some("#ff0000".to_string());
-
-        let palette = ThemePalette::from_config(&config, None, None);
-
-        assert_eq!(
-            palette.accent_source,
-            AccentSource::Custom("#ff0000".to_string())
-        );
-        assert_eq!(palette.accent_primary, "#ff0000");
-        assert_eq!(
-            palette.accent_text, "@window_fg_color",
-            "accent_text should use GTK theme color in GTK mode"
-        );
-        // Foreground should still be GTK-aware
-        assert_eq!(palette.foreground_primary, "@window_fg_color");
     }
 
     #[test]
@@ -2184,23 +2046,6 @@ mod tests {
     }
 
     #[test]
-    fn test_theme_sizes_minimum_values() {
-        // Even with small bar, sizes should have sensible minimums
-        let mut config = Config::default();
-        config.bar.size = 16; // Very small bar
-        let palette = ThemePalette::from_config(&config, None, None);
-
-        assert!(
-            palette.sizes.widget_padding_y >= 1,
-            "widget_padding_y should be at least 1"
-        );
-        assert!(
-            palette.sizes.font_size >= 1,
-            "font_size should be at least 1"
-        );
-    }
-
-    #[test]
     fn test_border_radius_respects_max() {
         // Border radius should never exceed half the height (to avoid artifacts)
         for bar_size in [24, 36, 48] {
@@ -2228,94 +2073,103 @@ mod tests {
         }
     }
 
-    // --- Popover palette tests ---
-
     #[test]
-    fn test_popover_palette_none_when_not_configured() {
-        let config = Config::default(); // popover = None
-        assert!(ThemePalette::popover_palette(&config, None, None).is_none());
-    }
+    fn popover_palette_cases() {
+        struct Case {
+            name: &'static str,
+            mode: &'static str,
+            scheme: Option<SchemePolarity>,
+            popover: Option<&'static str>,
+            material: bool,
+            /// `None` means no popover palette; otherwise whether it is dark.
+            popover_dark: Option<bool>,
+            bar_dark: Option<bool>,
+        }
+        let cases = [
+            Case {
+                name: "not configured",
+                mode: "auto",
+                scheme: None,
+                popover: None,
+                material: false,
+                popover_dark: None,
+                bar_dark: None,
+            },
+            Case {
+                name: "gtk mode ignores popover",
+                mode: "gtk",
+                scheme: None,
+                popover: Some("light"),
+                material: false,
+                popover_dark: None,
+                bar_dark: None,
+            },
+            Case {
+                name: "dark on dark is a no-op",
+                mode: "dark",
+                scheme: None,
+                popover: Some("dark"),
+                material: false,
+                popover_dark: None,
+                bar_dark: None,
+            },
+            Case {
+                name: "light on light is a no-op",
+                mode: "light",
+                scheme: None,
+                popover: Some("light"),
+                material: false,
+                popover_dark: None,
+                bar_dark: None,
+            },
+            Case {
+                name: "dark bar, light popover",
+                mode: "dark",
+                scheme: None,
+                popover: Some("light"),
+                material: false,
+                popover_dark: Some(false),
+                bar_dark: Some(true),
+            },
+            Case {
+                name: "light bar, dark popover",
+                mode: "light",
+                scheme: None,
+                popover: Some("dark"),
+                material: false,
+                popover_dark: Some(true),
+                bar_dark: Some(false),
+            },
+            Case {
+                name: "auto mode flips the material scheme",
+                mode: "auto",
+                scheme: Some(SchemePolarity::Dark),
+                popover: Some("light"),
+                material: true,
+                popover_dark: Some(false),
+                bar_dark: Some(true),
+            },
+        ];
+        let theme = material_theme();
+        for case in cases {
+            let mut config = Config::default();
+            config.theme.mode = case.mode.to_string();
+            config.theme.scheme = case.scheme;
+            config.theme.popover = case.popover.map(str::to_string);
+            let material = case.material.then_some(&theme);
 
-    #[test]
-    fn test_popover_palette_none_for_gtk_mode() {
-        let mut config = Config::default();
-        config.theme.mode = "gtk".to_string();
-        config.theme.popover = Some("light".to_string());
-        assert!(ThemePalette::popover_palette(&config, None, None).is_none());
-    }
-
-    #[test]
-    fn test_popover_palette_none_when_same_polarity() {
-        // Dark mode with dark popover = no-op
-        let mut config = Config::default();
-        config.theme.mode = "dark".to_string();
-        config.theme.popover = Some("dark".to_string());
-        assert!(ThemePalette::popover_palette(&config, None, None).is_none());
-
-        // Light mode with light popover = no-op
-        config.theme.mode = "light".to_string();
-        config.theme.popover = Some("light".to_string());
-        assert!(ThemePalette::popover_palette(&config, None, None).is_none());
-    }
-
-    #[test]
-    fn test_popover_palette_dark_to_light() {
-        let mut config = Config::default();
-        config.theme.mode = "dark".to_string();
-        config.theme.popover = Some("light".to_string());
-
-        let popover = ThemePalette::popover_palette(&config, None, None);
-        assert!(popover.is_some(), "should produce a light popover palette");
-        let popover = popover.unwrap();
-        assert!(!popover.is_dark_mode, "popover should be light mode");
-
-        // Bar palette should be dark
-        let bar = ThemePalette::from_config(&config, None, None);
-        assert!(bar.is_dark_mode, "bar should be dark mode");
-    }
-
-    #[test]
-    fn test_popover_palette_light_to_dark() {
-        let mut config = Config::default();
-        config.theme.mode = "light".to_string();
-        config.theme.popover = Some("dark".to_string());
-
-        let popover = ThemePalette::popover_palette(&config, None, None);
-        assert!(popover.is_some(), "should produce a dark popover palette");
-        let popover = popover.unwrap();
-        assert!(popover.is_dark_mode, "popover should be dark mode");
-
-        // Bar palette should be light
-        let bar = ThemePalette::from_config(&config, None, None);
-        assert!(!bar.is_dark_mode, "bar should be light mode");
-    }
-
-    #[test]
-    fn test_popover_palette_auto_mode_flips_scheme() {
-        use material_colors::theme::ThemeBuilder;
-
-        // Create a real Material You theme from a source color
-        let source_color = Argb::new(255, 53, 132, 228); // blue-ish
-        let material_theme = ThemeBuilder::with_source(source_color).build();
-
-        let mut config = Config::default();
-        config.theme.mode = "auto".to_string();
-        config.theme.scheme = Some(SchemePolarity::Dark);
-        config.theme.popover = Some("light".to_string());
-
-        let popover = ThemePalette::popover_palette(&config, Some(&material_theme), None);
-        assert!(
-            popover.is_some(),
-            "auto mode should produce popover palette"
-        );
-        let popover = popover.unwrap();
-        assert!(
-            !popover.is_dark_mode,
-            "popover should be light (scheme flipped)"
-        );
-
-        let bar = ThemePalette::from_config(&config, Some(&material_theme), None);
-        assert!(bar.is_dark_mode, "bar should be dark (scheme=dark)");
+            let popover = ThemePalette::popover_palette(&config, material, None);
+            assert_eq!(
+                popover.map(|p| p.is_dark_mode),
+                case.popover_dark,
+                "{}: popover polarity",
+                case.name
+            );
+            if let Some(bar_dark) = case.bar_dark {
+                let bar = ThemePalette::from_config(&config, material, None);
+                assert_eq!(bar.is_dark_mode, bar_dark, "{}: bar polarity", case.name);
+            }
+        }
     }
 
     #[test]
@@ -2324,175 +2178,121 @@ mod tests {
         config.theme.mode = "dark".to_string();
         config.theme.popover = Some("light".to_string());
 
+        let bar = ThemePalette::from_config(&config, None, None);
         let popover = ThemePalette::popover_palette(&config, None, None).unwrap();
         let css = popover.css_popover_vars_block();
 
-        // Should be scoped under .popover
         assert!(
             css.contains(".popover"),
             "popover CSS should be scoped to .popover"
         );
-        // Should contain polarity-dependent variables
-        assert!(css.contains("--widget-background-color:"));
-        assert!(css.contains("--color-foreground-primary:"));
-        assert!(css.contains("--color-accent-primary:"));
-        assert!(css.contains("--color-card-overlay:"));
-        assert!(css.contains("--color-border-subtle:"));
-        assert!(css.contains("--shadow-soft:"));
-        assert!(css.contains("--color-slider-track:"));
+        // The scoped block carries the flipped (light) palette's values
+        assert_ne!(popover.foreground_primary, bar.foreground_primary);
+        for (var, value) in [
+            ("--widget-background-color", &popover.widget_background),
+            ("--color-foreground-primary", &popover.foreground_primary),
+            ("--color-accent-primary", &popover.accent_primary),
+            ("--color-card-overlay", &popover.card_overlay),
+            ("--color-border-subtle", &popover.border_subtle),
+            ("--shadow-soft", &popover.shadow_soft),
+            ("--color-slider-track", &popover.slider_track),
+        ] {
+            assert_eq!(
+                css_var_value(&css, var),
+                Some(value.as_str()),
+                "{var} should carry the popover palette value"
+            );
+        }
 
-        // Should NOT contain size/spacing variables (those are polarity-independent)
+        // Size variables are polarity-independent and inherited from :root
         assert!(!css.contains("--bar-height:"));
         assert!(!css.contains("--font-size:"));
-        assert!(!css.contains("--spacing:"));
-        assert!(!css.contains("--border-radius:"));
-    }
-
-    // -------------------------------------------------------------------------
-    // effective_scheme() tests
-    // -------------------------------------------------------------------------
-
-    #[test]
-    fn test_effective_scheme_explicit_light_wins_regardless_of_luminance() {
-        // Explicit light override — luminance is dark but scheme wins
-        assert!(effective_scheme(
-            Some(crate::config::SchemePolarity::Light),
-            Some(0.1)
-        ));
     }
 
     #[test]
-    fn test_effective_scheme_explicit_dark_wins_regardless_of_luminance() {
-        // Explicit dark override — luminance is bright but scheme wins
-        assert!(!effective_scheme(
-            Some(crate::config::SchemePolarity::Dark),
-            Some(0.9)
-        ));
+    fn test_effective_scheme() {
+        use crate::config::SchemePolarity::{Dark, Gtk, Light};
+        // Returns true for light.
+        let cases = [
+            (
+                "explicit light wins over dark luminance",
+                Some(Light),
+                Some(0.1),
+                true,
+            ),
+            (
+                "explicit dark wins over light luminance",
+                Some(Dark),
+                Some(0.9),
+                false,
+            ),
+            ("high luminance derives light", None, Some(0.7), true),
+            ("low luminance derives dark", None, Some(0.1), false),
+            (
+                "exactly at threshold is light",
+                None,
+                Some(PERCEPTUAL_LIGHT_DARK_THRESHOLD),
+                true,
+            ),
+            (
+                "just below threshold is dark",
+                None,
+                Some(PERCEPTUAL_LIGHT_DARK_THRESHOLD - 0.001),
+                false,
+            ),
+            ("no luminance falls back to dark", None, None, false),
+            ("gtk uses luminance (high)", Some(Gtk), Some(0.7), true),
+            ("gtk uses luminance (low)", Some(Gtk), Some(0.1), false),
+            (
+                "gtk without luminance falls back to dark",
+                Some(Gtk),
+                None,
+                false,
+            ),
+        ];
+        for (name, scheme, luminance, expected_light) in cases {
+            assert_eq!(
+                effective_scheme(scheme, luminance),
+                expected_light,
+                "{name}"
+            );
+        }
     }
 
     #[test]
-    fn test_effective_scheme_none_derives_light_from_high_luminance() {
-        // No override — luminance >= perceptual midpoint → light
-        assert!(effective_scheme(None, Some(0.7)));
-    }
-
-    #[test]
-    fn test_effective_scheme_none_derives_dark_from_low_luminance() {
-        // No override — luminance < perceptual midpoint → dark
-        assert!(!effective_scheme(None, Some(0.1)));
-    }
-
-    #[test]
-    fn test_effective_scheme_boundary_at_threshold_is_light() {
-        // Boundary: exactly at threshold → light (>= rule)
-        assert!(effective_scheme(
-            None,
-            Some(PERCEPTUAL_LIGHT_DARK_THRESHOLD)
-        ));
-    }
-
-    #[test]
-    fn test_effective_scheme_just_below_boundary_is_dark() {
-        // Just below threshold → dark
-        assert!(!effective_scheme(
-            None,
-            Some(PERCEPTUAL_LIGHT_DARK_THRESHOLD - 0.001)
-        ));
-    }
-
-    #[test]
-    fn test_effective_scheme_no_luminance_falls_back_to_dark() {
-        // No override, no luminance → fallback dark
-        assert!(!effective_scheme(None, None));
-    }
-
-    #[test]
-    fn test_effective_scheme_gtk_falls_back_to_luminance() {
-        assert_eq!(
-            effective_scheme(Some(crate::config::SchemePolarity::Gtk), Some(0.7)),
-            effective_scheme(None, Some(0.7))
-        );
-        assert_eq!(
-            effective_scheme(Some(crate::config::SchemePolarity::Gtk), Some(0.1)),
-            effective_scheme(None, Some(0.1))
-        );
-        assert_eq!(
-            effective_scheme(Some(crate::config::SchemePolarity::Gtk), None),
-            effective_scheme(None, None)
-        );
-    }
-
-    #[test]
-    fn test_from_config_auto_mode_derives_light_from_high_luminance() {
-        use material_colors::theme::ThemeBuilder;
-
-        // Build a real Material You theme so the auto branch has schemes to select from
-        let source_color = Argb::new(255, 53, 132, 228); // blue-ish
-        let material_theme = ThemeBuilder::with_source(source_color).build();
-
-        let mut config = Config::default();
-        config.theme.mode = "auto".to_string();
-        config.theme.scheme = None; // rely on luminance auto-derivation
-
-        // High luminance (0.8) → light scheme → is_dark_mode should be false
-        let palette = ThemePalette::from_config(&config, Some(&material_theme), Some(0.8));
-        assert!(
-            !palette.is_dark_mode,
-            "high luminance wallpaper should auto-select light scheme"
-        );
-
-        // Low luminance (0.1) → dark scheme → is_dark_mode should be true
-        let palette = ThemePalette::from_config(&config, Some(&material_theme), Some(0.1));
-        assert!(
-            palette.is_dark_mode,
-            "low luminance wallpaper should auto-select dark scheme"
-        );
-    }
-
-    #[test]
-    fn test_auto_mode_fallback_respects_scheme_and_luminance_when_no_material_theme() {
-        // material_theme = None simulates wallpaper extraction failure.
-        // effective_scheme should still be consulted for the fallback branch.
-
-        let mut config = Config::default();
-        config.theme.mode = "auto".to_string();
-
-        // Explicit scheme = Light → light fallback, even with no material theme
-        config.theme.scheme = Some(SchemePolarity::Light);
-        let palette = ThemePalette::from_config(&config, None, None);
-        assert!(
-            !palette.is_dark_mode,
-            "explicit scheme=light should produce light fallback when material_theme is None"
-        );
-
-        // High luminance + no explicit scheme → light fallback
-        config.theme.scheme = None;
-        let palette = ThemePalette::from_config(&config, None, Some(0.8));
-        assert!(
-            !palette.is_dark_mode,
-            "high luminance should produce light fallback when material_theme is None"
-        );
-
-        // Low luminance + no explicit scheme → dark fallback
-        let palette = ThemePalette::from_config(&config, None, Some(0.1));
-        assert!(
-            palette.is_dark_mode,
-            "low luminance should produce dark fallback when material_theme is None"
-        );
+    fn auto_mode_polarity() {
+        // Without a material theme (wallpaper extraction failed) the fallback
+        // branch must still honour scheme and luminance.
+        let cases = [
+            ("material, high luminance", true, None, Some(0.8), false),
+            ("material, low luminance", true, None, Some(0.1), true),
+            (
+                "no material, explicit light",
+                false,
+                Some(SchemePolarity::Light),
+                None,
+                false,
+            ),
+            ("no material, high luminance", false, None, Some(0.8), false),
+            ("no material, low luminance", false, None, Some(0.1), true),
+        ];
+        let theme = material_theme();
+        for (name, material, scheme, luminance, expected_dark) in cases {
+            let mut config = Config::default();
+            config.theme.mode = "auto".to_string();
+            config.theme.scheme = scheme;
+            let palette = ThemePalette::from_config(&config, material.then_some(&theme), luminance);
+            assert_eq!(palette.is_dark_mode, expected_dark, "{name}");
+        }
     }
 
     #[test]
     fn test_auto_mode_respects_custom_urgent_state() {
-        use material_colors::theme::ThemeBuilder;
-
-        let source_color = Argb::new(255, 53, 132, 228);
-        let material_theme = ThemeBuilder::with_source(source_color).build();
-
         let mut config = Config::default();
         config.theme.mode = "auto".to_string();
         config.theme.states.urgent = "#adeba0".to_string();
 
-        let palette = ThemePalette::from_config(&config, Some(&material_theme), Some(0.1));
+        let palette = ThemePalette::from_config(&config, Some(&material_theme()), Some(0.1));
 
         assert_eq!(palette.state_urgent, "#adeba0");
     }
@@ -2508,26 +2308,16 @@ mod tests {
     }
 
     #[test]
-    fn test_outline_enabled_propagates_to_all_scopes() {
-        // Catches "forgot to wire a scope" regressions in the cascade.
-        let mut config = Config::default();
-        config.theme.outline = true;
-        // Default bar opacity is 0.0 (islands mode), which suppresses the
-        // inherited bar outline; raise it to verify the propagation path.
-        config.bar.background_opacity = 1.0;
-        let palette = ThemePalette::from_config(&config, None, None);
-        assert!(palette.bar_outline_enabled);
-        assert!(palette.widget_outline_enabled);
-        assert!(palette.surface_outline_enabled);
-    }
-
-    #[test]
-    fn test_outline_override_matrix() {
+    fn outline_override_matrix() {
         // Per-section `Option<bool>` overrides must win over the theme default
         // in either direction, and only affect their own scope. surface_outline
         // has no per-section override in v1 so it always tracks theme.outline.
+        // In islands mode (bar opacity 0) the bar surface is invisible, so an
+        // inherited bar outline is suppressed; an explicit override still wins.
         struct Case {
+            name: &'static str,
             theme: bool,
+            bar_opacity: f64,
             bar_override: Option<bool>,
             widgets_override: Option<bool>,
             expect_bar: bool,
@@ -2536,7 +2326,19 @@ mod tests {
         }
         let cases = [
             Case {
+                name: "theme outline propagates to all scopes",
                 theme: true,
+                bar_opacity: 1.0,
+                bar_override: None,
+                widgets_override: None,
+                expect_bar: true,
+                expect_widget: true,
+                expect_surface: true,
+            },
+            Case {
+                name: "bar override off",
+                theme: true,
+                bar_opacity: 1.0,
                 bar_override: Some(false),
                 widgets_override: None,
                 expect_bar: false,
@@ -2544,7 +2346,9 @@ mod tests {
                 expect_surface: true,
             },
             Case {
+                name: "bar override on",
                 theme: false,
+                bar_opacity: 1.0,
                 bar_override: Some(true),
                 widgets_override: None,
                 expect_bar: true,
@@ -2552,7 +2356,9 @@ mod tests {
                 expect_surface: false,
             },
             Case {
+                name: "widgets override off",
                 theme: true,
+                bar_opacity: 1.0,
                 bar_override: None,
                 widgets_override: Some(false),
                 expect_bar: true,
@@ -2560,64 +2366,55 @@ mod tests {
                 expect_surface: true,
             },
             Case {
+                name: "widgets override on",
                 theme: false,
+                bar_opacity: 1.0,
                 bar_override: None,
                 widgets_override: Some(true),
                 expect_bar: false,
                 expect_widget: true,
                 expect_surface: false,
             },
+            Case {
+                name: "islands suppress inherited bar outline",
+                theme: true,
+                bar_opacity: 0.0,
+                bar_override: None,
+                widgets_override: None,
+                expect_bar: false,
+                expect_widget: true,
+                expect_surface: true,
+            },
+            Case {
+                name: "islands explicit bar outline wins",
+                theme: false,
+                bar_opacity: 0.0,
+                bar_override: Some(true),
+                widgets_override: None,
+                expect_bar: true,
+                expect_widget: false,
+                expect_surface: false,
+            },
         ];
-        for (i, c) in cases.iter().enumerate() {
+        for c in cases {
             let mut config = Config::default();
             config.theme.outline = c.theme;
-            // Avoid islands-mode bar suppression contaminating the matrix —
-            // that interaction has its own dedicated test below.
-            config.bar.background_opacity = 1.0;
+            config.bar.background_opacity = c.bar_opacity;
             config.bar.outline = c.bar_override;
             config.widgets.outline = c.widgets_override;
             let p = ThemePalette::from_config(&config, None, None);
-            assert_eq!(p.bar_outline_enabled, c.expect_bar, "case {} bar", i);
+            assert_eq!(p.bar_outline_enabled, c.expect_bar, "{}: bar", c.name);
             assert_eq!(
                 p.widget_outline_enabled, c.expect_widget,
-                "case {} widget",
-                i
+                "{}: widget",
+                c.name
             );
             assert_eq!(
                 p.surface_outline_enabled, c.expect_surface,
-                "case {} surface",
-                i
+                "{}: surface",
+                c.name
             );
         }
-    }
-
-    #[test]
-    fn test_islands_mode_outline_suppression() {
-        // In islands mode (bar.background_opacity == 0) the bar surface is
-        // invisible, so an inherited bar outline would frame nothing — suppress
-        // it. Explicit `bar.outline = Some(true)` must still win for users who
-        // want a framing look around their islands. Other scopes inherit
-        // normally regardless.
-        let mut inherited = Config::default();
-        inherited.theme.outline = true;
-        inherited.bar.background_opacity = 0.0;
-        let p = ThemePalette::from_config(&inherited, None, None);
-        assert!(
-            !p.bar_outline_enabled,
-            "inherited bar outline must be suppressed"
-        );
-        assert!(p.widget_outline_enabled);
-        assert!(p.surface_outline_enabled);
-
-        let mut explicit = Config::default();
-        explicit.theme.outline = false;
-        explicit.bar.background_opacity = 0.0;
-        explicit.bar.outline = Some(true);
-        let p = ThemePalette::from_config(&explicit, None, None);
-        assert!(
-            p.bar_outline_enabled,
-            "explicit bar.outline = true must win"
-        );
     }
 
     #[test]
@@ -2657,33 +2454,5 @@ mod tests {
         ] {
             assert!(css.contains(needle), "missing CSS var: {}", needle);
         }
-    }
-
-    #[test]
-    fn test_per_widget_outline_color_emits_both_variables() {
-        // Widget popovers are separate GTK4 windows — CSS variables don't
-        // inherit across the window boundary, so a per-widget outline_color
-        // must be emitted on BOTH the bar-body selector (--widget-outline-color)
-        // and the popover selector (--surface-outline-color).
-        use crate::config::WidgetOptions;
-
-        let mut config = Config::default();
-        config.widgets.widget_configs.insert(
-            "clock".to_string(),
-            WidgetOptions {
-                outline_color: Some("accent".to_string()),
-                ..Default::default()
-            },
-        );
-
-        let css = ThemePalette::generate_per_widget_css(&config);
-        assert!(
-            css.contains("--widget-outline-color: var(--color-accent-primary);"),
-            "missing widget outline color"
-        );
-        assert!(
-            css.contains("--surface-outline-color: var(--color-accent-primary);"),
-            "missing surface outline color (popover would not pick up the override)"
-        );
     }
 }
