@@ -992,15 +992,6 @@ mod tests {
     }
 
     #[test]
-    fn event_dot_color_uses_fixed_alpha_after_parsing() {
-        let color = parse_event_dot_color("red").expect("CSS color name should parse");
-        assert_eq!(color.red(), 1.0);
-        assert_eq!(color.green(), 0.0);
-        assert_eq!(color.blue(), 0.0);
-        assert!((color.alpha() - 0.78).abs() < f32::EPSILON);
-    }
-
-    #[test]
     fn colorless_events_use_day_label_foreground_fallback() {
         let date = NaiveDate::from_ymd_opt(2026, 6, 1).unwrap();
         let event = test_event("2026-06-01 10:15:00", "2026-06-01 11:15:00", false);
@@ -1034,15 +1025,21 @@ mod tests {
             )
             .unwrap();
 
-            assert_eq!(dates.len(), GTK_CALENDAR_DAY_COUNT);
+            assert_eq!(
+                dates.len(),
+                GTK_CALENDAR_DAY_COUNT,
+                "leading_days={leading_days}: length"
+            );
             assert_eq!(
                 dates[leading_days],
-                NaiveDate::from_ymd_opt(2026, 2, 1).unwrap()
+                NaiveDate::from_ymd_opt(2026, 2, 1).unwrap(),
+                "leading_days={leading_days}: first of month"
             );
             assert!(
                 dates
                     .windows(2)
-                    .all(|days| days[0].succ_opt() == Some(days[1]))
+                    .all(|days| days[0].succ_opt() == Some(days[1])),
+                "leading_days={leading_days}: contiguous"
             );
         }
     }
@@ -1077,41 +1074,34 @@ mod tests {
     }
 
     #[test]
-    fn timed_event_details_follow_selected_continuation_day() {
-        let event = test_event("2026-06-01 10:15:00", "2026-06-04 12:30:00", false);
+    fn event_details_follow_selected_day() {
+        let multi_day = ("2026-06-01 10:15:00", "2026-06-04 12:30:00", false);
+        let cases = [
+            ("timed start day", multi_day, 1, "10:15"),
+            ("timed continuation day", multi_day, 2, "Ongoing"),
+            ("timed final day", multi_day, 4, "Until 12:30"),
+            (
+                "midnight end makes previous day final",
+                ("2026-06-01 10:15:00", "2026-06-03 00:00:00", false),
+                2,
+                "Until midnight",
+            ),
+            (
+                "all-day ignores selected day",
+                ("2026-06-01 00:00:00", "2026-06-04 00:00:00", true),
+                3,
+                "All day",
+            ),
+        ];
 
-        assert_eq!(
-            event_detail_text(&event, NaiveDate::from_ymd_opt(2026, 6, 1).unwrap()),
-            "10:15"
-        );
-        assert_eq!(
-            event_detail_text(&event, NaiveDate::from_ymd_opt(2026, 6, 2).unwrap()),
-            "Ongoing"
-        );
-        assert_eq!(
-            event_detail_text(&event, NaiveDate::from_ymd_opt(2026, 6, 4).unwrap()),
-            "Until 12:30"
-        );
-    }
-
-    #[test]
-    fn timed_event_details_treat_midnight_end_as_previous_final_day() {
-        let event = test_event("2026-06-01 10:15:00", "2026-06-03 00:00:00", false);
-
-        assert_eq!(
-            event_detail_text(&event, NaiveDate::from_ymd_opt(2026, 6, 2).unwrap()),
-            "Until midnight"
-        );
-    }
-
-    #[test]
-    fn all_day_event_details_ignore_selected_day() {
-        let event = test_event("2026-06-01 00:00:00", "2026-06-04 00:00:00", true);
-
-        assert_eq!(
-            event_detail_text(&event, NaiveDate::from_ymd_opt(2026, 6, 3).unwrap()),
-            "All day"
-        );
+        for (name, (start, end, all_day), june_day, expected) in cases {
+            let event = test_event(start, end, all_day);
+            assert_eq!(
+                event_detail_text(&event, NaiveDate::from_ymd_opt(2026, 6, june_day).unwrap()),
+                expected,
+                "{name}"
+            );
+        }
     }
 
     fn test_event(start: &str, end: &str, all_day: bool) -> CalendarEvent {

@@ -2132,19 +2132,20 @@ mod tests {
     }
 
     #[test]
-    fn right_margin_centers_anchor_when_space_allows() {
-        assert_eq!(calculate_popover_right_margin(500, 1000, 200, 4), 400);
-    }
+    fn popover_margin_centers_anchor_and_clamps_to_edges() {
+        type MarginFn = fn(i32, i32, i32, i32) -> i32;
+        let right: MarginFn = calculate_popover_right_margin;
+        let bottom: MarginFn = calculate_popover_bottom_margin;
+        let cases = [
+            ("right centered on anchor", right, 500, 1000, 400),
+            ("right clamped near left edge", right, 20, 1000, 796),
+            ("right clamped near right edge", right, 990, 1000, 4),
+            ("bottom uses same axis math", bottom, 400, 800, 300),
+        ];
 
-    #[test]
-    fn right_margin_clamps_to_edge_margins() {
-        assert_eq!(calculate_popover_right_margin(20, 1000, 200, 4), 796);
-        assert_eq!(calculate_popover_right_margin(990, 1000, 200, 4), 4);
-    }
-
-    #[test]
-    fn bottom_margin_uses_same_axis_math_for_vertical_bars() {
-        assert_eq!(calculate_popover_bottom_margin(400, 800, 200, 4), 300);
+        for (name, margin, anchor, monitor, expected) in cases {
+            assert_eq!(margin(anchor, monitor, 200, 4), expected, "{name}");
+        }
     }
 
     #[test]

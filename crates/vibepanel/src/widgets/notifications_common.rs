@@ -849,29 +849,34 @@ mod tests {
     }
 
     #[test]
-    fn test_sanitize_plain_text() {
-        assert_eq!(sanitize_body_markup("Hello World"), "Hello World");
-    }
+    fn split_markup_lines_cases() {
+        let cases: [(&str, String, &[&str]); 5] = [
+            ("blank lines kept", "a\n\nb".into(), &["a", "", "b"]),
+            ("simple lines", "a\nb".into(), &["a", "b"]),
+            (
+                "newline inside tag is not a line break",
+                "<a\n href=\"https://example.com\">link</a>".into(),
+                &["<a\n href=\"https://example.com\">link</a>"],
+            ),
+            (
+                "open link reopened on each line",
+                "<a href=\"https://x.test\">link\ntext</a>".into(),
+                &[
+                    "<a href=\"https://x.test\">link</a>",
+                    "<a href=\"https://x.test\">text</a>",
+                ],
+            ),
+            // Regression (738373f8).
+            (
+                "regression: sanitized entity newlines split",
+                sanitize_body_markup("one&#10;two&#10;three"),
+                &["one", "two", "three"],
+            ),
+        ];
 
-    #[test]
-    fn split_markup_lines_keeps_blank_lines_and_tag_contents() {
-        assert_eq!(split_markup_lines("a\n\nb"), ["a", "", "b"]);
-        assert_eq!(split_markup_lines("a\nb\n".trim_end()), ["a", "b"]);
-        assert_eq!(
-            split_markup_lines("<a\n href=\"https://example.com\">link</a>"),
-            ["<a\n href=\"https://example.com\">link</a>"]
-        );
-    }
-
-    #[test]
-    fn split_markup_lines_reopens_formatting_and_links() {
-        assert_eq!(
-            split_markup_lines("<a href=\"https://x.test\">link\ntext</a>"),
-            [
-                "<a href=\"https://x.test\">link</a>",
-                "<a href=\"https://x.test\">text</a>"
-            ]
-        );
+        for (name, markup, expected) in cases {
+            assert_eq!(split_markup_lines(&markup), expected, "{name}");
+        }
     }
 
     #[test]
@@ -899,119 +904,85 @@ mod tests {
     }
 
     #[test]
-    fn test_sanitize_allowed_tags() {
-        assert_eq!(
-            sanitize_body_markup("<b>Bold</b> <i>Italic</i> <u>Underline</u>"),
-            "<b>Bold</b> <i>Italic</i> <u>Underline</u>"
-        );
-    }
-
-    #[test]
-    fn test_sanitize_links() {
-        assert_eq!(
-            sanitize_body_markup(r#"<a href="https://example.com">Link</a>"#),
-            r#"<a href="https://example.com">Link</a>"#
-        );
-        // A bare & in an attribute would make GTK reject the whole body.
-        assert_eq!(
-            sanitize_body_markup(r#"<a href="https://e.com/?a=1&b=2&amp;c=3">Link</a>"#),
-            r#"<a href="https://e.com/?a=1&amp;b=2&amp;c=3">Link</a>"#
-        );
-        // GTK rejects any other attribute, or a link without href, for the whole body.
-        assert_eq!(
-            sanitize_body_markup(r#"<a target="_blank" HREF='https://e.com'>Link</a>"#),
-            r#"<a href="https://e.com">Link</a>"#
-        );
-        assert_eq!(sanitize_body_markup("<a name=top>Top</a>"), "Top");
-        // "href" inside another attribute's value isn't the link.
-        assert_eq!(
-            sanitize_body_markup(
-                r#"<a title="Docs href='https://wrong.example'" href="https://right.example">Docs</a>"#
+    fn sanitize_body_markup_cases() {
+        let cases = [
+            ("plain text", "Hello World", "Hello World"),
+            (
+                "allowed tags kept",
+                "<b>Bold</b> <i>Italic</i> <u>Underline</u>",
+                "<b>Bold</b> <i>Italic</i> <u>Underline</u>",
             ),
-            r#"<a href="https://right.example">Docs</a>"#
-        );
-    }
+            (
+                "link kept",
+                r#"<a href="https://example.com">Link</a>"#,
+                r#"<a href="https://example.com">Link</a>"#,
+            ),
+            // GTK rejects the whole body for a bare & in an attribute, any attribute other
+            // than href, or a link without href.
+            (
+                "regression: bare & in href escaped",
+                r#"<a href="https://e.com/?a=1&b=2&amp;c=3">Link</a>"#,
+                r#"<a href="https://e.com/?a=1&amp;b=2&amp;c=3">Link</a>"#,
+            ),
+            (
+                "regression: extra attrs dropped and single-quoted HREF normalized",
+                r#"<a target="_blank" HREF='https://e.com'>Link</a>"#,
+                r#"<a href="https://e.com">Link</a>"#,
+            ),
+            (
+                "regression: link without href unwrapped",
+                "<a name=top>Top</a>",
+                "Top",
+            ),
+            (
+                "regression: href inside another attribute value ignored",
+                r#"<a title="Docs href='https://wrong.example'" href="https://right.example">Docs</a>"#,
+                r#"<a href="https://right.example">Docs</a>"#,
+            ),
+            ("br", "Line 1<br>Line 2", "Line 1\nLine 2"),
+            ("self-closing br", "Line 1<br/>Line 2", "Line 1\nLine 2"),
+            (
+                "spaced self-closing br",
+                "Line 1<br />Line 2",
+                "Line 1\nLine 2",
+            ),
+            // Regression (738373f8).
+            (
+                "regression: line boundaries normalized",
+                "one\r\ntwo\rthree\u{2028}four\u{2029}five&#10;six&#xA;seven",
+                "one\ntwo\nthree\nfour\nfive\nsix\nseven",
+            ),
+            (
+                "img stripped",
+                r#"Image: <img src="test.png" alt="test"/>"#,
+                "Image: ",
+            ),
+            (
+                "unknown tags escaped",
+                "<script>alert('xss')</script>",
+                "&lt;script&gt;alert('xss')&lt;/script&gt;",
+            ),
+            ("named entity kept", "Fish &amp; Chips", "Fish &amp; Chips"),
+            ("lt entity kept", "A &lt; B", "A &lt; B"),
+            ("bare ampersand escaped", "A & B", "A &amp; B"),
+            ("decimal entity kept", "&#1234;", "&#1234;"),
+            ("hex entity kept", "&#x1F600;", "&#x1F600;"),
+            ("unclosed tag escaped", "Foo <b", "Foo &lt;b"),
+            ("double open bracket escaped", "<<b", "&lt;&lt;b"),
+            ("uppercase tags lowercased", "<B>BOLD</B>", "<b>BOLD</b>"),
+            ("uppercase br", "<BR>", "\n"),
+            ("unclosed tag auto-closed", "<b>Bold", "<b>Bold</b>"),
+            (
+                "nested unclosed tags auto-closed",
+                "<b><i>Bold Italic",
+                "<b><i>Bold Italic</i></b>",
+            ),
+            ("bad nesting fixed", "<b><i>Text</b>", "<b><i>Text</i></b>"),
+            ("stray closing tag dropped", "Text</b>", "Text"),
+        ];
 
-    #[test]
-    fn test_sanitize_br() {
-        assert_eq!(sanitize_body_markup("Line 1<br>Line 2"), "Line 1\nLine 2");
-        assert_eq!(sanitize_body_markup("Line 1<br/>Line 2"), "Line 1\nLine 2");
-        assert_eq!(sanitize_body_markup("Line 1<br />Line 2"), "Line 1\nLine 2");
-    }
-
-    #[test]
-    fn test_sanitize_line_boundaries() {
-        let markup =
-            sanitize_body_markup("one\r\ntwo\rthree\u{2028}four\u{2029}five&#10;six&#xA;seven");
-        assert_eq!(markup, "one\ntwo\nthree\nfour\nfive\nsix\nseven");
-        assert_eq!(
-            split_markup_lines(&sanitize_body_markup("one&#10;two&#10;three")),
-            ["one", "two", "three"]
-        );
-    }
-
-    #[test]
-    fn test_sanitize_strip_img() {
-        assert_eq!(
-            sanitize_body_markup(r#"Image: <img src="test.png" alt="test"/>"#),
-            "Image: "
-        );
-    }
-
-    #[test]
-    fn test_sanitize_escape_invalid_tags() {
-        assert_eq!(
-            sanitize_body_markup("<script>alert('xss')</script>"),
-            "&lt;script&gt;alert('xss')&lt;/script&gt;"
-        );
-    }
-
-    #[test]
-    fn test_sanitize_entities() {
-        // Valid entities preserved
-        assert_eq!(sanitize_body_markup("Fish &amp; Chips"), "Fish &amp; Chips");
-        assert_eq!(sanitize_body_markup("A &lt; B"), "A &lt; B");
-
-        // Invalid/Bare ampersand escaped
-        assert_eq!(sanitize_body_markup("A & B"), "A &amp; B");
-
-        // Decimal entity
-        assert_eq!(sanitize_body_markup("&#1234;"), "&#1234;");
-        // Hex entity
-        assert_eq!(sanitize_body_markup("&#x1F600;"), "&#x1F600;");
-    }
-
-    #[test]
-    fn test_sanitize_malformed_tags() {
-        // Unclosed tag
-        assert_eq!(sanitize_body_markup("Foo <b"), "Foo &lt;b");
-        // Nested unclosed - the first < fails parsing, becomes &lt;
-        // The second < starts a valid <b> tag
-        assert_eq!(sanitize_body_markup("<<b"), "&lt;&lt;b");
-    }
-
-    #[test]
-    fn test_case_insensitive_tags() {
-        assert_eq!(sanitize_body_markup("<B>BOLD</B>"), "<b>BOLD</b>");
-        assert_eq!(sanitize_body_markup("<BR>"), "\n");
-    }
-
-    #[test]
-    fn test_sanitize_auto_close() {
-        // Unclosed <b>
-        assert_eq!(sanitize_body_markup("<b>Bold"), "<b>Bold</b>");
-        // Nested unclosed
-        assert_eq!(
-            sanitize_body_markup("<b><i>Bold Italic"),
-            "<b><i>Bold Italic</i></b>"
-        );
-    }
-
-    #[test]
-    fn test_sanitize_nesting_fix() {
-        // Bad nesting
-        assert_eq!(sanitize_body_markup("<b><i>Text</b>"), "<b><i>Text</i></b>");
-        // Extra closing tag
-        assert_eq!(sanitize_body_markup("Text</b>"), "Text");
+        for (name, input, expected) in cases {
+            assert_eq!(sanitize_body_markup(input), expected, "{name}");
+        }
     }
 }
