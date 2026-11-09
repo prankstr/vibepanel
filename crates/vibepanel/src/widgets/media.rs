@@ -252,61 +252,33 @@ fn template_elements_for_orientation(template: &str, is_vertical: bool) -> Vec<T
 }
 
 /// Render all non-widget template elements into a single string.
-/// Literals (separators) are only included if both adjacent text tokens have values.
+/// Missing tokens drop out, and a literal only shows between two values. When a missing
+/// token leaves two literals next to each other, the later one is kept.
 fn render_text_from_elements(elements: &[TemplateElement], snapshot: &MediaSnapshot) -> String {
-    // First, resolve all token values
-    let resolved: Vec<Option<String>> = elements
-        .iter()
-        .map(|el| match el {
-            TemplateElement::Widget(_) => None,
-            TemplateElement::TextToken(token) => {
-                let val = token.value(snapshot);
-                if val.is_empty() { None } else { Some(val) }
-            }
-            TemplateElement::Literal(s) => Some(s.clone()),
-        })
-        .collect();
-
     let mut result = String::new();
+    let mut separator: Option<&str> = None;
 
-    for (idx, element) in elements.iter().enumerate() {
+    for element in elements {
         match element {
             TemplateElement::Widget(_) => {}
-            TemplateElement::TextToken(_) => {
-                if let Some(ref val) = resolved[idx] {
-                    result.push_str(val);
+            TemplateElement::Literal(literal) => separator = Some(literal),
+            TemplateElement::TextToken(token) => {
+                let value = token.value(snapshot);
+                if value.is_empty() {
+                    continue;
                 }
-            }
-            TemplateElement::Literal(_) => {
-                // Only include literal if there's a non-empty text token before AND after
-                let has_content_before = resolved[..idx]
-                    .iter()
-                    .rev()
-                    .find(|r| !matches!(r, Some(s) if is_literal_str(s)))
-                    .is_some_and(|r| r.is_some());
-
-                let has_content_after = resolved[idx + 1..]
-                    .iter()
-                    .find(|r| !matches!(r, Some(s) if is_literal_str(s)))
-                    .is_some_and(|r| r.is_some());
-
-                if has_content_before
-                    && has_content_after
-                    && let Some(ref val) = resolved[idx]
+                if !result.is_empty()
+                    && let Some(separator) = separator
                 {
-                    result.push_str(val);
+                    result.push_str(separator);
                 }
+                separator = None;
+                result.push_str(&value);
             }
         }
     }
 
     result.trim().to_string()
-}
-
-/// Check if a string looks like a literal (whitespace and/or punctuation only).
-fn is_literal_str(s: &str) -> bool {
-    s.chars()
-        .all(|c| c.is_whitespace() || c.is_ascii_punctuation() || "–—‒•".contains(c))
 }
 
 fn has_text(element: &TemplateElement) -> bool {
@@ -1460,6 +1432,13 @@ mod tests {
         snapshot_artist.metadata.artist = Some("Artist".to_string());
         let result = render_text_from_elements(&elements, &snapshot_artist);
         assert_eq!(result, "Artist");
+
+        // Missing middle token - one separator stays between its neighbours
+        let elements = parse_template("{artist} - {album} - {title}");
+        let mut snapshot_no_album = snapshot_artist.clone();
+        snapshot_no_album.metadata.title = Some("Song".to_string());
+        let result = render_text_from_elements(&elements, &snapshot_no_album);
+        assert_eq!(result, "Artist - Song");
     }
 
     #[test]

@@ -31,7 +31,7 @@
 
 use crate::services::config_manager::ConfigManager;
 use gtk4::prelude::*;
-use vibepanel_core::config::WidgetEntry;
+use vibepanel_core::config::{WidgetEntry, spacer_width};
 
 use crate::styles::widget as wgt;
 use crate::widgets::{WidgetConfig, warn_unknown_options};
@@ -50,11 +50,7 @@ impl WidgetConfig for SpacerConfig {
     fn from_entry(entry: &WidgetEntry) -> Self {
         warn_unknown_options("spacer", entry, &["width"]);
 
-        let width = entry
-            .options
-            .get("width")
-            .and_then(|v| v.as_integer())
-            .and_then(|n| u32::try_from(n).ok());
+        let width = entry.options.get("width").and_then(spacer_width);
 
         SpacerConfig { width }
     }

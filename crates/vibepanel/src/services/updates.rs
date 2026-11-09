@@ -236,9 +236,9 @@ impl UpdatesService {
 
     fn schedule_periodic_checks(this: &Rc<Self>) {
         let this_weak = Rc::downgrade(this);
-        let interval = this.check_interval.get();
+        let interval = u32::try_from(this.check_interval.get()).unwrap_or(u32::MAX);
 
-        let source_id = glib::timeout_add_seconds_local(interval as u32, move || {
+        let source_id = glib::timeout_add_seconds_local(interval, move || {
             if let Some(this) = this_weak.upgrade() {
                 Self::run_scheduled_check(&this);
                 glib::ControlFlow::Continue
@@ -718,7 +718,9 @@ fn parse_checkupdates_output(output: &str) -> Vec<UpdateInfo> {
 
     for line in output.lines() {
         let line = line.trim();
-        if line.is_empty() {
+        // pacman -Qu and paru -Qua mark ignored packages with a translated "[ignored]".
+        // Skip any bracketed note, as checkupdates does.
+        if line.is_empty() || line.contains('[') {
             continue;
         }
 
@@ -834,11 +836,17 @@ Nothing to do.
 linux 6.5.9.arch2-1 -> 6.6.1.arch1-1
 linux-headers 6.5.9.arch2-1 -> 6.6.1.arch1-1
 firefox 119.0-1 -> 120.0-1
+nvidia 545.29.02-1 -> 550.40.07-1 [ignored]
+mesa 23.2.1-1 -> 23.3.0-1 [ignoriert]
 "#;
 
         let result = parse_checkupdates_output(output);
 
-        assert_eq!(result.len(), 3);
+        assert_eq!(
+            result.len(),
+            3,
+            "ignored packages, in any language, are skipped"
+        );
         assert_eq!(result[0].name, "linux");
         assert_eq!(result[2].name, "firefox");
     }

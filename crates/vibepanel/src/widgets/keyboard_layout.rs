@@ -165,6 +165,18 @@ fn extract_short_name(layout_name: &str) -> String {
             }
 
             let base = layout_name[..start].trim();
+
+            // "English (US, intl., with dead keys)": the country code before the
+            // comma tells US and UK apart. Other languages put the layout they
+            // build on there instead ("Russian (US, phonetic)"), so skip them.
+            if base.eq_ignore_ascii_case("English")
+                && let Some((first, _)) = inner.split_once(',')
+                && (2..=3).contains(&first.len())
+                && first.chars().all(|c| c.is_ascii_uppercase())
+            {
+                return first.to_string();
+            }
+
             if !base.is_empty() {
                 if let Some(code) = layout_names::short_code_from_language(base) {
                     return code.to_string();
@@ -298,6 +310,18 @@ mod tests {
         assert_eq!(extract_short_name("Swedish (no dead keys)"), "SE");
         assert_eq!(extract_short_name("German (with AltGr dead keys)"), "DE");
         assert_eq!(extract_short_name("French (alt.)"), "alt.");
+        // A leading country code wins, and English variants without one are US.
+        assert_eq!(
+            extract_short_name("English (US, intl., with dead keys)"),
+            "US"
+        );
+        assert_eq!(extract_short_name("English (UK, extended, Windows)"), "UK");
+        assert_eq!(
+            extract_short_name("English (intl., with AltGr dead keys)"),
+            "US"
+        );
+        // Other languages name their base layout first; the language still wins.
+        assert_eq!(extract_short_name("Russian (US, phonetic)"), "RU");
         // Single-word variants are still treated as short codes.
         assert_eq!(extract_short_name("German (Dvorak)"), "Dvorak");
         assert_eq!(extract_short_name("Russian (phonetic)"), "phonetic");
