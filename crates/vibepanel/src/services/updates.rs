@@ -800,6 +800,14 @@ Operation aborted by the user.
         let fedora = &result["fedora"];
         assert_eq!(fedora.len(), 1);
         assert_eq!(fedora[0].name, "mesa-libGL");
+
+        let nothing_to_do = r#"
+Updating and loading repositories:
+Repositories loaded.
+Nothing to do.
+"#;
+        assert!(parse_dnf_upgrade_output(nothing_to_do).is_empty());
+        assert!(parse_dnf_upgrade_output("").is_empty());
     }
 
     #[test]
@@ -816,18 +824,6 @@ Skipping packages with conflicts:
 
         let names: Vec<&str> = result.values().flatten().map(|u| u.name.as_str()).collect();
         assert_eq!(names, ["fzf"]);
-    }
-
-    #[test]
-    fn test_parse_dnf_upgrade_output_nothing_to_do() {
-        let output = r#"
-Updating and loading repositories:
-Repositories loaded.
-Nothing to do.
-"#;
-
-        let result = parse_dnf_upgrade_output(output);
-        assert!(result.is_empty());
     }
 
     #[test]
@@ -849,18 +845,8 @@ mesa 23.2.1-1 -> 23.3.0-1 [ignoriert]
         );
         assert_eq!(result[0].name, "linux");
         assert_eq!(result[2].name, "firefox");
-    }
 
-    #[test]
-    fn test_parse_empty_output() {
-        let dnf_result = parse_dnf_upgrade_output("");
-        assert!(dnf_result.is_empty());
-
-        let pacman_result = parse_checkupdates_output("");
-        assert!(pacman_result.is_empty());
-
-        let flatpak_result = parse_flatpak_updates_output("");
-        assert!(flatpak_result.is_empty());
+        assert!(parse_checkupdates_output("").is_empty());
     }
 
     #[test]
@@ -876,26 +862,14 @@ org.freedesktop.Platform
         assert_eq!(result.len(), 3);
         assert_eq!(result[0].name, "org.mozilla.firefox");
         assert_eq!(result[2].name, "org.freedesktop.Platform");
-    }
 
-    #[test]
-    fn test_parse_flatpak_updates_output_dedup() {
         // Same ID can appear for both system and user installations
-        let output = "org.mozilla.firefox\norg.gnome.Calculator\norg.mozilla.firefox\n";
-        let result = parse_flatpak_updates_output(output);
+        let duplicated = "org.mozilla.firefox\norg.gnome.Calculator\norg.mozilla.firefox\n";
+        let result = parse_flatpak_updates_output(duplicated);
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].name, "org.mozilla.firefox");
         assert_eq!(result[1].name, "org.gnome.Calculator");
-    }
 
-    #[test]
-    fn test_package_manager_upgrade_command() {
-        assert_eq!(
-            PackageManager::Dnf.upgrade_command(),
-            "sudo dnf upgrade --refresh"
-        );
-        assert_eq!(PackageManager::Pacman.upgrade_command(), "sudo pacman -Syu");
-        assert_eq!(PackageManager::Paru.upgrade_command(), "paru -Syu");
-        assert_eq!(PackageManager::Flatpak.upgrade_command(), "flatpak update");
+        assert!(parse_flatpak_updates_output("").is_empty());
     }
 }

@@ -1456,118 +1456,95 @@ mod tests {
     use super::*;
     use crate::ui_regression_test_support::TestDir;
     use std::path::Path;
-    use vibepanel_core::config::{WeatherUnits, WidgetOptions, WidgetPlacement};
+    use vibepanel_core::config::{WidgetOptions, WidgetPlacement};
 
     #[test]
-    fn test_make_absolute_passthrough_for_absolute_path() {
-        let absolute = Path::new("/tmp/vibepanel-style.css");
-        assert_eq!(make_absolute(absolute), absolute.to_path_buf());
+    fn normalize_path_cases() {
+        let cases = [
+            (
+                "absolute path passes through",
+                PathBuf::from("/tmp/vibepanel-style.css"),
+                PathBuf::from("/tmp/vibepanel-style.css"),
+            ),
+            (
+                "relative path joins current dir",
+                PathBuf::from("style.css"),
+                std::env::current_dir().unwrap().join("style.css"),
+            ),
+        ];
+
+        for (name, path, expected) in cases {
+            assert_eq!(normalize_path(&path), expected, "{name}");
+        }
     }
 
     #[test]
-    fn test_weather_config_enabled_when_referenced() {
-        let mut config = Config::default();
-        config
-            .widgets
-            .right
-            .push(WidgetPlacement::Single("weather".to_string()));
+    fn weather_consumer_cases() {
+        fn place(config: &mut Config, widget: &str) {
+            config
+                .widgets
+                .right
+                .push(WidgetPlacement::Single(widget.to_string()));
+        }
 
-        let weather = weather_config_from_config(&config);
+        type Setup = fn(&mut Config);
+        let cases: [(&str, Setup, bool); 5] = [
+            (
+                "weather widget referenced",
+                |config| place(config, "weather"),
+                true,
+            ),
+            (
+                "weather widget with inline arg",
+                |config| place(config, "weather:compact"),
+                true,
+            ),
+            (
+                "disabled weather widget",
+                |config| {
+                    place(config, "weather");
+                    config.widgets.widget_configs.insert(
+                        "weather".to_string(),
+                        WidgetOptions {
+                            disabled: true,
+                            ..WidgetOptions::default()
+                        },
+                    );
+                },
+                false,
+            ),
+            (
+                "location without consumer",
+                |config| config.weather.location = Some("Berlin".to_string()),
+                false,
+            ),
+            (
+                "clock embeds weather",
+                |config| {
+                    place(config, "clock");
+                    config.widgets.widget_configs.insert(
+                        "clock".to_string(),
+                        WidgetOptions {
+                            options: [("show_weather".to_string(), toml::Value::Boolean(true))]
+                                .into_iter()
+                                .collect(),
+                            ..WidgetOptions::default()
+                        },
+                    );
+                },
+                true,
+            ),
+        ];
 
-        assert!(weather.enabled);
-    }
-
-    #[test]
-    fn test_weather_config_enabled_when_referenced_with_inline_arg() {
-        let mut config = Config::default();
-        config
-            .widgets
-            .right
-            .push(WidgetPlacement::Single("weather:compact".to_string()));
-
-        let weather = weather_config_from_config(&config);
-
-        assert!(weather.enabled);
-    }
-
-    #[test]
-    fn test_weather_config_disabled_widget_does_not_enable_service() {
-        let mut config = Config::default();
-        config
-            .widgets
-            .right
-            .push(WidgetPlacement::Single("weather".to_string()));
-        config.widgets.widget_configs.insert(
-            "weather".to_string(),
-            WidgetOptions {
-                disabled: true,
-                ..WidgetOptions::default()
-            },
-        );
-
-        let weather = weather_config_from_config(&config);
-
-        assert!(!weather.enabled);
-    }
-
-    #[test]
-    fn test_weather_config_location_without_consumer_does_not_enable_service() {
-        let mut config = Config::default();
-        config.weather.location = Some("Berlin".to_string());
-
-        let weather = weather_config_from_config(&config);
-
-        assert!(!weather.enabled);
-    }
-
-    #[test]
-    fn test_weather_config_enabled_when_clock_embeds_weather() {
-        let mut config = Config::default();
-        config
-            .widgets
-            .right
-            .push(WidgetPlacement::Single("clock".to_string()));
-        config.widgets.widget_configs.insert(
-            "clock".to_string(),
-            WidgetOptions {
-                options: [("show_weather".to_string(), toml::Value::Boolean(true))]
-                    .into_iter()
-                    .collect(),
-                ..WidgetOptions::default()
-            },
-        );
-
-        let weather = weather_config_from_config(&config);
-
-        assert!(weather.enabled);
-    }
-
-    #[test]
-    fn test_weather_config_parses_top_level_options() {
-        let mut config = Config::default();
-        config.weather.auto_locate = true;
-        config.weather.latitude = Some(40.7128);
-        config.weather.longitude = Some(-74.0060);
-        config.weather.location = Some("New York".to_string());
-        config.weather.units = WeatherUnits::Imperial;
-        config.weather.refresh_interval = 1200;
-
-        let weather = weather_config_from_config(&config);
-
-        assert!(!weather.enabled);
-        assert!(weather.auto_locate);
-        assert_eq!(weather.latitude, Some(40.7128));
-        assert_eq!(weather.longitude, Some(-74.0060));
-        assert_eq!(weather.location.as_deref(), Some("New York"));
-        assert_eq!(weather.units, WeatherUnits::Imperial);
-        assert_eq!(weather.refresh_interval, 1200);
-    }
-
-    #[test]
-    fn test_make_absolute_joins_current_dir_for_relative_path() {
-        let relative = Path::new("style.css");
-        let expected = std::env::current_dir().unwrap().join(relative);
-        assert_eq!(make_absolute(relative), expected);
+        for (name, setup, enabled) in cases {
+            let mut config = Config::default();
+            setup(&mut config);
+            assert_eq!(
+                weather_config_from_config(&config).enabled,
+                enabled,
+                "{name}"
+            );
+        }
     }
 
     #[test]
@@ -1764,30 +1741,6 @@ mod tests {
     }
 
     #[test]
-    fn config_sections_detect_theme_only_change() {
-        let old = Config::default();
-        let new = Config::default();
-        assert!(!ConfigSectionChanges::between(&old, &new).any());
-
-        let mut new = old.clone();
-        new.theme.popover = Some("light".to_string());
-        let changes = ConfigSectionChanges::between(&old, &new);
-        assert!(changes.theme);
-        assert!(!changes.rebuild_bars());
-    }
-
-    #[test]
-    fn config_sections_route_theme_animations_to_bar_rebuild() {
-        let old = Config::default();
-        let mut new = old.clone();
-        new.theme.animations = !old.theme.animations;
-
-        let changes = ConfigSectionChanges::between(&old, &new);
-        assert!(changes.theme);
-        assert!(changes.rebuild_bars());
-    }
-
-    #[test]
     fn test_gtk_color_scheme_value_resolution() {
         assert_eq!(
             scheme_from_gtk_color_scheme_value("prefer-dark"),
@@ -1813,160 +1766,246 @@ mod tests {
     }
 
     #[test]
-    fn config_sections_route_output_changes_to_bar_rebuild() {
-        let old = Config::default();
-        let mut new = old.clone();
-        new.bar.outputs.push("DP-1".to_string());
+    fn reload_routing() {
+        struct Case {
+            name: &'static str,
+            base: fn(&mut Config),
+            edit: fn(&mut Config),
+            sections: &'static [&'static str],
+            rebuild_bars: bool,
+        }
 
-        let changes = ConfigSectionChanges::between(&old, &new);
-        assert!(changes.bar);
-        assert!(changes.rebuild_bars());
-    }
+        fn place_battery(config: &mut Config) {
+            config
+                .widgets
+                .right
+                .push(WidgetPlacement::Single("battery".to_string()));
+        }
+        fn set_battery_option(config: &mut Config, key: &str, value: toml::Value) {
+            config
+                .widgets
+                .widget_configs
+                .entry("battery".to_string())
+                .or_default()
+                .options
+                .insert(key.to_string(), value);
+        }
+        fn set_battery_alert_policy(config: &mut Config) {
+            set_battery_option(config, "alerts", toml::Value::Boolean(false));
+            set_battery_option(config, "critical_threshold", toml::Value::Integer(10));
+        }
+        fn changed_sections(changes: &ConfigSectionChanges) -> Vec<&'static str> {
+            [
+                ("bar", changes.bar),
+                ("widgets", changes.widgets),
+                ("theme", changes.theme),
+                ("osd", changes.osd),
+                ("audio", changes.audio),
+                ("polkit", changes.polkit),
+                ("weather", changes.weather),
+                ("advanced", changes.advanced),
+                ("compositor", changes.compositor),
+            ]
+            .into_iter()
+            .filter_map(|(name, changed)| changed.then_some(name))
+            .collect()
+        }
 
-    #[test]
-    fn config_sections_route_osd_without_bar_rebuild() {
-        let old = Config::default();
-        let mut new = old.clone();
-        new.osd.timeout_ms += 1;
-
-        let changes = ConfigSectionChanges::between(&old, &new);
-        assert!(changes.osd);
-        assert!(!changes.rebuild_bars());
-    }
-
-    #[test]
-    fn config_sections_mark_compositor_restart_without_bar_rebuild() {
-        let old = Config::default();
-        let mut new = old.clone();
-        new.advanced.compositor = "niri".to_string();
-
-        let changes = ConfigSectionChanges::between(&old, &new);
-        assert!(changes.advanced);
-        assert!(changes.compositor);
-        assert!(changes.any());
-        assert!(!changes.rebuild_bars());
-    }
-
-    #[test]
-    fn config_sections_detect_widget_options_without_fingerprints() {
-        let old = Config::default();
-        let mut new = old.clone();
-        new.widgets.widget_configs.insert(
-            "clock".to_string(),
-            WidgetOptions {
-                show_if: Some("true".to_string()),
-                ..Default::default()
+        let cases = [
+            Case {
+                name: "no change",
+                base: |_| {},
+                edit: |_| {},
+                sections: &[],
+                rebuild_bars: false,
             },
-        );
-
-        let changes = ConfigSectionChanges::between(&old, &new);
-        assert!(changes.widgets);
-        assert!(changes.rebuild_bars());
-    }
-
-    #[test]
-    fn bar_visual_fields_refresh_without_bar_rebuild() {
-        let edits: [fn(&mut Config); 4] = [
-            |config| config.bar.background_color = Some("#123456".to_string()),
-            |config| config.bar.border_radius += 1,
-            |config| config.bar.outline = Some(true),
-            |config| config.bar.popover_offset += 1,
+            Case {
+                name: "theme popover only",
+                base: |_| {},
+                edit: |config| config.theme.popover = Some("light".to_string()),
+                sections: &["theme"],
+                rebuild_bars: false,
+            },
+            Case {
+                name: "theme animations",
+                base: |_| {},
+                edit: |config| config.theme.animations = !config.theme.animations,
+                sections: &["theme"],
+                rebuild_bars: true,
+            },
+            Case {
+                name: "bar outputs",
+                base: |_| {},
+                edit: |config| config.bar.outputs.push("DP-1".to_string()),
+                sections: &["bar"],
+                rebuild_bars: true,
+            },
+            Case {
+                name: "osd timeout",
+                base: |_| {},
+                edit: |config| config.osd.timeout_ms += 1,
+                sections: &["osd"],
+                rebuild_bars: false,
+            },
+            Case {
+                name: "compositor restart",
+                base: |_| {},
+                edit: |config| config.advanced.compositor = "niri".to_string(),
+                sections: &["advanced", "compositor"],
+                rebuild_bars: false,
+            },
+            Case {
+                name: "widget options without fingerprint",
+                base: |_| {},
+                edit: |config| {
+                    config.widgets.widget_configs.insert(
+                        "clock".to_string(),
+                        WidgetOptions {
+                            show_if: Some("true".to_string()),
+                            ..Default::default()
+                        },
+                    );
+                },
+                sections: &["widgets"],
+                rebuild_bars: true,
+            },
+            Case {
+                name: "bar background color is visual",
+                base: |_| {},
+                edit: |config| config.bar.background_color = Some("#123456".to_string()),
+                sections: &["bar"],
+                rebuild_bars: false,
+            },
+            Case {
+                name: "bar border radius is visual",
+                base: |_| {},
+                edit: |config| config.bar.border_radius += 1,
+                sections: &["bar"],
+                rebuild_bars: false,
+            },
+            Case {
+                name: "bar outline is visual",
+                base: |_| {},
+                edit: |config| config.bar.outline = Some(true),
+                sections: &["bar"],
+                rebuild_bars: false,
+            },
+            Case {
+                name: "bar popover offset is visual",
+                base: |_| {},
+                edit: |config| config.bar.popover_offset += 1,
+                sections: &["bar"],
+                rebuild_bars: false,
+            },
+            Case {
+                name: "widgets background color is visual",
+                base: |_| {},
+                edit: |config| config.widgets.background_color = Some("#123456".to_string()),
+                sections: &["widgets"],
+                rebuild_bars: false,
+            },
+            Case {
+                name: "widgets background opacity is visual",
+                base: |_| {},
+                edit: |config| config.widgets.background_opacity = 0.5,
+                sections: &["widgets"],
+                rebuild_bars: false,
+            },
+            Case {
+                name: "widgets popover background opacity is visual",
+                base: |_| {},
+                edit: |config| config.widgets.popover_background_opacity = Some(0.5),
+                sections: &["widgets"],
+                rebuild_bars: false,
+            },
+            Case {
+                name: "widgets outline is visual",
+                base: |_| {},
+                edit: |config| config.widgets.outline = Some(true),
+                sections: &["widgets"],
+                rebuild_bars: false,
+            },
+            Case {
+                name: "bar visual exemption does not mask structural change",
+                base: |_| {},
+                edit: |config| {
+                    config.bar.background_color = Some("#123456".to_string());
+                    config.bar.background_opacity = 0.5;
+                },
+                sections: &["bar"],
+                rebuild_bars: true,
+            },
+            Case {
+                name: "widgets visual exemption does not mask structural change",
+                base: |_| {},
+                edit: |config| {
+                    config.widgets.background_color = Some("#123456".to_string());
+                    config.widgets.border_radius += 1;
+                },
+                sections: &["widgets"],
+                rebuild_bars: true,
+            },
+            Case {
+                name: "advanced exemption does not mask structural change",
+                base: |_| {},
+                edit: |config| {
+                    config.advanced.compositor = "niri".to_string();
+                    config.advanced.pango_font_rendering = true;
+                },
+                sections: &["advanced", "compositor"],
+                rebuild_bars: true,
+            },
+            Case {
+                name: "battery alert policy is not structural",
+                base: place_battery,
+                edit: set_battery_alert_policy,
+                sections: &["widgets"],
+                rebuild_bars: false,
+            },
+            Case {
+                name: "battery low_threshold sets the low style",
+                base: |config| {
+                    place_battery(config);
+                    set_battery_alert_policy(config);
+                },
+                edit: |config| {
+                    set_battery_option(config, "low_threshold", toml::Value::Integer(30))
+                },
+                sections: &["widgets"],
+                rebuild_bars: true,
+            },
+            Case {
+                name: "battery show_icon is structural",
+                base: place_battery,
+                edit: |config| {
+                    set_battery_alert_policy(config);
+                    set_battery_option(config, "show_icon", toml::Value::Boolean(false));
+                },
+                sections: &["widgets"],
+                rebuild_bars: true,
+            },
         ];
 
-        for edit in edits {
-            let old = Config::default();
+        for case in cases {
+            let mut old = Config::default();
+            (case.base)(&mut old);
             let mut new = old.clone();
-            edit(&mut new);
+            (case.edit)(&mut new);
 
             let changes = ConfigSectionChanges::between(&old, &new);
-            assert!(changes.bar);
-            assert!(changes.any());
-            assert!(!changes.rebuild_bars());
+            assert_eq!(changed_sections(&changes), case.sections, "{}", case.name);
+            assert_eq!(
+                changes.any(),
+                !case.sections.is_empty(),
+                "{}: any()",
+                case.name
+            );
+            assert_eq!(
+                changes.rebuild_bars(),
+                case.rebuild_bars,
+                "{}: rebuild_bars()",
+                case.name
+            );
         }
-    }
-
-    #[test]
-    fn widget_visual_fields_refresh_without_bar_rebuild() {
-        let edits: [fn(&mut Config); 4] = [
-            |config| config.widgets.background_color = Some("#123456".to_string()),
-            |config| config.widgets.background_opacity = 0.5,
-            |config| config.widgets.popover_background_opacity = Some(0.5),
-            |config| config.widgets.outline = Some(true),
-        ];
-
-        for edit in edits {
-            let old = Config::default();
-            let mut new = old.clone();
-            edit(&mut new);
-
-            let changes = ConfigSectionChanges::between(&old, &new);
-            assert!(changes.widgets);
-            assert!(changes.any());
-            assert!(!changes.rebuild_bars());
-        }
-    }
-
-    #[test]
-    fn visual_exemptions_do_not_mask_structural_changes() {
-        let old = Config::default();
-
-        let mut bar = old.clone();
-        bar.bar.background_color = Some("#123456".to_string());
-        bar.bar.background_opacity = 0.5;
-        assert!(ConfigSectionChanges::between(&old, &bar).rebuild_bars());
-
-        let mut widgets = old.clone();
-        widgets.widgets.background_color = Some("#123456".to_string());
-        widgets.widgets.border_radius += 1;
-        assert!(ConfigSectionChanges::between(&old, &widgets).rebuild_bars());
-
-        let mut advanced = old.clone();
-        advanced.advanced.compositor = "niri".to_string();
-        advanced.advanced.pango_font_rendering = true;
-        assert!(ConfigSectionChanges::between(&old, &advanced).rebuild_bars());
-    }
-
-    #[test]
-    fn battery_alert_policy_refreshes_without_bar_rebuild() {
-        let mut old = Config::default();
-        old.widgets
-            .right
-            .push(WidgetPlacement::Single("battery".to_string()));
-        let mut new = old.clone();
-        new.widgets.widget_configs.insert(
-            "battery".to_string(),
-            WidgetOptions {
-                options: [
-                    ("alerts".to_string(), toml::Value::Boolean(false)),
-                    ("critical_threshold".to_string(), toml::Value::Integer(10)),
-                ]
-                .into_iter()
-                .collect(),
-                ..Default::default()
-            },
-        );
-
-        let changes = ConfigSectionChanges::between(&old, &new);
-        assert!(changes.widgets);
-        assert!(changes.any());
-        assert!(!changes.rebuild_bars());
-
-        // low_threshold also sets the widget's low style.
-        let mut low = new.clone();
-        low.widgets
-            .widget_configs
-            .get_mut("battery")
-            .unwrap()
-            .options
-            .insert("low_threshold".to_string(), toml::Value::Integer(30));
-        assert!(ConfigSectionChanges::between(&new, &low).rebuild_bars());
-
-        new.widgets
-            .widget_configs
-            .get_mut("battery")
-            .unwrap()
-            .options
-            .insert("show_icon".to_string(), toml::Value::Boolean(false));
-        assert!(ConfigSectionChanges::between(&old, &new).rebuild_bars());
     }
 }

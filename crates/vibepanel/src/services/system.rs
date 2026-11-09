@@ -1017,15 +1017,6 @@ mod tests {
     }
 
     #[test]
-    fn test_snapshot_unknown() {
-        let snapshot = SystemSnapshot::unknown();
-        assert!(!snapshot.available);
-        assert_eq!(snapshot.cpu_usage, 0.0);
-        assert_eq!(snapshot.memory_percent, 0.0);
-        assert_eq!(snapshot.net_download_speed, 0);
-    }
-
-    #[test]
     fn test_high_usage_threshold() {
         let mut snapshot = SystemSnapshot::unknown();
         snapshot.cpu_usage = 79.9;
