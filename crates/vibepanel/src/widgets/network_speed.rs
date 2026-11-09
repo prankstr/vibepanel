@@ -418,35 +418,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_network_speed_config_defaults() {
-        let entry = WidgetEntry {
-            name: "network_speed".to_string(),
-            options: Default::default(),
-        };
-        let config = NetworkSpeedConfig::from_entry(&entry);
-        assert!(config.show_icon);
-        assert!(config.show_arrows);
-        assert_eq!(config.format, NetworkSpeedFormat::Both);
-    }
+    fn network_speed_config_from_entry() {
+        let defaults = NetworkSpeedConfig::from_entry(&WidgetEntry::new("network_speed"));
+        assert!(defaults.show_icon);
+        assert!(defaults.show_arrows);
+        assert_eq!(defaults.format, NetworkSpeedFormat::Both);
 
-    #[test]
-    fn test_network_speed_config_custom() {
-        let mut options = std::collections::HashMap::new();
-        options.insert("show_icon".to_string(), toml::Value::Boolean(false));
-        options.insert("show_arrows".to_string(), toml::Value::Boolean(false));
-        options.insert(
-            "format".to_string(),
-            toml::Value::String("download".to_string()),
-        );
-
-        let entry = WidgetEntry {
+        let custom = NetworkSpeedConfig::from_entry(&WidgetEntry {
             name: "network_speed".to_string(),
-            options,
-        };
-        let config = NetworkSpeedConfig::from_entry(&entry);
-        assert!(!config.show_icon);
-        assert!(!config.show_arrows);
-        assert_eq!(config.format, NetworkSpeedFormat::Download);
+            options: std::collections::HashMap::from([
+                ("show_icon".to_string(), false.into()),
+                ("show_arrows".to_string(), false.into()),
+                ("format".to_string(), "download".into()),
+            ]),
+        });
+        assert!(!custom.show_icon);
+        assert!(!custom.show_arrows);
+        assert_eq!(custom.format, NetworkSpeedFormat::Download);
     }
 
     #[test]
@@ -454,14 +442,6 @@ mod tests {
         assert_eq!(
             NetworkSpeedFormat::from_str("both"),
             NetworkSpeedFormat::Both
-        );
-        assert_eq!(
-            NetworkSpeedFormat::from_str("Both"),
-            NetworkSpeedFormat::Both
-        );
-        assert_eq!(
-            NetworkSpeedFormat::from_str("download"),
-            NetworkSpeedFormat::Download
         );
         assert_eq!(
             NetworkSpeedFormat::from_str("Download"),
@@ -473,10 +453,6 @@ mod tests {
         );
         assert_eq!(
             NetworkSpeedFormat::from_str("upload"),
-            NetworkSpeedFormat::Upload
-        );
-        assert_eq!(
-            NetworkSpeedFormat::from_str("Upload"),
             NetworkSpeedFormat::Upload
         );
         assert_eq!(

@@ -1278,203 +1278,193 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_template_widget_tokens() {
-        let elements = parse_template("{art}{icon}{player_icon}");
-        assert_eq!(elements.len(), 3);
-        assert!(matches!(
-            elements[0],
-            TemplateElement::Widget(WidgetToken::Art)
-        ));
-        assert!(matches!(
-            elements[1],
-            TemplateElement::Widget(WidgetToken::Icon)
-        ));
-        assert!(matches!(
-            elements[2],
-            TemplateElement::Widget(WidgetToken::PlayerIcon)
-        ));
+    fn parse_template_cases() {
+        use TemplateElement::{Literal, TextToken as Text, Widget};
+
+        let cases = [
+            (
+                "widget tokens",
+                "{art}{icon}{player_icon}",
+                vec![
+                    Widget(WidgetToken::Art),
+                    Widget(WidgetToken::Icon),
+                    Widget(WidgetToken::PlayerIcon),
+                ],
+            ),
+            (
+                "text tokens",
+                "{title} - {artist}",
+                vec![
+                    Text(TextToken::Title),
+                    Literal(" - ".to_string()),
+                    Text(TextToken::Artist),
+                ],
+            ),
+            (
+                "mixed",
+                "{art}{title} - {artist}",
+                vec![
+                    Widget(WidgetToken::Art),
+                    Text(TextToken::Title),
+                    Literal(" - ".to_string()),
+                    Text(TextToken::Artist),
+                ],
+            ),
+            (
+                "literal between tokens",
+                "{art}{artist}{icon} - {title}",
+                vec![
+                    Widget(WidgetToken::Art),
+                    Text(TextToken::Artist),
+                    Widget(WidgetToken::Icon),
+                    Literal(" - ".to_string()),
+                    Text(TextToken::Title),
+                ],
+            ),
+        ];
+
+        for (name, template, expected) in cases {
+            assert_eq!(parse_template(template), expected, "{name}");
+        }
+
+        for (token, expected) in [
+            ("art", Some(WidgetToken::Art)),
+            ("icon", Some(WidgetToken::Icon)),
+            ("player_icon", Some(WidgetToken::PlayerIcon)),
+            ("title", None),
+            ("unknown", None),
+        ] {
+            assert_eq!(WidgetToken::parse(token), expected, "widget token {token}");
+        }
     }
 
     #[test]
-    fn test_parse_template_text_tokens() {
-        let elements = parse_template("{title} - {artist}");
-        assert_eq!(elements.len(), 3);
-        assert!(matches!(
-            elements[0],
-            TemplateElement::TextToken(TextToken::Title)
-        ));
-        assert!(matches!(
-            &elements[1],
-            TemplateElement::Literal(s) if s == " - "
-        ));
-        assert!(matches!(
-            elements[2],
-            TemplateElement::TextToken(TextToken::Artist)
-        ));
+    fn template_elements_for_orientation_cases() {
+        let cases = [
+            (
+                "vertical uses album art and controls",
+                true,
+                [
+                    TemplateElement::Widget(WidgetToken::Art),
+                    TemplateElement::Widget(WidgetToken::Controls),
+                ],
+            ),
+            (
+                "horizontal respects configured template",
+                false,
+                [
+                    TemplateElement::Widget(WidgetToken::PlayerIcon),
+                    TemplateElement::TextToken(TextToken::Title),
+                ],
+            ),
+        ];
+
+        for (name, vertical, expected) in cases {
+            assert_eq!(
+                template_elements_for_orientation("{player_icon}{title}", vertical),
+                expected,
+                "{name}"
+            );
+        }
     }
 
     #[test]
-    fn test_parse_template_mixed() {
-        let elements = parse_template("{art}{title} - {artist}");
-        assert_eq!(elements.len(), 4);
-        assert!(matches!(
-            elements[0],
-            TemplateElement::Widget(WidgetToken::Art)
-        ));
-        assert!(matches!(
-            elements[1],
-            TemplateElement::TextToken(TextToken::Title)
-        ));
-        assert!(matches!(
-            &elements[2],
-            TemplateElement::Literal(s) if s == " - "
-        ));
-        assert!(matches!(
-            elements[3],
-            TemplateElement::TextToken(TextToken::Artist)
-        ));
+    fn compute_text_runs_split_at_widgets() {
+        let cases = [
+            (
+                "controls between text",
+                "{artist}{controls}{title}",
+                vec![
+                    vec![TemplateElement::TextToken(TextToken::Artist)],
+                    vec![TemplateElement::TextToken(TextToken::Title)],
+                ],
+            ),
+            (
+                "inline widget between text",
+                "{controls}{artist} {art}{title}",
+                vec![
+                    vec![
+                        TemplateElement::TextToken(TextToken::Artist),
+                        TemplateElement::Literal(" ".to_string()),
+                    ],
+                    vec![TemplateElement::TextToken(TextToken::Title)],
+                ],
+            ),
+        ];
+
+        for (name, template, expected) in cases {
+            let elements = parse_template(template);
+            let runs: Vec<_> = compute_text_runs(&elements)
+                .into_iter()
+                .map(|run| elements[run].to_vec())
+                .collect();
+            assert_eq!(runs, expected, "{name}");
+        }
     }
 
     #[test]
-    fn test_vertical_template_uses_album_art_and_controls() {
-        let elements = template_elements_for_orientation("{player_icon}{title}", true);
+    fn render_text_from_elements_cases() {
+        let cases = [
+            (
+                "artist and title",
+                "{artist} - {title}",
+                Some("Test Artist"),
+                None,
+                Some("Test Song"),
+                "Test Artist - Test Song",
+            ),
+            (
+                "album and title",
+                "{album}: {title}",
+                Some("Test Artist"),
+                Some("Test Album"),
+                Some("Test Song"),
+                "Test Album: Test Song",
+            ),
+            (
+                "both missing omits separator",
+                "{artist} - {title}",
+                None,
+                None,
+                None,
+                "",
+            ),
+            (
+                "only title omits separator",
+                "{artist} - {title}",
+                None,
+                None,
+                Some("Song"),
+                "Song",
+            ),
+            (
+                "only artist omits separator",
+                "{artist} - {title}",
+                Some("Artist"),
+                None,
+                None,
+                "Artist",
+            ),
+            (
+                "missing middle token keeps one separator (B2)",
+                "{artist} - {album} - {title}",
+                Some("Artist"),
+                None,
+                Some("Song"),
+                "Artist - Song",
+            ),
+        ];
 
-        assert_eq!(
-            elements,
-            [
-                TemplateElement::Widget(WidgetToken::Art),
-                TemplateElement::Widget(WidgetToken::Controls)
-            ]
-        );
-    }
-
-    #[test]
-    fn test_horizontal_template_respects_configured_template() {
-        let elements = template_elements_for_orientation("{player_icon}{title}", false);
-
-        assert_eq!(
-            elements,
-            [
-                TemplateElement::Widget(WidgetToken::PlayerIcon),
-                TemplateElement::TextToken(TextToken::Title)
-            ]
-        );
-    }
-
-    #[test]
-    fn test_compute_text_runs_controls_between_text() {
-        let elements = parse_template("{artist}{controls}{title}");
-        let runs = compute_text_runs(&elements);
-        assert_eq!(runs.len(), 2);
-
-        assert_eq!(
-            elements[runs[0].clone()],
-            [TemplateElement::TextToken(TextToken::Artist)]
-        );
-        assert_eq!(
-            elements[runs[1].clone()],
-            [TemplateElement::TextToken(TextToken::Title)]
-        );
-    }
-
-    #[test]
-    fn test_compute_text_runs_inline_widget_between_text() {
-        let elements = parse_template("{controls}{artist} {art}{title}");
-        let runs = compute_text_runs(&elements);
-        assert_eq!(runs.len(), 2);
-
-        assert_eq!(
-            elements[runs[0].clone()],
-            [
-                TemplateElement::TextToken(TextToken::Artist),
-                TemplateElement::Literal(" ".to_string())
-            ]
-        );
-        assert_eq!(
-            elements[runs[1].clone()],
-            [TemplateElement::TextToken(TextToken::Title)]
-        );
-    }
-
-    #[test]
-    fn test_render_text_from_elements() {
-        let mut snapshot = MediaSnapshot::default();
-        snapshot.metadata.title = Some("Test Song".to_string());
-        snapshot.metadata.artist = Some("Test Artist".to_string());
-
-        let elements = parse_template("{artist} - {title}");
-        let result = render_text_from_elements(&elements, &snapshot);
-        assert_eq!(result, "Test Artist - Test Song");
-
-        snapshot.metadata.album = Some("Test Album".to_string());
-        let elements = parse_template("{album}: {title}");
-        let result = render_text_from_elements(&elements, &snapshot);
-        assert_eq!(result, "Test Album: Test Song");
-    }
-
-    #[test]
-    fn test_render_text_from_elements_missing() {
-        let snapshot = MediaSnapshot::default();
-
-        // Both missing - separator should be omitted
-        let elements = parse_template("{artist} - {title}");
-        let result = render_text_from_elements(&elements, &snapshot);
-        assert_eq!(result, "");
-
-        // Only title present - separator should be omitted
-        let mut snapshot_title = MediaSnapshot::default();
-        snapshot_title.metadata.title = Some("Song".to_string());
-        let result = render_text_from_elements(&elements, &snapshot_title);
-        assert_eq!(result, "Song");
-
-        // Only artist present - separator should be omitted
-        let mut snapshot_artist = MediaSnapshot::default();
-        snapshot_artist.metadata.artist = Some("Artist".to_string());
-        let result = render_text_from_elements(&elements, &snapshot_artist);
-        assert_eq!(result, "Artist");
-
-        // Missing middle token - one separator stays between its neighbours
-        let elements = parse_template("{artist} - {album} - {title}");
-        let mut snapshot_no_album = snapshot_artist.clone();
-        snapshot_no_album.metadata.title = Some("Song".to_string());
-        let result = render_text_from_elements(&elements, &snapshot_no_album);
-        assert_eq!(result, "Artist - Song");
-    }
-
-    #[test]
-    fn test_widget_token_parse() {
-        assert_eq!(WidgetToken::parse("art"), Some(WidgetToken::Art));
-        assert_eq!(WidgetToken::parse("icon"), Some(WidgetToken::Icon));
-        assert_eq!(
-            WidgetToken::parse("player_icon"),
-            Some(WidgetToken::PlayerIcon)
-        );
-        assert_eq!(WidgetToken::parse("title"), None);
-        assert_eq!(WidgetToken::parse("unknown"), None);
-    }
-
-    #[test]
-    fn test_parse_template_literal_and_tokens() {
-        let elements = parse_template("{art}{artist}{icon} - {title}");
-        assert!(matches!(
-            elements[0],
-            TemplateElement::Widget(WidgetToken::Art)
-        ));
-        assert!(matches!(
-            elements[1],
-            TemplateElement::TextToken(TextToken::Artist)
-        ));
-        assert!(matches!(
-            elements[2],
-            TemplateElement::Widget(WidgetToken::Icon)
-        ));
-        assert!(matches!(
-            &elements[3],
-            TemplateElement::Literal(s) if s == " - "
-        ));
-        assert!(matches!(
-            elements[4],
-            TemplateElement::TextToken(TextToken::Title)
-        ));
+        for (name, template, artist, album, title, expected) in cases {
+            let mut snapshot = MediaSnapshot::default();
+            snapshot.metadata.artist = artist.map(str::to_string);
+            snapshot.metadata.album = album.map(str::to_string);
+            snapshot.metadata.title = title.map(str::to_string);
+            assert_eq!(
+                render_text_from_elements(&parse_template(template), &snapshot),
+                expected,
+                "{name}"
+            );
+        }
     }
 }

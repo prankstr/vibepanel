@@ -210,16 +210,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn quantize_scale_maps_animation_endpoints() {
-        assert_eq!(quantize_scale(0.94), 241.0 / QUANT_DENOM);
-        assert_eq!(quantize_scale(1.0), 1.0);
-    }
-
-    #[test]
-    fn quantize_scale_rounds_at_boundary() {
+    fn quantize_scale_cases() {
         let midpoint = 241.5 / QUANT_DENOM;
-        assert_eq!(quantize_scale(midpoint - 1e-6), 241.0 / QUANT_DENOM);
-        assert_eq!(quantize_scale(midpoint), 242.0 / QUANT_DENOM);
-        assert_eq!(quantize_scale(midpoint + 1e-6), 242.0 / QUANT_DENOM);
+        let cases = [
+            ("animation start", 0.94, 241.0 / QUANT_DENOM),
+            ("animation end", 1.0, 1.0),
+            ("just below midpoint", midpoint - 1e-6, 241.0 / QUANT_DENOM),
+            ("midpoint rounds up", midpoint, 242.0 / QUANT_DENOM),
+            ("just above midpoint", midpoint + 1e-6, 242.0 / QUANT_DENOM),
+        ];
+
+        for (name, scale, expected) in cases {
+            assert_eq!(quantize_scale(scale), expected, "{name}");
+        }
     }
 }

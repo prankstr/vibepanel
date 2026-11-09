@@ -388,30 +388,35 @@ mod tests {
     }
 
     #[test]
-    fn test_format_repo_summary() {
-        let snapshot = make_snapshot(vec![
-            ("official", vec!["linux", "firefox"]),
-            ("aur", vec!["paru"]),
-        ]);
+    fn format_repo_summary_counts_all_repos() {
+        let cases = [
+            (
+                "multiple repos",
+                vec![
+                    ("official", vec!["linux", "firefox"]),
+                    ("aur", vec!["paru"]),
+                ],
+                "3 updates",
+            ),
+            (
+                "single repo",
+                vec![("official", vec!["linux", "firefox"])],
+                "2 updates",
+            ),
+            (
+                "single update",
+                vec![("official", vec!["linux"])],
+                "1 update",
+            ),
+        ];
 
-        let summary = format_repo_summary(&snapshot);
-        assert_eq!(summary, "3 updates");
-    }
-
-    #[test]
-    fn test_format_repo_summary_single_repo() {
-        let snapshot = make_snapshot(vec![("official", vec!["linux", "firefox"])]);
-
-        let summary = format_repo_summary(&snapshot);
-        assert_eq!(summary, "2 updates");
-    }
-
-    #[test]
-    fn test_format_repo_summary_single_update() {
-        let snapshot = make_snapshot(vec![("official", vec!["linux"])]);
-
-        let summary = format_repo_summary(&snapshot);
-        assert_eq!(summary, "1 update");
+        for (name, updates, expected) in cases {
+            assert_eq!(
+                format_repo_summary(&make_snapshot(updates)),
+                expected,
+                "{name}"
+            );
+        }
     }
 
     #[test]
@@ -447,17 +452,14 @@ mod tests {
     }
 
     #[test]
-    fn test_build_upgrade_command_flatpak_primary() {
-        let cmd = build_upgrade_command(PackageManager::Flatpak);
-        assert_eq!(cmd, "flatpak update");
-    }
-
-    #[test]
-    fn test_build_upgrade_command_non_flatpak_contains_primary() {
-        // NOTE: The exact output depends on whether /usr/bin/flatpak exists on
-        // the test machine. We only verify the primary command prefix.
-        let cmd = build_upgrade_command(PackageManager::Paru);
-        assert!(cmd.starts_with("paru -Syu"));
+    fn build_upgrade_command_starts_with_primary() {
+        assert_eq!(
+            build_upgrade_command(PackageManager::Flatpak),
+            "flatpak update"
+        );
+        // The non-flatpak output depends on whether /usr/bin/flatpak exists on
+        // the test machine, so only the primary command prefix is checked.
+        assert!(build_upgrade_command(PackageManager::Paru).starts_with("paru -Syu"));
     }
 
     #[test]

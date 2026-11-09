@@ -305,73 +305,75 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_cpu_config_defaults() {
-        let entry = WidgetEntry {
+    fn cpu_config_from_entry() {
+        let defaults = CpuConfig::from_entry(&WidgetEntry::new("cpu"));
+        assert!(defaults.show_icon);
+        assert!(defaults.show_percentage);
+        assert_eq!(defaults.format, CpuFormat::Usage);
+        assert!(defaults.stable_width);
+
+        let custom = CpuConfig::from_entry(&WidgetEntry {
             name: "cpu".to_string(),
-            options: Default::default(),
-        };
-        let config = CpuConfig::from_entry(&entry);
-        assert!(config.show_icon);
-        assert!(config.show_percentage);
-        assert_eq!(config.format, CpuFormat::Usage);
-        assert!(config.stable_width);
+            options: std::collections::HashMap::from([
+                ("show_icon".to_string(), false.into()),
+                ("show_percentage".to_string(), true.into()),
+                ("format".to_string(), "both".into()),
+                ("stable_width".to_string(), false.into()),
+            ]),
+        });
+        assert!(!custom.show_icon);
+        assert!(custom.show_percentage);
+        assert_eq!(custom.format, CpuFormat::Both);
+        assert!(!custom.stable_width);
     }
 
     #[test]
-    fn test_cpu_config_custom() {
-        let mut options = std::collections::HashMap::new();
-        options.insert("show_icon".to_string(), toml::Value::Boolean(false));
-        options.insert("show_percentage".to_string(), toml::Value::Boolean(true));
-        options.insert("stable_width".to_string(), toml::Value::Boolean(false));
-        options.insert(
-            "format".to_string(),
-            toml::Value::String("both".to_string()),
-        );
+    fn format_cpu_label_cases() {
+        let cases = [
+            (
+                "usage horizontal",
+                Some(72.0),
+                CpuFormat::Usage,
+                false,
+                "42%",
+            ),
+            ("usage vertical", Some(72.0), CpuFormat::Usage, true, "42%"),
+            (
+                "both vertical",
+                Some(72.0),
+                CpuFormat::Both,
+                true,
+                "42%\n72°",
+            ),
+            (
+                "temperature vertical",
+                Some(72.0),
+                CpuFormat::Temperature,
+                true,
+                "72°",
+            ),
+            (
+                "temperature unavailable",
+                None,
+                CpuFormat::Temperature,
+                false,
+                "—",
+            ),
+        ];
 
-        let entry = WidgetEntry {
-            name: "cpu".to_string(),
-            options,
-        };
-        let config = CpuConfig::from_entry(&entry);
-        assert!(!config.show_icon);
-        assert!(config.show_percentage);
-        assert_eq!(config.format, CpuFormat::Both);
-        assert!(!config.stable_width);
-    }
-
-    #[test]
-    fn test_format_cpu_label_compacts_vertical() {
-        let snapshot = SystemSnapshot {
-            available: true,
-            cpu_usage: 42.4,
-            cpu_temp: Some(72.0),
-            ..Default::default()
-        };
-        assert_eq!(format_cpu_label(&snapshot, &CpuFormat::Usage, false), "42%");
-        assert_eq!(format_cpu_label(&snapshot, &CpuFormat::Usage, true), "42%");
-        assert_eq!(
-            format_cpu_label(&snapshot, &CpuFormat::Both, true),
-            "42%\n72°"
-        );
-        assert_eq!(
-            format_cpu_label(&snapshot, &CpuFormat::Temperature, true),
-            "72°"
-        );
-
-        let boundary = SystemSnapshot {
-            cpu_usage: 100.0,
-            cpu_temp: Some(100.0),
-            ..snapshot
-        };
-        assert_eq!(format_cpu_label(&boundary, &CpuFormat::Usage, true), "100");
-        assert_eq!(
-            format_cpu_label(&boundary, &CpuFormat::Temperature, true),
-            "100"
-        );
-        assert_eq!(
-            format_cpu_label(&boundary, &CpuFormat::Both, true),
-            "100\n100"
-        );
+        for (name, cpu_temp, format, vertical, expected) in cases {
+            let snapshot = SystemSnapshot {
+                available: true,
+                cpu_usage: 42.4,
+                cpu_temp,
+                ..Default::default()
+            };
+            assert_eq!(
+                format_cpu_label(&snapshot, &format, vertical),
+                expected,
+                "{name}"
+            );
+        }
     }
 
     #[test]
@@ -381,19 +383,5 @@ mod tests {
         assert_eq!(CpuFormat::from_str("temp"), CpuFormat::Temperature);
         assert_eq!(CpuFormat::from_str("both"), CpuFormat::Both);
         assert_eq!(CpuFormat::from_str("unknown"), CpuFormat::Usage);
-    }
-
-    #[test]
-    fn test_format_cpu_label_temperature_unavailable() {
-        let snapshot = SystemSnapshot {
-            available: true,
-            cpu_usage: 76.0,
-            cpu_temp: None,
-            ..Default::default()
-        };
-        assert_eq!(
-            format_cpu_label(&snapshot, &CpuFormat::Temperature, false),
-            "—"
-        );
     }
 }

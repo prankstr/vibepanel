@@ -349,27 +349,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_rounded_pct_value_basic() {
-        assert_eq!(rounded_pct_value(0.0), 0);
-        assert_eq!(rounded_pct_value(12.3), 12);
-        assert_eq!(rounded_pct_value(12.5), 13);
-        assert_eq!(rounded_pct_value(99.9), 100);
-        assert_eq!(rounded_pct_value(150.0), 100);
-        assert_eq!(rounded_pct_value(-5.0), 0);
-    }
+    fn rounded_pct_value_rounds_and_clamps() {
+        let cases = [
+            ("zero", 0.0, 0),
+            ("rounds down", 12.3, 12),
+            ("rounds half up", 12.5, 13),
+            ("rounds up to full", 99.9, 100),
+            ("clamps above 100", 150.0, 100),
+            ("clamps below 0", -5.0, 0),
+            ("NaN", f64::NAN, 0),
+            ("infinity", f64::INFINITY, 100),
+            ("negative infinity", f64::NEG_INFINITY, 0),
+        ];
 
-    #[test]
-    fn test_rounded_pct_value_non_finite() {
-        assert_eq!(rounded_pct_value(f64::NAN), 0);
-        assert_eq!(rounded_pct_value(f64::INFINITY), 100);
-        assert_eq!(rounded_pct_value(f64::NEG_INFINITY), 0);
-    }
-
-    #[test]
-    fn test_readable_pct() {
-        assert_eq!(readable_pct(0), "0%");
-        assert_eq!(readable_pct(57), "57%");
-        assert_eq!(readable_pct(100), "100%");
+        for (name, value, expected) in cases {
+            assert_eq!(rounded_pct_value(value), expected, "{name}");
+        }
     }
 
     #[test]
@@ -379,24 +374,30 @@ mod tests {
     }
 
     #[test]
-    fn test_battery_icon_name_discharge() {
-        assert_eq!(battery_icon_name(100, false), "battery-full");
-        assert_eq!(battery_icon_name(95, false), "battery-full");
-        assert_eq!(battery_icon_name(85, false), "battery-high");
-        assert_eq!(battery_icon_name(67, false), "battery-medium-high");
-        assert_eq!(battery_icon_name(50, false), "battery-medium");
-        assert_eq!(battery_icon_name(30, false), "battery-medium-low");
-        assert_eq!(battery_icon_name(15, false), "battery-low");
-        assert_eq!(battery_icon_name(5, false), "battery-very-low");
-    }
+    fn battery_icon_name_cases() {
+        let cases = [
+            (100, false, "battery-full"),
+            (95, false, "battery-full"),
+            (85, false, "battery-high"),
+            (67, false, "battery-medium-high"),
+            (50, false, "battery-medium"),
+            (30, false, "battery-medium-low"),
+            (15, false, "battery-low"),
+            (5, false, "battery-very-low"),
+            (95, true, "battery-full-charging"),
+            (65, true, "battery-medium-high-charging"),
+            (50, true, "battery-medium-charging"),
+            (30, true, "battery-medium-low-charging"),
+            (5, true, "battery-very-low-charging"),
+        ];
 
-    #[test]
-    fn test_battery_icon_name_charging() {
-        assert_eq!(battery_icon_name(95, true), "battery-full-charging");
-        assert_eq!(battery_icon_name(65, true), "battery-medium-high-charging");
-        assert_eq!(battery_icon_name(50, true), "battery-medium-charging");
-        assert_eq!(battery_icon_name(30, true), "battery-medium-low-charging");
-        assert_eq!(battery_icon_name(5, true), "battery-very-low-charging");
+        for (percent, charging, expected) in cases {
+            assert_eq!(
+                battery_icon_name(percent, charging),
+                expected,
+                "{percent}% charging={charging}"
+            );
+        }
     }
 
     #[test]

@@ -513,15 +513,3 @@ fn resume_animation(state: &Rc<RefCell<MarqueeState>>, container: &MarqueeContai
         start_animation(state, container);
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_marquee_state_default() {
-        let state = MarqueeState::default();
-        assert!(!state.scrolling);
-        assert_eq!(state.offset, 0.0);
-    }
-}

@@ -954,148 +954,208 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_prepare_art_load_same_url_is_noop() {
-        let mut state = ArtState::new();
-        state.current_url = Some("http://example.com/art.jpg".into());
-        assert!(!state.prepare_art_load(Some("http://example.com/art.jpg"), None));
-        assert_eq!(state.generation, 0);
+    fn prepare_art_load_cases() {
+        const ART: &str = "http://example.com/art.jpg";
+        const OLD: &str = "http://example.com/old.jpg";
+        const NEW: &str = "http://example.com/new.jpg";
+
+        struct Case {
+            name: &'static str,
+            url_before: Option<&'static str>,
+            player_before: Option<&'static str>,
+            url: Option<&'static str>,
+            player: Option<&'static str>,
+            loads: bool,
+            url_after: Option<&'static str>,
+            player_after: Option<&'static str>,
+        }
+
+        let cases = [
+            Case {
+                name: "same url is a no-op",
+                url_before: Some(ART),
+                player_before: None,
+                url: Some(ART),
+                player: None,
+                loads: false,
+                url_after: Some(ART),
+                player_after: None,
+            },
+            Case {
+                name: "none to none is a no-op",
+                url_before: None,
+                player_before: None,
+                url: None,
+                player: None,
+                loads: false,
+                url_after: None,
+                player_after: None,
+            },
+            Case {
+                name: "some to none clears art",
+                url_before: Some(ART),
+                player_before: None,
+                url: None,
+                player: None,
+                loads: true,
+                url_after: None,
+                player_after: None,
+            },
+            Case {
+                name: "none to some loads art",
+                url_before: None,
+                player_before: None,
+                url: Some(ART),
+                player: None,
+                loads: true,
+                url_after: Some(ART),
+                player_after: None,
+            },
+            Case {
+                name: "different url cancels previous load",
+                url_before: Some(OLD),
+                player_before: None,
+                url: Some(NEW),
+                player: None,
+                loads: true,
+                url_after: Some(NEW),
+                player_after: None,
+            },
+            Case {
+                name: "player change to no art clears art",
+                url_before: Some(ART),
+                player_before: Some("spotify"),
+                url: None,
+                player: Some("firefox"),
+                loads: true,
+                url_after: None,
+                player_after: Some("firefox"),
+            },
+            Case {
+                name: "same player with no art clears stale art",
+                url_before: Some(ART),
+                player_before: Some("spotify"),
+                url: None,
+                player: Some("spotify"),
+                loads: true,
+                url_after: None,
+                player_after: Some("spotify"),
+            },
+        ];
+
+        for case in cases {
+            let mut state = ArtState::new();
+            state.current_url = case.url_before.map(String::from);
+            state.current_player_id = case.player_before.map(String::from);
+            let old_cancellable = state.cancellable.clone();
+
+            assert_eq!(
+                state.prepare_art_load(case.url, case.player),
+                case.loads,
+                "{}: loads",
+                case.name
+            );
+            assert_eq!(
+                state.current_url.as_deref(),
+                case.url_after,
+                "{}: current_url",
+                case.name
+            );
+            assert_eq!(
+                state.current_player_id.as_deref(),
+                case.player_after,
+                "{}: current_player_id",
+                case.name
+            );
+            assert_eq!(
+                state.generation,
+                u64::from(case.loads),
+                "{}: generation",
+                case.name
+            );
+            assert_eq!(
+                old_cancellable.is_cancelled(),
+                case.loads,
+                "{}: previous load cancelled",
+                case.name
+            );
+            assert!(
+                !state.cancellable.is_cancelled(),
+                "{}: new load not cancelled",
+                case.name
+            );
+        }
     }
 
     #[test]
-    fn test_prepare_art_load_none_to_none_is_noop() {
-        let mut state = ArtState::new();
-        assert!(!state.prepare_art_load(None, None));
+    fn should_settle_art_url_cases() {
+        let cases = [
+            (
+                "chromium file art",
+                Some("file:///tmp/album-art.jpg"),
+                Some("chromium"),
+                true,
+            ),
+            (
+                "brave file art",
+                Some("file:///tmp/album-art.jpg"),
+                Some("brave"),
+                true,
+            ),
+            ("missing art", None, Some("firefox"), true),
+            (
+                "non-chromium file art",
+                Some("file:///tmp/album-art.jpg"),
+                Some("firefox"),
+                false,
+            ),
+            (
+                "chromium remote art",
+                Some("https://example.com/art.jpg"),
+                Some("chromium"),
+                false,
+            ),
+            (
+                "data uri",
+                Some("data:image/jpeg;base64,aGVsbG8="),
+                None,
+                false,
+            ),
+        ];
+
+        for (name, url, player, expected) in cases {
+            assert_eq!(should_settle_art_url(url, player), expected, "{name}");
+        }
     }
 
     #[test]
-    fn test_prepare_art_load_some_to_none_clears_art() {
-        let mut state = ArtState::new();
-        state.current_url = Some("http://example.com/art.jpg".into());
-        assert!(state.prepare_art_load(None, None));
-        assert_eq!(state.current_url, None);
-    }
+    fn decode_data_uri_cases() {
+        let cases: [(&str, &str, Option<&[u8]>); 5] = [
+            // base64("hello") = "aGVsbG8="
+            (
+                "basic base64",
+                "data:image/jpeg;base64,aGVsbG8=",
+                Some(b"hello"),
+            ),
+            // Guards the `;`-split scan: `base64` is neither the final token nor
+            // lowercase, so a naive `ends_with("base64")` would wrongly reject it.
+            (
+                "base64 token not last and mixed case",
+                "data:image/jpeg;charset=utf-8;BASE64,aGVsbG8=",
+                Some(b"hello"),
+            ),
+            (
+                "percent-encoded is unsupported",
+                "data:image/jpeg,hello",
+                None,
+            ),
+            // Guards the `find(',')?`: without it, `[1..]` would panic.
+            ("no comma", "data:image/jpeg;base64", None),
+            ("empty payload", "data:image/jpeg;base64,", None),
+        ];
 
-    #[test]
-    fn test_prepare_art_load_none_to_some() {
-        let mut state = ArtState::new();
-        assert!(state.prepare_art_load(Some("http://example.com/art.jpg"), None));
-        assert_eq!(
-            state.current_url.as_deref(),
-            Some("http://example.com/art.jpg")
-        );
-    }
-
-    #[test]
-    fn test_prepare_art_load_different_url() {
-        let mut state = ArtState::new();
-        state.current_url = Some("http://example.com/old.jpg".into());
-        assert!(state.prepare_art_load(Some("http://example.com/new.jpg"), None));
-        assert_eq!(state.generation, 1);
-        assert_eq!(
-            state.current_url.as_deref(),
-            Some("http://example.com/new.jpg")
-        );
-    }
-
-    #[test]
-    fn test_prepare_art_load_cancels_previous() {
-        let mut state = ArtState::new();
-        state.current_url = Some("http://example.com/old.jpg".into());
-        let old_cancellable = state.cancellable.clone();
-
-        state.prepare_art_load(Some("http://example.com/new.jpg"), None);
-
-        assert!(old_cancellable.is_cancelled());
-        assert!(!state.cancellable.is_cancelled());
-        assert_eq!(state.generation, 1);
-    }
-
-    #[test]
-    fn test_prepare_art_load_player_change_clears_art() {
-        let mut state = ArtState::new();
-        state.current_url = Some("http://example.com/art.jpg".into());
-        state.current_player_id = Some("spotify".into());
-
-        // Switching to a player with no art should trigger a load (clear).
-        assert!(state.prepare_art_load(None, Some("firefox")));
-        assert_eq!(state.current_url, None);
-        assert_eq!(state.current_player_id.as_deref(), Some("firefox"));
-        assert_eq!(state.generation, 1);
-    }
-
-    #[test]
-    fn test_prepare_art_load_same_player_clears_none() {
-        let mut state = ArtState::new();
-        state.current_url = Some("http://example.com/art.jpg".into());
-        state.current_player_id = Some("spotify".into());
-
-        // Same player, genuine no-art track should clear stale art after the grace period.
-        assert!(state.prepare_art_load(None, Some("spotify")));
-        assert_eq!(state.current_url, None);
-    }
-
-    #[test]
-    fn test_chromium_file_art_and_missing_art_settle() {
-        assert!(should_settle_art_url(
-            Some("file:///tmp/album-art.jpg"),
-            Some("chromium")
-        ));
-        assert!(should_settle_art_url(
-            Some("file:///tmp/album-art.jpg"),
-            Some("brave")
-        ));
-        assert!(should_settle_art_url(None, Some("firefox")));
-    }
-
-    #[test]
-    fn test_non_chromium_art_loads_immediately() {
-        assert!(!should_settle_art_url(
-            Some("file:///tmp/album-art.jpg"),
-            Some("firefox")
-        ));
-        assert!(!should_settle_art_url(
-            Some("https://example.com/art.jpg"),
-            Some("chromium")
-        ));
-        assert!(!should_settle_art_url(
-            Some("data:image/jpeg;base64,aGVsbG8="),
-            None
-        ));
-    }
-
-    #[test]
-    fn test_decode_data_uri_basic_base64() {
-        // base64("hello") = "aGVsbG8="
-        assert_eq!(
-            decode_data_uri("data:image/jpeg;base64,aGVsbG8=").unwrap(),
-            b"hello"
-        );
-    }
-
-    #[test]
-    fn test_decode_data_uri_base64_token_not_last_and_mixed_case() {
-        // Guards the `;`-split scan: `base64` is neither the final token nor
-        // lowercase, so a naive `ends_with("base64")` would wrongly reject it.
-        assert_eq!(
-            decode_data_uri("data:image/jpeg;charset=utf-8;BASE64,aGVsbG8=").unwrap(),
-            b"hello"
-        );
-    }
-
-    #[test]
-    fn test_decode_data_uri_rejects_non_base64() {
-        // Percent-encoded (non-base64) data URIs are unsupported.
-        assert!(decode_data_uri("data:image/jpeg,hello").is_none());
-    }
-
-    #[test]
-    fn test_decode_data_uri_rejects_no_comma() {
-        // Guards the `find(',')?` — without it, `[1..]` would panic.
-        assert!(decode_data_uri("data:image/jpeg;base64").is_none());
-    }
-
-    #[test]
-    fn test_decode_data_uri_rejects_empty_payload() {
-        assert!(decode_data_uri("data:image/jpeg;base64,").is_none());
+        for (name, uri, expected) in cases {
+            assert_eq!(decode_data_uri(uri).as_deref(), expected, "{name}");
+        }
     }
 }

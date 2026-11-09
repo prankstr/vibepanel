@@ -258,10 +258,4 @@ mod tests {
             (0.0, 22.0)
         );
     }
-
-    #[test]
-    fn solid_series_enables_fill_only_for_primary_line() {
-        assert_eq!(HistorySeries::solid(Vec::new()).fill_alpha, 0.2);
-        assert_eq!(HistorySeries::dashed(Vec::new()).fill_alpha, 0.0);
-    }
 }

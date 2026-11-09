@@ -192,28 +192,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_updates_config_defaults() {
-        let entry = WidgetEntry {
-            name: "updates".to_string(),
-            options: Default::default(),
-        };
-        let config = UpdatesConfig::from_entry(&entry);
+    fn updates_config_check_interval() {
+        let cases = [
+            ("default", None, DEFAULT_CHECK_INTERVAL),
+            ("custom", Some(1800), 1800),
+        ];
 
-        assert_eq!(config.check_interval, DEFAULT_CHECK_INTERVAL);
-    }
-
-    #[test]
-    fn test_updates_config_custom() {
-        let mut options = std::collections::HashMap::new();
-        options.insert("check_interval".to_string(), toml::Value::Integer(1800));
-
-        let entry = WidgetEntry {
-            name: "updates".to_string(),
-            options,
-        };
-        let config = UpdatesConfig::from_entry(&entry);
-
-        assert_eq!(config.check_interval, 1800);
+        for (name, check_interval, expected) in cases {
+            let entry = WidgetEntry {
+                name: "updates".to_string(),
+                options: check_interval
+                    .map(|value| ("check_interval".to_string(), toml::Value::Integer(value)))
+                    .into_iter()
+                    .collect(),
+            };
+            let config = UpdatesConfig::from_entry(&entry);
+            assert_eq!(config.check_interval, expected, "{name}");
+        }
     }
 
     #[test]
