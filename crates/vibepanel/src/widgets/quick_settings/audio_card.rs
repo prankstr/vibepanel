@@ -801,30 +801,35 @@ mod tests {
     }
 
     #[test]
-    fn app_volume_list_key_ignores_dynamic_stream_fields() {
-        let first = snapshot(vec![stream(25, false, "Playback", 2)]);
-        let second = snapshot(vec![stream(80, true, "Next track", 6)]);
+    fn app_volume_list_key_changes_only_with_list_shape() {
+        let cases = [
+            (
+                "dynamic stream fields ignored",
+                snapshot(vec![stream(25, false, "Playback", 2)]),
+                snapshot(vec![stream(80, true, "Next track", 6)]),
+                true,
+            ),
+            (
+                "unavailable differs from available empty",
+                AudioSnapshot::default(),
+                snapshot(Vec::new()),
+                false,
+            ),
+            (
+                "streams appearing changes key",
+                snapshot(Vec::new()),
+                snapshot(vec![stream(25, false, "Playback", 2)]),
+                false,
+            ),
+        ];
 
-        assert_eq!(app_volume_list_key(&first), app_volume_list_key(&second));
-    }
-
-    #[test]
-    fn app_volume_list_key_distinguishes_unavailable_from_available_empty() {
-        let unavailable = AudioSnapshot::default();
-        let available = snapshot(Vec::new());
-
-        assert_ne!(
-            app_volume_list_key(&unavailable),
-            app_volume_list_key(&available)
-        );
-    }
-
-    #[test]
-    fn app_volume_list_key_changes_when_streams_appear() {
-        let empty = snapshot(Vec::new());
-        let populated = snapshot(vec![stream(25, false, "Playback", 2)]);
-
-        assert_ne!(app_volume_list_key(&empty), app_volume_list_key(&populated));
+        for (name, first, second, same_key) in cases {
+            assert_eq!(
+                app_volume_list_key(&first) == app_volume_list_key(&second),
+                same_key,
+                "{name}"
+            );
+        }
     }
 
     #[test]

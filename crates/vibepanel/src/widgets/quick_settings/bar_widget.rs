@@ -700,66 +700,67 @@ mod tests {
     use toml::Value;
 
     #[test]
-    fn quick_settings_power_commands_default_to_existing_behavior() {
-        let config = QuickSettingsConfig::from_entry(&WidgetEntry::new("quick_settings"));
+    fn quick_settings_config_parses_power_commands_and_expanded_state() {
+        let overrides: HashMap<String, Value> = [
+            (
+                "shutdown_command",
+                Value::String("loginctl poweroff".into()),
+            ),
+            ("reboot_command", Value::String("loginctl reboot".into())),
+            ("suspend_command", Value::String("loginctl suspend".into())),
+            ("lock_command", Value::String("swaylock".into())),
+            (
+                "logout_command",
+                Value::String("niri msg action quit".into()),
+            ),
+            ("remember_expanded_state", Value::Boolean(true)),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.to_string(), value))
+        .collect();
 
-        assert_eq!(config.power_commands.shutdown, "systemctl poweroff");
-        assert_eq!(config.power_commands.reboot, "systemctl reboot");
-        assert_eq!(config.power_commands.suspend, "systemctl suspend");
-        assert_eq!(config.power_commands.lock, "loginctl lock-session");
-        assert_eq!(config.power_commands.logout, "");
-    }
+        let cases = [
+            (
+                "defaults",
+                WidgetEntry::new("quick_settings"),
+                [
+                    "systemctl poweroff",
+                    "systemctl reboot",
+                    "systemctl suspend",
+                    "loginctl lock-session",
+                    "",
+                ],
+                false,
+            ),
+            (
+                "overrides",
+                WidgetEntry {
+                    name: "quick_settings".to_string(),
+                    options: overrides,
+                },
+                [
+                    "loginctl poweroff",
+                    "loginctl reboot",
+                    "loginctl suspend",
+                    "swaylock",
+                    "niri msg action quit",
+                ],
+                true,
+            ),
+        ];
 
-    #[test]
-    fn quick_settings_power_commands_parse_overrides() {
-        let mut options = HashMap::new();
-        options.insert(
-            "shutdown_command".to_string(),
-            Value::String("loginctl poweroff".to_string()),
-        );
-        options.insert(
-            "reboot_command".to_string(),
-            Value::String("loginctl reboot".to_string()),
-        );
-        options.insert(
-            "suspend_command".to_string(),
-            Value::String("loginctl suspend".to_string()),
-        );
-        options.insert(
-            "lock_command".to_string(),
-            Value::String("swaylock".to_string()),
-        );
-        options.insert(
-            "logout_command".to_string(),
-            Value::String("niri msg action quit".to_string()),
-        );
-
-        let entry = WidgetEntry {
-            name: "quick_settings".to_string(),
-            options,
-        };
-        let config = QuickSettingsConfig::from_entry(&entry);
-
-        assert_eq!(config.power_commands.shutdown, "loginctl poweroff");
-        assert_eq!(config.power_commands.reboot, "loginctl reboot");
-        assert_eq!(config.power_commands.suspend, "loginctl suspend");
-        assert_eq!(config.power_commands.lock, "swaylock");
-        assert_eq!(config.power_commands.logout, "niri msg action quit");
-    }
-
-    #[test]
-    fn quick_settings_remember_expanded_state_is_opt_in() {
-        let default_config = QuickSettingsConfig::from_entry(&WidgetEntry::new("quick_settings"));
-        assert!(!default_config.remember_expanded_state);
-
-        let mut options = HashMap::new();
-        options.insert("remember_expanded_state".to_string(), Value::Boolean(true));
-        let entry = WidgetEntry {
-            name: "quick_settings".to_string(),
-            options,
-        };
-
-        let config = QuickSettingsConfig::from_entry(&entry);
-        assert!(config.remember_expanded_state);
+        for (name, entry, [shutdown, reboot, suspend, lock, logout], remember) in cases {
+            let config = QuickSettingsConfig::from_entry(&entry);
+            let commands = &config.power_commands;
+            assert_eq!(commands.shutdown, shutdown, "{name}: shutdown");
+            assert_eq!(commands.reboot, reboot, "{name}: reboot");
+            assert_eq!(commands.suspend, suspend, "{name}: suspend");
+            assert_eq!(commands.lock, lock, "{name}: lock");
+            assert_eq!(commands.logout, logout, "{name}: logout");
+            assert_eq!(
+                config.remember_expanded_state, remember,
+                "{name}: remember_expanded_state"
+            );
+        }
     }
 }

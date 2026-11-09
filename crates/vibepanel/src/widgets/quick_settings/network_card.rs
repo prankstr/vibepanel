@@ -2133,180 +2133,182 @@ mod tests {
     }
 
     #[test]
-    fn test_network_icon_name_connected() {
-        assert_eq!(
-            network_icon_name(&NetworkIconContext {
-                connected: true,
-                ..test_icon_ctx()
-            }),
-            "network-wireless-signal-excellent-symbolic"
-        );
+    fn network_icon_name_follows_precedence() {
+        let wireless_offline = "network-wireless-offline-symbolic";
+        let wired = "network-wired-symbolic";
+        let cases = [
+            (
+                "wifi connected",
+                NetworkIconContext {
+                    connected: true,
+                    ..test_icon_ctx()
+                },
+                "network-wireless-signal-excellent-symbolic",
+            ),
+            ("wifi disconnected", test_icon_ctx(), wireless_offline),
+            (
+                "wifi disabled while connected",
+                NetworkIconContext {
+                    connected: true,
+                    wifi_enabled: false,
+                    ..test_icon_ctx()
+                },
+                wireless_offline,
+            ),
+            (
+                "wifi disabled",
+                NetworkIconContext {
+                    wifi_enabled: false,
+                    ..test_icon_ctx()
+                },
+                wireless_offline,
+            ),
+            (
+                "wired beats disabled wifi",
+                NetworkIconContext {
+                    wifi_enabled: false,
+                    wired_connected: true,
+                    ..test_icon_ctx()
+                },
+                wired,
+            ),
+            (
+                "wired beats connected wifi",
+                NetworkIconContext {
+                    connected: true,
+                    wired_connected: true,
+                    ..test_icon_ctx()
+                },
+                wired,
+            ),
+            (
+                "wired without wifi device",
+                NetworkIconContext {
+                    wifi_enabled: false,
+                    wired_connected: true,
+                    has_wifi_device: false,
+                    ..test_icon_ctx()
+                },
+                wired,
+            ),
+            (
+                "ethernet-only system disconnected",
+                NetworkIconContext {
+                    wifi_enabled: false,
+                    has_wifi_device: false,
+                    ..test_icon_ctx()
+                },
+                wired,
+            ),
+            // Regression (26b933da): an unavailable service must not fall through to device icons.
+            (
+                "regression: unavailable without wifi device",
+                NetworkIconContext {
+                    available: false,
+                    wifi_enabled: false,
+                    has_wifi_device: false,
+                    ..test_icon_ctx()
+                },
+                wireless_offline,
+            ),
+            (
+                "regression: unavailable while wifi connected",
+                NetworkIconContext {
+                    available: false,
+                    connected: true,
+                    ..test_icon_ctx()
+                },
+                wireless_offline,
+            ),
+            (
+                "regression: unavailable while wired connected",
+                NetworkIconContext {
+                    available: false,
+                    wifi_enabled: false,
+                    wired_connected: true,
+                    has_wifi_device: false,
+                    ..test_icon_ctx()
+                },
+                wireless_offline,
+            ),
+            (
+                "mobile primary with signal",
+                NetworkIconContext {
+                    mobile_is_primary: true,
+                    has_modem_device: true,
+                    mobile_signal_quality: Some(80),
+                    ..test_icon_ctx()
+                },
+                "network-cellular-signal-excellent-symbolic",
+            ),
+            (
+                "mobile primary without signal",
+                NetworkIconContext {
+                    mobile_is_primary: true,
+                    has_modem_device: true,
+                    ..test_icon_ctx()
+                },
+                "network-cellular-signal-none-symbolic",
+            ),
+            (
+                "modem-only system without mobile connection",
+                NetworkIconContext {
+                    wifi_enabled: false,
+                    has_wifi_device: false,
+                    has_modem_device: true,
+                    ..test_icon_ctx()
+                },
+                "network-cellular-signal-none-symbolic",
+            ),
+        ];
+
+        for (name, ctx, expected) in cases {
+            assert_eq!(network_icon_name(&ctx), expected, "{name}");
+        }
     }
 
     #[test]
-    fn test_network_icon_name_disconnected() {
-        assert_eq!(
-            network_icon_name(&test_icon_ctx()),
-            "network-wireless-offline-symbolic"
-        );
-    }
+    fn signal_icons_switch_at_thresholds() {
+        let wifi_cases = [
+            ("wifi 100 excellent", 100, "excellent"),
+            ("wifi 80 excellent", 80, "excellent"),
+            ("wifi 70 excellent", 70, "excellent"),
+            ("wifi 69 good", 69, "good"),
+            ("wifi 60 good", 60, "good"),
+            ("wifi 59 ok", 59, "ok"),
+            ("wifi 40 ok", 40, "ok"),
+            ("wifi 39 weak", 39, "weak"),
+            ("wifi 20 weak", 20, "weak"),
+            ("wifi 19 none", 19, "none"),
+            ("wifi 0 none", 0, "none"),
+        ];
+        for (name, level, strength) in wifi_cases {
+            assert_eq!(
+                wifi_strength_icon(level),
+                format!("network-wireless-signal-{strength}-symbolic"),
+                "{name}"
+            );
+        }
 
-    #[test]
-    fn test_network_icon_name_disabled() {
-        assert_eq!(
-            network_icon_name(&NetworkIconContext {
-                connected: true,
-                wifi_enabled: false,
-                ..test_icon_ctx()
-            }),
-            "network-wireless-offline-symbolic"
-        );
-        assert_eq!(
-            network_icon_name(&NetworkIconContext {
-                wifi_enabled: false,
-                ..test_icon_ctx()
-            }),
-            "network-wireless-offline-symbolic"
-        );
-    }
-
-    #[test]
-    fn test_network_icon_name_wired_connected() {
-        // Wired connected takes precedence regardless of Wi-Fi state
-        assert_eq!(
-            network_icon_name(&NetworkIconContext {
-                wifi_enabled: false,
-                wired_connected: true,
-                ..test_icon_ctx()
-            }),
-            "network-wired-symbolic"
-        );
-        assert_eq!(
-            network_icon_name(&NetworkIconContext {
-                connected: true,
-                wired_connected: true,
-                ..test_icon_ctx()
-            }),
-            "network-wired-symbolic"
-        );
-        assert_eq!(
-            network_icon_name(&NetworkIconContext {
-                wifi_enabled: false,
-                wired_connected: true,
-                has_wifi_device: false,
-                ..test_icon_ctx()
-            }),
-            "network-wired-symbolic"
-        );
-    }
-
-    #[test]
-    fn test_network_icon_name_ethernet_only_disconnected() {
-        // Ethernet-only system (no Wi-Fi device), not connected - shows lan icon (grayed)
-        assert_eq!(
-            network_icon_name(&NetworkIconContext {
-                wifi_enabled: false,
-                has_wifi_device: false,
-                ..test_icon_ctx()
-            }),
-            "network-wired-symbolic"
-        );
-    }
-
-    #[test]
-    fn test_network_icon_name_service_unavailable() {
-        // Service unavailable - always shows wireless offline icon regardless of other state
-        assert_eq!(
-            network_icon_name(&NetworkIconContext {
-                available: false,
-                wifi_enabled: false,
-                has_wifi_device: false,
-                ..test_icon_ctx()
-            }),
-            "network-wireless-offline-symbolic"
-        );
-        assert_eq!(
-            network_icon_name(&NetworkIconContext {
-                available: false,
-                connected: true,
-                ..test_icon_ctx()
-            }),
-            "network-wireless-offline-symbolic"
-        );
-        assert_eq!(
-            network_icon_name(&NetworkIconContext {
-                available: false,
-                wifi_enabled: false,
-                wired_connected: true,
-                has_wifi_device: false,
-                ..test_icon_ctx()
-            }),
-            "network-wireless-offline-symbolic"
-        );
-    }
-
-    #[test]
-    fn test_wifi_strength_icon_excellent() {
-        assert_eq!(
-            wifi_strength_icon(100),
-            "network-wireless-signal-excellent-symbolic"
-        );
-        assert_eq!(
-            wifi_strength_icon(80),
-            "network-wireless-signal-excellent-symbolic"
-        );
-        assert_eq!(
-            wifi_strength_icon(70),
-            "network-wireless-signal-excellent-symbolic"
-        );
-    }
-
-    #[test]
-    fn test_wifi_strength_icon_good() {
-        assert_eq!(
-            wifi_strength_icon(69),
-            "network-wireless-signal-good-symbolic"
-        );
-        assert_eq!(
-            wifi_strength_icon(60),
-            "network-wireless-signal-good-symbolic"
-        );
-    }
-
-    #[test]
-    fn test_wifi_strength_icon_ok() {
-        assert_eq!(
-            wifi_strength_icon(59),
-            "network-wireless-signal-ok-symbolic"
-        );
-        assert_eq!(
-            wifi_strength_icon(40),
-            "network-wireless-signal-ok-symbolic"
-        );
-    }
-
-    #[test]
-    fn test_wifi_strength_icon_weak() {
-        assert_eq!(
-            wifi_strength_icon(39),
-            "network-wireless-signal-weak-symbolic"
-        );
-        assert_eq!(
-            wifi_strength_icon(20),
-            "network-wireless-signal-weak-symbolic"
-        );
-    }
-
-    #[test]
-    fn test_wifi_strength_icon_none() {
-        assert_eq!(
-            wifi_strength_icon(19),
-            "network-wireless-signal-none-symbolic"
-        );
-        assert_eq!(
-            wifi_strength_icon(0),
-            "network-wireless-signal-none-symbolic"
-        );
+        let cellular_cases = [
+            ("cellular 100 excellent", 100, "excellent"),
+            ("cellular 75 excellent", 75, "excellent"),
+            ("cellular 74 good", 74, "good"),
+            ("cellular 55 good", 55, "good"),
+            ("cellular 54 ok", 54, "ok"),
+            ("cellular 35 ok", 35, "ok"),
+            ("cellular 34 weak", 34, "weak"),
+            ("cellular 15 weak", 15, "weak"),
+            ("cellular 14 none", 14, "none"),
+            ("cellular 0 none", 0, "none"),
+        ];
+        for (name, quality, strength) in cellular_cases {
+            assert_eq!(
+                cellular_signal_icon_name(quality),
+                format!("network-cellular-signal-{strength}-symbolic"),
+                "{name}"
+            );
+        }
     }
 
     // Helper to create a base snapshot for testing
@@ -2351,148 +2353,6 @@ mod tests {
         }
     }
 
-    // Tests for get_network_subtitle_text()
-
-    #[test]
-    fn test_subtitle_wired_only() {
-        let mut snapshot = test_snapshot();
-        snapshot.wired.connected = true;
-        let wrapped = NetworkSnapshot::NetworkManager(snapshot);
-        assert_eq!(get_network_subtitle_text(&wrapped), "Ethernet");
-    }
-
-    #[test]
-    fn test_subtitle_wired_and_wifi_connected() {
-        let mut snapshot = test_snapshot();
-        snapshot.wired.connected = true;
-        snapshot.wifi.ssid = Some("MyNetwork".to_string());
-        let wrapped = NetworkSnapshot::NetworkManager(snapshot);
-        assert_eq!(
-            get_network_subtitle_text(&wrapped),
-            "Ethernet \u{2022} MyNetwork"
-        );
-    }
-
-    #[test]
-    fn test_subtitle_wired_and_wifi_connecting() {
-        let mut snapshot = test_snapshot();
-        snapshot.wired.connected = true;
-        snapshot.wifi.connecting_ssid = Some("MyNetwork".to_string());
-        let wrapped = NetworkSnapshot::NetworkManager(snapshot);
-        assert_eq!(
-            get_network_subtitle_text(&wrapped),
-            "Ethernet \u{2022} Connecting to MyNetwork"
-        );
-    }
-
-    #[test]
-    fn test_subtitle_wifi_connected() {
-        let mut snapshot = test_snapshot();
-        snapshot.wifi.ssid = Some("HomeWifi".to_string());
-        let wrapped = NetworkSnapshot::NetworkManager(snapshot);
-        assert_eq!(get_network_subtitle_text(&wrapped), "HomeWifi");
-    }
-
-    #[test]
-    fn test_subtitle_wifi_connecting() {
-        let mut snapshot = test_snapshot();
-        snapshot.wifi.connecting_ssid = Some("HomeWifi".to_string());
-        let wrapped = NetworkSnapshot::NetworkManager(snapshot);
-        assert_eq!(
-            get_network_subtitle_text(&wrapped),
-            "Connecting to HomeWifi"
-        );
-    }
-
-    #[test]
-    fn test_subtitle_wifi_disconnected() {
-        let snapshot = test_snapshot();
-        let wrapped = NetworkSnapshot::NetworkManager(snapshot);
-        assert_eq!(get_network_subtitle_text(&wrapped), "Disconnected");
-    }
-
-    #[test]
-    fn test_subtitle_wifi_disabled() {
-        let mut snapshot = test_snapshot();
-        snapshot.wifi.enabled = Some(false);
-        let wrapped = NetworkSnapshot::NetworkManager(snapshot);
-        assert_eq!(get_network_subtitle_text(&wrapped), "Off");
-    }
-
-    #[test]
-    fn test_subtitle_ethernet_only_system_disconnected() {
-        let mut snapshot = test_snapshot();
-        snapshot.wifi.has_device = false;
-        snapshot.wired.has_device = true;
-        snapshot.wifi.enabled = None;
-        let wrapped = NetworkSnapshot::NetworkManager(snapshot);
-        assert_eq!(get_network_subtitle_text(&wrapped), "Disconnected");
-    }
-
-    #[test]
-    fn test_subtitle_service_unavailable() {
-        let mut snapshot = test_snapshot();
-        snapshot.available = false;
-        let wrapped = NetworkSnapshot::NetworkManager(snapshot);
-        assert_eq!(get_network_subtitle_text(&wrapped), "Unavailable");
-    }
-
-    // Tests for is_network_subtitle_active()
-
-    #[test]
-    fn test_subtitle_active_when_wired_connected() {
-        let mut snapshot = test_snapshot();
-        snapshot.wired.connected = true;
-        let wrapped = NetworkSnapshot::NetworkManager(snapshot);
-        assert!(is_network_subtitle_active(&wrapped));
-    }
-
-    #[test]
-    fn test_subtitle_active_when_wifi_connected() {
-        let mut snapshot = test_snapshot();
-        snapshot.wifi.connected = true;
-        snapshot.wifi.ssid = Some("Network".to_string());
-        let wrapped = NetworkSnapshot::NetworkManager(snapshot);
-        assert!(is_network_subtitle_active(&wrapped));
-    }
-
-    #[test]
-    fn test_subtitle_active_when_both_connected() {
-        let mut snapshot = test_snapshot();
-        snapshot.wired.connected = true;
-        snapshot.wifi.ssid = Some("Network".to_string());
-        let wrapped = NetworkSnapshot::NetworkManager(snapshot);
-        assert!(is_network_subtitle_active(&wrapped));
-    }
-
-    #[test]
-    fn test_subtitle_not_active_when_connecting() {
-        let mut snapshot = test_snapshot();
-        snapshot.wifi.connecting_ssid = Some("Network".to_string());
-        let wrapped = NetworkSnapshot::NetworkManager(snapshot);
-        assert!(!is_network_subtitle_active(&wrapped));
-    }
-
-    #[test]
-    fn test_subtitle_not_active_when_disconnected() {
-        let snapshot = test_snapshot();
-        let wrapped = NetworkSnapshot::NetworkManager(snapshot);
-        assert!(!is_network_subtitle_active(&wrapped));
-    }
-
-    #[test]
-    fn test_subtitle_not_active_wired_but_wifi_connecting() {
-        let mut snapshot = test_snapshot();
-        snapshot.wired.connected = true;
-        snapshot.wifi.connecting_ssid = Some("Network".to_string());
-        let wrapped = NetworkSnapshot::NetworkManager(snapshot);
-        // Even though wired is connected, we're in a "connecting" state for Wi-Fi
-        // so subtitle should not be fully active (shows connecting animation)
-        assert!(!is_network_subtitle_active(&wrapped));
-    }
-
-    // --- IWD-specific tests ---
-
     /// Create a base IWD snapshot for testing.
     fn iwd_snapshot() -> IwdSnapshot {
         IwdSnapshot {
@@ -2509,329 +2369,250 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_iwd_subtitle_connected() {
-        let mut snap = iwd_snapshot();
-        snap.state = Some(StationState::Connected);
-        snap.ssid = Some("HomeWifi".to_string());
-        let wrapped = NetworkSnapshot::Iwd(snap);
-        assert_eq!(get_network_subtitle_text(&wrapped), "HomeWifi");
-    }
-
-    #[test]
-    fn test_iwd_subtitle_connecting() {
-        let mut snap = iwd_snapshot();
-        snap.state = Some(StationState::Connecting);
-        snap.ssid = Some("HomeWifi".to_string());
-        let wrapped = NetworkSnapshot::Iwd(snap);
-        assert_eq!(
-            get_network_subtitle_text(&wrapped),
-            "Connecting to HomeWifi"
-        );
-    }
-
-    #[test]
-    fn test_iwd_subtitle_disconnected() {
-        let snap = iwd_snapshot();
-        let wrapped = NetworkSnapshot::Iwd(snap);
-        assert_eq!(get_network_subtitle_text(&wrapped), "Disconnected");
-    }
-
-    #[test]
-    fn test_iwd_subtitle_disabled() {
-        let mut snap = iwd_snapshot();
-        snap.wifi_enabled = Some(false);
-        let wrapped = NetworkSnapshot::Iwd(snap);
-        assert_eq!(get_network_subtitle_text(&wrapped), "Off");
-    }
-
-    #[test]
-    fn test_iwd_subtitle_unavailable() {
-        let mut snap = iwd_snapshot();
-        snap.available = false;
-        let wrapped = NetworkSnapshot::Iwd(snap);
-        assert_eq!(get_network_subtitle_text(&wrapped), "Unavailable");
-    }
-
-    #[test]
-    fn test_iwd_subtitle_active_when_connected() {
-        let mut snap = iwd_snapshot();
-        snap.state = Some(StationState::Connected);
-        snap.ssid = Some("Network".to_string());
-        let wrapped = NetworkSnapshot::Iwd(snap);
-        assert!(is_network_subtitle_active(&wrapped));
-    }
-
-    #[test]
-    fn test_iwd_subtitle_not_active_when_connecting() {
-        let mut snap = iwd_snapshot();
-        snap.state = Some(StationState::Connecting);
-        snap.ssid = Some("Network".to_string());
-        let wrapped = NetworkSnapshot::Iwd(snap);
-        assert!(!is_network_subtitle_active(&wrapped));
-    }
-
-    #[test]
-    fn test_iwd_subtitle_not_active_when_disconnected() {
-        let snap = iwd_snapshot();
-        let wrapped = NetworkSnapshot::Iwd(snap);
-        assert!(!is_network_subtitle_active(&wrapped));
-    }
-
-    #[test]
-    fn test_iwd_subtitle_roaming() {
-        let mut snap = iwd_snapshot();
-        snap.state = Some(StationState::Roaming);
-        snap.ssid = Some("RoamNet".to_string());
-        let wrapped = NetworkSnapshot::Iwd(snap);
-        // Roaming is considered connected
-        assert_eq!(get_network_subtitle_text(&wrapped), "RoamNet");
-        assert!(is_network_subtitle_active(&wrapped));
-    }
-
-    // ---- cellular_signal_icon_name tests ----
-
-    #[test]
-    fn test_cellular_signal_excellent() {
-        assert_eq!(
-            cellular_signal_icon_name(75),
-            "network-cellular-signal-excellent-symbolic"
-        );
-        assert_eq!(
-            cellular_signal_icon_name(100),
-            "network-cellular-signal-excellent-symbolic"
-        );
-    }
-
-    #[test]
-    fn test_cellular_signal_good() {
-        assert_eq!(
-            cellular_signal_icon_name(55),
-            "network-cellular-signal-good-symbolic"
-        );
-        assert_eq!(
-            cellular_signal_icon_name(74),
-            "network-cellular-signal-good-symbolic"
-        );
-    }
-
-    #[test]
-    fn test_cellular_signal_ok() {
-        assert_eq!(
-            cellular_signal_icon_name(35),
-            "network-cellular-signal-ok-symbolic"
-        );
-        assert_eq!(
-            cellular_signal_icon_name(54),
-            "network-cellular-signal-ok-symbolic"
-        );
-    }
-
-    #[test]
-    fn test_cellular_signal_weak() {
-        assert_eq!(
-            cellular_signal_icon_name(15),
-            "network-cellular-signal-weak-symbolic"
-        );
-        assert_eq!(
-            cellular_signal_icon_name(34),
-            "network-cellular-signal-weak-symbolic"
-        );
-    }
-
-    #[test]
-    fn test_cellular_signal_none() {
-        assert_eq!(
-            cellular_signal_icon_name(14),
-            "network-cellular-signal-none-symbolic"
-        );
-        assert_eq!(
-            cellular_signal_icon_name(0),
-            "network-cellular-signal-none-symbolic"
-        );
-    }
-
-    // ---- Mobile subtitle text tests ----
-
-    #[test]
-    fn test_subtitle_mobile_connected_with_operator() {
+    fn nm(setup: impl FnOnce(&mut NmSnapshot)) -> NetworkSnapshot {
         let mut snapshot = test_snapshot();
-        snapshot.mobile.is_primary = true;
-        snapshot.mobile.active = true;
-        snapshot.mobile.operator = Some("MyCarrier".to_string());
-        let wrapped = NetworkSnapshot::NetworkManager(snapshot);
-        assert_eq!(get_network_subtitle_text(&wrapped), "MyCarrier");
+        setup(&mut snapshot);
+        NetworkSnapshot::NetworkManager(snapshot)
+    }
+
+    fn iwd(setup: impl FnOnce(&mut IwdSnapshot)) -> NetworkSnapshot {
+        let mut snapshot = iwd_snapshot();
+        setup(&mut snapshot);
+        NetworkSnapshot::Iwd(snapshot)
     }
 
     #[test]
-    fn test_subtitle_mobile_connected_with_name_only() {
-        let mut snapshot = test_snapshot();
-        snapshot.mobile.is_primary = true;
-        snapshot.mobile.active = true;
-        snapshot.mobile.name = Some("My SIM".to_string());
-        let wrapped = NetworkSnapshot::NetworkManager(snapshot);
-        assert_eq!(get_network_subtitle_text(&wrapped), "My SIM");
-    }
+    fn network_subtitle_text_and_active() {
+        struct Case {
+            name: &'static str,
+            snapshot: NetworkSnapshot,
+            text: &'static str,
+            active: bool,
+        }
 
-    #[test]
-    fn test_subtitle_mobile_connected_no_name() {
-        let mut snapshot = test_snapshot();
-        snapshot.mobile.is_primary = true;
-        snapshot.mobile.active = true;
-        let wrapped = NetworkSnapshot::NetworkManager(snapshot);
-        assert_eq!(get_network_subtitle_text(&wrapped), "Mobile");
-    }
+        let cases = [
+            Case {
+                name: "nm wired only",
+                snapshot: nm(|s| s.wired.connected = true),
+                text: "Ethernet",
+                active: true,
+            },
+            Case {
+                name: "nm wired and wifi",
+                snapshot: nm(|s| {
+                    s.wired.connected = true;
+                    s.wifi.ssid = Some("MyNetwork".to_string());
+                }),
+                text: "Ethernet \u{2022} MyNetwork",
+                active: true,
+            },
+            Case {
+                name: "nm wired and wifi connecting",
+                snapshot: nm(|s| {
+                    s.wired.connected = true;
+                    s.wifi.connecting_ssid = Some("MyNetwork".to_string());
+                }),
+                text: "Ethernet \u{2022} Connecting to MyNetwork",
+                active: false,
+            },
+            Case {
+                name: "nm wifi connected",
+                snapshot: nm(|s| {
+                    s.wifi.connected = true;
+                    s.wifi.ssid = Some("HomeWifi".to_string());
+                }),
+                text: "HomeWifi",
+                active: true,
+            },
+            Case {
+                name: "nm wifi connecting",
+                snapshot: nm(|s| s.wifi.connecting_ssid = Some("HomeWifi".to_string())),
+                text: "Connecting to HomeWifi",
+                active: false,
+            },
+            Case {
+                name: "nm wifi disconnected",
+                snapshot: nm(|_| {}),
+                text: "Disconnected",
+                active: false,
+            },
+            Case {
+                name: "nm wifi disabled",
+                snapshot: nm(|s| s.wifi.enabled = Some(false)),
+                text: "Off",
+                active: false,
+            },
+            Case {
+                name: "nm ethernet-only system disconnected",
+                snapshot: nm(|s| {
+                    s.wifi.has_device = false;
+                    s.wired.has_device = true;
+                    s.wifi.enabled = None;
+                }),
+                text: "Disconnected",
+                active: false,
+            },
+            // Regression (26b933da): an unavailable service shows "Unavailable", not a device state.
+            Case {
+                name: "regression: nm service unavailable",
+                snapshot: nm(|s| s.available = false),
+                text: "Unavailable",
+                active: false,
+            },
+            Case {
+                name: "iwd connected",
+                snapshot: iwd(|s| {
+                    s.state = Some(StationState::Connected);
+                    s.ssid = Some("HomeWifi".to_string());
+                }),
+                text: "HomeWifi",
+                active: true,
+            },
+            Case {
+                name: "iwd connecting",
+                snapshot: iwd(|s| {
+                    s.state = Some(StationState::Connecting);
+                    s.ssid = Some("HomeWifi".to_string());
+                }),
+                text: "Connecting to HomeWifi",
+                active: false,
+            },
+            Case {
+                name: "iwd disconnected",
+                snapshot: iwd(|_| {}),
+                text: "Disconnected",
+                active: false,
+            },
+            Case {
+                name: "iwd disabled",
+                snapshot: iwd(|s| s.wifi_enabled = Some(false)),
+                text: "Off",
+                active: false,
+            },
+            Case {
+                name: "iwd unavailable",
+                snapshot: iwd(|s| s.available = false),
+                text: "Unavailable",
+                active: false,
+            },
+            Case {
+                name: "iwd roaming counts as connected",
+                snapshot: iwd(|s| {
+                    s.state = Some(StationState::Roaming);
+                    s.ssid = Some("RoamNet".to_string());
+                }),
+                text: "RoamNet",
+                active: true,
+            },
+            Case {
+                name: "mobile primary with operator",
+                snapshot: nm(|s| {
+                    s.mobile.is_primary = true;
+                    s.mobile.active = true;
+                    s.mobile.operator = Some("MyCarrier".to_string());
+                }),
+                text: "MyCarrier",
+                active: true,
+            },
+            Case {
+                name: "mobile primary with name only",
+                snapshot: nm(|s| {
+                    s.mobile.is_primary = true;
+                    s.mobile.active = true;
+                    s.mobile.name = Some("My SIM".to_string());
+                }),
+                text: "My SIM",
+                active: true,
+            },
+            Case {
+                name: "mobile primary without name",
+                snapshot: nm(|s| {
+                    s.mobile.is_primary = true;
+                    s.mobile.active = true;
+                }),
+                text: "Mobile",
+                active: true,
+            },
+            Case {
+                name: "mobile connecting",
+                snapshot: nm(|s| s.mobile.connecting = true),
+                text: "Mobile \u{2022} Connecting...",
+                active: false,
+            },
+            Case {
+                name: "mobile primary and wifi connecting",
+                snapshot: nm(|s| {
+                    s.mobile.is_primary = true;
+                    s.mobile.active = true;
+                    s.wifi.connecting_ssid = Some("HomeWifi".to_string());
+                }),
+                text: "Mobile \u{2022} Connecting to HomeWifi",
+                active: false,
+            },
+            Case {
+                name: "mobile primary and wifi",
+                snapshot: nm(|s| {
+                    s.mobile.is_primary = true;
+                    s.mobile.active = true;
+                    s.wifi.ssid = Some("HomeWifi".to_string());
+                }),
+                text: "HomeWifi \u{2022} Mobile",
+                active: true,
+            },
+            Case {
+                name: "mobile active but not primary",
+                snapshot: nm(|s| {
+                    s.mobile.active = true;
+                    s.mobile.operator = Some("Vodafone".to_string());
+                }),
+                text: "Vodafone",
+                active: true,
+            },
+            Case {
+                name: "wired and mobile active",
+                snapshot: nm(|s| {
+                    s.wired.connected = true;
+                    s.mobile.active = true;
+                    s.mobile.operator = Some("MyCarrier".to_string());
+                }),
+                text: "Ethernet \u{2022} MyCarrier",
+                active: true,
+            },
+            Case {
+                name: "wired, wifi and mobile active",
+                snapshot: nm(|s| {
+                    s.wired.connected = true;
+                    s.wifi.ssid = Some("HomeWifi".to_string());
+                    s.mobile.active = true;
+                    s.mobile.operator = Some("MyCarrier".to_string());
+                }),
+                text: "Ethernet \u{2022} HomeWifi \u{2022} MyCarrier",
+                active: true,
+            },
+            Case {
+                name: "mobile connecting with operator",
+                snapshot: nm(|s| {
+                    s.mobile.connecting = true;
+                    s.mobile.operator = Some("AT&T".to_string());
+                }),
+                text: "AT&T \u{2022} Connecting...",
+                active: false,
+            },
+        ];
 
-    #[test]
-    fn test_subtitle_mobile_connecting() {
-        let mut snapshot = test_snapshot();
-        snapshot.mobile.connecting = true;
-        let wrapped = NetworkSnapshot::NetworkManager(snapshot);
-        assert_eq!(
-            get_network_subtitle_text(&wrapped),
-            "Mobile \u{2022} Connecting..."
-        );
-    }
-
-    #[test]
-    fn test_subtitle_mobile_connected_and_wifi_connecting() {
-        let mut snapshot = test_snapshot();
-        snapshot.mobile.is_primary = true;
-        snapshot.mobile.active = true;
-        snapshot.wifi.connecting_ssid = Some("HomeWifi".to_string());
-        let wrapped = NetworkSnapshot::NetworkManager(snapshot);
-        assert_eq!(
-            get_network_subtitle_text(&wrapped),
-            "Mobile \u{2022} Connecting to HomeWifi"
-        );
-    }
-
-    #[test]
-    fn test_subtitle_mobile_connected_and_wifi_connected() {
-        let mut snapshot = test_snapshot();
-        snapshot.mobile.is_primary = true;
-        snapshot.mobile.active = true;
-        snapshot.wifi.ssid = Some("HomeWifi".to_string());
-        let wrapped = NetworkSnapshot::NetworkManager(snapshot);
-        assert_eq!(
-            get_network_subtitle_text(&wrapped),
-            "HomeWifi \u{2022} Mobile"
-        );
-    }
-
-    #[test]
-    fn test_subtitle_active_mobile_connected() {
-        let mut snapshot = test_snapshot();
-        snapshot.mobile.is_primary = true;
-        snapshot.mobile.active = true;
-        let wrapped = NetworkSnapshot::NetworkManager(snapshot);
-        assert!(is_network_subtitle_active(&wrapped));
-    }
-
-    #[test]
-    fn test_subtitle_not_active_mobile_connecting() {
-        let mut snapshot = test_snapshot();
-        snapshot.mobile.connecting = true;
-        let wrapped = NetworkSnapshot::NetworkManager(snapshot);
-        assert!(!is_network_subtitle_active(&wrapped));
-    }
-
-    // ---- Mobile subtitle: active (not just primary) ----
-
-    #[test]
-    fn test_subtitle_mobile_active_not_primary_with_operator() {
-        let mut snapshot = test_snapshot();
-        snapshot.mobile.active = true;
-        snapshot.mobile.operator = Some("Vodafone".to_string());
-        let wrapped = NetworkSnapshot::NetworkManager(snapshot);
-        assert_eq!(get_network_subtitle_text(&wrapped), "Vodafone");
-    }
-
-    #[test]
-    fn test_subtitle_wired_and_mobile_active() {
-        let mut snapshot = test_snapshot();
-        snapshot.wired.connected = true;
-        snapshot.mobile.active = true;
-        snapshot.mobile.operator = Some("MyCarrier".to_string());
-        let wrapped = NetworkSnapshot::NetworkManager(snapshot);
-        assert_eq!(
-            get_network_subtitle_text(&wrapped),
-            "Ethernet \u{2022} MyCarrier"
-        );
-    }
-
-    #[test]
-    fn test_subtitle_wired_wifi_and_mobile_active() {
-        let mut snapshot = test_snapshot();
-        snapshot.wired.connected = true;
-        snapshot.wifi.ssid = Some("HomeWifi".to_string());
-        snapshot.mobile.active = true;
-        snapshot.mobile.operator = Some("MyCarrier".to_string());
-        let wrapped = NetworkSnapshot::NetworkManager(snapshot);
-        assert_eq!(
-            get_network_subtitle_text(&wrapped),
-            "Ethernet \u{2022} HomeWifi \u{2022} MyCarrier"
-        );
-    }
-
-    #[test]
-    fn test_subtitle_mobile_connecting_with_operator() {
-        let mut snapshot = test_snapshot();
-        snapshot.mobile.connecting = true;
-        snapshot.mobile.operator = Some("AT&T".to_string());
-        let wrapped = NetworkSnapshot::NetworkManager(snapshot);
-        assert_eq!(
-            get_network_subtitle_text(&wrapped),
-            "AT&T \u{2022} Connecting..."
-        );
-    }
-
-    #[test]
-    fn test_subtitle_active_mobile_active_not_primary() {
-        let mut snapshot = test_snapshot();
-        snapshot.mobile.active = true;
-        let wrapped = NetworkSnapshot::NetworkManager(snapshot);
-        assert!(is_network_subtitle_active(&wrapped));
-    }
-
-    // ---- network_icon_name with mobile ----
-
-    #[test]
-    fn test_wifi_icon_mobile_connected_with_signal() {
-        assert_eq!(
-            network_icon_name(&NetworkIconContext {
-                mobile_is_primary: true,
-                has_modem_device: true,
-                mobile_signal_quality: Some(80),
-                ..test_icon_ctx()
-            }),
-            "network-cellular-signal-excellent-symbolic"
-        );
-    }
-
-    #[test]
-    fn test_wifi_icon_mobile_connected_no_signal() {
-        assert_eq!(
-            network_icon_name(&NetworkIconContext {
-                mobile_is_primary: true,
-                has_modem_device: true,
-                ..test_icon_ctx()
-            }),
-            "network-cellular-signal-none-symbolic"
-        );
-    }
-
-    #[test]
-    fn test_wifi_icon_modem_only_no_wifi() {
-        // Modem-only system without mobile connection shows cellular none icon
-        assert_eq!(
-            network_icon_name(&NetworkIconContext {
-                wifi_enabled: false,
-                has_wifi_device: false,
-                has_modem_device: true,
-                ..test_icon_ctx()
-            }),
-            "network-cellular-signal-none-symbolic"
-        );
+        for case in cases {
+            assert_eq!(
+                get_network_subtitle_text(&case.snapshot),
+                case.text,
+                "{}: text",
+                case.name
+            );
+            assert_eq!(
+                is_network_subtitle_active(&case.snapshot),
+                case.active,
+                "{}: active",
+                case.name
+            );
+        }
     }
 }
