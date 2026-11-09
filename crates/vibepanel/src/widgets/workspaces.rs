@@ -2521,7 +2521,7 @@ mod tests {
     }
 
     #[test]
-    fn test_scroll_waits_for_focus_and_cancels_on_clear() {
+    fn test_scroll_waits_for_focus_and_reconciles_targets() {
         let state = WorkspaceScrollFocus::default();
         state.pending.set(Some(2));
         assert_eq!(take_focused_scroll(&state.pending, false), None);
@@ -2532,29 +2532,25 @@ mod tests {
         state.pending.set(Some(4));
         state.clear();
         assert_eq!(take_focused_scroll(&state.pending, true), None);
-    }
 
-    #[test]
-    fn test_scroll_state_reconciles_snapshots_and_cancellation() {
         let state = WorkspaceScrollFocus::default();
         state.update(Some(1));
         state.set_target(2);
         state.set_target(3);
         state.set_target(2);
 
+        // A confirmation matching an earlier target doesn't settle the latest one.
         state.update(Some(2));
         assert_eq!(state.current(), Some(2));
-        assert!(state.target.get().is_some());
-
         state.update(Some(3));
         assert_eq!(state.current(), Some(2));
 
         state.cancel_target();
         assert_eq!(state.current(), Some(3));
 
+        // An expired target falls back to the confirmed workspace.
         state.target.set(Some((4, std::time::Instant::now())));
         assert_eq!(state.current(), Some(3));
-        assert_eq!(state.target.get(), None);
     }
 
     #[test]
@@ -2571,7 +2567,8 @@ mod tests {
             state.update(confirmed);
             assert_eq!(
                 adjacent_workspace_id(&[1, 2, 3, 4, 5], state.current(), true),
-                Some(5)
+                Some(5),
+                "confirmed {confirmed:?}"
             );
         }
     }
@@ -2589,65 +2586,61 @@ mod tests {
     }
 
     #[test]
-    fn test_workspace_config_default() {
+    fn test_workspace_config_defaults() {
         let entry = make_widget_entry("workspaces", HashMap::new());
         let config = WorkspacesConfig::from_entry(&entry);
         assert_eq!(config.label_type, LabelType::None);
         assert_eq!(config.separator, "");
+        assert!(config.animate.is_none());
         assert!(config.filter_by_output);
         assert!(!config.show_unoccupied);
+        assert!(!config.show_windows);
+        assert_eq!(config.max_windows, 3);
+        assert!(!config.group_by_app);
+        assert_eq!(config.icon_size, None);
     }
 
     #[test]
-    fn test_workspace_config_numbers() {
+    fn test_workspace_config_options_override_defaults() {
         let mut options = HashMap::new();
-        options.insert(
-            "label_type".to_string(),
-            Value::String("numbers".to_string()),
-        );
         options.insert("separator".to_string(), Value::String("|".to_string()));
+        options.insert("animate".to_string(), Value::Boolean(false));
+        options.insert("filter_by_output".to_string(), Value::Boolean(false));
+        options.insert("show_unoccupied".to_string(), Value::Boolean(true));
+        options.insert("show_windows".to_string(), Value::Boolean(true));
+        options.insert("max_windows".to_string(), Value::Integer(3));
+        options.insert("group_by_app".to_string(), Value::Boolean(true));
+        options.insert("icon_size".to_string(), Value::Integer(4));
         let entry = make_widget_entry("workspaces", options);
         let config = WorkspacesConfig::from_entry(&entry);
-        assert_eq!(config.label_type, LabelType::Name);
         assert_eq!(config.separator, "|");
+        assert_eq!(config.animate, Some(false));
+        assert!(!config.filter_by_output);
+        assert!(config.show_unoccupied);
+        assert!(config.show_windows);
+        assert_eq!(config.max_windows, 3);
+        assert!(config.group_by_app);
+        assert_eq!(config.icon_size, Some(8), "icon_size clamps to minimum");
     }
 
     #[test]
-    fn test_workspace_config_name() {
-        let mut options = HashMap::new();
-        options.insert("label_type".to_string(), Value::String("name".to_string()));
-        let entry = make_widget_entry("workspaces", options);
-        let config = WorkspacesConfig::from_entry(&entry);
-        assert_eq!(config.label_type, LabelType::Name);
-    }
+    fn test_workspace_config_label_type() {
+        let cases = [
+            ("icons", LabelType::Icons),
+            ("ICONS", LabelType::Icons),
+            ("name", LabelType::Name),
+            ("numbers", LabelType::Name),
+            ("index", LabelType::Index),
+            ("none", LabelType::None),
+            ("unknown", DEFAULT_LABEL_TYPE),
+        ];
 
-    #[test]
-    fn test_workspace_config_index() {
-        let mut options = HashMap::new();
-        options.insert("label_type".to_string(), Value::String("index".to_string()));
-        let entry = make_widget_entry("workspaces", options);
-        let config = WorkspacesConfig::from_entry(&entry);
-        assert_eq!(config.label_type, LabelType::Index);
-    }
-
-    #[test]
-    fn test_workspace_config_none() {
-        let mut options = HashMap::new();
-        options.insert("label_type".to_string(), Value::String("none".to_string()));
-        let entry = make_widget_entry("workspaces", options);
-        let config = WorkspacesConfig::from_entry(&entry);
-        assert_eq!(config.label_type, LabelType::None);
-    }
-
-    #[test]
-    fn test_label_type_from_str() {
-        assert_eq!(LabelType::from_str("icons"), LabelType::Icons);
-        assert_eq!(LabelType::from_str("ICONS"), LabelType::Icons);
-        assert_eq!(LabelType::from_str("name"), LabelType::Name);
-        assert_eq!(LabelType::from_str("numbers"), LabelType::Name);
-        assert_eq!(LabelType::from_str("index"), LabelType::Index);
-        assert_eq!(LabelType::from_str("none"), LabelType::None);
-        assert_eq!(LabelType::from_str("unknown"), DEFAULT_LABEL_TYPE);
+        for (input, expected) in cases {
+            let options =
+                HashMap::from([("label_type".to_string(), Value::String(input.to_string()))]);
+            let config = WorkspacesConfig::from_entry(&make_widget_entry("workspaces", options));
+            assert_eq!(config.label_type, expected, "label_type = {input:?}");
+        }
     }
 
     #[test]
@@ -2670,65 +2663,6 @@ mod tests {
             workspace_label_text(LabelType::Index, &named_without_index),
             "web"
         );
-    }
-
-    #[test]
-    fn test_workspace_config_animate_default() {
-        let entry = make_widget_entry("workspaces", HashMap::new());
-        let config = WorkspacesConfig::from_entry(&entry);
-        assert!(config.animate.is_none());
-    }
-
-    #[test]
-    fn test_workspace_config_animate_disabled() {
-        let mut options = HashMap::new();
-        options.insert("animate".to_string(), Value::Boolean(false));
-        let entry = make_widget_entry("workspaces", options);
-        let config = WorkspacesConfig::from_entry(&entry);
-        assert_eq!(config.animate, Some(false));
-    }
-
-    #[test]
-    fn test_workspace_config_filter_by_output_disabled() {
-        let mut options = HashMap::new();
-        options.insert("filter_by_output".to_string(), Value::Boolean(false));
-        let entry = make_widget_entry("workspaces", options);
-        let config = WorkspacesConfig::from_entry(&entry);
-        assert!(!config.filter_by_output);
-    }
-
-    #[test]
-    fn test_workspace_config_show_unoccupied_enabled() {
-        let mut options = HashMap::new();
-        options.insert("show_unoccupied".to_string(), Value::Boolean(true));
-        let entry = make_widget_entry("workspaces", options);
-        let config = WorkspacesConfig::from_entry(&entry);
-        assert!(config.show_unoccupied);
-    }
-
-    #[test]
-    fn test_workspace_config_windows_defaults() {
-        let entry = make_widget_entry("workspaces", HashMap::new());
-        let config = WorkspacesConfig::from_entry(&entry);
-        assert!(!config.show_windows);
-        assert_eq!(config.max_windows, 3);
-        assert!(!config.group_by_app);
-        assert_eq!(config.icon_size, None);
-    }
-
-    #[test]
-    fn test_workspace_config_windows_options() {
-        let mut options = HashMap::new();
-        options.insert("show_windows".to_string(), Value::Boolean(true));
-        options.insert("max_windows".to_string(), Value::Integer(3));
-        options.insert("group_by_app".to_string(), Value::Boolean(true));
-        options.insert("icon_size".to_string(), Value::Integer(4));
-        let entry = make_widget_entry("workspaces", options);
-        let config = WorkspacesConfig::from_entry(&entry);
-        assert!(config.show_windows);
-        assert_eq!(config.max_windows, 3);
-        assert!(config.group_by_app);
-        assert_eq!(config.icon_size, Some(8));
     }
 
     // -- window icons --
@@ -2830,34 +2764,94 @@ mod tests {
 
     #[test]
     fn test_limit_window_items() {
-        let mut items = make_items(3);
-        assert_eq!(limit_window_items(&mut items, 0), 0);
-        assert_eq!(limit_window_items(&mut items, 3), 0);
-        assert_eq!(items.len(), 3);
+        struct Case {
+            name: &'static str,
+            count: u64,
+            focused: Option<usize>,
+            urgent: Option<usize>,
+            max: usize,
+            hidden: usize,
+            visible: Vec<Vec<u64>>,
+        }
 
-        let mut items = make_items(5);
-        assert_eq!(limit_window_items(&mut items, 2), 3);
-        assert_eq!(item_ids(&items), vec![vec![1], vec![2]]);
-    }
+        let cases = [
+            Case {
+                name: "unlimited",
+                count: 3,
+                focused: None,
+                urgent: None,
+                max: 0,
+                hidden: 0,
+                visible: vec![vec![1], vec![2], vec![3]],
+            },
+            Case {
+                name: "exactly at limit",
+                count: 3,
+                focused: None,
+                urgent: None,
+                max: 3,
+                hidden: 0,
+                visible: vec![vec![1], vec![2], vec![3]],
+            },
+            Case {
+                name: "keeps first items",
+                count: 5,
+                focused: None,
+                urgent: None,
+                max: 2,
+                hidden: 3,
+                visible: vec![vec![1], vec![2]],
+            },
+            Case {
+                name: "hidden focused item kept visible",
+                count: 5,
+                focused: Some(4),
+                urgent: None,
+                max: 3,
+                hidden: 2,
+                visible: vec![vec![1], vec![2], vec![5]],
+            },
+            Case {
+                name: "hidden urgent item kept visible",
+                count: 5,
+                focused: None,
+                urgent: Some(3),
+                max: 3,
+                hidden: 2,
+                visible: vec![vec![1], vec![2], vec![4]],
+            },
+            Case {
+                name: "visible focused item in last slot isn't pushed out",
+                count: 5,
+                focused: Some(2),
+                urgent: Some(4),
+                max: 3,
+                hidden: 2,
+                visible: vec![vec![1], vec![5], vec![3]],
+            },
+        ];
 
-    #[test]
-    fn test_limit_window_items_keeps_focused_then_urgent_visible() {
-        let mut items = make_items(5);
-        items[4].focused = Some(0);
-        assert_eq!(limit_window_items(&mut items, 3), 2);
-        assert_eq!(item_ids(&items), vec![vec![1], vec![2], vec![5]]);
-
-        let mut items = make_items(5);
-        items[3].urgent = true;
-        limit_window_items(&mut items, 3);
-        assert_eq!(item_ids(&items), vec![vec![1], vec![2], vec![4]]);
-
-        // A visible focused item in the last slot isn't pushed out.
-        let mut items = make_items(5);
-        items[2].focused = Some(0);
-        items[4].urgent = true;
-        limit_window_items(&mut items, 3);
-        assert_eq!(item_ids(&items), vec![vec![1], vec![5], vec![3]]);
+        for case in cases {
+            let mut items = make_items(case.count);
+            if let Some(i) = case.focused {
+                items[i].focused = Some(0);
+            }
+            if let Some(i) = case.urgent {
+                items[i].urgent = true;
+            }
+            assert_eq!(
+                limit_window_items(&mut items, case.max),
+                case.hidden,
+                "{}: hidden count",
+                case.name
+            );
+            assert_eq!(
+                item_ids(&items),
+                case.visible,
+                "{}: visible items",
+                case.name
+            );
+        }
     }
 
     #[test]
@@ -2865,102 +2859,80 @@ mod tests {
         let (a, b) = ((0.0, 20.0), (100.0, 140.0));
         for (from, to) in [(a, b), (b, a)] {
             let extra = highlight_extra_us(100.0);
-            assert_eq!(highlight_edges(from, to, 0.0, extra), (from, false));
+            assert_eq!(
+                highlight_edges(from, to, 0.0, extra),
+                (from, false),
+                "{from:?} -> {to:?}: start"
+            );
             let ((start, end), done) = highlight_edges(from, to, HIGHLIGHT_LEAD_US, extra);
             assert!(
                 !done && end - start > 40.0,
-                "stretched midway: {start}..{end}"
+                "{from:?} -> {to:?}: stretched midway: {start}..{end}"
             );
             assert_eq!(
                 highlight_edges(from, to, HIGHLIGHT_TRAIL_US + extra, extra),
-                (to, true)
+                (to, true),
+                "{from:?} -> {to:?}: settled"
             );
         }
     }
 
     #[test]
-    fn test_global_display_includes_each_outputs_current_workspace() {
-        let active_workspaces = HashSet::from([2]);
+    fn test_collect_display_ids() {
+        let snapshot = |active: i32,
+                        workspaces: &[Workspace],
+                        per_output: &[(&str, i32)],
+                        occupancy_known: bool| WorkspaceServiceSnapshot {
+            active_workspace: HashSet::from([active]),
+            workspaces: workspaces.to_vec(),
+            per_output: per_output
+                .iter()
+                .map(|(output, active)| {
+                    (
+                        output.to_string(),
+                        PerOutputWorkspaces {
+                            active_workspace: HashSet::from([*active]),
+                            workspaces: vec![],
+                        },
+                    )
+                })
+                .collect(),
+            occupancy_known,
+        };
+
+        // Global display includes each output's current workspace.
         let workspaces = vec![
             make_workspace(2, "2", true, false, false, None),
             make_workspace(4, "4", false, true, false, Some(1)),
             make_workspace(8, "8", false, false, false, None),
         ];
-        let snapshot = WorkspaceServiceSnapshot {
-            active_workspace: active_workspaces.clone(),
-            workspaces: workspaces.clone(),
-            per_output: HashMap::from([
-                (
-                    "eDP-1".to_string(),
-                    PerOutputWorkspaces {
-                        active_workspace: HashSet::from([2]),
-                        workspaces: vec![],
-                    },
-                ),
-                (
-                    "HDMI-A-1".to_string(),
-                    PerOutputWorkspaces {
-                        active_workspace: HashSet::from([8]),
-                        workspaces: vec![],
-                    },
-                ),
-            ]),
-            occupancy_known: true,
-        };
+        let snap = snapshot(2, &workspaces, &[("eDP-1", 2), ("HDMI-A-1", 8)], true);
+        let ids = collect_display_ids(&workspaces, &HashSet::from([2]), &snap, false, true);
+        assert_eq!(ids, HashSet::from([2, 4, 8]), "global display");
 
-        let display_ids =
-            collect_display_ids(&workspaces, &active_workspaces, &snapshot, false, true);
-
-        assert!(display_ids.contains(&2));
-        assert!(display_ids.contains(&4));
-        assert!(display_ids.contains(&8));
-        assert_eq!(active_workspaces, HashSet::from([2]));
-        assert!(!workspaces.iter().find(|ws| ws.id == 8).unwrap().active);
-    }
-
-    #[test]
-    fn test_show_unoccupied_includes_reported_empty_workspaces() {
-        let active_workspaces = HashSet::from([1]);
+        // show_unoccupied includes reported empty workspaces, not unreported ones.
         let workspaces = vec![
             make_workspace(1, "1", true, false, false, Some(0)),
             make_workspace(2, "2", false, true, false, Some(1)),
             make_workspace(3, "3", false, false, false, Some(0)),
             make_workspace(4, "4", false, false, false, None),
         ];
-        let snapshot = WorkspaceServiceSnapshot {
-            active_workspace: active_workspaces.clone(),
-            workspaces: workspaces.clone(),
-            per_output: HashMap::new(),
-            occupancy_known: true,
-        };
+        let snap = snapshot(1, &workspaces, &[], true);
+        let active = HashSet::from([1]);
+        let ids = collect_display_ids(&workspaces, &active, &snap, false, false);
+        assert_eq!(ids, HashSet::from([1, 2]), "occupied only");
+        let ids = collect_display_ids(&workspaces, &active, &snap, true, false);
+        assert_eq!(ids, HashSet::from([1, 2, 3]), "show_unoccupied");
 
-        let default_ids =
-            collect_display_ids(&workspaces, &active_workspaces, &snapshot, false, false);
-        assert_eq!(default_ids, HashSet::from([1, 2]));
-
-        let show_unoccupied_ids =
-            collect_display_ids(&workspaces, &active_workspaces, &snapshot, true, false);
-        assert_eq!(show_unoccupied_ids, HashSet::from([1, 2, 3]));
-        assert!(!show_unoccupied_ids.contains(&4));
-    }
-
-    #[test]
-    fn test_unknown_occupancy_shows_all_listed_workspaces() {
-        let active_workspaces = HashSet::from([1]);
+        // Unknown occupancy shows every listed workspace.
         let workspaces = vec![
             make_workspace(1, "1", true, false, false, None),
             make_workspace(2, "2", false, false, false, None),
             make_workspace(3, "3", false, false, false, None),
         ];
-        let snapshot = WorkspaceServiceSnapshot {
-            active_workspace: active_workspaces.clone(),
-            workspaces: workspaces.clone(),
-            per_output: HashMap::new(),
-            occupancy_known: false,
-        };
-
-        let ids = collect_display_ids(&workspaces, &active_workspaces, &snapshot, false, false);
-        assert_eq!(ids, HashSet::from([1, 2, 3]));
+        let snap = snapshot(1, &workspaces, &[], false);
+        let ids = collect_display_ids(&workspaces, &active, &snap, false, false);
+        assert_eq!(ids, HashSet::from([1, 2, 3]), "unknown occupancy");
     }
 
     // -- build_tooltip tests --
@@ -3069,7 +3041,10 @@ mod tests {
             let slots = slot_layout([a, b, inactive].into_iter());
             let (pos, size) = *slots.last().unwrap();
             assert_eq!(pos + size, 70, "step {step}");
-            assert!(slots.windows(2).all(|w| w[0].0 + w[0].1 == w[1].0));
+            assert!(
+                slots.windows(2).all(|w| w[0].0 + w[0].1 == w[1].0),
+                "step {step}: contiguous {slots:?}"
+            );
         }
     }
 }

@@ -1258,103 +1258,88 @@ mod tests {
     }
 
     #[test]
-    fn sparse_grayscale_outline_is_analyzed() {
-        let pixels = rgba_icon(8, 8, 1, 1, 48);
-        let analysis = analyze_visible_pixels(&pixels).unwrap();
+    fn contrast_adjustment_cases() {
+        enum Outcome {
+            Unchanged,
+            /// Expected RGBA at each byte offset; other pixels aren't checked.
+            Pixels(Vec<(usize, [u8; 4])>),
+            AllPixels([u8; 4]),
+        }
 
-        assert!(analysis.is_grayscale);
-        assert_eq!(analysis.anchor_gray, 48);
-    }
+        let outline = (8 + 1) * 4;
+        let edge = (8 + 2) * 4;
+        let mut tinted = rgba_icon(8, 8, 1, 1, 48);
+        tinted[edge..edge + 4].copy_from_slice(&[60, 60, 60, 100]);
+        let mut mixed = [[48, 48, 48, 255]; 10].concat();
+        mixed[..4].copy_from_slice(&[48, 0, 0, 255]);
+        let mut percentile = [[32, 32, 32, 255]; 20].concat();
+        percentile[..8].copy_from_slice(&[255; 8]);
 
-    #[test]
-    fn low_contrast_dark_outline_is_brightened_on_dark_background() {
-        let mut pixels = rgba_icon(8, 8, 1, 1, 48);
-        let offset = (8 + 1) * 4;
+        let cases = [
+            (
+                "sparse low-contrast dark outline is brightened",
+                rgba_icon(8, 8, 1, 1, 48),
+                [255; 3],
+                Outcome::Pixels(vec![(outline, [235, 235, 235, 255])]),
+            ),
+            (
+                "high-contrast outline is unchanged",
+                rgba_icon(8, 8, 1, 1, 255),
+                [255; 3],
+                Outcome::Unchanged,
+            ),
+            (
+                "mixed-color artwork is unchanged",
+                mixed,
+                [255; 3],
+                Outcome::Unchanged,
+            ),
+            (
+                // Foreground softened 15% toward mid-gray, alpha kept.
+                "tinted foreground hue is preserved",
+                tinted,
+                [180, 200, 255],
+                Outcome::Pixels(vec![
+                    (outline, [172, 189, 235, 255]),
+                    (edge, [172, 189, 235, 100]),
+                ]),
+            ),
+            (
+                "percentile anchor ignores rare bright pixels",
+                percentile,
+                [255; 3],
+                Outcome::AllPixels([235, 235, 235, 255]),
+            ),
+        ];
 
-        apply_contrast_adjustment(
-            &mut pixels,
-            Some(&ContrastParams {
-                bg_luminance: 0.0,
-                fg: [255; 3],
-            }),
-        );
+        for (name, original, fg, outcome) in cases {
+            let mut pixels = original.clone();
+            apply_contrast_adjustment(
+                &mut pixels,
+                Some(&ContrastParams {
+                    bg_luminance: 0.0,
+                    fg,
+                }),
+            );
 
-        assert_eq!(&pixels[offset..offset + 4], &[235, 235, 235, 255]);
-    }
-
-    #[test]
-    fn high_contrast_outline_is_unchanged() {
-        let mut pixels = rgba_icon(8, 8, 1, 1, 255);
-        let original = pixels.clone();
-
-        apply_contrast_adjustment(
-            &mut pixels,
-            Some(&ContrastParams {
-                bg_luminance: 0.0,
-                fg: [255; 3],
-            }),
-        );
-
-        assert_eq!(pixels, original);
-    }
-
-    #[test]
-    fn mixed_color_artwork_is_unchanged() {
-        let mut pixels = [[48, 48, 48, 255]; 10].concat();
-        pixels[..4].copy_from_slice(&[48, 0, 0, 255]);
-        let original = pixels.clone();
-
-        apply_contrast_adjustment(
-            &mut pixels,
-            Some(&ContrastParams {
-                bg_luminance: 0.0,
-                fg: [255; 3],
-            }),
-        );
-
-        assert_eq!(pixels, original);
-    }
-
-    #[test]
-    fn tinted_foreground_hue_is_preserved() {
-        let mut pixels = rgba_icon(8, 8, 1, 1, 48);
-        let offset = (8 + 1) * 4;
-        let edge_offset = (8 + 2) * 4;
-        pixels[edge_offset..edge_offset + 4].copy_from_slice(&[60, 60, 60, 100]);
-
-        apply_contrast_adjustment(
-            &mut pixels,
-            Some(&ContrastParams {
-                bg_luminance: 0.0,
-                fg: [180, 200, 255],
-            }),
-        );
-
-        // Foreground softened 15% toward mid-gray.
-        assert_eq!(&pixels[offset..offset + 4], &[172, 189, 235, 255]);
-        assert_eq!(&pixels[edge_offset..edge_offset + 4], &[172, 189, 235, 100]);
-    }
-
-    #[test]
-    fn percentile_anchor_drives_contrast_gate() {
-        let mut pixels = [[32, 32, 32, 255]; 20].concat();
-        pixels[..8].copy_from_slice(&[255, 255, 255, 255, 255, 255, 255, 255]);
-
-        apply_contrast_adjustment(
-            &mut pixels,
-            Some(&ContrastParams {
-                bg_luminance: 0.0,
-                fg: [255; 3],
-            }),
-        );
-
-        assert!(
-            pixels
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .all(|pixel| pixel == &[235, 235, 235, 255])
-        );
+            match outcome {
+                Outcome::Unchanged => assert_eq!(pixels, original, "{name}"),
+                Outcome::Pixels(expected) => {
+                    for (offset, rgba) in expected {
+                        assert_eq!(
+                            &pixels[offset..offset + 4],
+                            &rgba,
+                            "{name}: pixel at byte {offset}"
+                        );
+                    }
+                }
+                Outcome::AllPixels(rgba) => {
+                    for pixel in pixels.as_chunks::<4>().0 {
+                        assert_eq!(pixel, &rgba, "{name}");
+                    }
+                }
+            }
+        }
     }
 
     #[test]

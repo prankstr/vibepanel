@@ -104,18 +104,34 @@ button.system-title-button > overlay > box {
 #[cfg(test)]
 mod tests {
     use super::css;
+    use crate::widgets::css::base::tests::declarations;
 
     #[test]
     fn progress_bars_clear_gtk_theme_chrome() {
-        let css = css();
+        let cases: [(&str, &[&str]); 2] = [
+            (
+                ".system-progress-bar trough, .system-core-bar trough",
+                &["background-image: none", "border: none", "box-shadow: none"],
+            ),
+            (
+                ".system-progress-bar trough progress, .system-core-bar trough progress",
+                &[
+                    "background-image: none",
+                    "border: none",
+                    "box-shadow: none",
+                    "margin: 0",
+                ],
+            ),
+        ];
 
-        for property in [
-            "background-image: none;",
-            "border: none;",
-            "box-shadow: none;",
-        ] {
-            assert_eq!(css.matches(property).count(), 2);
+        for (selector, expected) in cases {
+            let actual = declarations(css(), selector);
+            for declaration in expected {
+                assert!(
+                    actual.contains(&declaration.to_string()),
+                    "{selector}: missing {declaration}"
+                );
+            }
         }
-        assert!(css.contains("margin: 0;"));
     }
 }

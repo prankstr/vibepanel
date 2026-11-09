@@ -909,6 +909,12 @@ mod tests {
             WorkspaceSeparatorLabel::Number
         );
         assert!(!config.show_scratchpad_windows);
+
+        let mut options = HashMap::new();
+        options.insert("icon_size".to_string(), Value::Integer(2));
+        let entry = make_widget_entry("taskbar", options);
+        let config = TaskbarConfig::from_entry(&entry);
+        assert_eq!(config.icon_size, Some(8), "icon_size clamps to minimum");
     }
 
     #[test]
@@ -963,16 +969,6 @@ mod tests {
     }
 
     #[test]
-    fn test_taskbar_config_icon_size_min_clamp() {
-        let mut options = HashMap::new();
-        options.insert("icon_size".to_string(), Value::Integer(2));
-
-        let entry = make_widget_entry("taskbar", options);
-        let config = TaskbarConfig::from_entry(&entry);
-        assert_eq!(config.icon_size, Some(8));
-    }
-
-    #[test]
     fn test_workspace_display_label_uses_idx_with_name_fallback() {
         assert_eq!(workspace_meta_label(make_workspace_meta(42, 3, "web")), "3");
         assert_eq!(
@@ -982,7 +978,7 @@ mod tests {
     }
 
     #[test]
-    fn taskbar_urgent_workspaces_uses_output_state_when_filtered() {
+    fn taskbar_urgent_workspaces_prefers_output_state() {
         let mut snapshot = WorkspaceSnapshot::default();
         snapshot.urgent_workspaces.insert(1);
         snapshot.per_output.insert(
@@ -999,29 +995,44 @@ mod tests {
                 ..Default::default()
             },
         );
-
-        assert!(taskbar_urgent_workspaces(&snapshot, Some("eDP-1"), true).is_empty());
-        assert_eq!(
-            taskbar_urgent_workspaces(&snapshot, Some("HDMI-A-1"), true),
-            HashSet::from([1])
-        );
-    }
-
-    #[test]
-    fn taskbar_urgent_workspaces_falls_back_to_global_state() {
-        let mut snapshot = WorkspaceSnapshot::default();
-        snapshot.urgent_workspaces.insert(1);
         snapshot
             .per_output
-            .insert("eDP-1".to_string(), PerOutputState::default());
+            .insert("DP-1".to_string(), PerOutputState::default());
 
-        assert_eq!(
-            taskbar_urgent_workspaces(&snapshot, Some("eDP-1"), true),
-            HashSet::from([1])
-        );
-        assert_eq!(
-            taskbar_urgent_workspaces(&snapshot, Some("eDP-1"), false),
-            HashSet::from([1])
-        );
+        // (name, output, filter_by_output, expected)
+        let cases = [
+            (
+                "filtered, output reports none",
+                "eDP-1",
+                true,
+                HashSet::new(),
+            ),
+            (
+                "filtered, output reports urgent",
+                "HDMI-A-1",
+                true,
+                HashSet::from([1]),
+            ),
+            (
+                "filtered, output state unknown",
+                "DP-1",
+                true,
+                HashSet::from([1]),
+            ),
+            (
+                "unfiltered uses global state",
+                "DP-1",
+                false,
+                HashSet::from([1]),
+            ),
+        ];
+
+        for (name, output, filtered, expected) in cases {
+            assert_eq!(
+                taskbar_urgent_workspaces(&snapshot, Some(output), filtered),
+                expected,
+                "{name}"
+            );
+        }
     }
 }

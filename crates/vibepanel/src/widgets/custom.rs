@@ -1320,22 +1320,16 @@ mod tests {
     }
 
     #[test]
-    fn test_record_restart_attempt_enforces_cap_within_window() {
+    fn test_record_restart_attempt_caps_within_window_and_prunes_old() {
         let now = std::time::Instant::now();
         let mut times = Vec::new();
-
         for _ in 0..MAX_RESTARTS {
             assert!(record_restart_attempt(&mut times, now));
         }
         assert!(!record_restart_attempt(&mut times, now));
-    }
 
-    #[test]
-    fn test_record_restart_attempt_prunes_old_attempts() {
-        let now = std::time::Instant::now();
         let old = now - std::time::Duration::from_secs(RESTART_WINDOW_SECS + 1);
         let mut times = vec![old; MAX_RESTARTS as usize];
-
         assert!(record_restart_attempt(&mut times, now));
         assert_eq!(times, vec![now]);
     }
@@ -1366,7 +1360,7 @@ mod tests {
     }
 
     #[test]
-    fn test_custom_config_full() {
+    fn test_custom_config_options() {
         let mut options = HashMap::new();
         options.insert(
             "icon".to_string(),
@@ -1392,6 +1386,8 @@ mod tests {
             Value::String(" {output}".to_string()),
         );
         options.insert("interval".to_string(), Value::Integer(600));
+        options.insert("continuous".to_string(), Value::Boolean(true));
+        options.insert("restart_interval".to_string(), Value::Integer(5));
         options.insert("on_click".to_string(), Value::String("wlogout".to_string()));
         options.insert(
             "tooltip".to_string(),
@@ -1415,145 +1411,112 @@ mod tests {
         assert_eq!(config.exec, Some("echo hello".to_string()));
         assert_eq!(config.template, Some(" {output}".to_string()));
         assert_eq!(config.interval, 600);
+        assert!(config.continuous);
+        assert_eq!(config.restart_interval, Some(5));
         assert_eq!(config.on_click, Some("wlogout".to_string()));
         assert_eq!(config.tooltip, Some("Power menu".to_string()));
         assert_eq!(config.max_chars, Some(30));
-    }
 
-    #[test]
-    fn test_custom_config_icon_glyph_parsed() {
-        let mut options = HashMap::new();
-        options.insert("icon".to_string(), Value::String("glyph:🔋".to_string()));
-        let entry = make_entry(options);
-        let config = CustomConfig::from_entry(&entry);
-        assert_eq!(config.icon, Some(glyph_icon("🔋")));
-    }
-
-    #[test]
-    fn test_custom_config_icon_unknown_prefix_stays_named() {
-        let mut options = HashMap::new();
-        options.insert("icon".to_string(), Value::String("foo:bar".to_string()));
-        let entry = make_entry(options);
-        let config = CustomConfig::from_entry(&entry);
-        assert_eq!(config.icon, Some(named_icon("foo:bar")));
-    }
-
-    #[test]
-    fn test_custom_config_empty_prefixed_icon_ignored() {
-        let mut options = HashMap::new();
-        options.insert("icon".to_string(), Value::String("glyph:".to_string()));
-        let entry = make_entry(options);
-        let config = CustomConfig::from_entry(&entry);
-        assert!(config.icon.is_none());
-    }
-
-    #[test]
-    fn test_custom_config_icons_glyph_value_parsed() {
-        let mut icons = toml::map::Map::new();
-        icons.insert("unknown".to_string(), Value::String("glyph:?".to_string()));
-        icons.insert("dnd".to_string(), Value::String("disabled".to_string()));
-
-        let mut options = HashMap::new();
-        options.insert("icons".to_string(), Value::Table(icons));
-        let entry = make_entry(options);
-        let config = CustomConfig::from_entry(&entry);
-
-        assert_eq!(config.icons.get("unknown"), Some(&glyph_icon("?")));
-        assert_eq!(config.icons.get("dnd"), Some(&named_icon("disabled")));
-    }
-
-    #[test]
-    fn test_resolve_image_path_absolute() {
-        assert_eq!(
-            resolve_image_path("/usr/share/icon.png"),
-            "/usr/share/icon.png"
-        );
-    }
-
-    #[test]
-    fn test_resolve_image_path_file_uri() {
-        assert_eq!(
-            resolve_image_path("file:///usr/share/icon.png"),
-            "/usr/share/icon.png"
-        );
-    }
-
-    #[test]
-    fn test_resolve_image_path_home_relative() {
-        let resolved = resolve_image_path("~/icon.png");
-        match std::env::var("HOME") {
-            Ok(home) => assert_eq!(resolved, format!("{home}/icon.png")),
-            Err(_) => assert_eq!(resolved, "~/icon.png"),
-        }
-    }
-
-    // --- continuous mode config tests ---
-
-    #[test]
-    fn test_custom_config_continuous_true() {
-        let mut options = HashMap::new();
-        options.insert("continuous".to_string(), Value::Boolean(true));
-        options.insert("restart_interval".to_string(), Value::Integer(5));
-        let entry = make_entry(options);
-        let config = CustomConfig::from_entry(&entry);
-        assert!(config.continuous);
-        assert_eq!(config.restart_interval, Some(5));
-    }
-
-    #[test]
-    fn test_custom_config_negative_restart_interval_is_none() {
-        let mut options = HashMap::new();
-        options.insert("restart_interval".to_string(), Value::Integer(-1));
-        let entry = make_entry(options);
+        let entry = make_entry(HashMap::from([(
+            "restart_interval".to_string(),
+            Value::Integer(-1),
+        )]));
         let config = CustomConfig::from_entry(&entry);
         assert!(config.restart_interval.is_none());
     }
 
-    // --- ExecOutput / JSON deserialization tests ---
-
     #[test]
-    fn test_try_parse_json_plain_text() {
-        assert!(try_parse_json("hello world").is_none());
+    fn test_custom_config_icon_values() {
+        struct Case {
+            name: &'static str,
+            icon: Option<&'static str>,
+            icons: &'static [(&'static str, &'static str)],
+            expected_icon: Option<CustomIconValue>,
+            expected_icons: Vec<(&'static str, CustomIconValue)>,
+        }
+
+        let cases = [
+            Case {
+                name: "glyph prefix",
+                icon: Some("glyph:🔋"),
+                icons: &[],
+                expected_icon: Some(glyph_icon("🔋")),
+                expected_icons: vec![],
+            },
+            Case {
+                name: "unknown prefix stays named",
+                icon: Some("foo:bar"),
+                icons: &[],
+                expected_icon: Some(named_icon("foo:bar")),
+                expected_icons: vec![],
+            },
+            Case {
+                name: "empty glyph ignored",
+                icon: Some("glyph:"),
+                icons: &[],
+                expected_icon: None,
+                expected_icons: vec![],
+            },
+            Case {
+                name: "icons map parses glyph and named values",
+                icon: None,
+                icons: &[("unknown", "glyph:?"), ("dnd", "disabled")],
+                expected_icon: None,
+                expected_icons: vec![
+                    ("unknown", glyph_icon("?")),
+                    ("dnd", named_icon("disabled")),
+                ],
+            },
+        ];
+
+        for case in cases {
+            let mut options = HashMap::new();
+            if let Some(icon) = case.icon {
+                options.insert("icon".to_string(), Value::String(icon.to_string()));
+            }
+            if !case.icons.is_empty() {
+                let icons = case
+                    .icons
+                    .iter()
+                    .map(|(alt, icon)| ((*alt).to_string(), Value::String((*icon).to_string())))
+                    .collect();
+                options.insert("icons".to_string(), Value::Table(icons));
+            }
+            let config = CustomConfig::from_entry(&make_entry(options));
+
+            assert_eq!(config.icon, case.expected_icon, "{}: icon", case.name);
+            let expected_icons: BTreeMap<String, CustomIconValue> = case
+                .expected_icons
+                .into_iter()
+                .map(|(alt, icon)| (alt.to_string(), icon))
+                .collect();
+            assert_eq!(config.icons, expected_icons, "{}: icons", case.name);
+        }
     }
 
     #[test]
-    fn test_try_parse_json_unsupported_json_object() {
-        assert!(try_parse_json(r#"{"status":"ok"}"#).is_none());
-    }
+    fn test_resolve_image_path() {
+        let home_expanded = std::env::var("HOME").map_or_else(
+            |_| "~/icon.png".to_string(),
+            |home| format!("{home}/icon.png"),
+        );
+        let cases = [
+            (
+                "absolute",
+                "/usr/share/icon.png",
+                "/usr/share/icon.png".to_string(),
+            ),
+            (
+                "file uri",
+                "file:///usr/share/icon.png",
+                "/usr/share/icon.png".to_string(),
+            ),
+            ("home relative", "~/icon.png", home_expanded),
+        ];
 
-    #[test]
-    fn test_try_parse_json_supported_fields_without_text() {
-        assert_eq!(
-            try_parse_json(r#"{"tooltip":"hi"}"#)
-                .unwrap()
-                .tooltip
-                .as_deref(),
-            Some("hi")
-        );
-        assert_eq!(
-            try_parse_json(r#"{"alt":"dark"}"#).unwrap().alt.as_deref(),
-            Some("dark")
-        );
-        assert!(
-            try_parse_json(r#"{"class":"active"}"#)
-                .unwrap()
-                .class
-                .is_some()
-        );
-        assert_eq!(
-            try_parse_json(r#"{"percentage":80}"#).unwrap().percentage,
-            Some(80.0)
-        );
-    }
-
-    #[test]
-    fn test_try_parse_json_full() {
-        let json = r#"{"text":"cpu 42%","tooltip":"details","class":"warning","alt":"high","percentage":42.5}"#;
-        let out = try_parse_json(json).unwrap();
-        assert_eq!(out.text.as_deref(), Some("cpu 42%"));
-        assert_eq!(out.tooltip.as_deref(), Some("details"));
-        assert_eq!(out.alt.as_deref(), Some("high"));
-        assert!((out.percentage.unwrap() - 42.5).abs() < f64::EPSILON);
+        for (name, input, expected) in cases {
+            assert_eq!(resolve_image_path(input), expected, "{name}: {input}");
+        }
     }
 
     fn icon_map(entries: &[(&str, &str)]) -> BTreeMap<String, CustomIconValue> {
@@ -1589,166 +1552,248 @@ mod tests {
         );
     }
 
-    // --- StringOrVec tests ---
-
     #[test]
-    fn test_string_or_vec_single() {
-        let s: StringOrVec = serde_json::from_str(r#""hello""#).unwrap();
-        assert_eq!(s, StringOrVec::Single("hello".to_string()));
-        assert_eq!(s.into_vec(), vec!["hello"]);
-    }
+    fn test_plan_output_cases() {
+        #[derive(Default)]
+        struct Case {
+            name: &'static str,
+            raw: &'static str,
+            fallback: &'static str,
+            template: Option<&'static str>,
+            static_tooltip: Option<&'static str>,
+            icons: BTreeMap<String, CustomIconValue>,
+            static_icon: Option<CustomIconValue>,
+            static_image: bool,
+            label: &'static str,
+            tooltip: Option<&'static str>,
+            icon: Option<CustomIconValue>,
+            classes: &'static [&'static str],
+            should_show: bool,
+        }
 
-    #[test]
-    fn test_string_or_vec_multiple() {
-        let s: StringOrVec = serde_json::from_str(r#"["a","b","c"]"#).unwrap();
-        assert_eq!(
-            s,
-            StringOrVec::Multiple(vec!["a".into(), "b".into(), "c".into()])
-        );
-        assert_eq!(s.into_vec(), vec!["a", "b", "c"]);
-    }
-
-    // --- expand_template tests ---
-
-    #[test]
-    fn test_expand_template_with_exec_output() {
-        let out = ExecOutput {
-            text: Some("val".into()),
-            alt: Some("high".into()),
-            percentage: Some(75.0),
-            ..Default::default()
-        };
-        let result = expand_template("{text} ({alt}) {percentage}%", "val", Some(&out));
-        assert_eq!(result, "val (high) 75%");
-    }
-
-    #[test]
-    fn test_expand_template_missing_json_fields_clear_placeholders() {
-        let out = ExecOutput {
-            text: Some("val".into()),
-            ..Default::default()
-        };
-
-        let result = expand_template("{text} ({alt}) {percentage}%", "val", Some(&out));
-        assert_eq!(result, "val () %");
-    }
-
-    #[test]
-    fn test_plan_output_plain_text_clears_dynamic_state() {
-        let plan = plan_output(
-            "hello",
-            "fallback",
-            Some("[{output}]"),
-            None,
-            &BTreeMap::new(),
-            None,
-            false,
-        );
-
-        assert_eq!(
-            plan,
-            OutputPlan {
-                label: "[hello]".to_string(),
-                tooltip: None,
-                icon: None,
-                classes: Vec::new(),
+        let cases = [
+            // Plain text and JSON detection.
+            Case {
+                name: "plain text is not JSON",
+                raw: "hello world",
+                fallback: "fallback",
+                label: "hello world",
                 should_show: true,
-            }
-        );
-    }
-
-    #[test]
-    fn test_plan_output_json_class_and_tooltip() {
-        let icons = icon_map(&[("high", "cpu-high")]);
-        let static_icon = named_icon("static-icon");
-        let plan = plan_output(
-            r#"{"text":"cpu 42%","tooltip":"details","class":["warning",""],"alt":"high","icon":"ignored"}"#,
-            "fallback",
-            Some("{text}"),
-            Some("static"),
-            &icons,
-            Some(&static_icon),
-            false,
-        );
-
-        assert_eq!(
-            plan,
-            OutputPlan {
-                label: "cpu 42%".to_string(),
-                tooltip: Some("details".to_string()),
+                ..Default::default()
+            },
+            Case {
+                name: "JSON without supported fields is plain text",
+                raw: r#"{"status":"ok"}"#,
+                fallback: "fallback",
+                label: r#"{"status":"ok"}"#,
+                should_show: true,
+                ..Default::default()
+            },
+            Case {
+                name: "plain text with template clears dynamic state",
+                raw: "hello",
+                fallback: "fallback",
+                template: Some("[{output}]"),
+                label: "[hello]",
+                should_show: true,
+                ..Default::default()
+            },
+            Case {
+                name: "JSON tooltip-only is structured",
+                raw: r#"{"tooltip":"hi"}"#,
+                fallback: "fallback",
+                tooltip: Some("hi"),
+                ..Default::default()
+            },
+            Case {
+                name: "JSON alt-only is structured",
+                raw: r#"{"alt":"dark"}"#,
+                fallback: "fallback",
+                template: Some("{alt}"),
+                label: "dark",
+                should_show: true,
+                ..Default::default()
+            },
+            Case {
+                name: "JSON class-only is structured",
+                raw: r#"{"class":"active"}"#,
+                fallback: "fallback",
+                classes: &["active"],
+                ..Default::default()
+            },
+            Case {
+                name: "JSON percentage template shows without text",
+                raw: r#"{"percentage":80}"#,
+                fallback: "fallback",
+                template: Some("{percentage}%"),
+                label: "80%",
+                should_show: true,
+                ..Default::default()
+            },
+            Case {
+                name: "JSON with all fields",
+                raw: r#"{"text":"cpu 42%","tooltip":"details","class":"warning","alt":"high","percentage":42.5}"#,
+                fallback: "fallback",
+                template: Some("{text}|{alt}|{percentage}"),
+                label: "cpu 42%|high|42",
+                tooltip: Some("details"),
+                classes: &["warning"],
+                should_show: true,
+                ..Default::default()
+            },
+            // `class` as string or list.
+            Case {
+                name: "JSON class string",
+                raw: r#"{"class":"hello"}"#,
+                fallback: "fallback",
+                classes: &["hello"],
+                ..Default::default()
+            },
+            Case {
+                name: "JSON class list",
+                raw: r#"{"class":["a","b","c"]}"#,
+                fallback: "fallback",
+                classes: &["a", "b", "c"],
+                ..Default::default()
+            },
+            Case {
+                name: "JSON class list drops empty, alt selects icon over static",
+                raw: r#"{"text":"cpu 42%","tooltip":"details","class":["warning",""],"alt":"high","icon":"ignored"}"#,
+                fallback: "fallback",
+                template: Some("{text}"),
+                static_tooltip: Some("static"),
+                icons: icon_map(&[("high", "cpu-high")]),
+                static_icon: Some(named_icon("static-icon")),
+                label: "cpu 42%",
+                tooltip: Some("details"),
                 icon: Some(named_icon("cpu-high")),
-                classes: vec!["warning".to_string()],
+                classes: &["warning"],
                 should_show: true,
-            }
-        );
-    }
+                ..Default::default()
+            },
+            // Template placeholders.
+            Case {
+                name: "template expands text, alt and percentage",
+                raw: r#"{"text":"val","alt":"high","percentage":75}"#,
+                fallback: "fallback",
+                template: Some("{text} ({alt}) {percentage}%"),
+                label: "val (high) 75%",
+                should_show: true,
+                ..Default::default()
+            },
+            Case {
+                name: "template clears missing JSON placeholders",
+                raw: r#"{"text":"val"}"#,
+                fallback: "fallback",
+                template: Some("{text} ({alt}) {percentage}%"),
+                label: "val () %",
+                should_show: true,
+                ..Default::default()
+            },
+            // Icons.
+            Case {
+                name: "JSON alt without text selects icon",
+                raw: r#"{"alt":"dark"}"#,
+                fallback: "fallback",
+                icons: icon_map(&[("dark", "moon")]),
+                icon: Some(named_icon("moon")),
+                should_show: true,
+                ..Default::default()
+            },
+            Case {
+                name: "JSON alt can select glyph icon",
+                raw: r#"{"alt":"unknown"}"#,
+                fallback: "fallback",
+                icons: BTreeMap::from([("unknown".to_string(), glyph_icon("?"))]),
+                icon: Some(glyph_icon("?")),
+                should_show: true,
+                ..Default::default()
+            },
+            Case {
+                name: "JSON icon extension is ignored",
+                raw: r#"{"text":"cpu 42%","alt":"missing","icon":"json-icon"}"#,
+                fallback: "fallback",
+                static_icon: Some(named_icon("static-icon")),
+                label: "cpu 42%",
+                icon: Some(named_icon("static-icon")),
+                should_show: true,
+                ..Default::default()
+            },
+            // Visibility and fallback label.
+            Case {
+                name: "empty plain text uses fallback",
+                fallback: "fallback",
+                label: "fallback",
+                should_show: true,
+                ..Default::default()
+            },
+            Case {
+                name: "empty plain text without fallback hides",
+                ..Default::default()
+            },
+            Case {
+                name: "empty plain text with template uses fallback",
+                fallback: "fallback",
+                template: Some("[{output}]"),
+                label: "fallback",
+                should_show: true,
+                ..Default::default()
+            },
+            Case {
+                name: "empty plain text with template and no fallback hides",
+                template: Some("[{output}]"),
+                ..Default::default()
+            },
+            Case {
+                name: "empty plain text with static image shows",
+                static_image: true,
+                should_show: true,
+                ..Default::default()
+            },
+            Case {
+                name: "JSON empty text does not use fallback",
+                raw: r#"{"text":""}"#,
+                fallback: "fallback",
+                ..Default::default()
+            },
+            Case {
+                name: "JSON empty text with static image shows",
+                raw: r#"{"text":""}"#,
+                fallback: "fallback",
+                static_image: true,
+                should_show: true,
+                ..Default::default()
+            },
+            Case {
+                name: "JSON empty text with static icon shows",
+                raw: r#"{"text":""}"#,
+                fallback: "fallback",
+                static_icon: Some(named_icon("static-icon")),
+                icon: Some(named_icon("static-icon")),
+                should_show: true,
+                ..Default::default()
+            },
+        ];
 
-    #[test]
-    fn test_plan_output_json_alt_without_text_selects_icon() {
-        let icons = icon_map(&[("dark", "moon")]);
-        let plan = plan_output(
-            r#"{"alt":"dark"}"#,
-            "fallback",
-            None,
-            None,
-            &icons,
-            None,
-            false,
-        );
-
-        assert_eq!(plan.label, "");
-        assert_eq!(plan.icon, Some(named_icon("moon")));
-        assert!(plan.should_show);
-    }
-
-    #[test]
-    fn test_plan_output_json_alt_can_select_glyph_icon() {
-        let icons = BTreeMap::from([("unknown".to_string(), glyph_icon("?"))]);
-        let plan = plan_output(
-            r#"{"alt":"unknown"}"#,
-            "fallback",
-            None,
-            None,
-            &icons,
-            None,
-            false,
-        );
-
-        assert_eq!(plan.label, "");
-        assert_eq!(plan.icon, Some(glyph_icon("?")));
-        assert!(plan.should_show);
-    }
-
-    #[test]
-    fn test_plan_output_json_percentage_template_shows_without_text() {
-        let plan = plan_output(
-            r#"{"percentage":80}"#,
-            "fallback",
-            Some("{percentage}%"),
-            None,
-            &BTreeMap::new(),
-            None,
-            false,
-        );
-
-        assert_eq!(plan.label, "80%");
-        assert!(plan.should_show);
-    }
-
-    #[test]
-    fn test_plan_output_ignores_json_icon_extension() {
-        let static_icon = named_icon("static-icon");
-        let plan = plan_output(
-            r#"{"text":"cpu 42%","alt":"missing","icon":"json-icon"}"#,
-            "fallback",
-            None,
-            None,
-            &BTreeMap::new(),
-            Some(&static_icon),
-            false,
-        );
-
-        assert_eq!(plan.icon, Some(named_icon("static-icon")));
+        for case in cases {
+            let plan = plan_output(
+                case.raw,
+                case.fallback,
+                case.template,
+                case.static_tooltip,
+                &case.icons,
+                case.static_icon.as_ref(),
+                case.static_image,
+            );
+            let expected = OutputPlan {
+                label: case.label.to_string(),
+                tooltip: case.tooltip.map(String::from),
+                icon: case.icon,
+                classes: case.classes.iter().map(|c| (*c).to_string()).collect(),
+                should_show: case.should_show,
+            };
+            assert_eq!(plan, expected, "{}: {:?}", case.name, case.raw);
+        }
     }
 
     #[test]
@@ -1795,102 +1840,5 @@ mod tests {
         );
 
         assert_eq!(plan.tooltip, Some("dynamic".to_string()));
-    }
-
-    #[test]
-    fn test_output_should_show_plain_text_uses_fallback() {
-        let with_fallback = plan_output("", "fallback", None, None, &BTreeMap::new(), None, false);
-        assert_eq!(with_fallback.label, "fallback");
-        assert!(with_fallback.should_show);
-        let without_fallback = plan_output("", "", None, None, &BTreeMap::new(), None, false);
-        assert!(!without_fallback.should_show);
-    }
-
-    #[test]
-    fn test_output_should_show_empty_plain_text_template_uses_fallback() {
-        let plan = plan_output(
-            "",
-            "fallback",
-            Some("[{output}]"),
-            None,
-            &BTreeMap::new(),
-            None,
-            false,
-        );
-
-        assert_eq!(plan.label, "fallback");
-        assert!(plan.should_show);
-    }
-
-    #[test]
-    fn test_output_should_hide_empty_plain_text_template_without_fallback() {
-        let plan = plan_output(
-            "",
-            "",
-            Some("[{output}]"),
-            None,
-            &BTreeMap::new(),
-            None,
-            false,
-        );
-
-        assert_eq!(plan.label, "");
-        assert!(!plan.should_show);
-    }
-
-    #[test]
-    fn test_output_should_show_plain_text_with_static_image() {
-        let plan = plan_output("", "", None, None, &BTreeMap::new(), None, true);
-
-        assert!(plan.should_show);
-    }
-
-    #[test]
-    fn test_output_should_show_json_empty_text_does_not_use_fallback() {
-        let plan = plan_output(
-            r#"{"text":""}"#,
-            "fallback",
-            None,
-            None,
-            &BTreeMap::new(),
-            None,
-            false,
-        );
-        assert_eq!(plan.label, "");
-        assert!(!plan.should_show);
-    }
-
-    #[test]
-    fn test_output_should_show_json_empty_text_with_static_image() {
-        let plan = plan_output(
-            r#"{"text":""}"#,
-            "fallback",
-            None,
-            None,
-            &BTreeMap::new(),
-            None,
-            true,
-        );
-
-        assert_eq!(plan.label, "");
-        assert!(plan.should_show);
-    }
-
-    #[test]
-    fn test_output_should_show_json_empty_text_with_static_icon() {
-        let static_icon = named_icon("static-icon");
-        let plan = plan_output(
-            r#"{"text":""}"#,
-            "fallback",
-            None,
-            None,
-            &BTreeMap::new(),
-            Some(&static_icon),
-            false,
-        );
-
-        assert_eq!(plan.label, "");
-        assert_eq!(plan.icon, Some(named_icon("static-icon")));
-        assert!(plan.should_show);
     }
 }

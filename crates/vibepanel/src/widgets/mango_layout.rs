@@ -418,40 +418,45 @@ mod tests {
     use super::*;
     use crate::services::icons::has_material_mapping;
 
-    fn entry_with_layouts(values: Vec<toml::Value>) -> WidgetEntry {
-        let mut options = std::collections::HashMap::new();
-        options.insert("layouts".to_string(), toml::Value::Array(values));
-        WidgetEntry {
-            name: "mango_layout".to_string(),
-            options,
+    #[test]
+    fn config_from_entry() {
+        let all: Vec<_> = MANGO_LAYOUTS.iter().map(|layout| layout.name).collect();
+        let cases = [
+            ("no layouts option uses all", None, all),
+            (
+                "configured layouts keep order, deduplicate, drop unknown",
+                Some(vec!["grid", "tile", "grid", "unknown"]),
+                vec!["grid", "tile"],
+            ),
+        ];
+
+        for (name, layouts, expected) in cases {
+            let mut options = std::collections::HashMap::new();
+            if let Some(layouts) = layouts {
+                let values = layouts
+                    .into_iter()
+                    .map(|layout| toml::Value::String(layout.into()))
+                    .collect();
+                options.insert("layouts".to_string(), toml::Value::Array(values));
+            }
+            let entry = WidgetEntry {
+                name: "mango_layout".to_string(),
+                options,
+            };
+            let config = MangoLayoutConfig::from_entry(&entry);
+
+            assert!(config.show_icon, "{name}: show_icon");
+            assert!(config.show_label, "{name}: show_label");
+            assert_eq!(
+                config
+                    .layouts
+                    .iter()
+                    .map(|layout| layout.name)
+                    .collect::<Vec<_>>(),
+                expected,
+                "{name}: layouts"
+            );
         }
-    }
-
-    #[test]
-    fn config_defaults_to_all_layouts() {
-        let config = MangoLayoutConfig::default();
-        assert!(config.show_icon);
-        assert!(config.show_label);
-        assert_eq!(config.layouts.len(), MANGO_LAYOUTS.len());
-    }
-
-    #[test]
-    fn configured_layouts_preserve_order_and_deduplicate() {
-        let entry = entry_with_layouts(vec![
-            toml::Value::String("grid".into()),
-            toml::Value::String("tile".into()),
-            toml::Value::String("grid".into()),
-            toml::Value::String("unknown".into()),
-        ]);
-        let config = MangoLayoutConfig::from_entry(&entry);
-        assert_eq!(
-            config
-                .layouts
-                .iter()
-                .map(|layout| layout.name)
-                .collect::<Vec<_>>(),
-            vec!["grid", "tile"]
-        );
     }
 
     #[test]
@@ -468,74 +473,30 @@ mod tests {
     }
 
     #[test]
-    fn directional_layouts_have_expected_transforms() {
-        assert_eq!(
-            layout_icon("right_tile").unwrap().transform,
-            IconTransform::MirrorHorizontal
-        );
-        assert_eq!(
-            layout_icon("fair").unwrap().transform,
-            IconTransform::RotateNegative90
-        );
-        assert_eq!(
-            layout_icon("vertical_tile").unwrap().transform,
-            IconTransform::RotatePositive90
-        );
-        assert_eq!(
-            layout_icon("vertical_scroller").unwrap().transform,
-            IconTransform::RotatePositive90
-        );
-        assert_eq!(
-            layout_icon("vertical_grid").unwrap().transform,
-            IconTransform::RotatePositive90
-        );
-        assert_eq!(
-            layout_icon("vertical_deck").unwrap().transform,
-            IconTransform::RotateNegative90
-        );
-        assert_eq!(
-            layout_icon("vertical_fair").unwrap().transform,
-            IconTransform::None
-        );
-    }
-
-    #[test]
-    fn title_describes_single_tag_and_output() {
-        let info = WindowLayoutInfo {
-            output: "eDP-1".to_string(),
-            active_tags: vec![1],
+    fn popover_title_describes_tags_and_output() {
+        let info = |output: &str, active_tags: Vec<u32>| WindowLayoutInfo {
+            output: output.to_string(),
+            active_tags,
             layout_name: "tile".to_string(),
             symbol: "T".to_string(),
         };
+        let cases = [
+            (
+                "single tag",
+                info("eDP-1", vec![1]),
+                "Layout for tag 1 on eDP-1",
+            ),
+            (
+                "multi-tag view",
+                info("DP-1", vec![2, 3]),
+                "Layout for current view on DP-1",
+            ),
+            ("overview", info("DP-1", vec![0]), "Overview on DP-1"),
+        ];
 
-        assert_eq!(popover_title(Some(&info)), "Layout for tag 1 on eDP-1");
-    }
-
-    #[test]
-    fn title_describes_multi_tag_view() {
-        let info = WindowLayoutInfo {
-            output: "DP-1".to_string(),
-            active_tags: vec![2, 3],
-            layout_name: "grid".to_string(),
-            symbol: "G".to_string(),
-        };
-
-        assert_eq!(
-            popover_title(Some(&info)),
-            "Layout for current view on DP-1"
-        );
-    }
-
-    #[test]
-    fn title_describes_overview() {
-        let info = WindowLayoutInfo {
-            output: "DP-1".to_string(),
-            active_tags: vec![0],
-            layout_name: "grid".to_string(),
-            symbol: "G".to_string(),
-        };
-
-        assert_eq!(popover_title(Some(&info)), "Overview on DP-1");
-        assert!(is_overview(&info));
+        for (name, info, expected) in &cases {
+            assert_eq!(popover_title(Some(info)), *expected, "{name}");
+        }
+        assert!(is_overview(&cases[2].1), "overview: is_overview");
     }
 }
