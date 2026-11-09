@@ -987,22 +987,13 @@ pub fn extract_theme_from_image(
 mod tests {
     use super::*;
 
-    /// Regression test: a fully-greyscale wallpaper has no high-chroma colours,
-    /// so after the chroma retain filter `color_to_count` is empty. Before the
-    /// fix in `09a36d7`, the `?` on `ranked.first()` caused the whole function
-    /// to return `None`, silently discarding the luminance that had already been
-    /// computed and forcing auto mode to dark regardless of actual brightness.
-    ///
-    /// After the fix the outer `Option` reflects decode success/failure only;
-    /// luminance is always returned when image decode succeeds.
+    /// Regression (09a36d7): a greyscale image has no high-chroma colours, which
+    /// used to make extraction return `None` and discard the computed luminance.
     #[test]
     fn test_extract_theme_grayscale_preserves_luminance() {
         use image::{GrayImage, ImageFormat};
         use std::io::Cursor;
 
-        // 4×4 mid-gray image — all pixels have chroma ≈ 0, well below the 5.0
-        // retain threshold, so the quantiser colour map will be empty or
-        // produce only Score's built-in fallback colour.
         let img = GrayImage::from_pixel(4, 4, image::Luma([128u8]));
         let mut buf = Cursor::new(Vec::new());
         img.write_to(&mut buf, ImageFormat::Png)
@@ -1014,8 +1005,6 @@ mod tests {
         let result = extract_theme_from_image(path.to_str().expect("valid utf-8 path"));
         let _ = std::fs::remove_file(&path);
 
-        // The outer Option must be Some — a valid image is not a decode failure.
-        // Before the fix this returned None, discarding luminance entirely.
         let (_theme, luminance) = result.expect("extraction must succeed for a valid image");
 
         // Luminance must be in (0, 1) — mid-gray luma 128 gives ~0.216.
@@ -1026,33 +1015,29 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_awww_image_path_standard() {
-        let line =
-            "default: eDP-1: 1920x1080, scale: 1, currently displaying: image: /home/user/wall.png";
-        assert_eq!(
-            extract_awww_image_path(line),
-            Some("/home/user/wall.png".to_string())
-        );
-    }
+    fn test_extract_awww_image_path() {
+        let cases = [
+            (
+                "standard",
+                "default: eDP-1: 1920x1080, scale: 1, currently displaying: image: /home/user/wall.png",
+                Some("/home/user/wall.png"),
+            ),
+            (
+                "spaces in path",
+                "default: DP-2: 2560x1440, scale: 1, currently displaying: image: /home/user/My Wallpapers/wall.jpg",
+                Some("/home/user/My Wallpapers/wall.jpg"),
+            ),
+            ("no marker", "some random line", None),
+            (
+                "empty after marker",
+                "default: eDP-1: 1920x1080, scale: 1, currently displaying: image:   ",
+                None,
+            ),
+        ];
 
-    #[test]
-    fn test_extract_awww_image_path_spaces_in_path() {
-        let line = "default: DP-2: 2560x1440, scale: 1, currently displaying: image: /home/user/My Wallpapers/wall.jpg";
-        assert_eq!(
-            extract_awww_image_path(line),
-            Some("/home/user/My Wallpapers/wall.jpg".to_string())
-        );
-    }
-
-    #[test]
-    fn test_extract_awww_image_path_no_marker() {
-        assert_eq!(extract_awww_image_path("some random line"), None);
-    }
-
-    #[test]
-    fn test_extract_awww_image_path_empty_after_marker() {
-        let line = "default: eDP-1: 1920x1080, scale: 1, currently displaying: image:   ";
-        assert_eq!(extract_awww_image_path(line), None);
+        for (name, line, expected) in cases {
+            assert_eq!(extract_awww_image_path(line).as_deref(), expected, "{name}");
+        }
     }
 
     // ----- varint codec -----
@@ -1067,29 +1052,35 @@ mod tests {
     }
 
     #[test]
-    fn test_varint_decode_truncated() {
-        // Continuation bit set but no more bytes
-        assert!(read_varint_from_bytes(&[0x80]).is_err());
-        assert!(read_varint_from_bytes(&[]).is_err());
-    }
+    fn test_varint_decode() {
+        let cases: [(&str, &[u8], Option<usize>); 6] = [
+            ("continuation without next byte", &[0x80], None),
+            ("empty", &[], None),
+            (
+                "u32::MAX",
+                &[0xFF, 0xFF, 0xFF, 0xFF, 0x0F],
+                Some(u32::MAX as usize),
+            ),
+            (
+                "5th byte sets bit 32",
+                &[0xFF, 0xFF, 0xFF, 0xFF, 0x10],
+                None,
+            ),
+            (
+                "5th byte payload 0x7F",
+                &[0x80, 0x80, 0x80, 0x80, 0x7F],
+                None,
+            ),
+            (
+                "continuation after oversized 5th byte",
+                &[0x80, 0x80, 0x80, 0x80, 0x90, 0x01],
+                None,
+            ),
+        ];
 
-    #[test]
-    fn test_varint_decode_u32_boundary() {
-        // 0xFF,0xFF,0xFF,0xFF,0x0F -> u32::MAX (5th byte payload 0x0F, max valid)
-        assert_eq!(
-            read_varint_from_bytes(&[0xFF, 0xFF, 0xFF, 0xFF, 0x0F]).expect("u32::MAX decodes"),
-            u32::MAX as usize
-        );
-    }
-
-    #[test]
-    fn test_varint_decode_rejects_above_u32() {
-        // 5th byte payload 0x10 would set bit 32 -> exceeds u32 range
-        assert!(read_varint_from_bytes(&[0xFF, 0xFF, 0xFF, 0xFF, 0x10]).is_err());
-        // Highest 5th-byte payload 0x7F is also out of range
-        assert!(read_varint_from_bytes(&[0x80, 0x80, 0x80, 0x80, 0x7F]).is_err());
-        // Continuation bit set on a 5th byte with oversized payload: rejected early
-        assert!(read_varint_from_bytes(&[0x80, 0x80, 0x80, 0x80, 0x90, 0x01]).is_err());
+        for (name, bytes, expected) in cases {
+            assert_eq!(read_varint_from_bytes(bytes).ok(), expected, "{name}");
+        }
     }
 
     // ----- allocation caps on hyprwire payload sizes -----
@@ -1110,144 +1101,145 @@ mod tests {
     }
 
     #[test]
-    fn test_read_value_rejects_oversized_varchar() {
-        // Length beyond HW_MAX_VARCHAR_LEN must be rejected before allocating.
-        let mut payload = encode_varint(HW_MAX_VARCHAR_LEN + 1);
-        // A few body bytes so the socket has something to offer; the cap check
-        // must fire before any read_exact on the body.
-        payload.extend_from_slice(&[0u8; 16]);
-        let err = read_value_from_bytes(HW_VARCHAR, &payload).expect_err("cap rejects");
-        assert!(err.contains("exceeds cap"), "unexpected error: {err}");
-    }
+    fn test_read_value_enforces_allocation_caps() {
+        let varchar = |len: usize| {
+            let mut payload = encode_varint(len);
+            payload.extend_from_slice(&[0u8; 16]);
+            payload
+        };
+        let mut at_cap = encode_varint(HW_MAX_VARCHAR_LEN);
+        at_cap.extend(std::iter::repeat_n(b'a', HW_MAX_VARCHAR_LEN));
+        let mut oversized_array = vec![HW_UINT];
+        oversized_array.extend_from_slice(&encode_varint(HW_MAX_ARRAY_COUNT + 1));
+        let mut oversized_inner = vec![HW_VARCHAR];
+        oversized_inner.extend_from_slice(&encode_varint(1));
+        oversized_inner.extend_from_slice(&varchar(HW_MAX_VARCHAR_LEN + 1));
 
-    #[test]
-    fn test_read_value_accepts_varchar_at_cap() {
-        // Exactly HW_MAX_VARCHAR_LEN must still be accepted.
-        let mut payload = encode_varint(HW_MAX_VARCHAR_LEN);
-        payload.extend(std::iter::repeat_n(b'a', HW_MAX_VARCHAR_LEN));
-        let value = read_value_from_bytes(HW_VARCHAR, &payload).expect("cap-sized accepted");
-        match value {
-            HyprwireValue::Varchar(s) => assert_eq!(s.len(), HW_MAX_VARCHAR_LEN),
-            other => panic!("expected Varchar, got {other:?}"),
+        // `None` expects a cap error before the body is read.
+        let cases = [
+            (
+                "varchar over cap",
+                HW_VARCHAR,
+                varchar(HW_MAX_VARCHAR_LEN + 1),
+                None,
+            ),
+            (
+                "varchar at cap",
+                HW_VARCHAR,
+                at_cap,
+                Some(HW_MAX_VARCHAR_LEN),
+            ),
+            ("array count over cap", HW_ARRAY, oversized_array, None),
+            (
+                "array item varchar over cap",
+                HW_ARRAY,
+                oversized_inner,
+                None,
+            ),
+        ];
+
+        for (name, magic, payload, expected) in cases {
+            match (read_value_from_bytes(magic, &payload), expected) {
+                (Ok(HyprwireValue::Varchar(s)), Some(len)) => assert_eq!(s.len(), len, "{name}"),
+                (Err(err), None) => assert!(err.contains("exceeds cap"), "{name}: {err}"),
+                (other, _) => panic!("{name}: unexpected {other:?}"),
+            }
         }
     }
 
     #[test]
-    fn test_read_array_rejects_oversized_count() {
-        // Item type + varint count above HW_MAX_ARRAY_COUNT.
-        let mut payload = vec![HW_UINT];
-        payload.extend_from_slice(&encode_varint(HW_MAX_ARRAY_COUNT + 1));
-        let err = read_value_from_bytes(HW_ARRAY, &payload).expect_err("cap rejects");
-        assert!(err.contains("exceeds cap"), "unexpected error: {err}");
+    fn test_parse_hyprpaper_active_response() {
+        let cases = [
+            (
+                "single monitor, no target",
+                "eDP-1 = /home/user/wall.png\n",
+                None,
+                Some("/home/user/wall.png"),
+            ),
+            (
+                "target found",
+                "eDP-1 = /home/user/first.png\nDP-1 = /home/user/second.png\n",
+                Some("DP-1"),
+                Some("/home/user/second.png"),
+            ),
+            (
+                "target missing falls back to first",
+                "eDP-1 = /home/user/first.png\nDP-1 = /home/user/second.png\n",
+                Some("HDMI-A-1"),
+                Some("/home/user/first.png"),
+            ),
+            (
+                "empty path skipped",
+                "eDP-1 = \nDP-1 = /home/user/second.png\n",
+                None,
+                Some("/home/user/second.png"),
+            ),
+            (
+                "no target returns first non-empty of several",
+                "eDP-1 = \nDP-1 = /home/user/wall.png\nHDMI-A-1 = /home/user/other.png\n",
+                None,
+                Some("/home/user/wall.png"),
+            ),
+            (
+                "target with empty path falls back",
+                "eDP-1 = /home/user/first.png\nDP-1 = \n",
+                Some("DP-1"),
+                Some("/home/user/first.png"),
+            ),
+            (
+                "non-ascii path",
+                "eDP-1 = /home/user/壁纸.png\n",
+                None,
+                Some("/home/user/壁纸.png"),
+            ),
+            (
+                "non-ascii path for target",
+                "DP-1 = /home/david/Bilder/Café.jpg\n",
+                Some("DP-1"),
+                Some("/home/david/Bilder/Café.jpg"),
+            ),
+            ("empty response", "", None, None),
+            ("no separators", "garbage without separators\n", None, None),
+            ("all paths empty", "eDP-1 = \nDP-1 = \n", None, None),
+            (
+                "all paths empty with target",
+                "eDP-1 = \nDP-1 = \n",
+                Some("DP-1"),
+                None,
+            ),
+        ];
+
+        for (name, response, monitor, expected) in cases {
+            assert_eq!(
+                parse_hyprpaper_active_response(response, monitor).as_deref(),
+                expected,
+                "{name}"
+            );
+        }
     }
 
     #[test]
-    fn test_read_array_rejects_oversized_inner_varchar() {
-        // Count of 1, then oversized varchar length inside.
-        let mut payload = vec![HW_VARCHAR];
-        payload.extend_from_slice(&encode_varint(1));
-        payload.extend_from_slice(&encode_varint(HW_MAX_VARCHAR_LEN + 1));
-        payload.extend_from_slice(&[0u8; 16]);
-        let err = read_value_from_bytes(HW_ARRAY, &payload).expect_err("cap rejects");
-        assert!(err.contains("exceeds cap"), "unexpected error: {err}");
-    }
+    fn test_parse_new_object() {
+        let cases = [
+            (
+                "object id and sequence",
+                vec![HyprwireValue::Uint(42), HyprwireValue::Uint(7)],
+                Some((42, 7)),
+            ),
+            (
+                "wrong argument types",
+                vec![HyprwireValue::Uint(42), HyprwireValue::Seq(7)],
+                None,
+            ),
+        ];
 
-    // ----- parse_hyprpaper_active_response (legacy text protocol) -----
-
-    #[test]
-    fn test_parse_legacy_single_monitor_no_target() {
-        let response = "eDP-1 = /home/user/wall.png\n";
-        assert_eq!(
-            parse_hyprpaper_active_response(response, None),
-            Some("/home/user/wall.png".to_string())
-        );
-    }
-
-    #[test]
-    fn test_parse_legacy_multi_monitor_target_match() {
-        let response = "eDP-1 = /home/user/first.png\nDP-1 = /home/user/second.png\n";
-        assert_eq!(
-            parse_hyprpaper_active_response(response, Some("DP-1")),
-            Some("/home/user/second.png".to_string())
-        );
-    }
-
-    #[test]
-    fn test_parse_legacy_multi_monitor_target_miss_falls_back() {
-        let response = "eDP-1 = /home/user/first.png\nDP-1 = /home/user/second.png\n";
-        assert_eq!(
-            parse_hyprpaper_active_response(response, Some("HDMI-A-1")),
-            Some("/home/user/first.png".to_string())
-        );
-    }
-
-    #[test]
-    fn test_parse_legacy_empty_path_filtered() {
-        let response = "eDP-1 = \nDP-1 = /home/user/second.png\n";
-        assert_eq!(
-            parse_hyprpaper_active_response(response, None),
-            Some("/home/user/second.png".to_string())
-        );
-    }
-
-    #[test]
-    fn test_parse_legacy_target_empty_path_falls_back() {
-        let response = "eDP-1 = /home/user/first.png\nDP-1 = \n";
-        assert_eq!(
-            parse_hyprpaper_active_response(response, Some("DP-1")),
-            Some("/home/user/first.png".to_string())
-        );
-    }
-
-    #[test]
-    fn test_parse_legacy_non_ascii_path() {
-        // Regression guard: legacy hyprpaper can return UTF-8 paths with
-        // non-ASCII characters (CJK, accented, etc.). The old is_ascii()
-        // guard rejected these incorrectly.
-        let response = "eDP-1 = /home/user/壁纸.png\n";
-        assert_eq!(
-            parse_hyprpaper_active_response(response, None),
-            Some("/home/user/壁纸.png".to_string())
-        );
-
-        let response = "DP-1 = /home/david/Bilder/Café.jpg\n";
-        assert_eq!(
-            parse_hyprpaper_active_response(response, Some("DP-1")),
-            Some("/home/david/Bilder/Café.jpg".to_string())
-        );
-    }
-
-    #[test]
-    fn test_parse_legacy_empty_response() {
-        assert_eq!(parse_hyprpaper_active_response("", None), None);
-    }
-
-    #[test]
-    fn test_parse_legacy_no_equals_lines() {
-        assert_eq!(
-            parse_hyprpaper_active_response("garbage without separators\n", None),
-            None
-        );
-    }
-
-    // ----- parse_new_object -----
-
-    #[test]
-    fn test_parse_new_object_valid() {
-        let msg = HyprwireMessage {
-            code: HW_NEW_OBJECT,
-            args: vec![HyprwireValue::Uint(42), HyprwireValue::Uint(7)],
-        };
-        assert_eq!(parse_new_object(&msg), Some((42, 7)));
-    }
-
-    #[test]
-    fn test_parse_new_object_wrong_types() {
-        let msg = HyprwireMessage {
-            code: HW_NEW_OBJECT,
-            args: vec![HyprwireValue::Uint(42), HyprwireValue::Seq(7)],
-        };
-        assert_eq!(parse_new_object(&msg), None);
+        for (name, args, expected) in cases {
+            let msg = HyprwireMessage {
+                code: HW_NEW_OBJECT,
+                args,
+            };
+            assert_eq!(parse_new_object(&msg), expected, "{name}");
+        }
     }
 
     // ----- parse_active_wallpaper_event -----
@@ -1270,124 +1262,103 @@ mod tests {
     }
 
     #[test]
-    fn test_active_wallpaper_event_matching() {
+    fn test_active_wallpaper_event() {
         let msg = active_wallpaper_msg(
             5,
             HYPRPAPER_STATUS_ACTIVE_WALLPAPER,
             "eDP-1",
             "/home/user/wall.png",
         );
-        assert_eq!(
-            parse_active_wallpaper_event(&msg, 5),
-            Some(("eDP-1".to_string(), "/home/user/wall.png".to_string()))
-        );
-    }
-
-    #[test]
-    fn test_active_wallpaper_event_wrong_object_id() {
-        let msg = active_wallpaper_msg(
-            5,
-            HYPRPAPER_STATUS_ACTIVE_WALLPAPER,
-            "eDP-1",
-            "/home/user/wall.png",
-        );
-        assert_eq!(parse_active_wallpaper_event(&msg, 99), None);
-    }
-
-    // ----- select_monitor_wallpaper -----
-
-    fn entry(name: &str, path: &str) -> (String, String) {
-        (name.to_string(), path.to_string())
-    }
-
-    #[test]
-    fn test_select_no_target_returns_first_nonempty() {
-        let entries = vec![
-            entry("eDP-1", ""),
-            entry("DP-1", "/home/user/wall.png"),
-            entry("HDMI-A-1", "/home/user/other.png"),
+        let cases = [
+            (
+                "status object matches",
+                5,
+                Some(("eDP-1", "/home/user/wall.png")),
+            ),
+            ("other object id", 99, None),
         ];
-        assert_eq!(
-            select_monitor_wallpaper(&entries, None),
-            Some("/home/user/wall.png".to_string())
-        );
+
+        for (name, status_id, expected) in cases {
+            let event = parse_active_wallpaper_event(&msg, status_id);
+            assert_eq!(
+                event
+                    .as_ref()
+                    .map(|(monitor, path)| (monitor.as_str(), path.as_str())),
+                expected,
+                "{name}"
+            );
+        }
     }
 
     #[test]
-    fn test_select_target_found() {
-        let entries = vec![
-            entry("eDP-1", "/home/user/first.png"),
-            entry("DP-1", "/home/user/second.png"),
-        ];
-        assert_eq!(
-            select_monitor_wallpaper(&entries, Some("DP-1")),
-            Some("/home/user/second.png".to_string())
-        );
-    }
-
-    #[test]
-    fn test_select_all_empty_returns_none() {
-        let entries = vec![entry("eDP-1", ""), entry("DP-1", "")];
-        assert_eq!(select_monitor_wallpaper(&entries, None), None);
-        assert_eq!(select_monitor_wallpaper(&entries, Some("DP-1")), None);
-    }
-
-    // ----- maps_indicate_hyprwire -----
-
-    #[test]
-    fn test_maps_indicate_hyprwire_matches_library_mapping() {
-        let maps = "\
+    fn test_maps_indicate_hyprwire() {
+        let cases = [
+            (
+                "hyprtoolkit library mapped",
+                "\
 7f0000000000-7f0000010000 r-xp 00000000 fd:00 1 /usr/lib/libhyprtoolkit.so.0\n\
-7f0000020000-7f0000030000 r-xp 00000000 fd:00 2 /usr/lib/libhyprlang.so\n";
-        assert!(maps_indicate_hyprwire(maps));
-    }
-
-    #[test]
-    fn test_maps_indicate_hyprwire_rejects_hyprpaper_07_maps() {
-        let maps = "\
+7f0000020000-7f0000030000 r-xp 00000000 fd:00 2 /usr/lib/libhyprlang.so\n",
+                true,
+            ),
+            (
+                "hyprpaper 0.7 maps",
+                "\
 55d000000000-55d000040000 r-xp 00000000 fd:00 10 /usr/bin/hyprpaper\n\
 7f0000000000-7f0000020000 r-xp 00000000 fd:00 20 /usr/lib/libhyprlang.so\n\
-7f0000030000-7f0000040000 r-xp 00000000 fd:00 21 /usr/lib/libwayland-client.so.0\n";
-        assert!(!maps_indicate_hyprwire(maps));
-    }
-
-    #[test]
-    fn test_maps_indicate_hyprwire_rejects_bare_hyprtoolkit_substring() {
-        let maps = "\
-55d000000000-55d000040000 r-xp 00000000 fd:00 10 /opt/hyprtoolkit-demo/bin/demo\n";
-        assert!(!maps_indicate_hyprwire(maps));
-    }
-
-    #[test]
-    fn test_maps_indicate_hyprwire_rejects_hyprtoolkit_helper_library() {
-        let maps = "\
-7f0000000000-7f0000010000 r-xp 00000000 fd:00 1 /usr/lib/libhyprtoolkit-helper.so.0\n";
-        assert!(!maps_indicate_hyprwire(maps));
-    }
-
-    #[test]
-    fn test_maps_indicate_hyprwire_rejects_hyprtoolkit_plugin_library() {
-        let maps = "\
-7f0000000000-7f0000010000 r-xp 00000000 fd:00 1 /usr/lib/libhyprtoolkit-plugin.so.1\n";
-        assert!(!maps_indicate_hyprwire(maps));
-    }
-
-    // ----- is_hyprpaper_status_protocol_available -----
-
-    #[test]
-    fn test_is_hyprpaper_status_protocol_available_rejects_old_version() {
-        let protocols = vec![(HYPRPAPER_PROTOCOL.to_string(), 1u32)];
-        assert!(!is_hyprpaper_status_protocol_available(&protocols));
-    }
-
-    #[test]
-    fn test_is_hyprpaper_status_protocol_available_accepts_v2_and_above() {
-        let protocols = vec![
-            (HYPRPAPER_PROTOCOL.to_string(), 1u32),
-            (HYPRPAPER_PROTOCOL.to_string(), 2u32),
-            ("other_protocol".to_string(), 5u32),
+7f0000030000-7f0000040000 r-xp 00000000 fd:00 21 /usr/lib/libwayland-client.so.0\n",
+                false,
+            ),
+            (
+                "bare hyprtoolkit substring",
+                "\
+55d000000000-55d000040000 r-xp 00000000 fd:00 10 /opt/hyprtoolkit-demo/bin/demo\n",
+                false,
+            ),
+            (
+                "hyprtoolkit helper library",
+                "\
+7f0000000000-7f0000010000 r-xp 00000000 fd:00 1 /usr/lib/libhyprtoolkit-helper.so.0\n",
+                false,
+            ),
+            (
+                "hyprtoolkit plugin library",
+                "\
+7f0000000000-7f0000010000 r-xp 00000000 fd:00 1 /usr/lib/libhyprtoolkit-plugin.so.1\n",
+                false,
+            ),
         ];
-        assert!(is_hyprpaper_status_protocol_available(&protocols));
+
+        for (name, maps, expected) in cases {
+            assert_eq!(maps_indicate_hyprwire(maps), expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn test_is_hyprpaper_status_protocol_available() {
+        let cases = [
+            (
+                "only v1",
+                vec![(HYPRPAPER_PROTOCOL.to_string(), 1u32)],
+                false,
+            ),
+            (
+                "v2 advertised",
+                vec![
+                    (HYPRPAPER_PROTOCOL.to_string(), 1u32),
+                    (HYPRPAPER_PROTOCOL.to_string(), 2u32),
+                    ("other_protocol".to_string(), 5u32),
+                ],
+                true,
+            ),
+        ];
+
+        for (name, protocols, expected) in cases {
+            assert_eq!(
+                is_hyprpaper_status_protocol_available(&protocols),
+                expected,
+                "{name}"
+            );
+        }
     }
 
     // ----- collect_wallpaper_entries -----

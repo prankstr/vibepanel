@@ -698,134 +698,83 @@ mod tests {
     use super::*;
 
     #[test]
-    fn access_technology_5g() {
-        assert_eq!(access_technology_label(MM_ACCESS_TECH_NR5G), "5G");
-    }
-
-    #[test]
-    fn access_technology_lte_iot_variants() {
-        assert_eq!(access_technology_label(MM_ACCESS_TECH_LTE_CAT_M), "LTE");
-        assert_eq!(access_technology_label(MM_ACCESS_TECH_LTE_NB_IOT), "LTE");
-    }
-
-    #[test]
-    fn access_technology_lte() {
-        assert_eq!(access_technology_label(MM_ACCESS_TECH_LTE), "LTE");
-    }
-
-    #[test]
-    fn access_technology_hspa_plus() {
-        assert_eq!(access_technology_label(MM_ACCESS_TECH_HSPA_PLUS), "HSPA+");
-    }
-
-    #[test]
-    fn access_technology_hspa() {
-        assert_eq!(
-            access_technology_label(MM_ACCESS_TECH_HSDPA | MM_ACCESS_TECH_HSUPA),
-            "HSPA"
-        );
-        // Single HSDPA bit also counts as HSPA.
-        assert_eq!(access_technology_label(MM_ACCESS_TECH_HSDPA), "HSPA");
-        assert_eq!(access_technology_label(MM_ACCESS_TECH_HSPA), "HSPA");
-    }
-
-    #[test]
-    fn access_technology_3g() {
-        assert_eq!(access_technology_label(MM_ACCESS_TECH_UMTS), "3G");
-    }
-
-    #[test]
-    fn access_technology_edge() {
-        assert_eq!(access_technology_label(MM_ACCESS_TECH_EDGE), "EDGE");
-    }
-
-    #[test]
-    fn access_technology_2g() {
-        assert_eq!(access_technology_label(MM_ACCESS_TECH_GPRS), "2G");
-        assert_eq!(access_technology_label(MM_ACCESS_TECH_GSM), "2G");
-        assert_eq!(access_technology_label(MM_ACCESS_TECH_GSM_COMPACT), "2G");
-    }
-
-    #[test]
-    fn access_technology_unknown_returns_empty() {
-        assert_eq!(access_technology_label(0), "");
-        assert_eq!(access_technology_label(1), ""); // bit 0, no known tech
-    }
-
-    #[test]
-    fn access_technology_highest_wins() {
-        // When multiple bits are set, the highest-priority tech should win.
-        // 5G beats everything.
-        assert_eq!(
-            access_technology_label(MM_ACCESS_TECH_NR5G | MM_ACCESS_TECH_LTE),
-            "5G"
-        );
-        // LTE beats 3G.
-        assert_eq!(
-            access_technology_label(MM_ACCESS_TECH_LTE | MM_ACCESS_TECH_UMTS),
-            "LTE"
-        );
-        // HSPA+ beats HSPA.
-        assert_eq!(
-            access_technology_label(
-                MM_ACCESS_TECH_HSPA_PLUS | MM_ACCESS_TECH_HSPA | MM_ACCESS_TECH_HSDPA
+    fn access_technology_labels() {
+        let cases = [
+            ("5G", MM_ACCESS_TECH_NR5G, "5G"),
+            ("LTE Cat-M is LTE", MM_ACCESS_TECH_LTE_CAT_M, "LTE"),
+            ("LTE NB-IoT is LTE", MM_ACCESS_TECH_LTE_NB_IOT, "LTE"),
+            ("LTE", MM_ACCESS_TECH_LTE, "LTE"),
+            ("HSPA+", MM_ACCESS_TECH_HSPA_PLUS, "HSPA+"),
+            (
+                "HSDPA and HSUPA",
+                MM_ACCESS_TECH_HSDPA | MM_ACCESS_TECH_HSUPA,
+                "HSPA",
             ),
-            "HSPA+"
-        );
-    }
+            ("HSDPA alone", MM_ACCESS_TECH_HSDPA, "HSPA"),
+            ("HSPA", MM_ACCESS_TECH_HSPA, "HSPA"),
+            ("UMTS", MM_ACCESS_TECH_UMTS, "3G"),
+            ("EDGE", MM_ACCESS_TECH_EDGE, "EDGE"),
+            ("GPRS", MM_ACCESS_TECH_GPRS, "2G"),
+            ("GSM", MM_ACCESS_TECH_GSM, "2G"),
+            ("GSM compact", MM_ACCESS_TECH_GSM_COMPACT, "2G"),
+            ("no bits", 0, ""),
+            ("unknown bit", 1, ""),
+            (
+                "5G beats LTE",
+                MM_ACCESS_TECH_NR5G | MM_ACCESS_TECH_LTE,
+                "5G",
+            ),
+            (
+                "LTE beats 3G",
+                MM_ACCESS_TECH_LTE | MM_ACCESS_TECH_UMTS,
+                "LTE",
+            ),
+            (
+                "HSPA+ beats HSPA",
+                MM_ACCESS_TECH_HSPA_PLUS | MM_ACCESS_TECH_HSPA | MM_ACCESS_TECH_HSDPA,
+                "HSPA+",
+            ),
+        ];
 
-    // --- resolve_mobile_connecting tests ---
-
-    #[test]
-    fn mobile_connecting_local_true_dbus_active_clears_flag() {
-        // D-Bus says active (connected) → local flag is redundant, clear it.
-        // effective_connecting = dbus_connecting (false here).
-        let (effective, clear) = resolve_mobile_connecting(true, true, false);
-        assert!(!effective, "should use D-Bus connecting (false)");
-        assert!(clear, "should clear local flag");
-    }
-
-    #[test]
-    fn mobile_connecting_local_true_dbus_connecting_clears_flag() {
-        // D-Bus says connecting → local flag is redundant, clear it.
-        // effective_connecting = dbus_connecting (true).
-        let (effective, clear) = resolve_mobile_connecting(true, false, true);
-        assert!(effective, "should use D-Bus connecting (true)");
-        assert!(clear, "should clear local flag");
-    }
-
-    #[test]
-    fn mobile_connecting_local_true_dbus_neither_keeps_flag() {
-        // D-Bus hasn't reflected the attempt yet → keep local flag,
-        // show connecting = true.
-        let (effective, clear) = resolve_mobile_connecting(true, false, false);
-        assert!(effective, "should keep showing connecting from local flag");
-        assert!(!clear, "should NOT clear local flag");
-    }
-
-    #[test]
-    fn mobile_connecting_local_false_passes_through_dbus() {
-        // No local intent — pass through whatever D-Bus says.
-        let (eff1, clr1) = resolve_mobile_connecting(false, false, false);
-        assert!(!eff1);
-        assert!(!clr1);
-
-        let (eff2, clr2) = resolve_mobile_connecting(false, false, true);
-        assert!(eff2);
-        assert!(!clr2);
-
-        let (eff3, clr3) = resolve_mobile_connecting(false, true, false);
-        assert!(!eff3);
-        assert!(!clr3);
+        for (name, tech, expected) in cases {
+            assert_eq!(access_technology_label(tech), expected, "{name}");
+        }
     }
 
     #[test]
-    fn mobile_connecting_local_true_dbus_both_active_and_connecting() {
-        // Edge case: both active and connecting set (shouldn't normally happen,
-        // but D-Bus signals may race). Local flag clears, uses dbus_connecting.
-        let (effective, clear) = resolve_mobile_connecting(true, true, true);
-        assert!(effective, "should use D-Bus connecting (true)");
-        assert!(clear, "should clear local flag");
+    fn resolve_mobile_connecting_truth_table() {
+        // (name, local, dbus_active, dbus_connecting) -> (effective, clear_local)
+        let cases = [
+            ("local, dbus active", true, true, false, false, true),
+            ("local, dbus connecting", true, false, true, true, true),
+            (
+                "local, dbus not yet updated",
+                true,
+                false,
+                false,
+                true,
+                false,
+            ),
+            (
+                "local, dbus active and connecting",
+                true,
+                true,
+                true,
+                true,
+                true,
+            ),
+            ("no local, dbus idle", false, false, false, false, false),
+            ("no local, dbus connecting", false, false, true, true, false),
+            ("no local, dbus active", false, true, false, false, false),
+        ];
+
+        for (name, local, active, connecting, effective, clear) in cases {
+            assert_eq!(
+                resolve_mobile_connecting(local, active, connecting),
+                (effective, clear),
+                "{name}"
+            );
+        }
     }
 
     #[test]

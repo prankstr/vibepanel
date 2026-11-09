@@ -1429,13 +1429,19 @@ mod tests {
         // Authentication can also select an AP without ever reaching ACTIVATED.
         for device_state in [110, 30, 40, 60, 120] {
             state.reconcile_connection(Some(device_state), Some("/ap"), &networks);
-            assert!(!state.connected && !state.networks[0].active);
-            assert!(state.ssid.is_none());
-            assert_eq!(state.strength, 0);
+            assert!(
+                !state.connected && !state.networks[0].active,
+                "device state {device_state}"
+            );
+            assert!(state.ssid.is_none(), "device state {device_state}");
+            assert_eq!(state.strength, 0, "device state {device_state}");
             // A delayed list response must not restore its old active flags.
             networks = vec![test_network("/ap")];
             state.reconcile_connection(Some(device_state), Some("/ap"), &networks);
-            assert!(!state.connected && !state.networks[0].active);
+            assert!(
+                !state.connected && !state.networks[0].active,
+                "device state {device_state}: delayed list"
+            );
         }
         // A different AP (even for the same SSID) must not inherit the active flag.
         networks.push(test_network("/other_ap"));
@@ -1642,7 +1648,10 @@ mod tests {
                 .activation_cancel
                 .replace(Some(mobile.clone()));
             service.set_unavailable();
-            assert!(wifi.is_cancelled() && mobile.is_cancelled());
+            assert!(
+                wifi.is_cancelled() && mobile.is_cancelled(),
+                "available={available}"
+            );
         }
     }
 
@@ -2014,22 +2023,95 @@ mod tests {
         original.close_future().await.unwrap();
     }
 
+    struct ProfileCase {
+        name: &'static str,
+        existing: bool,
+        activated: bool,
+        cancel: bool,
+        cancel_during_save: bool,
+        save_fails: bool,
+        password: Option<&'static str>,
+    }
+
     #[test]
     fn wifi_profile_lifecycle() {
         use glib::variant::ObjectPath;
         use std::cell::{Cell, RefCell};
 
-        for (existing, activated, cancel, cancel_during_save, save_fails, password) in [
-            (true, true, false, false, false, None),
-            (true, true, false, false, false, Some("ignored password")),
-            (true, false, false, false, false, Some("ignored password")),
-            (true, true, true, false, false, None),
-            (false, true, false, false, false, Some("password")),
-            (false, false, false, false, false, Some("password")),
-            (false, true, true, false, false, Some("password")),
-            (false, true, false, false, true, Some("password")),
-            (false, true, false, true, false, Some("password")),
-            (false, true, false, true, true, Some("password")),
+        let base = ProfileCase {
+            name: "",
+            existing: false,
+            activated: true,
+            cancel: false,
+            cancel_during_save: false,
+            save_fails: false,
+            password: Some("password"),
+        };
+        for ProfileCase {
+            name,
+            existing,
+            activated,
+            cancel,
+            cancel_during_save,
+            save_fails,
+            password,
+        } in [
+            ProfileCase {
+                name: "existing profile activates",
+                existing: true,
+                password: None,
+                ..base
+            },
+            ProfileCase {
+                name: "existing profile ignores password",
+                existing: true,
+                password: Some("ignored password"),
+                ..base
+            },
+            ProfileCase {
+                name: "existing profile activation fails",
+                existing: true,
+                activated: false,
+                password: Some("ignored password"),
+                ..base
+            },
+            ProfileCase {
+                name: "existing profile cancelled",
+                existing: true,
+                cancel: true,
+                password: None,
+                ..base
+            },
+            ProfileCase {
+                name: "new profile saved after activation",
+                ..base
+            },
+            ProfileCase {
+                name: "new profile activation fails",
+                activated: false,
+                ..base
+            },
+            ProfileCase {
+                name: "new profile cancelled",
+                cancel: true,
+                ..base
+            },
+            ProfileCase {
+                name: "new profile save fails",
+                save_fails: true,
+                ..base
+            },
+            ProfileCase {
+                name: "cancelled during save",
+                cancel_during_save: true,
+                ..base
+            },
+            ProfileCase {
+                name: "cancelled during failing save",
+                cancel_during_save: true,
+                save_fails: true,
+                ..base
+            },
         ] {
             let cancellable = gio::Cancellable::new();
             let calls = RefCell::new(Vec::new());
@@ -2054,7 +2136,8 @@ mod tests {
                             "ActivateConnection" => {
                                 assert_eq!(
                                     args.unwrap().get::<(ObjectPath, ObjectPath, ObjectPath)>(),
-                                    Some((object("/"), object("/device"), object("/ap")))
+                                    Some((object("/"), object("/device"), object("/ap"))),
+                                    "{name}"
                                 );
                                 if !existing {
                                     return Err(gio::DBusError::new_for_dbus_error(
@@ -2068,16 +2151,18 @@ mod tests {
                                 Ok((object("/active"),).to_variant())
                             }
                             "AddAndActivateConnection2" => {
-                                assert!(!existing);
+                                assert!(!existing, "{name}");
                                 let args = args.unwrap();
-                                assert_eq!(args.type_().as_str(), "(a{sa{sv}}ooa{sv})");
+                                assert_eq!(args.type_().as_str(), "(a{sa{sv}}ooa{sv})", "{name}");
                                 assert_eq!(
                                     args.child_value(1).get::<ObjectPath>().unwrap(),
-                                    object("/device")
+                                    object("/device"),
+                                    "{name}"
                                 );
                                 assert_eq!(
                                     args.child_value(2).get::<ObjectPath>().unwrap(),
-                                    object("/ap")
+                                    object("/ap"),
+                                    "{name}"
                                 );
                                 let wifi =
                                     NmService::settings_section(args, "802-11-wireless").unwrap();
@@ -2086,26 +2171,30 @@ mod tests {
                                         .unwrap()
                                         .get::<Vec<u8>>()
                                         .unwrap(),
-                                    b" network:with\\spaces "
+                                    b" network:with\\spaces ",
+                                    "{name}"
                                 );
                                 let secrets =
                                     NmService::settings_section(args, "802-11-wireless-security")
                                         .unwrap();
                                 assert!(
-                                    NmService::get_prop_variant(&secrets, "key-mgmt").is_none()
+                                    NmService::get_prop_variant(&secrets, "key-mgmt").is_none(),
+                                    "{name}"
                                 );
                                 assert_eq!(
                                     NmService::get_prop_variant(&secrets, "psk")
                                         .unwrap()
                                         .get::<String>()
                                         .as_deref(),
-                                    Some("password")
+                                    Some("password"),
+                                    "{name}"
                                 );
                                 assert_eq!(
                                     NmService::get_prop_variant(&secrets, "psk-flags")
                                         .unwrap()
                                         .get::<u32>(),
-                                    Some(0)
+                                    Some(0),
+                                    "{name}"
                                 );
                                 let options = args
                                     .child_value(3)
@@ -2113,9 +2202,10 @@ mod tests {
                                     .unwrap();
                                 assert_eq!(
                                     options["persist"].get::<String>().as_deref(),
-                                    Some("volatile")
+                                    Some("volatile"),
+                                    "{name}"
                                 );
-                                assert!(!options.contains_key("bind-activation"));
+                                assert!(!options.contains_key("bind-activation"), "{name}");
                                 if cancel {
                                     cancellable.cancel();
                                 }
@@ -2127,16 +2217,16 @@ mod tests {
                                     .to_variant())
                             }
                             "Update2" => {
-                                assert!(!existing && activated && !cancel);
+                                assert!(!existing && activated && !cancel, "{name}");
                                 assert!(
                                     watched.get(),
-                                    "Saving must wait for the activation watcher"
+                                    "{name}: saving must wait for the activation watcher"
                                 );
-                                assert_eq!(path, "/profile");
+                                assert_eq!(path, "/profile", "{name}");
                                 let args = args.unwrap();
-                                assert_eq!(args.type_().as_str(), "(a{sa{sv}}ua{sv})");
-                                assert_eq!(args.child_value(0).n_children(), 0);
-                                assert_eq!(args.child_value(1).get::<u32>(), Some(1));
+                                assert_eq!(args.type_().as_str(), "(a{sa{sv}}ua{sv})", "{name}");
+                                assert_eq!(args.child_value(0).n_children(), 0, "{name}");
+                                assert_eq!(args.child_value(1).get::<u32>(), Some(1), "{name}");
                                 if cancel_during_save {
                                     cancellable.cancel();
                                 }
@@ -2150,10 +2240,11 @@ mod tests {
                                 }
                             }
                             "DeactivateConnection" => {
-                                assert!(!activated || cancel || cancel_during_save);
+                                assert!(!activated || cancel || cancel_during_save, "{name}");
                                 assert_eq!(
                                     args.unwrap().child_value(0).get::<ObjectPath>().unwrap(),
-                                    object("/active")
+                                    object("/active"),
+                                    "{name}"
                                 );
                                 Ok(().to_variant())
                             }
@@ -2162,7 +2253,7 @@ mod tests {
                     })())
                 },
                 |active| {
-                    assert_eq!(active, "/active");
+                    assert_eq!(active, "/active", "{name}");
                     watched.set(true);
                     std::future::ready(if activated {
                         Ok(())
@@ -2176,19 +2267,28 @@ mod tests {
                 password,
                 &cancellable,
             ));
-            assert_eq!(result.is_ok(), activated && !cancel && !cancel_during_save);
-            assert_eq!(watched.get(), !cancel);
+            assert_eq!(
+                result.is_ok(),
+                activated && !cancel && !cancel_during_save,
+                "{name}"
+            );
+            assert_eq!(watched.get(), !cancel, "{name}");
             if save_fails && !cancel_during_save {
-                assert!(result.unwrap().unwrap().contains("Permission denied"));
+                assert!(
+                    result.unwrap().unwrap().contains("Permission denied"),
+                    "{name}"
+                );
             }
             let calls = calls.borrow();
             assert_eq!(
                 calls.iter().any(|c| c == "Update2"),
-                !existing && activated && !cancel
+                !existing && activated && !cancel,
+                "{name}"
             );
             assert_eq!(
                 calls.iter().any(|c| c == "DeactivateConnection"),
-                !activated || cancel || cancel_during_save
+                !activated || cancel || cancel_during_save,
+                "{name}"
             );
             if cancel_during_save {
                 let update = calls.iter().position(|call| call == "Update2").unwrap();
@@ -2196,7 +2296,7 @@ mod tests {
                     .iter()
                     .position(|call| call == "DeactivateConnection")
                     .unwrap();
-                assert!(update < deactivate);
+                assert!(update < deactivate, "{name}");
             }
         }
     }
@@ -2211,13 +2311,14 @@ mod tests {
             (1, 0x800, None, None),
             (1, 0, Some("abcde"), Some("wep-key0")),
         ] {
+            let row = format!("flags={flags} security={security:#x}");
             let settings = new_wifi_settings("test", password, flags, security).unwrap();
             if let Some(key) = expected {
                 let secrets = &settings["802-11-wireless-security"];
-                assert_eq!(secrets[key].get::<String>().as_deref(), password);
-                assert!(!secrets.contains_key("key-mgmt"));
+                assert_eq!(secrets[key].get::<String>().as_deref(), password, "{row}");
+                assert!(!secrets.contains_key("key-mgmt"), "{row}");
             } else {
-                assert!(!settings.contains_key("802-11-wireless-security"));
+                assert!(!settings.contains_key("802-11-wireless-security"), "{row}");
             }
         }
         assert!(new_wifi_settings("test", None, 1, 0x100).is_err());
@@ -2307,30 +2408,7 @@ mod tests {
                 None,
                 &gio::Cancellable::new(),
             ));
-            assert!(result.is_err());
+            assert!(result.is_err(), "{name}");
         }
-    }
-
-    #[test]
-    fn parses_networkmanager_settings_variants() {
-        let wifi = HashMap::from([
-            ("ssid".to_string(), b"test-network".to_vec().to_variant()),
-            ("hidden".to_string(), true.to_variant()),
-        ]);
-        let settings = (HashMap::from([("802-11-wireless".to_string(), wifi)]),).to_variant();
-
-        let section = NmService::settings_section(&settings, "802-11-wireless").unwrap();
-        let ssid: Vec<u8> = NmService::get_prop_variant(&section, "ssid")
-            .unwrap()
-            .iter()
-            .filter_map(|byte| byte.get::<u8>())
-            .collect();
-
-        assert_eq!(ssid, b"test-network");
-        assert_eq!(
-            NmService::get_prop_variant(&section, "hidden").and_then(|value| value.get::<bool>()),
-            Some(true)
-        );
-        assert!(NmService::settings_section(&settings, "missing").is_none());
     }
 }

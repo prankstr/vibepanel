@@ -1902,47 +1902,79 @@ mod tests {
     }
 
     #[test]
-    fn wifi_spec_offers_saving_only_agent_owned_secrets() {
-        for (key_mgmt, flags, offer_save) in [
-            ("wpa-psk", None, false),
-            ("sae", Some(0), false),
-            ("wpa-psk", Some(SECRET_FLAG_AGENT_OWNED), true),
-            ("wpa-psk", Some(SECRET_FLAG_NOT_SAVED), false),
-            (
-                "wpa-psk",
-                Some(SECRET_FLAG_AGENT_OWNED | SECRET_FLAG_NOT_SAVED),
-                false,
-            ),
-        ] {
+    fn wifi_spec_picks_secret_and_offers_saving_only_agent_owned_secrets() {
+        let psk = |key_mgmt: &str, flags: Option<u32>| {
             let mut security = vec![("key-mgmt", key_mgmt.to_variant())];
             if let Some(flags) = flags {
                 security.push(("psk-flags", flags.to_variant()));
             }
+            security
+        };
+        let cases = [
+            (
+                "psk without flags",
+                psk("wpa-psk", None),
+                "psk",
+                "psk-flags",
+                false,
+            ),
+            (
+                "sae system-owned",
+                psk("sae", Some(0)),
+                "psk",
+                "psk-flags",
+                false,
+            ),
+            (
+                "psk agent-owned",
+                psk("wpa-psk", Some(SECRET_FLAG_AGENT_OWNED)),
+                "psk",
+                "psk-flags",
+                true,
+            ),
+            (
+                "psk not saved",
+                psk("wpa-psk", Some(SECRET_FLAG_NOT_SAVED)),
+                "psk",
+                "psk-flags",
+                false,
+            ),
+            (
+                "psk agent-owned but not saved",
+                psk(
+                    "wpa-psk",
+                    Some(SECRET_FLAG_AGENT_OWNED | SECRET_FLAG_NOT_SAVED),
+                ),
+                "psk",
+                "psk-flags",
+                false,
+            ),
+            (
+                "wep uses the transmit key index",
+                vec![
+                    ("key-mgmt", "none".to_variant()),
+                    ("wep-tx-keyidx", 2u32.to_variant()),
+                    ("wep-key-flags", SECRET_FLAG_AGENT_OWNED.to_variant()),
+                ],
+                "wep-key2",
+                "wep-key-flags",
+                false,
+            ),
+        ];
+
+        for (name, security, secret_key, flags_key, offer_save) in cases {
             let spec = wifi_secret_spec(&connection(Some(security))).unwrap();
             assert_eq!(
                 spec,
                 WifiSecretSpec {
                     ssid: "cafe".into(),
-                    secret_key: "psk".into(),
-                    flags_key: "psk-flags".into(),
+                    secret_key: secret_key.into(),
+                    flags_key: flags_key.into(),
                     offer_save,
                 },
-                "{key_mgmt} flags={flags:?}"
+                "{name}"
             );
         }
-    }
-
-    #[test]
-    fn wifi_spec_uses_the_transmit_wep_key() {
-        let spec = wifi_secret_spec(&connection(Some(vec![
-            ("key-mgmt", "none".to_variant()),
-            ("wep-tx-keyidx", 2u32.to_variant()),
-            ("wep-key-flags", SECRET_FLAG_AGENT_OWNED.to_variant()),
-        ])))
-        .unwrap();
-        assert_eq!(spec.secret_key, "wep-key2");
-        assert_eq!(spec.flags_key, "wep-key-flags");
-        assert!(!spec.offer_save);
     }
 
     #[test]
@@ -1960,7 +1992,10 @@ mod tests {
                 ("psk-flags", SECRET_FLAG_NOT_REQUIRED.to_variant()),
             ]),
         ] {
-            assert!(wifi_secret_spec(&connection(security.clone())).is_err());
+            assert!(
+                wifi_secret_spec(&connection(security.clone())).is_err(),
+                "{security:?}"
+            );
         }
 
         let no_ssid: HashMap<String, HashMap<String, Variant>> = HashMap::from([(

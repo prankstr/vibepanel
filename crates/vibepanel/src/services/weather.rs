@@ -1285,51 +1285,54 @@ mod tests {
     }
 
     #[test]
-    fn reverse_geocoded_location_name_prefers_city_country() {
-        assert_eq!(
-            reverse_geocoded_location_name(ReverseGeocodingAddress {
-                city: Some("Stockholm".to_string()),
-                country: Some("Sweden".to_string()),
-                ..ReverseGeocodingAddress::default()
-            }),
-            Some("Stockholm, Sweden".to_string())
-        );
-    }
+    fn reverse_geocoded_location_name_cases() {
+        let sweden = || ReverseGeocodingAddress {
+            country: Some("Sweden".to_string()),
+            ..ReverseGeocodingAddress::default()
+        };
+        let cases = [
+            (
+                "city and country",
+                ReverseGeocodingAddress {
+                    city: Some("Stockholm".to_string()),
+                    ..sweden()
+                },
+                Some("Stockholm, Sweden"),
+            ),
+            (
+                "village fallback",
+                ReverseGeocodingAddress {
+                    village: Some("Test Village".to_string()),
+                    ..sweden()
+                },
+                Some("Test Village, Sweden"),
+            ),
+            (
+                "county fallback",
+                ReverseGeocodingAddress {
+                    county: Some("Stockholm County".to_string()),
+                    ..sweden()
+                },
+                Some("Stockholm County, Sweden"),
+            ),
+            (
+                "blank city falls back to country",
+                ReverseGeocodingAddress {
+                    city: Some(" ".to_string()),
+                    ..sweden()
+                },
+                Some("Sweden"),
+            ),
+            ("empty address", ReverseGeocodingAddress::default(), None),
+        ];
 
-    #[test]
-    fn reverse_geocoded_location_name_uses_locality_fallbacks() {
-        assert_eq!(
-            reverse_geocoded_location_name(ReverseGeocodingAddress {
-                village: Some("Test Village".to_string()),
-                country: Some("Sweden".to_string()),
-                ..ReverseGeocodingAddress::default()
-            }),
-            Some("Test Village, Sweden".to_string())
-        );
-        assert_eq!(
-            reverse_geocoded_location_name(ReverseGeocodingAddress {
-                county: Some("Stockholm County".to_string()),
-                country: Some("Sweden".to_string()),
-                ..ReverseGeocodingAddress::default()
-            }),
-            Some("Stockholm County, Sweden".to_string())
-        );
-    }
-
-    #[test]
-    fn reverse_geocoded_location_name_falls_back_to_country() {
-        assert_eq!(
-            reverse_geocoded_location_name(ReverseGeocodingAddress {
-                city: Some(" ".to_string()),
-                country: Some("Sweden".to_string()),
-                ..ReverseGeocodingAddress::default()
-            }),
-            Some("Sweden".to_string())
-        );
-        assert_eq!(
-            reverse_geocoded_location_name(ReverseGeocodingAddress::default()),
-            None
-        );
+        for (name, address, expected) in cases {
+            assert_eq!(
+                reverse_geocoded_location_name(address).as_deref(),
+                expected,
+                "{name}"
+            );
+        }
     }
 
     #[test]
@@ -1359,132 +1362,94 @@ mod tests {
     }
 
     #[test]
-    fn cached_matches_config_respects_explicit_coordinates() {
-        let mut snapshot = WeatherSnapshot::unknown();
-        snapshot.location = Some(WeatherLocation {
-            name: "Cached".to_string(),
-            latitude: 52.52,
-            longitude: 13.40,
-        });
-        snapshot.current = Some(CurrentWeather {
-            temperature: 20.0,
-            feels_like: None,
-            humidity: None,
-            wind_speed: None,
-            condition: "Clear".to_string(),
-            weather_code: None,
-            is_day: None,
-        });
-        let cache = PersistedWeatherCache {
-            location_key: Some("coords:52.5000,13.4100".to_string()),
-            units: WeatherUnits::Metric,
-            wind_units: WeatherWindUnits::MetersPerSecond,
-            snapshot,
+    fn cached_matches_config_cases() {
+        let cache = |key: &str, located: bool| {
+            let mut snapshot = WeatherSnapshot::unknown();
+            snapshot.location = located.then(|| WeatherLocation {
+                name: "Cached".to_string(),
+                latitude: 52.52,
+                longitude: 13.40,
+            });
+            PersistedWeatherCache {
+                location_key: Some(key.to_string()),
+                units: WeatherUnits::Metric,
+                wind_units: WeatherWindUnits::MetersPerSecond,
+                snapshot,
+            }
         };
-
-        // Matching explicit coords (same rounded key) are accepted.
-        assert!(cached_matches_config(
-            &cache,
-            &ResolvedWeatherConfig {
-                latitude: Some(52.50),
-                longitude: Some(13.41),
-                ..ResolvedWeatherConfig::default()
-            }
-        ));
-
-        // Different explicit coords produce a different key and are rejected.
-        assert!(!cached_matches_config(
-            &cache,
-            &ResolvedWeatherConfig {
-                latitude: Some(40.71),
-                longitude: Some(-74.0),
-                ..ResolvedWeatherConfig::default()
-            }
-        ));
-
-        // A coords cache must not satisfy an auto-location config (different mode).
-        assert!(!cached_matches_config(
-            &cache,
-            &ResolvedWeatherConfig {
-                auto_locate: true,
-                ..ResolvedWeatherConfig::default()
-            }
-        ));
-
-        // No cached location is never a match.
-        let empty_cache = PersistedWeatherCache {
-            location_key: Some("auto".to_string()),
-            units: WeatherUnits::Metric,
-            wind_units: WeatherWindUnits::MetersPerSecond,
-            snapshot: WeatherSnapshot::unknown(),
+        let coords = |latitude, longitude| ResolvedWeatherConfig {
+            latitude: Some(latitude),
+            longitude: Some(longitude),
+            ..ResolvedWeatherConfig::default()
         };
-        assert!(!cached_matches_config(
-            &empty_cache,
-            &ResolvedWeatherConfig {
-                auto_locate: true,
-                ..ResolvedWeatherConfig::default()
-            }
-        ));
-    }
-
-    #[test]
-    fn cached_matches_config_rejects_different_units_or_location_query() {
-        let mut snapshot = WeatherSnapshot::unknown();
-        snapshot.location = Some(WeatherLocation {
-            name: "Berlin".to_string(),
-            latitude: 52.52,
-            longitude: 13.40,
-        });
-        snapshot.current = Some(CurrentWeather {
-            temperature: 20.0,
-            feels_like: None,
-            humidity: None,
-            wind_speed: None,
-            condition: "Clear".to_string(),
-            weather_code: None,
-            is_day: None,
-        });
-        let cache = PersistedWeatherCache {
-            location_key: Some("location:berlin".to_string()),
-            units: WeatherUnits::Metric,
-            wind_units: WeatherWindUnits::MetersPerSecond,
-            snapshot,
+        let auto = ResolvedWeatherConfig {
+            auto_locate: true,
+            ..ResolvedWeatherConfig::default()
         };
+        let named = |location: &str, units, wind_units| ResolvedWeatherConfig {
+            location: Some(location.to_string()),
+            units,
+            wind_units: Some(wind_units),
+            ..ResolvedWeatherConfig::default()
+        };
+        let coords_cache = cache("coords:52.5000,13.4100", true);
+        let berlin_cache = cache("location:berlin", true);
+        let (metric, ms) = (WeatherUnits::Metric, WeatherWindUnits::MetersPerSecond);
 
-        assert!(cached_matches_config(
-            &cache,
-            &ResolvedWeatherConfig {
-                location: Some("  BERLIN  ".to_string()),
-                wind_units: Some(WeatherWindUnits::MetersPerSecond),
-                ..ResolvedWeatherConfig::default()
-            }
-        ));
-        assert!(!cached_matches_config(
-            &cache,
-            &ResolvedWeatherConfig {
-                location: Some("Paris".to_string()),
-                wind_units: Some(WeatherWindUnits::MetersPerSecond),
-                ..ResolvedWeatherConfig::default()
-            }
-        ));
-        assert!(!cached_matches_config(
-            &cache,
-            &ResolvedWeatherConfig {
-                location: Some("Berlin".to_string()),
-                units: WeatherUnits::Imperial,
-                wind_units: Some(WeatherWindUnits::MetersPerSecond),
-                ..ResolvedWeatherConfig::default()
-            }
-        ));
-        // Same location but a differing wind unit must not match.
-        assert!(!cached_matches_config(
-            &cache,
-            &ResolvedWeatherConfig {
-                location: Some("Berlin".to_string()),
-                wind_units: Some(WeatherWindUnits::Kmh),
-                ..ResolvedWeatherConfig::default()
-            }
-        ));
+        let cases = [
+            (
+                "same rounded coords",
+                &coords_cache,
+                coords(52.50, 13.41),
+                true,
+            ),
+            (
+                "different coords",
+                &coords_cache,
+                coords(40.71, -74.0),
+                false,
+            ),
+            (
+                "coords cache for auto-locate",
+                &coords_cache,
+                auto.clone(),
+                false,
+            ),
+            (
+                "cache without location",
+                &cache("auto", false),
+                auto.clone(),
+                false,
+            ),
+            (
+                "location query normalized",
+                &berlin_cache,
+                named("  BERLIN  ", metric, ms),
+                true,
+            ),
+            (
+                "different location query",
+                &berlin_cache,
+                named("Paris", metric, ms),
+                false,
+            ),
+            (
+                "different units",
+                &berlin_cache,
+                named("Berlin", WeatherUnits::Imperial, ms),
+                false,
+            ),
+            (
+                "different wind units",
+                &berlin_cache,
+                named("Berlin", metric, WeatherWindUnits::Kmh),
+                false,
+            ),
+        ];
+
+        for (name, cache, config, expected) in cases {
+            assert_eq!(cached_matches_config(cache, &config), expected, "{name}");
+        }
     }
 
     #[test]
@@ -1556,43 +1521,46 @@ mod tests {
     }
 
     #[test]
-    fn normal_error_with_current_weather_stays_visible() {
-        let service = WeatherService::new();
-        service.set_snapshot(snapshot_with_current_weather());
-
-        service.apply_error("network unavailable".to_string(), RefreshMode::Normal);
-
-        let snapshot = service.snapshot();
-        assert!(snapshot.stale);
-        assert_eq!(snapshot.error.as_deref(), Some("network unavailable"));
-    }
-
-    #[test]
-    fn resume_error_with_current_weather_is_quiet() {
-        let service = WeatherService::new();
-        service.set_snapshot(snapshot_with_current_weather());
-
-        service.apply_error("network unavailable".to_string(), RefreshMode::Resume);
-
-        let snapshot = service.snapshot();
-        assert!(snapshot.stale);
-        assert_eq!(snapshot.error, None);
-    }
-
-    #[test]
-    fn resume_error_without_current_weather_stays_visible() {
-        let service = WeatherService::new();
-        service.set_snapshot(WeatherSnapshot {
+    fn apply_error_visibility() {
+        let without_current_weather = WeatherSnapshot {
             available: true,
             loading: true,
             ..WeatherSnapshot::unknown()
-        });
+        };
+        let cases = [
+            (
+                "normal refresh with weather stays visible",
+                snapshot_with_current_weather(),
+                RefreshMode::Normal,
+                true,
+                Some("network unavailable"),
+            ),
+            (
+                "resume with weather is quiet",
+                snapshot_with_current_weather(),
+                RefreshMode::Resume,
+                true,
+                None,
+            ),
+            (
+                "resume without weather stays visible",
+                without_current_weather,
+                RefreshMode::Resume,
+                false,
+                Some("network unavailable"),
+            ),
+        ];
 
-        service.apply_error("network unavailable".to_string(), RefreshMode::Resume);
+        for (name, snapshot, mode, stale, error) in cases {
+            let service = WeatherService::new();
+            service.set_snapshot(snapshot);
 
-        let snapshot = service.snapshot();
-        assert!(!snapshot.stale);
-        assert_eq!(snapshot.error.as_deref(), Some("network unavailable"));
+            service.apply_error("network unavailable".to_string(), mode);
+
+            let snapshot = service.snapshot();
+            assert_eq!(snapshot.stale, stale, "{name}: stale");
+            assert_eq!(snapshot.error.as_deref(), error, "{name}: error");
+        }
     }
 
     fn snapshot_with_current_weather() -> WeatherSnapshot {
