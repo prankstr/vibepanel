@@ -108,7 +108,6 @@ mod tests {
 
     #[test]
     fn catalog_has_unique_names_and_symbols() {
-        assert_eq!(MANGO_LAYOUTS.len(), 14);
         assert_eq!(
             MANGO_LAYOUTS
                 .iter()

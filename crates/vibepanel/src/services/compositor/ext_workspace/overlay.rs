@@ -349,31 +349,46 @@ mod tests {
     }
 
     #[test]
-    fn marks_multiple_active_globally_and_per_output() {
+    fn active_groups_mark_active_workspaces() {
         let metas = global_metas(&[1, 2, 3]);
-        let overlay = ExtWorkspaceOverlay {
-            groups: vec![group(&["DP-1"], &["1", "2", "3"], &["1", "2"], &[])],
-        };
-        let (_, snap) = merge(&metas, &ipc("DP-1", 2, &[2]), &overlay);
+        let multi_active = || group(&["DP-1"], &["1", "2", "3"], &["1", "2"], &[]);
+        // (name, groups, IPC active, IPC occupied, expected active)
+        let cases = [
+            (
+                "multiple active marked globally and per output",
+                vec![multi_active()],
+                2,
+                vec![2],
+                HashSet::from([1, 2]),
+            ),
+            // IPC already switched to 3, ext-workspace still reports 1+2.
+            (
+                "ignored while streams disagree",
+                vec![multi_active()],
+                3,
+                vec![],
+                HashSet::from([3]),
+            ),
+            // Two groups on the same output both claim the IPC-active workspace.
+            (
+                "ambiguous groups keep IPC state",
+                vec![
+                    group(&["DP-1"], &["1", "2"], &["1", "2"], &[]),
+                    group(&["DP-1"], &["1", "3"], &["1", "3"], &[]),
+                ],
+                1,
+                vec![],
+                HashSet::from([1]),
+            ),
+        ];
 
-        assert_eq!(snap.active_workspace, HashSet::from([1, 2]));
-        assert_eq!(
-            snap.per_output["DP-1"].active_workspace,
-            HashSet::from([1, 2])
-        );
-    }
+        for (name, groups, active, occupied, expected) in cases {
+            let overlay = ExtWorkspaceOverlay { groups };
+            let (_, snap) = merge(&metas, &ipc("DP-1", active, &occupied), &overlay);
 
-    #[test]
-    fn ignored_while_streams_disagree() {
-        // IPC already switched to 3, ext-workspace still reports 1+2.
-        let metas = global_metas(&[1, 2, 3]);
-        let overlay = ExtWorkspaceOverlay {
-            groups: vec![group(&["DP-1"], &["1", "2", "3"], &["1", "2"], &[])],
-        };
-        let (_, snap) = merge(&metas, &ipc("DP-1", 3, &[]), &overlay);
-
-        assert_eq!(snap.active_workspace, HashSet::from([3]));
-        assert_eq!(snap.per_output["DP-1"].active_workspace, HashSet::from([3]));
+            assert_eq!(snap.active_workspace, expected, "{name}");
+            assert_eq!(snap.per_output["DP-1"].active_workspace, expected, "{name}");
+        }
     }
 
     #[test]
@@ -426,22 +441,6 @@ mod tests {
         assert_eq!(ids(&out_metas), vec![1, 3, 4]);
         assert_eq!(snap.active_workspace, HashSet::from([3]));
         assert_eq!(snap.per_output["B"].active_workspace, HashSet::from([4]));
-    }
-
-    #[test]
-    fn ambiguous_active_groups_keep_ipc_state() {
-        // Two groups on the same output both claim the IPC-active workspace.
-        let metas = global_metas(&[1, 2, 3]);
-        let overlay = ExtWorkspaceOverlay {
-            groups: vec![
-                group(&["DP-1"], &["1", "2"], &["1", "2"], &[]),
-                group(&["DP-1"], &["1", "3"], &["1", "3"], &[]),
-            ],
-        };
-        let (_, snap) = merge(&metas, &ipc("DP-1", 1, &[]), &overlay);
-
-        assert_eq!(snap.active_workspace, HashSet::from([1]));
-        assert_eq!(snap.per_output["DP-1"].active_workspace, HashSet::from([1]));
     }
 
     #[test]
