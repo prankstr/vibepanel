@@ -259,76 +259,61 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_extract_short_name_parenthesized() {
-        assert_eq!(extract_short_name("English (US)"), "US");
-        assert_eq!(extract_short_name("German (Dvorak)"), "Dvorak");
-        assert_eq!(extract_short_name("Russian (phonetic)"), "phonetic");
+    fn test_extract_short_name() {
+        let cases = [
+            // Single-word variants are treated as short codes.
+            ("variant country code", "English (US)", "US"),
+            ("variant name", "German (Dvorak)", "Dvorak"),
+            ("variant lowercase", "Russian (phonetic)", "phonetic"),
+            ("variant with dot", "French (alt.)", "alt."),
+            ("short code us", "us", "US"),
+            ("short code de", "de", "DE"),
+            ("short code fr", "fr", "FR"),
+            ("known language French", "French", "FR"),
+            ("known language Japanese", "Japanese", "JP"),
+            ("known language Swedish", "Swedish", "SE"),
+            ("known language German", "German", "DE"),
+            ("unknown language passes through", "Klingon", "Klingon"),
+            ("empty", "", "?"),
+            ("empty parens", "English ()", "English ()"),
+            ("nested parens", "Foo (Bar (Baz))", "Baz"),
+            // Multi-word variant descriptions fall back to the base language.
+            (
+                "multi-word variant: Swedish",
+                "Swedish (no dead keys)",
+                "SE",
+            ),
+            (
+                "multi-word variant: German",
+                "German (with AltGr dead keys)",
+                "DE",
+            ),
+            // Regression (B5): comma variants use the country code, else the language.
+            (
+                "B5: US comma variant",
+                "English (US, intl., with dead keys)",
+                "US",
+            ),
+            (
+                "B5: UK comma variant",
+                "English (UK, extended, Windows)",
+                "UK",
+            ),
+            (
+                "B5: English without code",
+                "English (intl., with AltGr dead keys)",
+                "US",
+            ),
+            ("B5: language beats layout", "Russian (US, phonetic)", "RU"),
+        ];
+
+        for (name, input, expected) in cases {
+            assert_eq!(extract_short_name(input), expected, "{name}: {input:?}");
+        }
     }
 
     #[test]
-    fn test_extract_short_name_short_codes() {
-        assert_eq!(extract_short_name("us"), "US");
-        assert_eq!(extract_short_name("de"), "DE");
-        assert_eq!(extract_short_name("fr"), "FR");
-    }
-
-    #[test]
-    fn test_extract_short_name_full_name() {
-        // Known language names resolve to 2-letter display codes.
-        assert_eq!(extract_short_name("French"), "FR");
-        assert_eq!(extract_short_name("Japanese"), "JP");
-        assert_eq!(extract_short_name("Swedish"), "SE");
-        assert_eq!(extract_short_name("German"), "DE");
-        // Unknown names pass through unchanged
-        assert_eq!(extract_short_name("Klingon"), "Klingon");
-    }
-
-    #[test]
-    fn test_extract_short_name_empty() {
-        assert_eq!(extract_short_name(""), "?");
-    }
-
-    #[test]
-    fn test_compact_layout_label_takes_first_two_chars() {
-        assert_eq!(compact_layout_label("US"), "US");
-        assert_eq!(compact_layout_label("Dvorak"), "Dv");
-        assert_eq!(compact_layout_label("?"), "?");
-    }
-
-    #[test]
-    fn test_extract_short_name_edge_cases() {
-        // Empty parens
-        assert_eq!(extract_short_name("English ()"), "English ()");
-        // Nested
-        assert_eq!(extract_short_name("Foo (Bar (Baz))"), "Baz");
-    }
-
-    #[test]
-    fn test_extract_short_name_variant_descriptions() {
-        // Variant descriptions with spaces should fall back to the base name,
-        // which then resolves via the language-name table to a 2-letter code
-        assert_eq!(extract_short_name("Swedish (no dead keys)"), "SE");
-        assert_eq!(extract_short_name("German (with AltGr dead keys)"), "DE");
-        assert_eq!(extract_short_name("French (alt.)"), "alt.");
-        // A leading country code wins, and English variants without one are US.
-        assert_eq!(
-            extract_short_name("English (US, intl., with dead keys)"),
-            "US"
-        );
-        assert_eq!(extract_short_name("English (UK, extended, Windows)"), "UK");
-        assert_eq!(
-            extract_short_name("English (intl., with AltGr dead keys)"),
-            "US"
-        );
-        // Other languages name their base layout first; the language still wins.
-        assert_eq!(extract_short_name("Russian (US, phonetic)"), "RU");
-        // Single-word variants are still treated as short codes.
-        assert_eq!(extract_short_name("German (Dvorak)"), "Dvorak");
-        assert_eq!(extract_short_name("Russian (phonetic)"), "phonetic");
-    }
-
-    #[test]
-    fn test_keyboard_layout_config_defaults() {
+    fn test_keyboard_layout_config() {
         let entry = WidgetEntry {
             name: "keyboard_layout".to_string(),
             options: Default::default(),
@@ -337,10 +322,7 @@ mod tests {
         assert!(config.show_icon);
         assert!(config.show_label);
         assert_eq!(config.format, LayoutFormat::Short);
-    }
 
-    #[test]
-    fn test_keyboard_layout_config_custom() {
         let mut options = std::collections::HashMap::new();
         options.insert("show_icon".to_string(), toml::Value::Boolean(false));
         options.insert("show_label".to_string(), toml::Value::Boolean(true));
@@ -348,7 +330,6 @@ mod tests {
             "format".to_string(),
             toml::Value::String("long".to_string()),
         );
-
         let entry = WidgetEntry {
             name: "keyboard_layout".to_string(),
             options,

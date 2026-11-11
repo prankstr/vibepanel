@@ -1100,14 +1100,11 @@ mod tests {
             [4, {"pos_in_scrolling_layout": [2, 2]}],
         ]}}));
         assert_eq!(window_ids(&state), vec![2, 5, 1, 4, 3, 10, 11]);
-    }
 
-    #[test]
-    fn dragged_floating_window_keeps_its_place() {
         // Windows without a layout position, such as floating ones, sort by ID.
-        let mut state = setup();
-        drag(&mut state, 2);
-        assert_eq!(window_ids(&state), vec![1, 2, 3, 4, 5, 10, 11]);
+        let mut floating = setup();
+        drag(&mut floating, 2);
+        assert_eq!(window_ids(&floating), vec![1, 2, 3, 4, 5, 10, 11]);
     }
 
     #[test]

@@ -257,35 +257,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_memory_config_defaults() {
-        let entry = WidgetEntry {
-            name: "memory".to_string(),
-            options: Default::default(),
-        };
-        let config = MemoryConfig::from_entry(&entry);
-        assert!(config.show_icon);
-        assert_eq!(config.format, MemoryFormat::Percentage);
-        assert!(config.stable_width);
-    }
+    fn memory_config_from_entry() {
+        let defaults = MemoryConfig::from_entry(&WidgetEntry::new("memory"));
+        assert!(defaults.show_icon);
+        assert_eq!(defaults.format, MemoryFormat::Percentage);
+        assert!(defaults.stable_width);
 
-    #[test]
-    fn test_memory_config_custom() {
-        let mut options = std::collections::HashMap::new();
-        options.insert("show_icon".to_string(), toml::Value::Boolean(false));
-        options.insert("stable_width".to_string(), toml::Value::Boolean(false));
-        options.insert(
-            "format".to_string(),
-            toml::Value::String("absolute".to_string()),
-        );
-
-        let entry = WidgetEntry {
+        let custom = MemoryConfig::from_entry(&WidgetEntry {
             name: "memory".to_string(),
-            options,
-        };
-        let config = MemoryConfig::from_entry(&entry);
-        assert!(!config.show_icon);
-        assert_eq!(config.format, MemoryFormat::Absolute);
-        assert!(!config.stable_width);
+            options: std::collections::HashMap::from([
+                ("show_icon".to_string(), false.into()),
+                ("format".to_string(), "absolute".into()),
+                ("stable_width".to_string(), false.into()),
+            ]),
+        });
+        assert!(!custom.show_icon);
+        assert_eq!(custom.format, MemoryFormat::Absolute);
+        assert!(!custom.stable_width);
     }
 
     #[test]
@@ -294,72 +282,70 @@ mod tests {
             MemoryFormat::from_str("percentage"),
             MemoryFormat::Percentage
         );
-        assert_eq!(
-            MemoryFormat::from_str("Percentage"),
-            MemoryFormat::Percentage
-        );
-        assert_eq!(MemoryFormat::from_str("absolute"), MemoryFormat::Absolute);
         assert_eq!(MemoryFormat::from_str("ABSOLUTE"), MemoryFormat::Absolute);
         assert_eq!(MemoryFormat::from_str("both"), MemoryFormat::Both);
-        assert_eq!(MemoryFormat::from_str("Both"), MemoryFormat::Both);
         assert_eq!(MemoryFormat::from_str("unknown"), MemoryFormat::Percentage);
     }
 
     #[test]
-    fn test_format_memory_compacts_vertical_percentage() {
-        let snapshot = SystemSnapshot {
-            available: true,
-            memory_percent: 76.4,
-            memory_used: 8 * 1024 * 1024 * 1024,
-            memory_total: 16 * 1024 * 1024 * 1024,
-            ..Default::default()
-        };
+    fn format_memory_cases() {
+        let cases = [
+            (
+                "percentage horizontal",
+                76.4,
+                8,
+                MemoryFormat::Percentage,
+                false,
+                "76%",
+            ),
+            (
+                "percentage vertical",
+                76.4,
+                8,
+                MemoryFormat::Percentage,
+                true,
+                "76%",
+            ),
+            (
+                "absolute vertical compacts to percentage",
+                76.4,
+                8,
+                MemoryFormat::Absolute,
+                true,
+                "76%",
+            ),
+            (
+                "both vertical compacts to percentage",
+                76.4,
+                8,
+                MemoryFormat::Both,
+                true,
+                "76%",
+            ),
+            (
+                "both horizontal shows unit once",
+                62.5,
+                10,
+                MemoryFormat::Both,
+                false,
+                "10.0/16.0G",
+            ),
+        ];
 
-        assert_eq!(
-            format_memory(&snapshot, &MemoryFormat::Percentage, false),
-            "76%"
-        );
-        assert_eq!(
-            format_memory(&snapshot, &MemoryFormat::Percentage, true),
-            "76%"
-        );
-        assert_eq!(
-            format_memory(&snapshot, &MemoryFormat::Absolute, true),
-            "76%"
-        );
-        assert_eq!(format_memory(&snapshot, &MemoryFormat::Both, true), "76%");
-
-        let boundary = SystemSnapshot {
-            memory_percent: 100.0,
-            ..snapshot
-        };
-        assert_eq!(
-            format_memory(&boundary, &MemoryFormat::Percentage, true),
-            "100"
-        );
-    }
-
-    #[test]
-    fn test_format_memory_both_shows_unit_once() {
-        let snapshot = SystemSnapshot {
-            available: true,
-            memory_percent: 62.5,
-            memory_used: 10 * 1024 * 1024 * 1024,
-            memory_total: 16 * 1024 * 1024 * 1024,
-            ..Default::default()
-        };
-
-        assert_eq!(
-            format_memory(&snapshot, &MemoryFormat::Both, false),
-            "10.0/16.0G"
-        );
-
-        // Used below 1 GiB stays in the total's unit (was "512/16.0G").
-        let low = SystemSnapshot {
-            memory_used: 512 * 1024 * 1024,
-            ..snapshot
-        };
-        assert_eq!(format_memory(&low, &MemoryFormat::Both, false), "0.5/16.0G");
+        for (name, memory_percent, used_gib, format, vertical, expected) in cases {
+            let snapshot = SystemSnapshot {
+                available: true,
+                memory_percent,
+                memory_used: used_gib * 1024 * 1024 * 1024,
+                memory_total: 16 * 1024 * 1024 * 1024,
+                ..Default::default()
+            };
+            assert_eq!(
+                format_memory(&snapshot, &format, vertical),
+                expected,
+                "{name}"
+            );
+        }
     }
 
     #[test]

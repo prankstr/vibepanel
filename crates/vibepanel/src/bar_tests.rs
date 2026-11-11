@@ -136,7 +136,7 @@ fn expect_popover_anchor(position: BarPosition, edge: gtk4_layer_shell::Edge) ->
         }
 }
 
-fn assert_bar_window_anchors(window: &ApplicationWindow, position: BarPosition) {
+fn assert_bar_window_anchors(case: &str, window: &ApplicationWindow, position: BarPosition) {
     for edge in [
         gtk4_layer_shell::Edge::Top,
         gtk4_layer_shell::Edge::Right,
@@ -146,13 +146,13 @@ fn assert_bar_window_anchors(window: &ApplicationWindow, position: BarPosition) 
         assert_eq!(
             window.is_anchor(edge),
             expect_bar_window_anchor(position, edge),
-            "bar window {edge:?} anchor should track bar.position={}",
+            "{case}: bar window {edge:?} anchor should track bar.position={}",
             position.as_str()
         );
     }
 }
 
-fn assert_popover_window_anchors(window: &ApplicationWindow, position: BarPosition) {
+fn assert_popover_window_anchors(case: &str, window: &ApplicationWindow, position: BarPosition) {
     for edge in [
         gtk4_layer_shell::Edge::Top,
         gtk4_layer_shell::Edge::Right,
@@ -162,134 +162,132 @@ fn assert_popover_window_anchors(window: &ApplicationWindow, position: BarPositi
         assert_eq!(
             window.is_anchor(edge),
             expect_popover_anchor(position, edge),
-            "popover {edge:?} anchor should track bar.position={}",
+            "{case}: popover {edge:?} anchor should track bar.position={}",
             position.as_str()
         );
     }
 }
 
-fn run_layer_shell_bar_position_contract(position: &str) {
-    let Some(context) = layer_shell_context_or_skip() else {
-        return;
-    };
-
-    let position = test_bar_position(position);
-    let mut config = layer_shell_test_config();
-    config.bar.position = position.as_str().to_string();
-    let bar = present_layer_shell_bar(&context, &config, false);
-    let window = &bar.window;
-    let expected_thickness = rendered_bar_height(&config);
-    let monitor_geometry = context.monitor.geometry();
-    let (default_width, default_height) = window.default_size();
-
-    assert!(window.is_layer_window());
-    assert_bar_window_anchors(window, position);
-    if position.is_vertical() {
-        assert_eq!(default_width, expected_thickness);
-        assert_eq!(default_height, monitor_geometry.height());
-    } else {
-        assert_eq!(default_width, monitor_geometry.width());
-        assert_eq!(default_height, expected_thickness);
+fn run_layer_shell_bar_position_contract() {
+    struct Case {
+        name: &'static str,
+        position: &'static str,
+        padding: Option<u32>,
+        background_opacity: Option<f64>,
     }
-    assert_eq!(window.layer(), gtk4_layer_shell::Layer::Top);
-    assert_eq!(window.keyboard_mode(), gtk4_layer_shell::KeyboardMode::None);
-    assert!(window.auto_exclusive_zone_is_enabled());
-    assert_eq!(window.namespace().as_deref(), Some("vibepanel"));
-    assert_eq!(window.monitor().as_ref(), Some(&context.monitor));
 
-    window.close();
-    flush_gtk();
-}
-
-fn run_layer_shell_bar_height_contract(background_opacity: f64) {
     let Some(context) = layer_shell_context_or_skip() else {
         return;
     };
+    let monitor_geometry = context.monitor.geometry();
+    let cases = [
+        Case {
+            name: "top",
+            position: "top",
+            padding: None,
+            background_opacity: None,
+        },
+        Case {
+            name: "bottom",
+            position: "bottom",
+            padding: None,
+            background_opacity: None,
+        },
+        Case {
+            name: "left",
+            position: "left",
+            padding: None,
+            background_opacity: None,
+        },
+        Case {
+            name: "right",
+            position: "right",
+            padding: None,
+            background_opacity: None,
+        },
+        Case {
+            name: "height with visible background",
+            position: "top",
+            padding: Some(10),
+            background_opacity: Some(1.0),
+        },
+        Case {
+            name: "height with transparent background",
+            position: "top",
+            padding: Some(10),
+            background_opacity: Some(0.0),
+        },
+    ];
 
-    let mut config = layer_shell_test_config();
-    config.bar.padding = 10;
-    config.bar.background_opacity = background_opacity;
-    let bar = present_layer_shell_bar(&context, &config, false);
-    let window = &bar.window;
+    for case in cases {
+        let name = case.name;
+        let position = test_bar_position(case.position);
+        let mut config = layer_shell_test_config();
+        config.bar.position = position.as_str().to_string();
+        if let Some(padding) = case.padding {
+            config.bar.padding = padding;
+        }
+        if let Some(background_opacity) = case.background_opacity {
+            config.bar.background_opacity = background_opacity;
+        }
+        let bar = present_layer_shell_bar(&context, &config, false);
+        let window = &bar.window;
+        let expected_thickness = rendered_bar_height(&config);
+        let (default_width, default_height) = window.default_size();
 
-    let expected_height = rendered_bar_height(&config);
-    let (_default_width, default_height) = window.default_size();
+        assert!(
+            window.is_layer_window(),
+            "{name}: bar should be a layer window"
+        );
+        assert_bar_window_anchors(name, window, position);
+        if position.is_vertical() {
+            assert_eq!(default_width, expected_thickness, "{name}: default width");
+            assert_eq!(
+                default_height,
+                monitor_geometry.height(),
+                "{name}: default height"
+            );
+        } else {
+            assert_eq!(
+                default_width,
+                monitor_geometry.width(),
+                "{name}: default width"
+            );
+            assert_eq!(default_height, expected_thickness, "{name}: default height");
+            assert!(
+                window.height() >= expected_thickness,
+                "{name}: rendered height {} should be at least {expected_thickness}",
+                window.height()
+            );
+        }
+        assert_eq!(
+            window.layer(),
+            gtk4_layer_shell::Layer::Top,
+            "{name}: layer"
+        );
+        assert_eq!(
+            window.keyboard_mode(),
+            gtk4_layer_shell::KeyboardMode::None,
+            "{name}: keyboard mode"
+        );
+        assert!(
+            window.auto_exclusive_zone_is_enabled(),
+            "{name}: auto exclusive zone"
+        );
+        assert_eq!(
+            window.namespace().as_deref(),
+            Some("vibepanel"),
+            "{name}: namespace"
+        );
+        assert_eq!(
+            window.monitor().as_ref(),
+            Some(&context.monitor),
+            "{name}: monitor"
+        );
 
-    assert_eq!(default_height, expected_height);
-    assert!(window.auto_exclusive_zone_is_enabled());
-    assert!(window.height() >= expected_height);
-
-    window.close();
-    flush_gtk();
-}
-
-fn run_layer_shell_popover_position_contract(position: &str) {
-    let Some(context) = layer_shell_context_or_skip() else {
-        return;
-    };
-
-    let position = test_bar_position(position);
-    let mut config = layer_shell_test_config();
-    config.bar.position = position.as_str().to_string();
-    config.bar.padding = 10;
-    config.bar.popover_offset = 18;
-    config.bar.background_opacity = 1.0;
-    apply_layer_shell_config(&config, true);
-
-    let popover = LayerShellPopover::new(&context.app, "contract", || {
-        gtk4::Label::new(Some("contract popover")).upcast::<gtk4::Widget>()
-    });
-    popover.show_at(
-        PopoverAnchor { x: 160, y: 160 },
-        Some(context.monitor.clone()),
-    );
-    flush_gtk();
-
-    let Some(window) = popover.test_window() else {
-        panic!("popover should create a layer-shell window when shown");
-    };
-    let Some(catcher) = popover.test_click_catcher() else {
-        panic!("popover should create a click-catcher when shown");
-    };
-
-    let bar_edge = popover_bar_edge();
-    let expected_bar_margin = calculate_popover_bar_margin();
-    let expected_catcher_margin = calculate_bar_exclusive_zone();
-
-    assert!(window.is_layer_window());
-    assert_popover_window_anchors(&window, position);
-    assert_eq!(window.layer(), gtk4_layer_shell::Layer::Top);
-    assert_ne!(window.keyboard_mode(), gtk4_layer_shell::KeyboardMode::None);
-    assert_eq!(window.exclusive_zone(), 0);
-    assert_eq!(
-        window.namespace().as_deref(),
-        Some("vibepanel-contract-popover")
-    );
-    assert_eq!(window.monitor().as_ref(), Some(&context.monitor));
-    assert_eq!(window.margin(bar_edge), expected_bar_margin);
-
-    assert!(catcher.is_layer_window());
-    assert!(catcher.is_anchor(gtk4_layer_shell::Edge::Top));
-    assert!(catcher.is_anchor(gtk4_layer_shell::Edge::Right));
-    assert!(catcher.is_anchor(gtk4_layer_shell::Edge::Bottom));
-    assert!(catcher.is_anchor(gtk4_layer_shell::Edge::Left));
-    assert_eq!(catcher.layer(), gtk4_layer_shell::Layer::Top);
-    assert_eq!(
-        catcher.keyboard_mode(),
-        gtk4_layer_shell::KeyboardMode::None
-    );
-    assert_eq!(catcher.exclusive_zone(), -1);
-    assert_eq!(
-        catcher.namespace().as_deref(),
-        Some("vibepanel-click-catcher")
-    );
-    assert_eq!(catcher.monitor().as_ref(), Some(&context.monitor));
-    assert_eq!(catcher.margin(bar_edge), expected_catcher_margin);
-
-    popover.hide();
-    window.close();
-    catcher.close();
-    flush_gtk();
+        window.close();
+        flush_gtk();
+    }
 }
 
 fn run_layer_shell_popover_on_show_reversal_contract() {
@@ -389,159 +387,204 @@ fn run_layer_shell_click_catcher_lifetime_contract() {
     flush_gtk();
 }
 
-fn run_layer_shell_popover_offset_contract(position: &str, background_opacity: f64) {
+fn run_layer_shell_popover_placement_contract() {
     let Some(context) = layer_shell_context_or_skip() else {
         return;
     };
 
-    let position = test_bar_position(position);
-    let mut config = layer_shell_test_config();
-    config.bar.position = position.as_str().to_string();
-    config.bar.popover_offset = 23;
-    config.bar.background_opacity = background_opacity;
-    apply_layer_shell_config(&config, true);
+    let cases = [
+        ("top, transparent bar", "top", 0.0),
+        ("top, visible bar", "top", 1.0),
+        ("bottom, transparent bar", "bottom", 0.0),
+        ("bottom, visible bar", "bottom", 1.0),
+        ("left, transparent bar", "left", 0.0),
+        ("left, visible bar", "left", 1.0),
+        ("right, transparent bar", "right", 0.0),
+        ("right, visible bar", "right", 1.0),
+    ];
 
-    let popover = LayerShellPopover::new(&context.app, "contract", || {
-        gtk4::Label::new(Some("contract popover")).upcast::<gtk4::Widget>()
-    });
-    popover.show_at(
-        PopoverAnchor { x: 160, y: 160 },
-        Some(context.monitor.clone()),
-    );
-    flush_gtk();
+    for (name, position, background_opacity) in cases {
+        let position = test_bar_position(position);
+        let mut config = layer_shell_test_config();
+        config.bar.position = position.as_str().to_string();
+        config.bar.padding = 10;
+        config.bar.popover_offset = 23;
+        config.bar.background_opacity = background_opacity;
+        apply_layer_shell_config(&config, true);
 
-    let Some(window) = popover.test_window() else {
-        panic!("popover should create a layer-shell window when shown");
-    };
-    let Some(catcher) = popover.test_click_catcher() else {
-        panic!("popover should create a click-catcher when shown");
-    };
+        let popover = LayerShellPopover::new(&context.app, "contract", || {
+            gtk4::Label::new(Some("contract popover")).upcast::<gtk4::Widget>()
+        });
+        popover.show_at(
+            PopoverAnchor { x: 160, y: 160 },
+            Some(context.monitor.clone()),
+        );
+        flush_gtk();
 
-    let bar_edge = popover_bar_edge();
-    let expected_bar_margin = calculate_popover_bar_margin();
-    let expected_catcher_margin = calculate_bar_exclusive_zone();
+        let Some(window) = popover.test_window() else {
+            panic!("{name}: popover should create a layer-shell window when shown");
+        };
+        let Some(catcher) = popover.test_click_catcher() else {
+            panic!("{name}: popover should create a click-catcher when shown");
+        };
 
-    assert!(window.is_layer_window());
-    assert_popover_window_anchors(&window, position);
-    assert_eq!(window.layer(), gtk4_layer_shell::Layer::Top);
-    assert_eq!(
-        window.namespace().as_deref(),
-        Some("vibepanel-contract-popover")
-    );
-    assert_eq!(window.monitor().as_ref(), Some(&context.monitor));
-    assert_eq!(window.margin(bar_edge), expected_bar_margin);
-    if config.bar.background_opacity > 0.0 {
+        let bar_edge = popover_bar_edge();
+        let expected_bar_margin = if background_opacity > 0.0 {
+            config.bar.popover_offset as i32 - config.bar.padding as i32
+        } else {
+            config.bar.popover_offset as i32
+        };
+
+        assert!(window.is_layer_window(), "{name}: popover layer window");
+        assert_popover_window_anchors(name, &window, position);
+        assert_eq!(
+            window.layer(),
+            gtk4_layer_shell::Layer::Top,
+            "{name}: popover layer"
+        );
+        assert_ne!(
+            window.keyboard_mode(),
+            gtk4_layer_shell::KeyboardMode::None,
+            "{name}: popover keyboard mode"
+        );
+        assert_eq!(window.exclusive_zone(), 0, "{name}: popover exclusive zone");
+        assert_eq!(
+            window.namespace().as_deref(),
+            Some("vibepanel-contract-popover"),
+            "{name}: popover namespace"
+        );
+        assert_eq!(
+            window.monitor().as_ref(),
+            Some(&context.monitor),
+            "{name}: popover monitor"
+        );
         assert_eq!(
             window.margin(bar_edge),
-            config.bar.popover_offset as i32 - config.bar.padding as i32
+            expected_bar_margin,
+            "{name}: popover bar-edge margin"
         );
-    } else {
-        assert_eq!(window.margin(bar_edge), config.bar.popover_offset as i32);
+
+        assert!(catcher.is_layer_window(), "{name}: catcher layer window");
+        for edge in [
+            gtk4_layer_shell::Edge::Top,
+            gtk4_layer_shell::Edge::Right,
+            gtk4_layer_shell::Edge::Bottom,
+            gtk4_layer_shell::Edge::Left,
+        ] {
+            assert!(catcher.is_anchor(edge), "{name}: catcher {edge:?} anchor");
+        }
+        assert_eq!(
+            catcher.layer(),
+            gtk4_layer_shell::Layer::Top,
+            "{name}: catcher layer"
+        );
+        assert_eq!(
+            catcher.keyboard_mode(),
+            gtk4_layer_shell::KeyboardMode::None,
+            "{name}: catcher keyboard mode"
+        );
+        assert_eq!(
+            catcher.exclusive_zone(),
+            -1,
+            "{name}: catcher exclusive zone"
+        );
+        assert_eq!(
+            catcher.namespace().as_deref(),
+            Some("vibepanel-click-catcher"),
+            "{name}: catcher namespace"
+        );
+        assert_eq!(
+            catcher.monitor().as_ref(),
+            Some(&context.monitor),
+            "{name}: catcher monitor"
+        );
+        assert_eq!(
+            catcher.margin(bar_edge),
+            calculate_bar_exclusive_zone(),
+            "{name}: catcher bar-edge margin"
+        );
+
+        popover.hide();
+        window.close();
+        catcher.close();
+        flush_gtk();
     }
-
-    assert!(catcher.is_layer_window());
-    assert_eq!(catcher.margin(bar_edge), expected_catcher_margin);
-
-    popover.hide();
-    window.close();
-    catcher.close();
-    flush_gtk();
 }
 
-fn run_layer_shell_clock_popover_contract() {
+fn run_layer_shell_widget_popovers_contract() {
     let Some(context) = layer_shell_context_or_skip() else {
         return;
     };
 
-    let mut config = layer_shell_test_config();
-    config.widgets.left = vec![WidgetPlacement::Single("clock".to_string())];
-    let bar = present_layer_shell_bar(&context, &config, true);
+    let cases = [
+        ("clock", "clock", crate::styles::calendar::POPOVER),
+        ("system", "cpu", crate::styles::system_popover::POPOVER),
+    ];
 
-    assert!(
-        popover_registry::dispatch("clock", DispatchAction::Show),
-        "clock widget should register a popover handle"
-    );
-    flush_gtk();
+    for (name, widget, content_class) in cases {
+        let mut config = layer_shell_test_config();
+        config.widgets.left = vec![WidgetPlacement::Single(widget.to_string())];
+        let bar = present_layer_shell_bar(&context, &config, true);
 
-    let Some(popover_window) = popover_registry::test_layer_shell_window("clock") else {
-        panic!("clock registry handle should expose its real layer-shell popover window");
-    };
-    let Some(child) = popover_window.child() else {
-        panic!("clock popover window should have content after being shown");
-    };
+        assert!(
+            popover_registry::dispatch(widget, DispatchAction::Show),
+            "{name}: {widget} widget should register a popover handle"
+        );
+        flush_gtk();
 
-    let bar_edge = popover_bar_edge();
-    let expected_bar_margin = calculate_popover_bar_margin();
+        let Some(popover_window) = popover_registry::test_layer_shell_window(widget) else {
+            panic!("{name}: registry handle should expose its real layer-shell popover window");
+        };
+        let Some(child) = popover_window.child() else {
+            panic!("{name}: popover window should have content after being shown");
+        };
 
-    assert!(popover_window.is_layer_window());
-    assert!(popover_window.is_anchor(gtk4_layer_shell::Edge::Top));
-    assert!(popover_window.is_anchor(gtk4_layer_shell::Edge::Right));
-    assert!(!popover_window.is_anchor(gtk4_layer_shell::Edge::Bottom));
-    assert!(!popover_window.is_anchor(gtk4_layer_shell::Edge::Left));
-    assert_eq!(popover_window.layer(), gtk4_layer_shell::Layer::Top);
-    assert_eq!(
-        popover_window.namespace().as_deref(),
-        Some("vibepanel-clock-popover")
-    );
-    assert_eq!(popover_window.monitor().as_ref(), Some(&context.monitor));
-    assert_eq!(popover_window.margin(bar_edge), expected_bar_margin);
-    assert!(
-        find_descendant_with_class(&child, crate::styles::calendar::POPOVER).is_some(),
-        "clock popover should contain calendar popover content"
-    );
+        let bar_edge = popover_bar_edge();
+        let expected_bar_margin = calculate_popover_bar_margin();
 
-    popover_registry::dispatch("clock", DispatchAction::Hide);
-    popover_window.close();
-    bar.window.close();
-    flush_gtk();
-}
+        assert!(popover_window.is_layer_window(), "{name}: layer window");
+        for (edge, anchored) in [
+            (gtk4_layer_shell::Edge::Top, true),
+            (gtk4_layer_shell::Edge::Right, true),
+            (gtk4_layer_shell::Edge::Bottom, false),
+            (gtk4_layer_shell::Edge::Left, false),
+        ] {
+            assert_eq!(
+                popover_window.is_anchor(edge),
+                anchored,
+                "{name}: {edge:?} anchor"
+            );
+        }
+        assert_eq!(
+            popover_window.layer(),
+            gtk4_layer_shell::Layer::Top,
+            "{name}: layer"
+        );
+        assert_eq!(
+            popover_window.namespace().as_deref(),
+            Some(format!("vibepanel-{widget}-popover").as_str()),
+            "{name}: namespace"
+        );
+        assert_eq!(
+            popover_window.monitor().as_ref(),
+            Some(&context.monitor),
+            "{name}: monitor"
+        );
+        assert_eq!(
+            popover_window.margin(bar_edge),
+            expected_bar_margin,
+            "{name}: bar-edge margin"
+        );
+        assert!(
+            find_descendant_with_class(&child, content_class).is_some(),
+            "{name}: popover should contain {content_class} content"
+        );
 
-fn run_layer_shell_system_widget_popover_contract() {
-    let Some(context) = layer_shell_context_or_skip() else {
-        return;
-    };
-
-    let mut config = layer_shell_test_config();
-    config.widgets.left = vec![WidgetPlacement::Single("cpu".to_string())];
-    let bar = present_layer_shell_bar(&context, &config, true);
-
-    assert!(
-        popover_registry::dispatch("cpu", DispatchAction::Show),
-        "cpu widget should register a system popover handle"
-    );
-    flush_gtk();
-
-    let Some(popover_window) = popover_registry::test_layer_shell_window("cpu") else {
-        panic!("cpu registry handle should expose its real layer-shell popover window");
-    };
-    let Some(child) = popover_window.child() else {
-        panic!("cpu popover window should have content after being shown");
-    };
-
-    let bar_edge = popover_bar_edge();
-    let expected_bar_margin = calculate_popover_bar_margin();
-
-    assert!(popover_window.is_layer_window());
-    assert!(popover_window.is_anchor(gtk4_layer_shell::Edge::Top));
-    assert!(popover_window.is_anchor(gtk4_layer_shell::Edge::Right));
-    assert!(!popover_window.is_anchor(gtk4_layer_shell::Edge::Bottom));
-    assert!(!popover_window.is_anchor(gtk4_layer_shell::Edge::Left));
-    assert_eq!(popover_window.layer(), gtk4_layer_shell::Layer::Top);
-    assert_eq!(
-        popover_window.namespace().as_deref(),
-        Some("vibepanel-cpu-popover")
-    );
-    assert_eq!(popover_window.monitor().as_ref(), Some(&context.monitor));
-    assert_eq!(popover_window.margin(bar_edge), expected_bar_margin);
-    assert!(
-        find_descendant_with_class(&child, crate::styles::system_popover::POPOVER).is_some(),
-        "cpu popover should contain shared system popover content"
-    );
-
-    popover_registry::dispatch("cpu", DispatchAction::Hide);
-    popover_window.close();
-    bar.window.close();
-    flush_gtk();
+        popover_registry::dispatch(widget, DispatchAction::Hide);
+        popover_window.close();
+        bar.window.close();
+        flush_gtk();
+    }
 }
 
 fn label_in(widget: &gtk4::Widget) -> Option<gtk4::Label> {
@@ -1284,54 +1327,14 @@ layer_shell_contract_tests!(
         run_layer_shell_intellihide_sway_contract()
     ),
     (
-        test_layer_shell_bar_position_top,
-        "bar.position.top",
-        run_layer_shell_bar_position_contract("top")
+        test_layer_shell_bar_position,
+        "bar.position",
+        run_layer_shell_bar_position_contract()
     ),
     (
-        test_layer_shell_bar_position_bottom,
-        "bar.position.bottom",
-        run_layer_shell_bar_position_contract("bottom")
-    ),
-    (
-        test_layer_shell_bar_position_left,
-        "bar.position.left",
-        run_layer_shell_bar_position_contract("left")
-    ),
-    (
-        test_layer_shell_bar_position_right,
-        "bar.position.right",
-        run_layer_shell_bar_position_contract("right")
-    ),
-    (
-        test_layer_shell_bar_height_visible,
-        "bar.height.visible",
-        run_layer_shell_bar_height_contract(1.0)
-    ),
-    (
-        test_layer_shell_bar_height_transparent,
-        "bar.height.transparent",
-        run_layer_shell_bar_height_contract(0.0)
-    ),
-    (
-        test_layer_shell_popover_position_top,
-        "popover.position.top",
-        run_layer_shell_popover_position_contract("top")
-    ),
-    (
-        test_layer_shell_popover_position_bottom,
-        "popover.position.bottom",
-        run_layer_shell_popover_position_contract("bottom")
-    ),
-    (
-        test_layer_shell_popover_position_left,
-        "popover.position.left",
-        run_layer_shell_popover_position_contract("left")
-    ),
-    (
-        test_layer_shell_popover_position_right,
-        "popover.position.right",
-        run_layer_shell_popover_position_contract("right")
+        test_layer_shell_popover_placement,
+        "popover.placement",
+        run_layer_shell_popover_placement_contract()
     ),
     (
         test_layer_shell_popover_on_show_reversal,
@@ -1344,152 +1347,128 @@ layer_shell_contract_tests!(
         run_layer_shell_click_catcher_lifetime_contract()
     ),
     (
-        test_layer_shell_popover_offset_top,
-        "popover.offset.top",
-        run_layer_shell_popover_offset_contract("top", 0.0)
-    ),
-    (
-        test_layer_shell_popover_offset_bottom,
-        "popover.offset.bottom",
-        run_layer_shell_popover_offset_contract("bottom", 0.0)
-    ),
-    (
-        test_layer_shell_popover_offset_left,
-        "popover.offset.left",
-        run_layer_shell_popover_offset_contract("left", 0.0)
-    ),
-    (
-        test_layer_shell_popover_offset_right,
-        "popover.offset.right",
-        run_layer_shell_popover_offset_contract("right", 0.0)
-    ),
-    (
-        test_layer_shell_popover_offset_visible_top,
-        "popover.offset.visible.top",
-        run_layer_shell_popover_offset_contract("top", 1.0)
-    ),
-    (
-        test_layer_shell_popover_offset_visible_bottom,
-        "popover.offset.visible.bottom",
-        run_layer_shell_popover_offset_contract("bottom", 1.0)
-    ),
-    (
-        test_layer_shell_popover_offset_visible_left,
-        "popover.offset.visible.left",
-        run_layer_shell_popover_offset_contract("left", 1.0)
-    ),
-    (
-        test_layer_shell_popover_offset_visible_right,
-        "popover.offset.visible.right",
-        run_layer_shell_popover_offset_contract("right", 1.0)
-    ),
-    (
-        test_layer_shell_clock_widget_popover,
-        "widget.clock.popover",
-        run_layer_shell_clock_popover_contract()
-    ),
-    (
-        test_layer_shell_system_widget_popover,
-        "widget.system.popover",
-        run_layer_shell_system_widget_popover_contract()
+        test_layer_shell_widget_popovers,
+        "widget.popovers",
+        run_layer_shell_widget_popovers_contract()
     ),
 );
 
 #[test]
-fn merge_runs_empty() {
-    assert_eq!(compute_merge_runs(&[]), vec![]);
+fn compute_merge_runs_partitions_kinds() {
+    use MergeKind::{Popover, Spacer};
+
+    let cases = [
+        ("empty", vec![], vec![]),
+        (
+            "unmergeable never grouped",
+            vec![
+                Popover(Unmergeable),
+                Popover(Unmergeable),
+                Popover(Unmergeable),
+            ],
+            vec![
+                (Unmergeable, 0, 1),
+                (Unmergeable, 1, 2),
+                (Unmergeable, 2, 3),
+            ],
+        ),
+        (
+            "consecutive system entries merge",
+            vec![Popover(System), Popover(System), Popover(System)],
+            vec![(System, 0, 3)],
+        ),
+        (
+            "unmergeable breaks a system run",
+            vec![
+                Popover(System),
+                Popover(System),
+                Popover(Unmergeable),
+                Popover(System),
+            ],
+            vec![(System, 0, 2), (Unmergeable, 2, 3), (System, 3, 4)],
+        ),
+        (
+            "single system is its own run",
+            vec![Popover(System)],
+            vec![(System, 0, 1)],
+        ),
+        (
+            "spacer between same kind is absorbed",
+            vec![Popover(System), Spacer, Popover(System)],
+            vec![(System, 0, 3)],
+        ),
+        (
+            "spacer before a different kind joins the left run",
+            vec![Popover(System), Spacer, Popover(Unmergeable)],
+            vec![(System, 0, 2), (Unmergeable, 2, 3)],
+        ),
+        (
+            "leading spacer joins the first run",
+            vec![Spacer, Popover(System), Popover(System)],
+            vec![(System, 0, 3)],
+        ),
+        (
+            "trailing spacer joins the last run",
+            vec![Popover(System), Spacer],
+            vec![(System, 0, 2)],
+        ),
+        ("spacers alone build no runs", vec![Spacer, Spacer], vec![]),
+    ];
+
+    for (name, kinds, expected) in cases {
+        assert_eq!(compute_merge_runs(&kinds), expected, "{name}");
+    }
 }
 
 #[test]
-fn merge_runs_unmergeable_never_grouped() {
-    let runs = compute_merge_runs(&[
-        MergeKind::Popover(Unmergeable),
-        MergeKind::Popover(Unmergeable),
-        MergeKind::Popover(Unmergeable),
-    ]);
-    assert_eq!(
-        runs,
-        vec![
-            (Unmergeable, 0, 1),
-            (Unmergeable, 1, 2),
-            (Unmergeable, 2, 3),
-        ]
-    );
-}
+fn bar_and_screen_margin_layout_follow_position() {
+    let cases = [
+        (
+            BarPosition::Top,
+            gtk4::Orientation::Horizontal,
+            gtk4::Orientation::Vertical,
+            true,
+        ),
+        (
+            BarPosition::Bottom,
+            gtk4::Orientation::Horizontal,
+            gtk4::Orientation::Vertical,
+            false,
+        ),
+        (
+            BarPosition::Left,
+            gtk4::Orientation::Vertical,
+            gtk4::Orientation::Horizontal,
+            true,
+        ),
+        (
+            BarPosition::Right,
+            gtk4::Orientation::Vertical,
+            gtk4::Orientation::Horizontal,
+            false,
+        ),
+    ];
 
-#[test]
-fn merge_runs_system_grouping() {
-    // Consecutive System entries merge into one run
-    assert_eq!(
-        compute_merge_runs(&[
-            MergeKind::Popover(System),
-            MergeKind::Popover(System),
-            MergeKind::Popover(System),
-        ]),
-        vec![(System, 0, 3)]
-    );
-    // Unmergeable breaks a System run; singleton System stays singleton
-    assert_eq!(
-        compute_merge_runs(&[
-            MergeKind::Popover(System),
-            MergeKind::Popover(System),
-            MergeKind::Popover(Unmergeable),
-            MergeKind::Popover(System),
-        ]),
-        vec![(System, 0, 2), (Unmergeable, 2, 3), (System, 3, 4)],
-    );
-    // Single System is its own run
-    assert_eq!(
-        compute_merge_runs(&[MergeKind::Popover(System)]),
-        vec![(System, 0, 1)]
-    );
-}
-
-#[test]
-fn bar_flow_orientation_matches_position() {
-    assert_eq!(
-        bar_flow_orientation_for(BarPosition::Top),
-        gtk4::Orientation::Horizontal
-    );
-    assert_eq!(
-        bar_flow_orientation_for(BarPosition::Bottom),
-        gtk4::Orientation::Horizontal
-    );
-    assert_eq!(
-        bar_flow_orientation_for(BarPosition::Left),
-        gtk4::Orientation::Vertical
-    );
-    assert_eq!(
-        bar_flow_orientation_for(BarPosition::Right),
-        gtk4::Orientation::Vertical
-    );
-}
-
-#[test]
-fn screen_margin_shell_orientation_matches_screen_edge() {
-    assert_eq!(
-        shell_orientation_for(BarPosition::Top),
-        gtk4::Orientation::Vertical
-    );
-    assert_eq!(
-        shell_orientation_for(BarPosition::Bottom),
-        gtk4::Orientation::Vertical
-    );
-    assert_eq!(
-        shell_orientation_for(BarPosition::Left),
-        gtk4::Orientation::Horizontal
-    );
-    assert_eq!(
-        shell_orientation_for(BarPosition::Right),
-        gtk4::Orientation::Horizontal
-    );
+    for (position, flow, shell, spacer_precedes_bar) in cases {
+        assert_eq!(
+            bar_flow_orientation_for(position),
+            flow,
+            "{position:?}: bar flow orientation"
+        );
+        assert_eq!(
+            shell_orientation_for(position),
+            shell,
+            "{position:?}: shell orientation"
+        );
+        assert_eq!(
+            screen_margin_spacer_precedes_bar(position),
+            spacer_precedes_bar,
+            "{position:?}: screen-margin spacer order"
+        );
+    }
 
     assert_eq!(screen_margin_spacer_size(BarPosition::Top, 12), (-1, 12));
     assert_eq!(screen_margin_spacer_size(BarPosition::Right, 12), (12, -1));
-    assert!(screen_margin_spacer_precedes_bar(BarPosition::Top));
-    assert!(screen_margin_spacer_precedes_bar(BarPosition::Left));
-    assert!(!screen_margin_spacer_precedes_bar(BarPosition::Bottom));
-    assert!(!screen_margin_spacer_precedes_bar(BarPosition::Right));
 }
 
 #[test]
@@ -1524,152 +1503,61 @@ fn point_projects_to_edge_target_respects_position_and_bounds() {
 }
 
 #[test]
-fn merge_runs_spacer_absorbed_between_same_kind() {
-    // cpu, spacer, memory → still merges into one System run
-    assert_eq!(
-        compute_merge_runs(&[
-            MergeKind::Popover(System),
-            MergeKind::Spacer,
-            MergeKind::Popover(System),
-        ]),
-        vec![(System, 0, 3)]
-    );
+fn user_css_search_paths_order_and_dedup() {
+    let cases = [
+        (
+            "config dir first",
+            Some("/custom/config/dir"),
+            Some("/xdg-home"),
+            Some("/home/test"),
+            vec![
+                "/custom/config/dir/style.css",
+                "/xdg-home/vibepanel/style.css",
+                "/home/test/.config/vibepanel/style.css",
+                "style.css",
+            ],
+        ),
+        (
+            "config dir, XDG and HOME dedup",
+            Some("/home/test/.config/vibepanel"),
+            Some("/home/test/.config"),
+            Some("/home/test"),
+            vec!["/home/test/.config/vibepanel/style.css", "style.css"],
+        ),
+        (
+            "nothing set leaves only the CWD fallback",
+            None,
+            None,
+            None,
+            vec!["style.css"],
+        ),
+        (
+            "XDG dedup with HOME",
+            None,
+            Some("/home/test/.config"),
+            Some("/home/test"),
+            vec!["/home/test/.config/vibepanel/style.css", "style.css"],
+        ),
+    ];
+
+    for (name, config_dir, xdg_config_home, home_dir, expected) in cases {
+        let paths = user_css_search_paths_from_env(
+            config_dir.map(Path::new),
+            xdg_config_home.map(Path::new),
+            home_dir.map(Path::new),
+        );
+        let expected: Vec<PathBuf> = expected.into_iter().map(PathBuf::from).collect();
+        assert_eq!(paths, expected, "{name}");
+    }
 }
 
 #[test]
-fn merge_runs_spacer_absorbed_into_left_run() {
-    // System, spacer, Unmergeable → spacer attaches to System run
-    assert_eq!(
-        compute_merge_runs(&[
-            MergeKind::Popover(System),
-            MergeKind::Spacer,
-            MergeKind::Popover(Unmergeable),
-        ]),
-        vec![(System, 0, 2), (Unmergeable, 2, 3)]
-    );
-}
-
-#[test]
-fn merge_runs_leading_spacer_absorbed() {
-    // spacer, System, System → leading spacer joins first run
-    assert_eq!(
-        compute_merge_runs(&[
-            MergeKind::Spacer,
-            MergeKind::Popover(System),
-            MergeKind::Popover(System),
-        ]),
-        vec![(System, 0, 3)]
-    );
-}
-
-#[test]
-fn merge_runs_trailing_spacer_absorbed() {
-    // System, spacer → trailing spacer joins the System run
-    assert_eq!(
-        compute_merge_runs(&[MergeKind::Popover(System), MergeKind::Spacer]),
-        vec![(System, 0, 2)]
-    );
-}
-
-#[test]
-fn merge_runs_all_spacers_get_no_runs() {
-    // Spacers only exist to join painted groups; alone they build nothing.
-    assert_eq!(
-        compute_merge_runs(&[MergeKind::Spacer, MergeKind::Spacer]),
-        Vec::new()
-    );
-}
-
-#[test]
-fn user_css_search_paths_config_dir_first() {
-    let dir = std::path::Path::new("/custom/config/dir");
-    let paths = user_css_search_paths_from_env(
-        Some(dir),
-        Some(Path::new("/xdg-home")),
-        Some(Path::new("/home/test")),
-    );
-    assert_eq!(
-        paths,
-        vec![
-            dir.join("style.css"),
-            PathBuf::from("/xdg-home/vibepanel/style.css"),
-            PathBuf::from("/home/test/.config/vibepanel/style.css"),
-            PathBuf::from("style.css"),
-        ]
-    );
-}
-
-#[test]
-fn user_css_search_paths_deduplicates() {
-    let paths = user_css_search_paths_from_env(
-        Some(Path::new("/home/test/.config/vibepanel")),
-        Some(Path::new("/home/test/.config")),
-        Some(Path::new("/home/test")),
-    );
-    assert_eq!(
-        paths,
-        vec![
-            PathBuf::from("/home/test/.config/vibepanel/style.css"),
-            PathBuf::from("style.css"),
-        ]
-    );
-}
-
-#[test]
-fn user_css_search_paths_none_config_dir_still_has_entries() {
-    let paths = user_css_search_paths_from_env(None, None, None);
-    assert_eq!(
-        paths,
-        vec![PathBuf::from("style.css")],
-        "without config/XDG/HOME, only the CWD fallback remains"
-    );
-}
-
-#[test]
-fn user_css_search_paths_xdg_dedup_with_home() {
-    let paths = user_css_search_paths_from_env(
-        None,
-        Some(Path::new("/home/test/.config")),
-        Some(Path::new("/home/test")),
-    );
-    assert_eq!(
-        paths,
-        vec![
-            PathBuf::from("/home/test/.config/vibepanel/style.css"),
-            PathBuf::from("style.css"),
-        ]
-    );
-}
-
-#[test]
-fn find_user_css_returns_none_when_no_file_exists() {
-    // Pass a config_dir that does not contain style.css; without HOME/XDG
-    // overrides the CWD fallback is unlikely to exist either, but we use an
-    // empty tmp dir as config_dir so that slot is definitely absent.
-    let tmp = TestDir::new("vibepanel_test_missing_css");
-    // An empty directory: none of the candidate paths will exist.
-    let result =
-        user_css_search_paths_from_env(Some(tmp.path()), Some(tmp.path()), Some(tmp.path()))
-            .into_iter()
-            .find(|p| p.exists());
-    assert_eq!(result, None);
-}
-
-#[test]
-fn find_user_css_finds_existing_file() {
-    // Create a real style.css in a temp directory and point config_dir at
-    // it so find_user_css returns the config-adjacent path (highest priority).
+fn find_user_css_prefers_style_next_to_config() {
     let tmp = TestDir::new("vibepanel_test_css");
     let style_path = tmp.path().join("style.css");
     std::fs::write(&style_path, "/* test */").unwrap();
 
-    // Use the injected-env helper so we don't depend on real HOME/XDG.
-    let found =
-        user_css_search_paths_from_env(Some(tmp.path()), Some(tmp.path()), Some(tmp.path()))
-            .into_iter()
-            .find(|p| p.exists());
-
-    assert_eq!(found, Some(style_path));
+    assert_eq!(find_user_css(Some(tmp.path())), Some(style_path));
 }
 
 fn entry_with_width(name: &str, width: Option<toml::Value>) -> WidgetEntry {

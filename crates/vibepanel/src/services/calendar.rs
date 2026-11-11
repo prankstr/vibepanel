@@ -644,56 +644,93 @@ mod tests {
     }
 
     #[test]
-    fn buckets_all_day_end_exclusive() {
-        let event = DankEvent {
-            calendar_id: "cal".to_string(),
-            summary: "event".to_string(),
-            location: String::new(),
-            start: "2026-06-22T00:00:00Z".to_string(),
-            end: "2026-06-24T00:00:00Z".to_string(),
-            all_day: true,
-            status: String::new(),
-        };
-        let buckets = bucket_events(
-            vec![event],
-            &HashMap::new(),
-            NaiveDate::from_ymd_opt(2026, 6, 1).unwrap(),
-            NaiveDate::from_ymd_opt(2026, 7, 1).unwrap(),
-        );
-        assert!(buckets.contains_key(&NaiveDate::from_ymd_opt(2026, 6, 22).unwrap()));
-        assert!(buckets.contains_key(&NaiveDate::from_ymd_opt(2026, 6, 23).unwrap()));
-        assert!(!buckets.contains_key(&NaiveDate::from_ymd_opt(2026, 6, 24).unwrap()));
-    }
+    fn bucket_cases() {
+        struct Case {
+            name: &'static str,
+            start: String,
+            end: String,
+            all_day: bool,
+            hidden_calendar: bool,
+            expected_days: Vec<NaiveDate>,
+        }
 
-    #[test]
-    fn hidden_calendars_are_filtered() {
-        let event = DankEvent {
-            calendar_id: "cal".to_string(),
-            summary: "event".to_string(),
-            location: String::new(),
-            start: "2026-06-22T12:00:00Z".to_string(),
-            end: "2026-06-22T13:00:00Z".to_string(),
-            all_day: false,
-            status: String::new(),
-        };
-        let calendars = HashMap::from([(
-            "cal".to_string(),
-            DankCalendar {
-                id: "cal".to_string(),
-                name: "Hidden".to_string(),
-                color: None,
-                hidden: true,
+        let day = |d| NaiveDate::from_ymd_opt(2026, 6, d).unwrap();
+        let window_start = day(1);
+        let window_end = NaiveDate::from_ymd_opt(2026, 7, 1).unwrap();
+        let cases = [
+            Case {
+                name: "all-day end is exclusive",
+                start: "2026-06-22T00:00:00Z".to_string(),
+                end: "2026-06-24T00:00:00Z".to_string(),
+                all_day: true,
+                hidden_calendar: false,
+                expected_days: vec![day(22), day(23)],
             },
-        )]);
-        assert!(
-            bucket_events(
-                vec![event],
-                &calendars,
-                NaiveDate::from_ymd_opt(2026, 6, 1).unwrap(),
-                NaiveDate::from_ymd_opt(2026, 7, 1).unwrap(),
-            )
-            .is_empty()
-        );
+            Case {
+                name: "hidden calendar is filtered",
+                start: "2026-06-22T12:00:00Z".to_string(),
+                end: "2026-06-22T13:00:00Z".to_string(),
+                all_day: false,
+                hidden_calendar: true,
+                expected_days: vec![],
+            },
+            Case {
+                name: "timed event ending at midnight stays on start day",
+                start: Local
+                    .with_ymd_and_hms(2026, 6, 22, 23, 0, 0)
+                    .unwrap()
+                    .to_rfc3339(),
+                end: Local
+                    .with_ymd_and_hms(2026, 6, 23, 0, 0, 0)
+                    .unwrap()
+                    .to_rfc3339(),
+                all_day: false,
+                hidden_calendar: false,
+                expected_days: vec![day(22)],
+            },
+            Case {
+                name: "long event only inside fetch window",
+                start: "2020-01-01T00:00:00Z".to_string(),
+                end: "2030-01-01T00:00:00Z".to_string(),
+                all_day: true,
+                hidden_calendar: false,
+                expected_days: window_start.iter_days().take(30).collect(),
+            },
+        ];
+
+        for case in cases {
+            let event = DankEvent {
+                calendar_id: "cal".to_string(),
+                summary: "event".to_string(),
+                location: String::new(),
+                start: case.start,
+                end: case.end,
+                all_day: case.all_day,
+                status: String::new(),
+            };
+            let calendars = if case.hidden_calendar {
+                HashMap::from([(
+                    "cal".to_string(),
+                    DankCalendar {
+                        id: "cal".to_string(),
+                        name: "Hidden".to_string(),
+                        color: None,
+                        hidden: true,
+                    },
+                )])
+            } else {
+                HashMap::new()
+            };
+
+            let buckets = bucket_events(vec![event], &calendars, window_start, window_end);
+
+            assert_eq!(
+                buckets.keys().copied().collect::<Vec<_>>(),
+                case.expected_days,
+                "{}",
+                case.name
+            );
+        }
     }
 
     #[test]
@@ -703,56 +740,6 @@ mod tests {
 
         assert_eq!(start.date(), NaiveDate::from_ymd_opt(2026, 1, 18).unwrap());
         assert_eq!(end.date(), NaiveDate::from_ymd_opt(2026, 3, 15).unwrap());
-    }
-
-    #[test]
-    fn timed_event_ending_at_midnight_stays_on_start_day() {
-        let start = Local.with_ymd_and_hms(2026, 6, 22, 23, 0, 0).unwrap();
-        let end = Local.with_ymd_and_hms(2026, 6, 23, 0, 0, 0).unwrap();
-        let event = DankEvent {
-            calendar_id: "cal".to_string(),
-            summary: "event".to_string(),
-            location: String::new(),
-            start: start.to_rfc3339(),
-            end: end.to_rfc3339(),
-            all_day: false,
-            status: String::new(),
-        };
-        let buckets = bucket_events(
-            vec![event],
-            &HashMap::new(),
-            NaiveDate::from_ymd_opt(2026, 6, 1).unwrap(),
-            NaiveDate::from_ymd_opt(2026, 7, 1).unwrap(),
-        );
-        assert!(buckets.contains_key(&NaiveDate::from_ymd_opt(2026, 6, 22).unwrap()));
-        assert!(!buckets.contains_key(&NaiveDate::from_ymd_opt(2026, 6, 23).unwrap()));
-    }
-
-    #[test]
-    fn buckets_long_events_only_inside_fetch_window() {
-        let event = DankEvent {
-            calendar_id: "cal".to_string(),
-            summary: "event".to_string(),
-            location: String::new(),
-            start: "2020-01-01T00:00:00Z".to_string(),
-            end: "2030-01-01T00:00:00Z".to_string(),
-            all_day: true,
-            status: String::new(),
-        };
-        let window_start = NaiveDate::from_ymd_opt(2026, 6, 1).unwrap();
-        let window_end = NaiveDate::from_ymd_opt(2026, 7, 1).unwrap();
-
-        let buckets = bucket_events(vec![event], &HashMap::new(), window_start, window_end);
-
-        assert_eq!(buckets.len(), 30);
-        assert_eq!(
-            buckets.first_key_value().map(|(date, _)| *date),
-            Some(window_start)
-        );
-        assert_eq!(
-            buckets.last_key_value().map(|(date, _)| *date),
-            window_end.pred_opt()
-        );
     }
 
     #[test]
@@ -943,43 +930,44 @@ mod tests {
     }
 
     #[test]
-    fn client_reports_eof_before_capabilities() {
+    fn connect_fails_when_socket_closes_before_capabilities() {
         let (socket, listener) = TestSocket::bind();
         let server = std::thread::spawn(move || drop(listener.accept().expect("accept client")));
 
         let error = DankCalendarClient::connect(&socket.path)
             .err()
-            .expect("EOF must fail connection");
-
-        assert!(error.contains("closed before capabilities"));
+            .expect("connect must fail");
+        assert!(error.contains("closed before capabilities"), "{error}");
         server.join().unwrap();
     }
 
-    #[test]
-    fn client_reports_eof_while_waiting_for_response() {
-        let (socket, listener) = TestSocket::bind();
-        let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("accept client");
-            writeln!(stream, "capabilities").unwrap();
-            let mut reader = BufReader::new(stream.try_clone().unwrap());
-            read_request(&mut reader);
-        });
-
-        let mut client = DankCalendarClient::connect(&socket.path).unwrap();
-        let error = client.calendars_list().unwrap_err();
-
-        assert_eq!(error, "DankCalendar socket closed");
-        server.join().unwrap();
-    }
-
-    #[test]
-    fn client_propagates_matching_response_errors() {
+    /// Connect to a server that sends capabilities, then return the error from
+    /// `calendars_list` after `respond` handles the request.
+    fn calendars_list_error(respond: fn(&mut UnixStream, Value)) -> String {
         let (socket, listener) = TestSocket::bind();
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("accept client");
             writeln!(stream, "capabilities").unwrap();
             let mut reader = BufReader::new(stream.try_clone().unwrap());
             let request = read_request(&mut reader);
+            respond(&mut stream, request);
+        });
+
+        let mut client = DankCalendarClient::connect(&socket.path).expect("connect");
+        let error = client.calendars_list().unwrap_err();
+        server.join().unwrap();
+        error
+    }
+
+    #[test]
+    fn request_fails_when_socket_closes_before_response() {
+        let error = calendars_list_error(|_, _| {});
+        assert_eq!(error, "DankCalendar socket closed");
+    }
+
+    #[test]
+    fn request_propagates_response_error() {
+        let error = calendars_list_error(|stream, request| {
             writeln!(
                 stream,
                 r#"{{"id":{},"error":"calendar unavailable"}}"#,
@@ -987,9 +975,6 @@ mod tests {
             )
             .unwrap();
         });
-
-        let mut client = DankCalendarClient::connect(&socket.path).unwrap();
-        assert_eq!(client.calendars_list().unwrap_err(), "calendar unavailable");
-        server.join().unwrap();
+        assert_eq!(error, "calendar unavailable");
     }
 }

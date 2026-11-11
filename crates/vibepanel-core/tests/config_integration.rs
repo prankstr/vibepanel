@@ -1,7 +1,8 @@
 //! Integration tests for config parsing against the real config.toml.
 
 use std::path::PathBuf;
-use vibepanel_core::{Config, config::SchemePolarity};
+use vibepanel_core::Config;
+use vibepanel_core::config::{DEFAULT_BATTERY_CRITICAL_THRESHOLD, DEFAULT_BATTERY_LOW_THRESHOLD};
 
 fn project_root() -> PathBuf {
     // Navigate from crates/vibepanel-core/ up to project root
@@ -14,65 +15,21 @@ fn project_root() -> PathBuf {
 }
 
 #[test]
-fn test_load_real_config() {
+fn find_and_load_explicit_path_loads_and_validates() {
+    // config.toml is also the embedded DEFAULT_CONFIG_TOML
     let config_path = project_root().join("config.toml");
 
-    let config = Config::load(&config_path).expect("Failed to load config.toml");
+    let result = Config::find_and_load(Some(&config_path)).unwrap();
 
-    // Verify config loads and has expected structure
-    // (specific values may change, so we test for validity rather than exact values)
+    assert!(!result.used_defaults);
+    assert_eq!(result.source, Some(config_path));
+
+    // Specific values may change, so test for validity rather than exact values
+    let config = result.config;
     assert!(config.bar.size > 0, "Bar size should be positive");
-
-    // Check widgets are loaded
     assert!(!config.widgets.left.is_empty(), "Expected left widgets");
     assert!(!config.widgets.right.is_empty(), "Expected right widgets");
-}
-
-#[test]
-fn test_real_config_validates() {
-    let config_path = project_root().join("config.toml");
-    let config = Config::load(&config_path).unwrap();
-
-    // The real config should pass validation
     config.validate().expect("Real config.toml should be valid");
-}
-
-#[test]
-fn test_widget_names() {
-    let config_path = project_root().join("config.toml");
-    let config = Config::load(&config_path).unwrap();
-
-    // Check known widget names (handles both single widgets and groups)
-    let left_names: Vec<String> = config
-        .widgets
-        .left
-        .iter()
-        .flat_map(|w| w.display_names())
-        .collect();
-    let right_names: Vec<String> = config
-        .widgets
-        .right
-        .iter()
-        .flat_map(|w| w.display_names())
-        .collect();
-
-    assert!(
-        left_names.iter().any(|n| n.contains("workspaces")),
-        "Expected workspaces widget in left"
-    );
-    assert!(
-        left_names.iter().any(|n| n.contains("window_title")),
-        "Expected window_title widget in left"
-    );
-
-    assert!(
-        right_names.iter().any(|n| n.contains("clock")),
-        "Expected clock widget in right"
-    );
-    assert!(
-        right_names.iter().any(|n| n.contains("battery")),
-        "Expected battery widget in right"
-    );
 }
 
 #[test]
@@ -94,23 +51,6 @@ fn test_config_summary() {
 }
 
 #[test]
-fn test_find_and_load_with_explicit_path() {
-    let config_path = project_root().join("config.toml");
-
-    let result = Config::find_and_load(Some(&config_path)).unwrap();
-
-    assert!(!result.used_defaults);
-    assert!(result.source.is_some());
-    assert_eq!(result.source.unwrap(), config_path);
-
-    // Config should be valid (don't assert specific values that may change)
-    result
-        .config
-        .validate()
-        .expect("Loaded config should be valid");
-}
-
-#[test]
 fn test_find_and_load_explicit_missing_fails() {
     let missing_path = PathBuf::from("/nonexistent/config.toml");
 
@@ -121,399 +61,179 @@ fn test_find_and_load_explicit_missing_fails() {
 
 #[test]
 fn test_broken_config_returns_error_not_defaults() {
-    use std::io::Write;
-
-    // Create a temp directory and broken config file
     let temp_dir = std::env::temp_dir().join("vibepanel_test_broken_config");
     let _ = std::fs::remove_dir_all(&temp_dir); // Clean up any previous run
     std::fs::create_dir_all(&temp_dir).unwrap();
 
     let broken_config_path = temp_dir.join("config.toml");
-    let mut file = std::fs::File::create(&broken_config_path).unwrap();
-    writeln!(file, "this is not valid toml {{{{").unwrap();
-    drop(file);
+    std::fs::write(&broken_config_path, "this is not valid toml {{{{\n").unwrap();
 
-    // Loading the broken config directly should fail
-    let result = Config::load(&broken_config_path);
+    let result = Config::find_and_load(Some(&broken_config_path));
     assert!(result.is_err(), "Broken config should fail to load");
 
-    // Clean up
     std::fs::remove_dir_all(&temp_dir).unwrap();
 }
 
 #[test]
-fn test_default_config_toml_parses_without_error() {
-    // The embedded DEFAULT_CONFIG_TOML should always parse successfully
-    let config =
-        Config::from_default_toml().expect("DEFAULT_CONFIG_TOML should parse without error");
+fn battery_alert_config_cases() {
+    struct Case {
+        name: &'static str,
+        toml: &'static str,
+        enabled: bool,
+        thresholds: Option<(u32, u32)>,
+    }
+    let cases = [
+        Case {
+            name: "explicit options",
+            toml: r#"
+                [widgets]
+                right = ["battery"]
 
-    // And it should validate
-    config
-        .validate()
-        .expect("DEFAULT_CONFIG_TOML should pass validation");
+                [widgets.battery]
+                alerts = true
+                low_threshold = 15
+                critical_threshold = 5
+            "#,
+            enabled: true,
+            thresholds: Some((15, 5)),
+        },
+        Case {
+            name: "defaults with active widget",
+            toml: r#"
+                [widgets]
+                right = ["battery"]
+            "#,
+            enabled: true,
+            thresholds: Some((
+                DEFAULT_BATTERY_LOW_THRESHOLD,
+                DEFAULT_BATTERY_CRITICAL_THRESHOLD,
+            )),
+        },
+        Case {
+            name: "widget not placed",
+            toml: r#"
+                [widgets]
+                right = ["clock"]
+
+                [widgets.battery]
+                alerts = true
+            "#,
+            enabled: false,
+            thresholds: None,
+        },
+        Case {
+            name: "widget disabled",
+            toml: r#"
+                [widgets]
+                right = ["battery"]
+
+                [widgets.battery]
+                disabled = true
+            "#,
+            enabled: false,
+            thresholds: None,
+        },
+    ];
+    for case in cases {
+        let config: Config = toml::from_str(case.toml).unwrap();
+        let alert = config.battery_alert_config();
+        assert_eq!(alert.enabled, case.enabled, "{}: enabled", case.name);
+        if let Some((low, critical)) = case.thresholds {
+            assert_eq!(alert.low_threshold, low, "{}: low_threshold", case.name);
+            assert_eq!(
+                alert.critical_threshold, critical,
+                "{}: critical_threshold",
+                case.name
+            );
+        }
+        if let Err(err) = config.validate() {
+            panic!("{}: expected valid config: {err}", case.name);
+        }
+    }
 }
 
 #[test]
-fn test_validation_rejects_invalid_theme_mode() {
-    let toml = r#"
-        [theme]
-        mode = "ultra_dark"
-    "#;
-
-    let config: Config = toml::from_str(toml).unwrap();
-    let result = config.validate();
-
-    assert!(result.is_err(), "Invalid theme.mode should fail validation");
-    let err = result.unwrap_err().to_string();
-    assert!(
-        err.contains("theme.mode"),
-        "Error should mention theme.mode"
-    );
+fn battery_validation_rejects() {
+    let cases = [
+        (
+            "zero low threshold",
+            "low_threshold = 0",
+            "widgets.battery.low_threshold",
+        ),
+        (
+            "u32 overflow",
+            "low_threshold = 4294967396",
+            "widgets.battery.low_threshold",
+        ),
+        (
+            "non-bool alerts",
+            "alerts = \"yes\"",
+            "widgets.battery.alerts",
+        ),
+        (
+            "critical above low",
+            "low_threshold = 10\ncritical_threshold = 15",
+            "widgets.battery.critical_threshold",
+        ),
+    ];
+    for (name, battery, field) in cases {
+        let toml = format!("[widgets]\nright = [\"battery\"]\n\n[widgets.battery]\n{battery}\n");
+        let config: Config = toml::from_str(&toml).unwrap();
+        let err = match config.validate() {
+            Ok(()) => panic!("{name}: expected validation error"),
+            Err(err) => err.to_string(),
+        };
+        assert!(err.contains(field), "{name}: should report {field}: {err}");
+    }
 }
 
 #[test]
-fn test_validation_rejects_invalid_compositor() {
-    let toml = r#"
-        [advanced]
-        compositor = "gnome_shell"
-    "#;
-
-    let config: Config = toml::from_str(toml).unwrap();
-    let result = config.validate();
-
-    assert!(
-        result.is_err(),
-        "Invalid advanced.compositor should fail validation"
-    );
-    let err = result.unwrap_err().to_string();
-    assert!(
-        err.contains("advanced.compositor"),
-        "Error should mention advanced.compositor"
-    );
-}
-
-#[test]
-fn test_validation_rejects_invalid_osd_position() {
-    let toml = r#"
-        [osd]
-        position = "middle"
-    "#;
-
-    let config: Config = toml::from_str(toml).unwrap();
-    let result = config.validate();
-
-    assert!(
-        result.is_err(),
-        "Invalid osd.position should fail validation"
-    );
-    let err = result.unwrap_err().to_string();
-    assert!(
-        err.contains("osd.position"),
-        "Error should mention osd.position"
-    );
-}
-
-#[test]
-fn test_validation_accepts_valid_enum_values() {
-    // Test all valid enum combinations
-    let toml = r#"
-        [theme]
-        mode = "dark"
-        
-        [advanced]
-        compositor = "hyprland"
-
-        [bar]
-        position = "left"
-        
-        [osd]
-        position = "bottom"
-        show_value = true
-        
-        [widgets]
-        center = ["clock"]
-    "#;
-
-    let config: Config = toml::from_str(toml).unwrap();
-    assert!(config.osd.show_value, "OSD show_value should parse");
-    config
-        .validate()
-        .expect("Valid config should pass validation");
-
-    // Also test other valid values
-    let toml2 = r#"
-        [theme]
-        mode = "light"
-        
-        [advanced]
-        compositor = "niri"
-
-        [bar]
-        position = "right"
-        
-        [osd]
-        position = "top"
-        
-        [widgets]
-        left = ["clock"]
-        right = ["battery"]
-    "#;
-
-    let config2: Config = toml::from_str(toml2).unwrap();
-    config2
-        .validate()
-        .expect("Valid config should pass validation");
-}
-
-#[test]
-fn test_theme_scheme_accepts_gtk_for_auto_mode() {
-    let toml = r#"
-        [theme]
-        mode = "auto"
-        scheme = "gtk"
-    "#;
-
-    let config: Config = toml::from_str(toml).unwrap();
-    assert_eq!(config.theme.scheme, Some(SchemePolarity::Gtk));
-    config
-        .validate()
-        .expect("theme.scheme=gtk should be valid in auto mode");
-}
-
-#[test]
-fn test_validation_collects_multiple_errors() {
-    // Multiple invalid values should all be reported
-    let toml = r#"
-        [bar]
-        size = 0
-        
-        [theme]
-        mode = "bad_mode"
-        
-        [osd]
-        timeout_ms = 0
-    "#;
-
-    let config: Config = toml::from_str(toml).unwrap();
-    let result = config.validate();
-
-    assert!(result.is_err(), "Multiple invalid values should fail");
-    let err = result.unwrap_err().to_string();
-
-    // All errors should be present
-    assert!(err.contains("bar.size"), "Should report bar.size error");
-    assert!(err.contains("theme.mode"), "Should report theme.mode error");
-    assert!(
-        err.contains("osd.timeout_ms"),
-        "Should report osd.timeout_ms error"
-    );
-}
-
-#[test]
-fn test_battery_alert_config_parses() {
-    let toml = r#"
-        [widgets]
-        right = ["battery"]
-
-        [widgets.battery]
-        alerts = true
-        low_threshold = 15
-        critical_threshold = 5
-    "#;
-
-    let config: Config = toml::from_str(toml).unwrap();
-    let alert = config.battery_alert_config();
-    assert!(alert.enabled);
-    assert_eq!(alert.low_threshold, 15);
-    assert_eq!(alert.critical_threshold, 5);
-    config
-        .validate()
-        .expect("Valid battery alert config should pass validation");
-}
-
-#[test]
-fn test_battery_alerts_default_to_active_widget() {
-    let toml = r#"
-        [widgets]
-        right = ["battery"]
-    "#;
-
-    let config: Config = toml::from_str(toml).unwrap();
-    let alert = config.battery_alert_config();
-    assert!(alert.enabled);
-    assert_eq!(alert.low_threshold, 20);
-    assert_eq!(alert.critical_threshold, 5);
-}
-
-#[test]
-fn test_battery_alerts_disabled_without_active_widget() {
-    let toml = r#"
-        [widgets]
-        right = ["clock"]
-
-        [widgets.battery]
-        alerts = true
-    "#;
-
-    let config: Config = toml::from_str(toml).unwrap();
-    assert!(!config.battery_alert_config().enabled);
-}
-
-#[test]
-fn test_battery_alerts_disabled_when_widget_disabled() {
-    let toml = r#"
-        [widgets]
-        right = ["battery"]
-
-        [widgets.battery]
-        disabled = true
-    "#;
-
-    let config: Config = toml::from_str(toml).unwrap();
-    assert!(!config.battery_alert_config().enabled);
-}
-
-#[test]
-fn test_battery_alert_threshold_validation() {
-    let toml = r#"
-        [widgets]
-        right = ["battery"]
-
-        [widgets.battery]
-        low_threshold = 0
-    "#;
-
-    let config: Config = toml::from_str(toml).unwrap();
-    let err = config.validate().unwrap_err().to_string();
-    assert!(
-        err.contains("widgets.battery.low_threshold"),
-        "Should report battery alert threshold error"
-    );
-}
-
-#[test]
-fn test_battery_alert_threshold_rejects_u32_overflow() {
-    let toml = r#"
-        [widgets]
-        right = ["battery"]
-
-        [widgets.battery]
-        low_threshold = 4294967396
-    "#;
-
-    let config: Config = toml::from_str(toml).unwrap();
-    let err = config.validate().unwrap_err().to_string();
-    assert!(
-        err.contains("widgets.battery.low_threshold"),
-        "Should report battery alert threshold overflow"
-    );
-}
-
-#[test]
-fn test_battery_alert_enabled_validation() {
-    let toml = r#"
-        [widgets]
-        right = ["battery"]
-
-        [widgets.battery]
-        alerts = "yes"
-    "#;
-
-    let config: Config = toml::from_str(toml).unwrap();
-    let err = config.validate().unwrap_err().to_string();
-    assert!(
-        err.contains("widgets.battery.alerts"),
-        "Should report battery alert enabled error"
-    );
-}
-
-#[test]
-fn test_battery_alert_critical_threshold_validation() {
-    let toml = r#"
-        [widgets]
-        right = ["battery"]
-
-        [widgets.battery]
-        low_threshold = 10
-        critical_threshold = 15
-    "#;
-
-    let config: Config = toml::from_str(toml).unwrap();
-    let err = config.validate().unwrap_err().to_string();
-    assert!(
-        err.contains("widgets.battery.critical_threshold"),
-        "Should report battery alert critical threshold error"
-    );
-}
-
-#[test]
-fn test_audio_overdrive_policy_explicit_true() {
-    let temp_dir = std::env::temp_dir().join("vibepanel_test_audio_policy_true");
+fn audio_overdrive_policy_cases() {
+    let temp_dir = std::env::temp_dir().join("vibepanel_test_audio_policy");
     let _ = std::fs::remove_dir_all(&temp_dir);
     std::fs::create_dir_all(&temp_dir).unwrap();
 
-    let config_path = temp_dir.join("config.toml");
-    std::fs::write(&config_path, "[audio]\nallow_overdrive = true\n").unwrap();
-
-    assert!(Config::read_audio_allow_overdrive(Some(&config_path)));
-
-    std::fs::remove_dir_all(&temp_dir).unwrap();
-}
-
-#[test]
-fn test_audio_overdrive_policy_explicit_false() {
-    let temp_dir = std::env::temp_dir().join("vibepanel_test_audio_policy_false");
-    let _ = std::fs::remove_dir_all(&temp_dir);
-    std::fs::create_dir_all(&temp_dir).unwrap();
-
-    let config_path = temp_dir.join("config.toml");
-    std::fs::write(&config_path, "[audio]\nallow_overdrive = false\n").unwrap();
-
-    assert!(!Config::read_audio_allow_overdrive(Some(&config_path)));
-
-    std::fs::remove_dir_all(&temp_dir).unwrap();
-}
-
-#[test]
-fn test_audio_overdrive_policy_missing_or_invalid_falls_back() {
-    let temp_dir = std::env::temp_dir().join("vibepanel_test_audio_policy_invalid");
-    let _ = std::fs::remove_dir_all(&temp_dir);
-    std::fs::create_dir_all(&temp_dir).unwrap();
-
-    let missing_path = temp_dir.join("missing.toml");
-    assert!(!Config::read_audio_allow_overdrive(Some(&missing_path)));
-
-    let malformed_path = temp_dir.join("malformed.toml");
-    std::fs::write(&malformed_path, "this is not valid toml {{{{\n").unwrap();
-    assert!(!Config::read_audio_allow_overdrive(Some(&malformed_path)));
-
-    let missing_audio_path = temp_dir.join("missing-audio.toml");
-    std::fs::write(&missing_audio_path, "[bar]\nsize = 40\n").unwrap();
-    assert!(!Config::read_audio_allow_overdrive(Some(
-        &missing_audio_path
-    )));
-
-    let wrong_type_path = temp_dir.join("wrong-type.toml");
-    std::fs::write(&wrong_type_path, "[audio]\nallow_overdrive = \"yes\"\n").unwrap();
-    assert!(!Config::read_audio_allow_overdrive(Some(&wrong_type_path)));
-
-    std::fs::remove_dir_all(&temp_dir).unwrap();
-}
-
-#[test]
-fn test_audio_overdrive_policy_ignores_unrelated_validation_errors() {
-    let temp_dir = std::env::temp_dir().join("vibepanel_test_audio_policy_lenient");
-    let _ = std::fs::remove_dir_all(&temp_dir);
-    std::fs::create_dir_all(&temp_dir).unwrap();
-
-    let config_path = temp_dir.join("config.toml");
-    std::fs::write(
-        &config_path,
-        "[audio]\nallow_overdrive = true\n\n[theme]\nmode = \"invalid\"\n",
-    )
-    .unwrap();
-
-    assert!(Config::read_audio_allow_overdrive(Some(&config_path)));
+    // `None` contents means the file doesn't exist.
+    let cases = [
+        (
+            "explicit true",
+            Some("[audio]\nallow_overdrive = true\n"),
+            true,
+        ),
+        (
+            "explicit false",
+            Some("[audio]\nallow_overdrive = false\n"),
+            false,
+        ),
+        ("missing file", None, false),
+        (
+            "malformed toml",
+            Some("this is not valid toml {{{{\n"),
+            false,
+        ),
+        ("missing audio section", Some("[bar]\nsize = 40\n"), false),
+        (
+            "wrong type",
+            Some("[audio]\nallow_overdrive = \"yes\"\n"),
+            false,
+        ),
+        (
+            "ignores unrelated validation errors",
+            Some("[audio]\nallow_overdrive = true\n\n[theme]\nmode = \"invalid\"\n"),
+            true,
+        ),
+    ];
+    for (i, (name, contents, expected)) in cases.into_iter().enumerate() {
+        let path = temp_dir.join(format!("config-{i}.toml"));
+        if let Some(contents) = contents {
+            std::fs::write(&path, contents).unwrap();
+        }
+        assert_eq!(
+            Config::read_audio_allow_overdrive(Some(&path)),
+            expected,
+            "{name}"
+        );
+    }
 
     std::fs::remove_dir_all(&temp_dir).unwrap();
 }

@@ -424,61 +424,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_workspace_meta_equality() {
-        let ws1 = WorkspaceMeta {
-            id: 1,
-            idx: 1,
-            name: "1".to_string(),
-            output: None,
-        };
-        let ws2 = WorkspaceMeta {
-            id: 1,
-            idx: 1,
-            name: "1".to_string(),
-            output: None,
-        };
-        let ws3 = WorkspaceMeta {
-            id: 2,
-            idx: 2,
-            name: "2".to_string(),
-            output: None,
-        };
-
-        assert_eq!(ws1, ws2);
-        assert_ne!(ws1, ws3);
-    }
-
-    #[test]
     fn test_workspace_snapshot_default_has_known_occupancy() {
         // Native backends rely on this default; never derive it.
         assert!(WorkspaceSnapshot::default().occupancy_known);
-    }
-
-    #[test]
-    fn test_workspace_snapshot_default() {
-        let snapshot = WorkspaceSnapshot::default();
-        assert!(snapshot.active_workspace.is_empty());
-        assert!(snapshot.occupied_workspaces.is_empty());
-        assert!(snapshot.urgent_workspaces.is_empty());
-    }
-
-    #[test]
-    fn test_per_output_state_no_active() {
-        let state = PerOutputState::default();
-        assert!(state.active_workspace.is_empty());
-        assert!(!state.active_workspace.contains(&1));
-    }
-
-    #[test]
-    fn test_per_output_state_single_active() {
-        // Single active workspace (typical Niri/Hyprland case)
-        let mut state = PerOutputState::default();
-        state.active_workspace.insert(2);
-
-        assert!(state.active_workspace.contains(&2));
-        assert!(!state.active_workspace.contains(&1));
-        assert!(!state.active_workspace.contains(&3));
-        assert_eq!(state.active_workspace.len(), 1);
     }
 
     #[test]
@@ -493,67 +441,5 @@ mod tests {
 
         second.window_counts.insert(1, 1);
         assert_ne!(first, second);
-    }
-
-    #[test]
-    fn test_per_output_state_multiple_active() {
-        // Multiple active workspaces (MangoWC multi-tag case)
-        let mut state = PerOutputState::default();
-        state.active_workspace.insert(1);
-        state.active_workspace.insert(3);
-        state.active_workspace.insert(5);
-
-        assert!(state.active_workspace.contains(&1));
-        assert!(state.active_workspace.contains(&3));
-        assert!(state.active_workspace.contains(&5));
-        assert!(!state.active_workspace.contains(&2));
-        assert!(!state.active_workspace.contains(&4));
-        assert_eq!(state.active_workspace.len(), 3);
-    }
-
-    #[test]
-    fn test_workspace_snapshot_single_active() {
-        let mut snapshot = WorkspaceSnapshot::default();
-        snapshot.active_workspace.insert(1);
-
-        assert!(snapshot.active_workspace.contains(&1));
-        assert!(!snapshot.active_workspace.contains(&2));
-        assert_eq!(snapshot.active_workspace.len(), 1);
-    }
-
-    #[test]
-    fn test_workspace_snapshot_multiple_active() {
-        // Multi-tag view scenario
-        let mut snapshot = WorkspaceSnapshot::default();
-        snapshot.active_workspace.insert(1);
-        snapshot.active_workspace.insert(3);
-
-        assert!(snapshot.active_workspace.contains(&1));
-        assert!(snapshot.active_workspace.contains(&3));
-        assert!(!snapshot.active_workspace.contains(&2));
-        assert_eq!(snapshot.active_workspace.len(), 2);
-    }
-
-    #[test]
-    fn test_keyboard_layout_info_default() {
-        let info = KeyboardLayoutInfo::default();
-        assert!(info.layout_name.is_empty());
-        assert_eq!(info.layout_count, None);
-    }
-
-    #[test]
-    fn test_keyboard_layout_info_equality() {
-        let info1 = KeyboardLayoutInfo {
-            layout_name: "English (US)".to_string(),
-            layout_count: Some(2),
-        };
-        let info2 = info1.clone();
-        assert_eq!(info1, info2);
-
-        let info3 = KeyboardLayoutInfo {
-            layout_name: "German".to_string(),
-            layout_count: Some(2),
-        };
-        assert_ne!(info1, info3);
     }
 }

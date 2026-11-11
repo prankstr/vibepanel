@@ -581,178 +581,112 @@ mod tests {
     }
 
     #[test]
-    fn test_clock_config_default_format() {
-        let entry = make_widget_entry("clock", HashMap::new());
-        let config = ClockConfig::from_entry(&entry);
-        assert_eq!(config.format, "%a %d %H:%M");
-        assert_eq!(config.format_vertical, None);
-        assert!(!config.show_weather);
+    fn clock_config_from_entry() {
+        let defaults = ClockConfig::from_entry(&make_widget_entry("clock", HashMap::new()));
+        assert_eq!(defaults.format, "%a %d %H:%M");
+        assert_eq!(defaults.format_vertical, None);
+        assert!(!defaults.show_weather);
+        assert!(defaults.calendar_events);
+
+        let custom = ClockConfig::from_entry(&make_widget_entry(
+            "clock",
+            HashMap::from([
+                ("format".to_string(), "%H:%M".into()),
+                ("format_vertical".to_string(), "%H\n%M".into()),
+                ("show_weather".to_string(), true.into()),
+                ("calendar_events".to_string(), false.into()),
+            ]),
+        ));
+        assert_eq!(custom.format, "%H:%M");
+        assert_eq!(custom.format_vertical.as_deref(), Some("%H\n%M"));
+        assert!(custom.show_weather);
+        assert!(!custom.calendar_events);
+
+        // Values of the wrong type fall back to the defaults.
+        let wrong_types = ClockConfig::from_entry(&make_widget_entry(
+            "clock",
+            HashMap::from([
+                ("format".to_string(), Value::Integer(123)),
+                ("format_vertical".to_string(), Value::Integer(123)),
+                ("calendar_events".to_string(), "dankcalendar".into()),
+            ]),
+        ));
+        assert_eq!(wrong_types.format, defaults.format);
+        assert_eq!(wrong_types.format_vertical, None);
+        assert_eq!(wrong_types.calendar_events, defaults.calendar_events);
     }
 
     #[test]
-    fn test_clock_config_custom_format() {
-        let mut options = HashMap::new();
-        options.insert("format".to_string(), Value::String("%H:%M".to_string()));
-        let entry = make_widget_entry("clock", options);
-        let config = ClockConfig::from_entry(&entry);
-        assert_eq!(config.format, "%H:%M");
-    }
-
-    #[test]
-    fn test_clock_config_custom_vertical_format() {
-        let mut options = HashMap::new();
-        options.insert(
-            "format_vertical".to_string(),
-            Value::String("%H\n%M".to_string()),
-        );
-        let entry = make_widget_entry("clock", options);
-        let config = ClockConfig::from_entry(&entry);
-        assert_eq!(config.format, "%a %d %H:%M");
-        assert_eq!(config.format_vertical.as_deref(), Some("%H\n%M"));
-    }
-
-    #[test]
-    fn test_clock_config_ignores_non_string_format() {
-        let mut options = HashMap::new();
-        options.insert("format".to_string(), Value::Integer(123));
-        let entry = make_widget_entry("clock", options);
-        let config = ClockConfig::from_entry(&entry);
-        // Falls back to default when format is not a string
-        assert_eq!(config.format, "%a %d %H:%M");
-    }
-
-    #[test]
-    fn test_clock_config_ignores_non_string_vertical_format() {
-        let mut options = HashMap::new();
-        options.insert("format_vertical".to_string(), Value::Integer(123));
-        let entry = make_widget_entry("clock", options);
-        let config = ClockConfig::from_entry(&entry);
-        assert_eq!(config.format_vertical, None);
-    }
-
-    #[test]
-    fn test_clock_config_show_weather() {
-        let mut options = HashMap::new();
-        options.insert("show_weather".to_string(), Value::Boolean(true));
-        let entry = make_widget_entry("clock", options);
-        let config = ClockConfig::from_entry(&entry);
-        assert!(config.show_weather);
-
-        let mut options = HashMap::new();
-        options.insert("show_weather".to_string(), Value::Boolean(false));
-        let entry = make_widget_entry("clock", options);
-        let config = ClockConfig::from_entry(&entry);
-        assert!(!config.show_weather);
-    }
-
-    #[test]
-    fn test_clock_config_calendar_events() {
-        let enabled = HashMap::from([("calendar_events".to_string(), Value::Boolean(true))]);
-        let disabled = HashMap::from([("calendar_events".to_string(), Value::Boolean(false))]);
-
-        assert!(ClockConfig::from_entry(&make_widget_entry("clock", enabled)).calendar_events);
-        assert!(!ClockConfig::from_entry(&make_widget_entry("clock", disabled)).calendar_events);
-    }
-
-    #[test]
-    fn test_clock_config_rejects_non_boolean_calendar_events() {
-        let options = HashMap::from([(
-            "calendar_events".to_string(),
-            Value::String("dankcalendar".to_string()),
-        )]);
-        let config = ClockConfig::from_entry(&make_widget_entry("clock", options));
-
-        assert!(config.calendar_events);
-    }
-
-    #[test]
-    fn test_clock_config_default_impl() {
-        let config = ClockConfig::default();
-        assert_eq!(config.format, "%a %d %H:%M");
-        assert_eq!(config.format_vertical, None);
-        assert!(!config.show_weather);
-        assert!(config.calendar_events);
-    }
-
-    #[test]
-    fn test_formatted_clock_text_vertical_uses_compact_time() {
+    fn formatted_clock_text_picks_format_for_orientation() {
         let now = chrono::Local::now();
-        assert_eq!(
-            formatted_clock_text("%a %d %H:%M", None, true, now),
-            now.format("%H\n%M").to_string()
-        );
-    }
-
-    #[test]
-    fn test_formatted_clock_text_vertical_uses_vertical_format_when_set() {
-        let now = chrono::Local::now();
-        assert_eq!(
-            formatted_clock_text("%a %d %H:%M", Some("%a\n%H:%M"), true, now),
-            now.format("%a\n%H:%M").to_string()
-        );
-    }
-
-    #[test]
-    fn test_formatted_clock_text_horizontal_uses_config_format() {
-        let now = chrono::Local::now();
-        assert_eq!(
-            formatted_clock_text("%a %d %H:%M", Some("%H\n%M"), false, now),
-            now.format("%a %d %H:%M").to_string()
-        );
-    }
-
-    #[test]
-    fn test_analyze_clock_format_detects_second_resolution_formats() {
-        for format in ["%H:%M:%S", "%T", "%r", "%X", "%c", "%+", "%s"] {
-            assert_eq!(
-                analyze_clock_format(format),
-                Some(SchedulingMode::Second),
-                "{format} should need seconds"
-            );
-        }
-    }
-
-    #[test]
-    fn test_analyze_clock_format_detects_fractional_seconds() {
-        for format in ["%f", "%.f", "%.3f", "%3f", "%H:%M:%.6f"] {
-            assert_eq!(
-                analyze_clock_format(format),
-                Some(SchedulingMode::Second),
-                "{format} should need seconds"
-            );
-        }
-    }
-
-    #[test]
-    fn test_analyze_clock_format_detects_valid_padded_seconds() {
-        for format in ["%-S", "%_S", "%0S"] {
-            assert_eq!(
-                analyze_clock_format(format),
-                Some(SchedulingMode::Second),
-                "{format} should need seconds"
-            );
-        }
-    }
-
-    #[test]
-    fn test_analyze_clock_format_rejects_invalid_chrono_formats() {
-        for format in ["%3S", "%OS", "%ES", "%^S", "%#S"] {
-            assert_eq!(
-                analyze_clock_format(format),
+        let cases = [
+            (
+                "vertical without vertical format uses compact time",
                 None,
-                "{format} should be rejected"
+                true,
+                "%H\n%M",
+            ),
+            (
+                "vertical uses vertical format when set",
+                Some("%a\n%H:%M"),
+                true,
+                "%a\n%H:%M",
+            ),
+            (
+                "horizontal uses config format",
+                Some("%H\n%M"),
+                false,
+                "%a %d %H:%M",
+            ),
+        ];
+
+        for (name, format_vertical, vertical, expected_format) in cases {
+            assert_eq!(
+                formatted_clock_text("%a %d %H:%M", format_vertical, vertical, now),
+                now.format(expected_format).to_string(),
+                "{name}"
             );
         }
     }
 
     #[test]
-    fn test_analyze_clock_format_uses_minute_boundary_for_minute_formats() {
-        for format in ["%H:%M", "%a %d %H:%M", "%Y", "literal S"] {
-            assert_eq!(
-                analyze_clock_format(format),
-                Some(SchedulingMode::MinuteBoundary),
-                "{format} should not need seconds"
-            );
+    fn analyze_clock_format_cases() {
+        let second = Some(SchedulingMode::Second);
+        let minute = Some(SchedulingMode::MinuteBoundary);
+        let cases = [
+            // Second-resolution formats.
+            ("%H:%M:%S", second),
+            ("%T", second),
+            ("%r", second),
+            ("%X", second),
+            ("%c", second),
+            ("%+", second),
+            ("%s", second),
+            // Fractional seconds.
+            ("%f", second),
+            ("%.f", second),
+            ("%.3f", second),
+            ("%3f", second),
+            ("%H:%M:%.6f", second),
+            // Valid padded seconds.
+            ("%-S", second),
+            ("%_S", second),
+            ("%0S", second),
+            // Invalid chrono formats are rejected.
+            ("%3S", None),
+            ("%OS", None),
+            ("%ES", None),
+            ("%^S", None),
+            ("%#S", None),
+            // Minute formats use the minute boundary.
+            ("%H:%M", minute),
+            ("%a %d %H:%M", minute),
+            ("%Y", minute),
+            ("literal S", minute),
+        ];
+
+        for (format, expected) in cases {
+            assert_eq!(analyze_clock_format(format), expected, "{format}");
         }
     }
 

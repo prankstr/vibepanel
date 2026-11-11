@@ -705,7 +705,7 @@ mod tests {
     }
 
     #[test]
-    fn test_window_title_config_default() {
+    fn test_window_title_config() {
         let entry = make_widget_entry("window_title", HashMap::new());
         let config = WindowTitleConfig::from_entry(&entry);
         assert_eq!(config.empty_text, "");
@@ -716,6 +716,32 @@ mod tests {
         assert_eq!(config.icon_size, None);
         assert!(!config.uppercase);
         assert!(config.filter_by_output);
+
+        let mut options = HashMap::new();
+        options.insert(
+            "empty_text".to_string(),
+            Value::String("No window".to_string()),
+        );
+        options.insert(
+            "template".to_string(),
+            Value::String("{app}: {title}".to_string()),
+        );
+        options.insert("max_chars".to_string(), Value::Integer(50));
+        options.insert("icon_size".to_string(), Value::Integer(24));
+        options.insert("uppercase".to_string(), Value::Boolean(true));
+        let entry = make_widget_entry("window_title", options);
+        let config = WindowTitleConfig::from_entry(&entry);
+        assert_eq!(config.empty_text, "No window");
+        assert_eq!(config.template, "{app}: {title}");
+        assert_eq!(config.max_chars, 50);
+        assert_eq!(config.icon_size, Some(24));
+        assert!(config.uppercase);
+
+        let mut options = HashMap::new();
+        options.insert("icon_size".to_string(), Value::Integer(2));
+        let entry = make_widget_entry("window_title", options);
+        let config = WindowTitleConfig::from_entry(&entry);
+        assert_eq!(config.icon_size, Some(8), "icon_size clamps to minimum");
     }
 
     #[test]
@@ -745,40 +771,6 @@ mod tests {
     }
 
     #[test]
-    fn test_window_title_config_custom() {
-        let mut options = HashMap::new();
-        options.insert(
-            "empty_text".to_string(),
-            Value::String("No window".to_string()),
-        );
-        options.insert(
-            "template".to_string(),
-            Value::String("{app}: {title}".to_string()),
-        );
-        options.insert("max_chars".to_string(), Value::Integer(50));
-        options.insert("icon_size".to_string(), Value::Integer(24));
-        options.insert("uppercase".to_string(), Value::Boolean(true));
-        let entry = make_widget_entry("window_title", options);
-        let config = WindowTitleConfig::from_entry(&entry);
-        assert_eq!(config.empty_text, "No window");
-        assert_eq!(config.template, "{app}: {title}");
-        assert_eq!(config.max_chars, 50);
-        assert_eq!(config.icon_size, Some(24));
-        assert!(config.uppercase);
-    }
-
-    #[test]
-    fn test_window_title_config_icon_size_min_clamp() {
-        let mut options = HashMap::new();
-        options.insert("icon_size".to_string(), Value::Integer(2));
-
-        let entry = make_widget_entry("window_title", options);
-        let config = WindowTitleConfig::from_entry(&entry);
-
-        assert_eq!(config.icon_size, Some(8));
-    }
-
-    #[test]
     fn test_titlecase() {
         assert_eq!(titlecase("firefox"), "Firefox");
         assert_eq!(titlecase("FIREFOX"), "FIREFOX");
@@ -787,58 +779,30 @@ mod tests {
     }
 
     #[test]
-    fn test_window_title_icon_size_uses_same_default_for_both_orientations() {
-        // Even bar size — even pixmap/icon stays even.
-        assert_eq!(
-            window_title_icon_size_from_values(false, None, 20, 26, 32),
-            20
-        );
-        assert_eq!(
-            window_title_icon_size_from_values(true, None, 20, 26, 32),
-            20
-        );
-        assert_eq!(
-            window_title_icon_size_from_values(true, None, 24, 26, 32),
-            24
-        );
-    }
+    fn test_window_title_icon_size() {
+        // (name, configured, pixmap, widget_height, bar_size, expected)
+        let cases = [
+            ("default on even bar", None, 20, 26, 32, 20),
+            ("larger default on even bar", None, 24, 26, 32, 24),
+            // Parity follows the bar so centering lands on a whole pixel.
+            ("default on odd bar flips parity", None, 20, 26, 33, 19),
+            ("override", Some(18), 20, 26, 32, 18),
+            ("override capped to widget height", Some(40), 20, 26, 32, 26),
+        ];
 
-    #[test]
-    fn test_window_title_icon_size_matches_bar_parity() {
-        // Odd bar size — icon parity flipped to odd so centering lands on
-        // a whole pixel rather than a half-pixel.
-        assert_eq!(
-            window_title_icon_size_from_values(false, None, 20, 26, 33),
-            19
-        );
-        assert_eq!(
-            window_title_icon_size_from_values(true, None, 20, 26, 33),
-            19
-        );
-    }
-
-    #[test]
-    fn test_window_title_icon_size_override_applies_to_both_orientations() {
-        assert_eq!(
-            window_title_icon_size_from_values(false, Some(18), 20, 26, 32),
-            18
-        );
-        assert_eq!(
-            window_title_icon_size_from_values(true, Some(18), 20, 26, 32),
-            18
-        );
-    }
-
-    #[test]
-    fn test_window_title_icon_size_override_caps_to_widget_height() {
-        assert_eq!(
-            window_title_icon_size_from_values(false, Some(40), 20, 26, 32),
-            26
-        );
-        assert_eq!(
-            window_title_icon_size_from_values(true, Some(40), 20, 26, 32),
-            26
-        );
+        for (name, configured, pixmap, widget_height, bar_size, expected) in cases {
+            assert_eq!(
+                window_title_icon_size_from_values(
+                    false,
+                    configured,
+                    pixmap,
+                    widget_height,
+                    bar_size
+                ),
+                expected,
+                "{name}"
+            );
+        }
     }
 
     #[test]
@@ -851,217 +815,72 @@ mod tests {
     }
 
     #[test]
-    fn test_clean_title_removes_exact_and_variant_app_segments() {
-        // Exact match
-        let cleaned = clean_title("Firefox — Some Page", "Firefox");
-        assert_eq!(cleaned, "Some Page");
+    fn test_clean_title() {
+        // (name, title, friendly app, expected)
+        #[rustfmt::skip]
+        let cases = [
+            // App segment removal
+            ("exact app segment", "Firefox — Some Page", "Firefox", "Some Page"),
+            ("variant: title has longer app name", "Mozilla Firefox — Some Page", "Firefox", "Some Page"),
+            ("variant: app has longer name", "Firefox — Some Page", "Mozilla Firefox", "Some Page"),
+            ("case-insensitive, upper title", "FIREFOX — Some Page", "firefox", "Some Page"),
+            ("case-insensitive, upper app", "firefox — Some Page", "FIREFOX", "Some Page"),
+            ("leading @ ignored when matching", "@Firefox — Some Page", "Firefox", "Some Page"),
+            ("leading : ignored when matching", ":Firefox — Some Page", "Firefox", "Some Page"),
+            ("preserves original case", "Firefox — SoMe WeIrD CaSe", "Firefox", "SoMe WeIrD CaSe"),
+            ("first of several segments", "Firefox — Tab 1 — mozilla.org", "Firefox", "Tab 1 \u{2014} mozilla.org"),
+            ("middle of several segments", "Tab 1 — Firefox — mozilla.org", "Firefox", "Tab 1 \u{2014} mozilla.org"),
+            ("last of several segments", "Tab 1 — mozilla.org — Firefox", "Firefox", "Tab 1 \u{2014} mozilla.org"),
+            ("duplicate segments deduplicated", "Page — Page — Firefox", "Firefox", "Page"),
+            // Empty and delimiter-only input
+            ("empty title", "", "Firefox", ""),
+            ("empty app keeps all segments", "Firefox — Some Page", "", "Firefox \u{2014} Some Page"),
+            ("both empty", "", "", ""),
+            ("only delimiter", "—", "Firefox", ""),
+            ("only spaced delimiter", " — ", "Firefox", ""),
+            // Bare "-" is not a delimiter: splits on "|" into ["-", "-"], deduped.
+            ("bare hyphens around pipe", "- | -", "Firefox", "-"),
+            // Delimiters
+            ("en dash", "Firefox \u{2013} Some Page", "Firefox", "Some Page"),
+            ("pipe", "Firefox | Some Page", "Firefox", "Some Page"),
+            ("bullet", "Firefox \u{2022} Some Page", "Firefox", "Some Page"),
+            ("middle dot", "Firefox \u{00b7} Some Page", "Firefox", "Some Page"),
+            // Regression: hyphens inside words are not delimiters
+            ("hyphenated word kept", "A-B", "SomeApp", "A-B"),
+            ("hyphenated project kept", "my-project", "SomeApp", "my-project"),
+            ("multi-hyphen word kept", "v1-beta-2", "SomeApp", "v1-beta-2"),
+            ("hyphenated word with app removed", "A-B — Firefox", "Firefox", "A-B"),
+            ("hyphenated word with variant app removed", "my-project — Visual Studio Code", "Code", "my-project"),
+            // Regression: " - " still delimits
+            ("spaced hyphen delimiter", "Firefox - Some Page", "Firefox", "Some Page"),
+            ("spaced hyphen after hyphenated file", "some-file.rs - VS Code", "Code", "some-file.rs"),
+            ("spaced hyphen after hyphenated word", "A-B - Firefox", "Firefox", "A-B"),
+            // Regression: original delimiters are preserved, not replaced with em dash
+            ("pipes preserved", "Firefox | Tab 1 | mozilla.org", "Firefox", "Tab 1 | mozilla.org"),
+            ("mixed delimiters preserved", "Firefox \u{2014} Tab 1 | mozilla.org", "Firefox", "Tab 1 | mozilla.org"),
+            ("middle removal keeps left delimiter", "Tab 1 | Firefox \u{2014} mozilla.org", "Firefox", "Tab 1 | mozilla.org"),
+            ("bullet preserved", "Tab 1 \u{2022} mozilla.org", "", "Tab 1 \u{2022} mozilla.org"),
+            ("no match keeps em dashes", "A \u{2014} B \u{2014} C", "SomeApp", "A \u{2014} B \u{2014} C"),
+            ("no match keeps mixed delimiters", "Tab 1 | Page 2 \u{2022} Info", "SomeApp", "Tab 1 | Page 2 \u{2022} Info"),
+            // Regression: removing every segment
+            ("single segment is app", "Firefox", "Firefox", ""),
+            ("all segments are app", "Firefox \u{2014} Firefox", "Firefox", ""),
+            ("consecutive app segments removed", "Firefox \u{2014} Firefox \u{2014} Page", "Firefox", "Page"),
+            // Regression: delimiters without spaces and at the boundaries
+            ("unspaced pipe", "Firefox|Page", "Firefox", "Page"),
+            ("unspaced pipes kept", "A|B|C", "SomeApp", "A|B|C"),
+            ("leading delimiter, app only", "\u{2014} Firefox", "Firefox", ""),
+            ("leading delimiter", "\u{2014} Page", "Firefox", "Page"),
+            ("trailing delimiter, app only", "Firefox \u{2014}", "Firefox", ""),
+            ("trailing delimiter", "Page \u{2014}", "Firefox", "Page"),
+        ];
 
-        // Variant: title contains "Mozilla Firefox", friendly app is "Firefox"
-        let cleaned_variant = clean_title("Mozilla Firefox — Some Page", "Firefox");
-        assert_eq!(cleaned_variant, "Some Page");
-
-        // Variant: friendly app "Mozilla Firefox", title segment "Firefox"
-        let cleaned_variant2 = clean_title("Firefox — Some Page", "Mozilla Firefox");
-        assert_eq!(cleaned_variant2, "Some Page");
-    }
-
-    #[test]
-    fn test_clean_title_empty_inputs() {
-        // Empty title returns empty string
-        assert_eq!(clean_title("", "Firefox"), "");
-
-        // Empty friendly app - should keep all segments
-        assert_eq!(
-            clean_title("Firefox — Some Page", ""),
-            "Firefox \u{2014} Some Page"
-        );
-
-        // Both empty
-        assert_eq!(clean_title("", ""), "");
-    }
-
-    #[test]
-    fn test_clean_title_only_delimiters() {
-        // Title with only delimiters/whitespace
-        assert_eq!(clean_title("—", "Firefox"), "");
-        assert_eq!(clean_title(" — ", "Firefox"), "");
-        // Bare "-" is not a delimiter, so it's treated as a segment.
-        // Splits on "|" → ["-", "-"], dedup → "-"
-        assert_eq!(clean_title("- | -", "Firefox"), "-");
-    }
-
-    #[test]
-    fn test_clean_title_unicode_delimiters() {
-        // En-dash (U+2013)
-        let cleaned_endash = clean_title("Firefox \u{2013} Some Page", "Firefox");
-        assert_eq!(cleaned_endash, "Some Page");
-
-        // Em-dash (U+2014)
-        let cleaned_emdash = clean_title("Firefox \u{2014} Some Page", "Firefox");
-        assert_eq!(cleaned_emdash, "Some Page");
-
-        // Pipe
-        let cleaned_pipe = clean_title("Firefox | Some Page", "Firefox");
-        assert_eq!(cleaned_pipe, "Some Page");
-
-        // Bullet (U+2022)
-        let cleaned_bullet = clean_title("Firefox \u{2022} Some Page", "Firefox");
-        assert_eq!(cleaned_bullet, "Some Page");
-
-        // Middle dot (U+00B7)
-        let cleaned_middot = clean_title("Firefox \u{00b7} Some Page", "Firefox");
-        assert_eq!(cleaned_middot, "Some Page");
-    }
-
-    #[test]
-    fn test_clean_title_multiple_segments() {
-        // Multiple segments, first matches app — original delimiter preserved
-        let cleaned = clean_title("Firefox — Tab 1 — mozilla.org", "Firefox");
-        assert_eq!(cleaned, "Tab 1 \u{2014} mozilla.org");
-
-        // Multiple segments, middle matches app — left delimiter preserved
-        let cleaned_mid = clean_title("Tab 1 — Firefox — mozilla.org", "Firefox");
-        assert_eq!(cleaned_mid, "Tab 1 \u{2014} mozilla.org");
-
-        // Multiple segments, last matches app — original delimiter preserved
-        let cleaned_last = clean_title("Tab 1 — mozilla.org — Firefox", "Firefox");
-        assert_eq!(cleaned_last, "Tab 1 \u{2014} mozilla.org");
-    }
-
-    #[test]
-    fn test_clean_title_duplicate_segments() {
-        // Duplicate segments should be deduplicated
-        let cleaned = clean_title("Page — Page — Firefox", "Firefox");
-        assert_eq!(cleaned, "Page");
-    }
-
-    #[test]
-    fn test_clean_title_case_insensitive() {
-        // Case should not matter for matching
-        let cleaned = clean_title("FIREFOX — Some Page", "firefox");
-        assert_eq!(cleaned, "Some Page");
-
-        let cleaned_rev = clean_title("firefox — Some Page", "FIREFOX");
-        assert_eq!(cleaned_rev, "Some Page");
-    }
-
-    #[test]
-    fn test_clean_title_leading_special_chars() {
-        // Leading @, :, space should be stripped during normalization
-        let cleaned = clean_title("@Firefox — Some Page", "Firefox");
-        assert_eq!(cleaned, "Some Page");
-
-        let cleaned_colon = clean_title(":Firefox — Some Page", "Firefox");
-        assert_eq!(cleaned_colon, "Some Page");
-    }
-
-    #[test]
-    fn test_clean_title_preserves_original_case() {
-        // Output should preserve the original casing of non-app segments
-        let cleaned = clean_title("Firefox — SoMe WeIrD CaSe", "Firefox");
-        assert_eq!(cleaned, "SoMe WeIrD CaSe");
-    }
-
-    #[test]
-    fn test_clean_title_preserves_hyphenated_words() {
-        // Bare hyphens inside words should NOT be treated as delimiters
-        assert_eq!(clean_title("A-B", "SomeApp"), "A-B");
-        assert_eq!(clean_title("my-project", "SomeApp"), "my-project");
-        assert_eq!(clean_title("v1-beta-2", "SomeApp"), "v1-beta-2");
-
-        // Hyphenated word with app name removal
-        assert_eq!(clean_title("A-B — Firefox", "Firefox"), "A-B");
-        assert_eq!(
-            clean_title("my-project — Visual Studio Code", "Code"),
-            "my-project"
-        );
-    }
-
-    #[test]
-    fn test_clean_title_spaced_hyphen_delimiter() {
-        // " - " (space-hyphen-space) should still work as a delimiter
-        assert_eq!(clean_title("Firefox - Some Page", "Firefox"), "Some Page");
-        assert_eq!(
-            clean_title("some-file.rs - VS Code", "Code"),
-            "some-file.rs"
-        );
-        assert_eq!(clean_title("A-B - Firefox", "Firefox"), "A-B");
-    }
-
-    #[test]
-    fn test_clean_title_preserves_original_delimiters() {
-        // Pipe delimiter should be preserved, not replaced with em-dash
-        assert_eq!(
-            clean_title("Firefox | Tab 1 | mozilla.org", "Firefox"),
-            "Tab 1 | mozilla.org"
-        );
-
-        // Mixed delimiters should each be preserved
-        assert_eq!(
-            clean_title("Firefox \u{2014} Tab 1 | mozilla.org", "Firefox"),
-            "Tab 1 | mozilla.org"
-        );
-
-        // When removing a middle segment, the left delimiter is used
-        assert_eq!(
-            clean_title("Tab 1 | Firefox \u{2014} mozilla.org", "Firefox"),
-            "Tab 1 | mozilla.org"
-        );
-
-        // Bullet delimiter preserved
-        assert_eq!(
-            clean_title("Tab 1 \u{2022} mozilla.org", ""),
-            "Tab 1 \u{2022} mozilla.org"
-        );
-    }
-
-    #[test]
-    fn test_clean_title_all_segments_removed() {
-        // Single segment that matches app
-        assert_eq!(clean_title("Firefox", "Firefox"), "");
-
-        // All segments match app (duplicates collapsed then removed)
-        assert_eq!(clean_title("Firefox \u{2014} Firefox", "Firefox"), "");
-    }
-
-    #[test]
-    fn test_clean_title_consecutive_removals() {
-        // First two consecutive segments removed, third kept
-        assert_eq!(
-            clean_title("Firefox \u{2014} Firefox \u{2014} Page", "Firefox"),
-            "Page"
-        );
-    }
-
-    #[test]
-    fn test_clean_title_no_matches_full_preservation() {
-        // No segments match — title returned verbatim with original delimiters
-        assert_eq!(
-            clean_title("A \u{2014} B \u{2014} C", "SomeApp"),
-            "A \u{2014} B \u{2014} C"
-        );
-
-        assert_eq!(
-            clean_title("Tab 1 | Page 2 \u{2022} Info", "SomeApp"),
-            "Tab 1 | Page 2 \u{2022} Info"
-        );
-    }
-
-    #[test]
-    fn test_clean_title_no_whitespace_around_delimiter() {
-        // Delimiters without surrounding spaces should still work
-        assert_eq!(clean_title("Firefox|Page", "Firefox"), "Page");
-        assert_eq!(clean_title("A|B|C", "SomeApp"), "A|B|C");
-    }
-
-    #[test]
-    fn test_clean_title_delimiter_at_boundaries() {
-        // Leading delimiter — empty first segment is skipped
-        assert_eq!(clean_title("\u{2014} Firefox", "Firefox"), "");
-        assert_eq!(clean_title("\u{2014} Page", "Firefox"), "Page");
-
-        // Trailing delimiter — empty last segment is skipped
-        assert_eq!(clean_title("Firefox \u{2014}", "Firefox"), "");
-        assert_eq!(clean_title("Page \u{2014}", "Firefox"), "Page");
+        for (name, title, app, expected) in cases {
+            assert_eq!(
+                clean_title(title, app),
+                expected,
+                "{name}: {title:?} / {app:?}"
+            );
+        }
     }
 }

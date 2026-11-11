@@ -1150,19 +1150,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_run_show_if_command_true() {
-        assert!(BaseWidget::run_show_if_command_with_timeout("true"));
-    }
+    fn test_run_show_if_command() {
+        let cases = [
+            ("exit 0 shows", "true", true),
+            ("non-zero exit hides", "false", false),
+            (
+                "missing binary hides",
+                "/nonexistent/binary/that/does/not/exist",
+                false,
+            ),
+        ];
 
-    #[test]
-    fn test_run_show_if_command_false() {
-        assert!(!BaseWidget::run_show_if_command_with_timeout("false"));
-    }
-
-    #[test]
-    fn test_run_show_if_command_nonexistent_binary() {
-        assert!(!BaseWidget::run_show_if_command_with_timeout(
-            "/nonexistent/binary/that/does/not/exist"
-        ));
+        for (name, command, expected) in cases {
+            assert_eq!(
+                BaseWidget::run_show_if_command_with_timeout(command),
+                expected,
+                "{name}: {command}"
+            );
+        }
     }
 }

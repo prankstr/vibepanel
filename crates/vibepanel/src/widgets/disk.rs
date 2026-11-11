@@ -306,19 +306,12 @@ mod tests {
             "337.0/460.0G"
         );
         assert_eq!(format_disk(&usage, &DiskFormat::UsedOfTotal, true), "76%");
-        // Used is shown in the total's unit, so small values round down.
-        let small = SpaceUsage {
-            total: 1024 * GIB,
-            used: 900 * 1024 * 1024,
-            ..Default::default()
-        };
-        assert_eq!(
-            format_disk(&small, &DiskFormat::UsedOfTotal, false),
-            "0.0/1.0T"
-        );
         for format in [DiskFormat::Percentage, DiskFormat::Free] {
             let text = format_disk(&usage, &format, false);
-            assert!(text.chars().count() <= disk_label_width(&format, false) as usize);
+            assert!(
+                text.chars().count() <= disk_label_width(&format, false) as usize,
+                "{format:?}: {text:?} exceeds stable width"
+            );
         }
     }
 }

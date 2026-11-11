@@ -802,63 +802,94 @@ mod tests {
     use super::{audio_input_icon_name, audio_output_icon_name, device_subtitle};
 
     #[test]
-    fn device_subtitle_preserves_port_description_casing() {
-        assert_eq!(
-            device_subtitle("USB Audio", Some("HDMI / DisplayPort 2"), Some("speaker")),
-            Some("HDMI / DisplayPort 2".to_string())
-        );
+    fn device_subtitle_cases() {
+        let cases = [
+            (
+                "port description keeps casing",
+                Some("HDMI / DisplayPort 2"),
+                Some("speaker"),
+                "HDMI / DisplayPort 2",
+            ),
+            (
+                "form factor fallback is title-cased",
+                None,
+                Some("headset-microphone"),
+                "Headset Microphone",
+            ),
+        ];
+
+        for (name, port_description, form_factor, expected) in cases {
+            assert_eq!(
+                device_subtitle("USB Audio", port_description, form_factor),
+                Some(expected.to_string()),
+                "{name}"
+            );
+        }
     }
 
     #[test]
-    fn device_subtitle_title_cases_form_factor_fallback() {
-        assert_eq!(
-            device_subtitle("USB Audio", None, Some("headset-microphone")),
-            Some("Headset Microphone".to_string())
-        );
-    }
+    fn audio_icon_name_cases() {
+        let output_cases = [
+            (
+                "bluetooth speakers normalized",
+                Some("audio-speakers-bluetooth"),
+                None,
+                "audio-speakers",
+            ),
+            (
+                "usb card normalized",
+                Some("audio-card-analog-usb"),
+                None,
+                "audio-card-symbolic",
+            ),
+            (
+                "symbolic headphones normalized",
+                Some("audio-headphones-symbolic"),
+                None,
+                "audio-headphones",
+            ),
+            (
+                "unknown hint falls back to headset form factor",
+                Some("vendor-specific-device"),
+                Some("headset"),
+                "audio-headset",
+            ),
+            (
+                "generic card defers to headset form factor",
+                Some("audio-card-analog"),
+                Some("headset"),
+                "audio-headset",
+            ),
+            (
+                "unknown hint and internal form factor fall back to card",
+                Some("vendor-specific-device"),
+                Some("internal"),
+                "audio-card-symbolic",
+            ),
+        ];
+        for (name, icon_hint, form_factor, expected) in output_cases {
+            assert_eq!(
+                audio_output_icon_name(icon_hint, form_factor),
+                expected,
+                "output: {name}"
+            );
+        }
 
-    #[test]
-    fn audio_output_icon_normalizes_supported_device_hints() {
-        assert_eq!(
-            audio_output_icon_name(Some("audio-speakers-bluetooth"), None),
-            "audio-speakers"
-        );
-        assert_eq!(
-            audio_output_icon_name(Some("audio-card-analog-usb"), None),
-            "audio-card-symbolic"
-        );
-        assert_eq!(
-            audio_output_icon_name(Some("audio-headphones-symbolic"), None),
-            "audio-headphones"
-        );
-    }
-
-    #[test]
-    fn audio_output_icon_uses_safe_fallbacks() {
-        assert_eq!(
-            audio_output_icon_name(Some("vendor-specific-device"), Some("headset")),
-            "audio-headset"
-        );
-        assert_eq!(
-            audio_output_icon_name(Some("audio-card-analog"), Some("headset")),
-            "audio-headset"
-        );
-        assert_eq!(
-            audio_output_icon_name(Some("vendor-specific-device"), Some("internal")),
-            "audio-card-symbolic"
-        );
-    }
-
-    #[test]
-    fn audio_input_icon_distinguishes_headsets() {
-        assert_eq!(audio_input_icon_name(Some("headset")), "audio-headset");
-        assert_eq!(
-            audio_input_icon_name(Some("microphone")),
-            "audio-input-microphone-symbolic"
-        );
-        assert_eq!(
-            audio_input_icon_name(None),
-            "audio-input-microphone-symbolic"
-        );
+        let input_cases = [
+            ("headset", Some("headset"), "audio-headset"),
+            (
+                "microphone",
+                Some("microphone"),
+                "audio-input-microphone-symbolic",
+            ),
+            ("no form factor", None, "audio-input-microphone-symbolic"),
+        ];
+        for (name, form_factor, expected) in input_cases {
+            assert_eq!(
+                audio_input_icon_name(form_factor),
+                expected,
+                "input: {name}"
+            );
+        }
     }
 }

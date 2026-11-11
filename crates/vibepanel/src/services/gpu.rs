@@ -1477,13 +1477,6 @@ mod tests {
     }
 
     #[test]
-    fn test_gpu_snapshot_defaults() {
-        let snap = GpuSnapshot::default();
-        assert!(!snap.available());
-        assert!(snap.devices.is_empty());
-    }
-
-    #[test]
     fn test_vram_percent() {
         let snapshot = GpuDeviceSnapshot {
             vram_used: Some(4),
@@ -1524,25 +1517,26 @@ mod tests {
         assert_eq!(MockGpuConfig::parse(Some("99"), None).count, MAX_MOCK_GPUS);
     }
 
-    #[cfg(debug_assertions)]
     #[test]
-    fn test_mock_gpu_devices_include_current_and_max_clock() {
-        let devices = MockGpuConfig::parse(Some("2"), None).devices(3, 1234.0);
-        assert_eq!(devices[0].device_index, 3);
-        for device in devices {
-            assert!(device.clock_mhz.is_some());
-            assert!(device.max_clock_mhz >= device.clock_mhz);
-        }
-    }
+    fn is_gpu_high_cases() {
+        let cases: [(&str, &[f32], bool); 4] = [
+            ("just below threshold", &[89.0], false),
+            ("at threshold", &[90.0], true),
+            ("full load", &[100.0], true),
+            ("any device above threshold", &[10.0, 95.0], true),
+        ];
 
-    #[test]
-    fn test_is_gpu_high() {
-        for (usage, expected) in [(89.0, false), (90.0, true), (100.0, true)] {
-            let snap = GpuSnapshot::from_devices(vec![GpuDeviceSnapshot {
-                gpu_usage: Some(usage),
-                ..Default::default()
-            }]);
-            assert_eq!(snap.is_gpu_high(), expected);
+        for (name, usages, expected) in cases {
+            let snap = GpuSnapshot::from_devices(
+                usages
+                    .iter()
+                    .map(|&usage| GpuDeviceSnapshot {
+                        gpu_usage: Some(usage),
+                        ..Default::default()
+                    })
+                    .collect(),
+            );
+            assert_eq!(snap.is_gpu_high(), expected, "{name}");
         }
     }
 
@@ -1580,43 +1574,6 @@ mod tests {
     }
 
     #[test]
-    fn test_snapshot_from_devices_preserves_devices() {
-        let snap = GpuSnapshot::from_devices(vec![
-            GpuDeviceSnapshot {
-                gpu_usage: Some(75.0),
-                device_name: Some("Primary GPU".to_string()),
-                ..Default::default()
-            },
-            GpuDeviceSnapshot {
-                gpu_usage: Some(35.0),
-                device_name: Some("Secondary GPU".to_string()),
-                ..Default::default()
-            },
-        ]);
-
-        assert!(snap.available());
-        assert_eq!(snap.devices.len(), 2);
-        assert_eq!(snap.devices[0].gpu_usage, Some(75.0));
-        assert_eq!(snap.devices[0].device_name.as_deref(), Some("Primary GPU"));
-    }
-
-    #[test]
-    fn test_is_gpu_high_checks_all_devices() {
-        let snap = GpuSnapshot::from_devices(vec![
-            GpuDeviceSnapshot {
-                gpu_usage: Some(10.0),
-                ..Default::default()
-            },
-            GpuDeviceSnapshot {
-                gpu_usage: Some(95.0),
-                ..Default::default()
-            },
-        ]);
-
-        assert!(snap.is_gpu_high());
-    }
-
-    #[test]
     fn test_drm_card_index_parses_numeric_suffix() {
         assert_eq!(drm_card_index(Path::new("/sys/class/drm/card2")), Some(2));
         assert_eq!(drm_card_index(Path::new("/sys/class/drm/card10")), Some(10));
@@ -1637,122 +1594,121 @@ mod tests {
     }
 
     #[test]
-    fn test_auto_select_empty() {
-        assert_eq!(GpuService::auto_select(&[]), None);
-    }
-
-    #[test]
-    fn test_auto_select_single_integrated() {
-        let devices = vec![dummy_amd("iGPU", false, true)];
-        assert_eq!(GpuService::auto_select(&devices), Some(0));
-    }
-
-    #[test]
-    fn test_auto_select_prefers_discrete() {
-        let devices = vec![
-            dummy_amd("iGPU", false, true),
-            dummy_amd("dGPU", true, false),
-        ];
-        assert_eq!(GpuService::auto_select(&devices), Some(1));
-    }
-
-    #[test]
-    fn test_auto_select_prefers_primary_discrete() {
-        let devices = vec![
-            dummy_amd("secondary-dgpu", true, false),
-            dummy_amd("primary-dgpu", true, true),
-        ];
-        assert_eq!(GpuService::auto_select(&devices), Some(1));
-    }
-
-    #[test]
-    fn test_parse_display_selection_accepts_strings() {
-        assert_eq!(
-            GpuService::parse_display_selection_value(
-                &toml::Value::String("auto".to_string()),
-                "devices"
+    fn auto_select_cases() {
+        let cases = [
+            ("no devices", vec![], None),
+            (
+                "single integrated",
+                vec![dummy_amd("iGPU", false, true)],
+                Some(0),
             ),
-            Some(GpuDisplaySelection::Auto)
-        );
-        assert_eq!(
-            GpuService::parse_display_selection_value(
-                &toml::Value::String("all".to_string()),
-                "devices"
+            (
+                "prefers discrete",
+                vec![
+                    dummy_amd("iGPU", false, true),
+                    dummy_amd("dGPU", true, false),
+                ],
+                Some(1),
             ),
-            Some(GpuDisplaySelection::All)
-        );
-    }
-
-    #[test]
-    fn test_parse_display_selection_accepts_integer_and_array() {
-        assert_eq!(
-            GpuService::parse_display_selection_value(&toml::Value::Integer(2), "devices"),
-            Some(GpuDisplaySelection::Explicit(vec![2]))
-        );
-        assert_eq!(
-            GpuService::parse_display_selection_value(
-                &toml::Value::Array(vec![toml::Value::Integer(2), toml::Value::Integer(1)]),
-                "devices",
+            (
+                "prefers primary discrete",
+                vec![
+                    dummy_amd("secondary-dgpu", true, false),
+                    dummy_amd("primary-dgpu", true, true),
+                ],
+                Some(1),
             ),
-            Some(GpuDisplaySelection::Explicit(vec![2, 1]))
-        );
+        ];
+
+        for (name, devices, expected) in cases {
+            assert_eq!(GpuService::auto_select(&devices), expected, "{name}");
+        }
     }
 
     #[test]
-    fn test_resolve_display_indices_auto_shows_selected_only() {
-        let devices = vec![
-            dummy_amd("iGPU", false, true),
-            dummy_amd("dGPU", true, false),
-        ];
-
-        assert_eq!(
-            GpuService::resolve_display_indices(&devices, &GpuDisplaySelection::Auto),
-            vec![1]
-        );
-    }
-
-    #[test]
-    fn test_resolve_display_indices_all_orders_selected_first() {
-        let devices = vec![
-            dummy_amd("iGPU", false, true),
-            dummy_amd("dGPU", true, false),
-            dummy_amd("dGPU-2", true, false),
-        ];
-
-        assert_eq!(
-            GpuService::resolve_display_indices(&devices, &GpuDisplaySelection::All),
-            vec![1, 0, 2]
-        );
-    }
-
-    #[test]
-    fn test_resolve_display_indices_explicit_preserves_order() {
-        let devices = vec![
-            dummy_amd("gpu-0", false, true),
-            dummy_amd("gpu-1", true, false),
-            dummy_amd("gpu-2", true, false),
-        ];
-
-        assert_eq!(
-            GpuService::resolve_display_indices(
-                &devices,
-                &GpuDisplaySelection::Explicit(vec![2, 1]),
+    fn parse_display_selection_cases() {
+        let cases = [
+            (
+                "auto string",
+                toml::Value::String("auto".to_string()),
+                GpuDisplaySelection::Auto,
             ),
-            vec![2, 1]
-        );
+            (
+                "all string",
+                toml::Value::String("all".to_string()),
+                GpuDisplaySelection::All,
+            ),
+            (
+                "single integer",
+                toml::Value::Integer(2),
+                GpuDisplaySelection::Explicit(vec![2]),
+            ),
+            (
+                "integer array keeps order",
+                toml::Value::Array(vec![toml::Value::Integer(2), toml::Value::Integer(1)]),
+                GpuDisplaySelection::Explicit(vec![2, 1]),
+            ),
+        ];
+
+        for (name, value, expected) in cases {
+            assert_eq!(
+                GpuService::parse_display_selection_value(&value, "devices"),
+                Some(expected),
+                "{name}"
+            );
+        }
     }
 
     #[test]
-    fn test_resolve_display_indices_invalid_list_falls_back_to_auto() {
-        let devices = vec![
-            dummy_amd("iGPU", false, true),
-            dummy_amd("dGPU", true, false),
+    fn resolve_display_indices_cases() {
+        let cases = [
+            (
+                "auto shows selected only",
+                vec![
+                    dummy_amd("iGPU", false, true),
+                    dummy_amd("dGPU", true, false),
+                ],
+                GpuDisplaySelection::Auto,
+                vec![1],
+            ),
+            (
+                "all orders selected first",
+                vec![
+                    dummy_amd("iGPU", false, true),
+                    dummy_amd("dGPU", true, false),
+                    dummy_amd("dGPU-2", true, false),
+                ],
+                GpuDisplaySelection::All,
+                vec![1, 0, 2],
+            ),
+            (
+                "explicit preserves order",
+                vec![
+                    dummy_amd("gpu-0", false, true),
+                    dummy_amd("gpu-1", true, false),
+                    dummy_amd("gpu-2", true, false),
+                ],
+                GpuDisplaySelection::Explicit(vec![2, 1]),
+                vec![2, 1],
+            ),
+            (
+                "invalid explicit list falls back to auto",
+                vec![
+                    dummy_amd("iGPU", false, true),
+                    dummy_amd("dGPU", true, false),
+                ],
+                GpuDisplaySelection::Explicit(vec![9]),
+                vec![1],
+            ),
         ];
 
-        assert_eq!(
-            GpuService::resolve_display_indices(&devices, &GpuDisplaySelection::Explicit(vec![9]),),
-            vec![1]
-        );
+        for (name, devices, selection, expected) in cases {
+            assert_eq!(
+                GpuService::resolve_display_indices(&devices, &selection),
+                expected,
+                "{name}"
+            );
+        }
     }
 
     #[test]

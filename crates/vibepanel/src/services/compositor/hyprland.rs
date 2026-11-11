@@ -1564,12 +1564,80 @@ mod tests {
     }
 
     #[test]
-    fn workspace_meta_merges_names_with_defaults() {
+    fn parse_workspace_handles_both_ipc_formats() {
+        // Older Hyprland sends `id`/`name`, newer adds `address`/`type`.
+        // (name, workspace, expected (id, name, address))
+        let cases = [
+            (
+                "older special",
+                json!({ "id": -99, "name": "special:magic" }),
+                None,
+            ),
+            (
+                "newer special",
+                json!({ "address": "special:magic", "type": "special", "name": "special:magic" }),
+                None,
+            ),
+            (
+                "older numbered",
+                json!({ "id": 4, "name": "Discord" }),
+                Some((4, "Discord", "4")),
+            ),
+            (
+                "newer numbered",
+                json!({ "address": "4", "id": 4, "type": "normal", "name": "Discord" }),
+                Some((4, "Discord", "4")),
+            ),
+            (
+                "numbered without name",
+                json!({ "id": 4, "name": "" }),
+                Some((4, "4", "4")),
+            ),
+            (
+                "older named keeps hyprland id",
+                json!({ "id": -1337, "name": "web" }),
+                Some((-1337, "web", "web")),
+            ),
+            (
+                "older named with name: prefix",
+                json!({ "id": -1337, "name": "name:web" }),
+                Some((-1337, "web", "web")),
+            ),
+            (
+                "newer named hashes address",
+                json!({ "address": "web", "type": "normal", "name": "web" }),
+                Some((named_id("web"), "web", "web")),
+            ),
+            (
+                "newer rename keeps id",
+                json!({ "address": "web", "type": "normal", "name": "Browser" }),
+                Some((named_id("web"), "Browser", "web")),
+            ),
+            ("older id 0", json!({ "id": 0, "name": "" }), None),
+            ("older id -1", json!({ "id": -1, "name": "" }), None),
+            (
+                "newer empty",
+                json!({ "address": "", "type": "", "name": "" }),
+                None,
+            ),
+            ("empty object", json!({}), None),
+        ];
+
+        for (name, workspace, expected) in cases {
+            let parsed =
+                HyprlandBackend::parse_workspace(&workspace).map(|ws| (ws.id, ws.name, ws.address));
+            let expected =
+                expected.map(|(id, n, address)| (id, n.to_string(), address.to_string()));
+            assert_eq!(parsed, expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn workspace_meta_fills_defaults_and_sorts_named_last() {
         let workspaces = meta(json!([
             { "id": 2, "name": "web", "windows": 1, "monitor": "DP-1" },
             { "id": 11, "name": "chat", "windows": 0, "monitor": "HDMI-A-1" }
         ]));
-
         assert_eq!(workspaces.iter().find(|ws| ws.id == 1).unwrap().name, "1");
         assert_eq!(workspaces.iter().find(|ws| ws.id == 2).unwrap().name, "web");
         assert_eq!(
@@ -1577,94 +1645,7 @@ mod tests {
             "chat"
         );
         assert!(workspaces.iter().all(|ws| ws.output.is_none()));
-    }
 
-    #[test]
-    fn parse_workspace_skips_special_workspaces() {
-        for special in [
-            json!({ "id": -99, "name": "special:magic" }),
-            json!({ "address": "special:magic", "type": "special", "name": "special:magic" }),
-        ] {
-            assert_eq!(HyprlandBackend::parse_workspace(&special), None);
-        }
-    }
-
-    #[test]
-    fn parse_workspace_reads_numbered_workspaces_in_both_formats() {
-        let legacy = json!({ "id": 4, "name": "Discord" });
-        let current = json!({ "address": "4", "id": 4, "type": "normal", "name": "Discord" });
-
-        for ws in [legacy, current] {
-            let parsed = HyprlandBackend::parse_workspace(&ws).unwrap();
-            assert_eq!(parsed.id, 4);
-            assert_eq!(parsed.name, "Discord");
-            assert_eq!(parsed.address, "4");
-        }
-        assert_eq!(
-            HyprlandBackend::parse_workspace(&json!({ "id": 4, "name": "" }))
-                .unwrap()
-                .name,
-            "4"
-        );
-    }
-
-    #[test]
-    fn parse_workspace_keeps_hyprland_named_ids_on_older_versions() {
-        let legacy = json!({ "id": -1337, "name": "web" });
-        let prefixed = json!({ "id": -1337, "name": "name:web" });
-
-        for ws in [legacy, prefixed] {
-            let parsed = HyprlandBackend::parse_workspace(&ws).unwrap();
-            assert_eq!(parsed.id, -1337);
-            assert_eq!(parsed.name, "web");
-            assert_eq!(parsed.address, "web");
-        }
-    }
-
-    #[test]
-    fn parse_workspace_hashes_named_addresses_on_newer_versions() {
-        let current = json!({ "address": "web", "type": "normal", "name": "web" });
-
-        let parsed = HyprlandBackend::parse_workspace(&current).unwrap();
-        assert_eq!(parsed.id, named_id("web"));
-        assert_eq!(parsed.name, "web");
-        assert_eq!(parsed.address, "web");
-    }
-
-    #[test]
-    fn parse_workspace_keeps_named_id_across_renames() {
-        // Newer Hyprland renames only the display name.
-        let renamed = json!({ "address": "web", "type": "normal", "name": "Browser" });
-
-        let parsed = HyprlandBackend::parse_workspace(&renamed).unwrap();
-        assert_eq!(parsed.id, named_id("web"));
-        assert_eq!(parsed.name, "Browser");
-        assert_eq!(parsed.address, "web");
-    }
-
-    #[test]
-    fn parse_workspace_rejects_missing_workspaces() {
-        for none in [
-            json!({ "id": 0, "name": "" }),
-            json!({ "id": -1, "name": "" }),
-            json!({ "address": "", "type": "", "name": "" }),
-            json!({}),
-        ] {
-            assert_eq!(HyprlandBackend::parse_workspace(&none), None);
-        }
-    }
-
-    #[test]
-    fn workspace_meta_has_no_display_index_for_named_workspaces() {
-        let workspaces = meta(json!([{ "address": "web", "type": "normal", "name": "web" }]));
-        let web = workspaces.iter().find(|ws| ws.name == "web").unwrap();
-
-        assert_eq!(web.id, named_id("web"));
-        assert_eq!(web.idx, -1);
-    }
-
-    #[test]
-    fn workspace_meta_sorts_numbered_before_named_in_creation_order() {
         let expected = [
             "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "12", "web", "Chat", "mail",
         ];
@@ -1682,34 +1663,40 @@ mod tests {
             { "address": "Chat", "type": "normal", "name": "Chat" },
             { "address": "mail", "type": "normal", "name": "mail" }
         ]));
-
-        for workspaces in [legacy, current] {
+        for (name, workspaces) in [("older", &legacy), ("newer", &current)] {
             let names: Vec<_> = workspaces.iter().map(|ws| ws.name.as_str()).collect();
-            assert_eq!(names, expected);
+            assert_eq!(names, expected, "{name}");
         }
+
+        // Named workspaces have no display index.
+        let web = current.iter().find(|ws| ws.name == "web").unwrap();
+        assert_eq!(web.id, named_id("web"));
+        assert_eq!(web.idx, -1);
     }
 
     #[test]
-    fn workspace_switch_target_uses_named_workspace_address() {
-        let backend = HyprlandBackend::new();
-        backend.apply_state(state(
-            json!([]),
-            json!([{ "address": "web", "type": "normal", "name": "Browser" }]),
-        ));
+    fn workspace_targets_use_named_workspace_address() {
+        type Target = fn(&HyprlandBackend, i32) -> String;
+        let switch: Target = HyprlandBackend::workspace_switch_target;
+        let lua: Target = HyprlandBackend::workspace_lua_target;
+        let newer = json!([{ "address": "web", "type": "normal", "name": "Browser" }]);
+        let older = json!([{ "id": -1337, "name": "web" }]);
+        // (name, workspaces, target, workspace id, expected)
+        let cases = [
+            ("switch named", &newer, switch, named_id("web"), "name:web"),
+            ("switch numbered", &newer, switch, 3, "3"),
+            ("switch unknown", &newer, switch, -9999, "-9999"),
+            // Regression: lua targets must quote named workspaces.
+            ("lua named is quoted", &older, lua, -1337, "\"name:web\""),
+            ("lua numbered", &older, lua, 3, "3"),
+            ("lua unknown", &older, lua, -9999, "-9999"),
+        ];
 
-        assert_eq!(backend.workspace_switch_target(named_id("web")), "name:web");
-        assert_eq!(backend.workspace_switch_target(3), "3");
-        assert_eq!(backend.workspace_switch_target(-9999), "-9999");
-    }
-
-    #[test]
-    fn workspace_lua_target_quotes_named_workspaces() {
-        let backend = HyprlandBackend::new();
-        backend.apply_state(state(json!([]), json!([{ "id": -1337, "name": "web" }])));
-
-        assert_eq!(backend.workspace_lua_target(-1337), "\"name:web\"");
-        assert_eq!(backend.workspace_lua_target(3), "3");
-        assert_eq!(backend.workspace_lua_target(-9999), "-9999");
+        for (name, workspaces, target, id, expected) in cases {
+            let backend = HyprlandBackend::new();
+            backend.apply_state(state(json!([]), workspaces.clone()));
+            assert_eq!(target(&backend, id), expected, "{name}");
+        }
     }
 
     #[test]
@@ -1753,7 +1740,7 @@ mod tests {
     }
 
     #[test]
-    fn window_info_resolves_monitor_id_to_connector() {
+    fn window_info_from_activewindow_resolves_monitor_connector() {
         let monitor_names = HashMap::from([(0, "eDP-1".to_string()), (1, "DP-3".to_string())]);
         let window = json!({
             "address": "0x55d0c0ffee",
@@ -1761,19 +1748,23 @@ mod tests {
             "class": "com.mitchellh.ghostty",
             "monitor": 1,
         });
+        // (name, activewindow, expected (title, app_id, output))
+        let cases = [
+            (
+                "monitor id resolves to connector",
+                window,
+                Some(("vibepanel", "com.mitchellh.ghostty", Some("DP-3"))),
+            ),
+            ("no focused window", json!({}), None),
+        ];
 
-        let info = HyprlandBackend::window_info_from_ipc(&window, &monitor_names).unwrap();
-
-        assert_eq!(info.title, "vibepanel");
-        assert_eq!(info.app_id, "com.mitchellh.ghostty");
-        assert_eq!(info.output, Some("DP-3".to_string()));
-    }
-
-    #[test]
-    fn window_info_is_none_without_focused_window() {
-        let monitor_names = HashMap::from([(0, "eDP-1".to_string())]);
-
-        assert!(HyprlandBackend::window_info_from_ipc(&json!({}), &monitor_names).is_none());
+        for (name, window, expected) in cases {
+            let info = HyprlandBackend::window_info_from_ipc(&window, &monitor_names);
+            let actual = info
+                .as_ref()
+                .map(|i| (i.title.as_str(), i.app_id.as_str(), i.output.as_deref()));
+            assert_eq!(actual, expected, "{name}");
+        }
     }
 
     #[test]
@@ -1788,16 +1779,7 @@ mod tests {
         let changes = backend.handle_event("activelayout>>keyboard-a,German");
 
         assert!(changes.keyboard_layout);
-        assert_eq!(
-            backend
-                .shared
-                .keyboard_layout
-                .read()
-                .as_ref()
-                .unwrap()
-                .layout_name,
-            "German"
-        );
+        assert_eq!(backend.get_keyboard_layout().unwrap().layout_name, "German");
     }
 
     fn state(monitors: Value, workspaces: Value) -> HyprlandState {
@@ -1982,12 +1964,11 @@ mod tests {
         let tiled = json!([client(0x1, ws(1), (1720, 58)), left.clone()]);
         apply_clients(&backend, two_monitors(1, 5), tiled);
 
-        // Newer Hyprland reports a mode, older a bool.
-        for fullscreen in [json!(2), json!(true)] {
+        for (name, fullscreen) in [("newer mode", json!(2)), ("older bool", json!(true))] {
             let mut full = client(0x1, ws(1), (0, 0));
             full["fullscreen"] = fullscreen;
             apply_clients(&backend, two_monitors(1, 5), json!([full, left.clone()]));
-            assert_eq!(order(&backend), [0x2, 0x1]);
+            assert_eq!(order(&backend), [0x2, 0x1], "{name}");
         }
     }
 
@@ -1997,17 +1978,19 @@ mod tests {
         let old = |id: i32, name: &str| json!({ "id": id, "name": name });
         let formats = [
             (
+                "newer",
                 new("special:a"),
                 new("special:b"),
                 json!({ "address": "", "name": "" }),
             ),
             (
+                "older",
                 old(-98, "special:a"),
                 old(-97, "special:b"),
                 json!({ "id": 0, "name": "" }),
             ),
         ];
-        for (shown, hidden, none) in formats {
+        for (name, shown, hidden, none) in formats {
             let backend = HyprlandBackend::new();
             let monitors = json!([
                 {"id": 0, "name": "DP-1", "activeWorkspace": ws(2), "specialWorkspace": shown.clone()},
@@ -2032,7 +2015,11 @@ mod tests {
                 .iter()
                 .map(|w| (w.id, w.workspace_id, w.is_scratchpad))
                 .collect();
-            assert_eq!(listed, [(0x5, Some(2), false), (0x1, Some(2), true)]);
+            assert_eq!(
+                listed,
+                [(0x5, Some(2), false), (0x1, Some(2), true)],
+                "{name}"
+            );
         }
     }
 
@@ -2182,20 +2169,39 @@ mod tests {
     #[test]
     fn activewindow_requeries_clients_only_when_focus_changes() {
         let a = json!({"address": "0xa", "class": "app", "monitor": 0});
-        // (active window, previous focus, previous class, expected queries)
+        // (name, active window, previous focus, previous class, expected queries)
         let cases = [
-            (a.clone(), 0xa, "app", vec!["j/activewindow"]),
-            (a.clone(), 0xb, "app", vec!["j/activewindow", "j/clients"]),
-            (a, 0xa, "old", vec!["j/activewindow", "j/clients"]),
+            (
+                "title change only",
+                a.clone(),
+                0xa,
+                "app",
+                vec!["j/activewindow"],
+            ),
+            (
+                "focus moved",
+                a.clone(),
+                0xb,
+                "app",
+                vec!["j/activewindow", "j/clients"],
+            ),
+            (
+                "class changed",
+                a,
+                0xa,
+                "old",
+                vec!["j/activewindow", "j/clients"],
+            ),
             // The fallback full refresh already queries the clients.
             (
+                "no active window",
                 json!({}),
                 0xa,
                 "app",
                 vec!["j/activewindow", "j/monitors", "j/workspaces", "j/clients"],
             ),
         ];
-        for (i, (active, focused, class, expected)) in cases.into_iter().enumerate() {
+        for (i, (name, active, focused, class, expected)) in cases.into_iter().enumerate() {
             let (backend, socket) = backend_with_fake_socket(
                 &format!("activewindow-{i}"),
                 vec![
@@ -2215,7 +2221,7 @@ mod tests {
 
             backend.handle_event("activewindow>>app,new title");
 
-            assert_eq!(*socket.commands.lock().unwrap(), expected, "case {i}");
+            assert_eq!(*socket.commands.lock().unwrap(), expected, "{name}");
         }
     }
 

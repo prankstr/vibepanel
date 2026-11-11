@@ -811,3 +811,40 @@ workspace-container.has-highlight > .workspace-indicator.active.clickable:hover 
 "#
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::css;
+    use crate::widgets::css::base::tests::declarations;
+
+    // Regression: the generator already emits physical padding sides, so the
+    // vertical rule must not swap them onto the flow axis.
+    #[test]
+    fn bar_padding_reads_physical_sides_in_both_orientations() {
+        let css = css(0, 0, false);
+        let horizontal = declarations(&css, "sectioned-bar.bar");
+        for side in ["top", "right", "bottom", "left"] {
+            let expected = format!("padding-{side}: var(--vp-internal-bar-padding-{side})");
+            assert!(horizontal.contains(&expected), "missing {expected}");
+        }
+
+        let vertical = declarations(&css, "sectioned-bar.bar.bar--vertical");
+        assert!(
+            !vertical.iter().any(|d| d.starts_with("padding")),
+            "vertical bar must not override padding: {vertical:?}"
+        );
+    }
+
+    // Regression (27912f76): with an outline and rounded corners, the
+    // background must stay inside the border instead of bleeding past it.
+    #[test]
+    fn bar_and_widget_backgrounds_stay_inside_the_outline() {
+        let css = css(0, 0, false);
+        for selector in ["sectioned-bar.bar", ".widget"] {
+            assert!(
+                declarations(&css, selector).contains(&"background-clip: padding-box".to_string()),
+                "{selector}"
+            );
+        }
+    }
+}

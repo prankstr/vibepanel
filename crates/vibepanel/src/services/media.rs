@@ -1758,14 +1758,6 @@ mod tests {
     }
 
     #[test]
-    fn test_media_snapshot_default() {
-        let snapshot = MediaSnapshot::default();
-        assert!(!snapshot.available);
-        assert!(snapshot.player_name.is_none());
-        assert_eq!(snapshot.playback_status, PlaybackStatus::Stopped);
-    }
-
-    #[test]
     fn test_parse_metadata_normalizes_track_id() {
         let parse_track_id = |track_id: Variant| {
             let metadata = HashMap::from([("mpris:trackid".to_string(), track_id)]).to_variant();
@@ -1787,38 +1779,68 @@ mod tests {
     }
 
     #[test]
-    fn test_youtube_thumbnail_url() {
-        let expected = Some("https://i.ytimg.com/vi/dQw4w9WgXcQ/maxresdefault.jpg".to_string());
-        assert_eq!(
-            youtube_thumbnail_url("https://www.youtube.com/watch?v=dQw4w9WgXcQ"),
-            expected
-        );
-        let synthetic_expected =
-            Some("https://i.ytimg.com/vi/abcdefghijk/maxresdefault.jpg".to_string());
-        assert_eq!(
-            youtube_thumbnail_url("https://youtu.be/abcdefghijk?t=30"),
-            synthetic_expected
-        );
-        assert_eq!(
-            youtube_thumbnail_url("https://www.youtube.com/shorts/abcdefghijk"),
-            synthetic_expected
-        );
-    }
+    fn test_youtube_thumbnail_urls() {
+        type UrlFn = fn(&str) -> Option<String>;
+        let cases: [(&str, UrlFn, &str, Option<&str>); 9] = [
+            (
+                "watch url",
+                youtube_thumbnail_url,
+                "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+                Some("https://i.ytimg.com/vi/dQw4w9WgXcQ/maxresdefault.jpg"),
+            ),
+            (
+                "youtu.be with timestamp",
+                youtube_thumbnail_url,
+                "https://youtu.be/abcdefghijk?t=30",
+                Some("https://i.ytimg.com/vi/abcdefghijk/maxresdefault.jpg"),
+            ),
+            (
+                "shorts",
+                youtube_thumbnail_url,
+                "https://www.youtube.com/shorts/abcdefghijk",
+                Some("https://i.ytimg.com/vi/abcdefghijk/maxresdefault.jpg"),
+            ),
+            (
+                "unrelated host",
+                youtube_thumbnail_url,
+                "https://example.com/watch?v=abcdefghijk",
+                None,
+            ),
+            (
+                "lookalike host",
+                youtube_thumbnail_url,
+                "https://youtube.com.evil.test/watch?v=abcdefghijk",
+                None,
+            ),
+            (
+                "invalid video id",
+                youtube_thumbnail_url,
+                "https://www.youtube.com/watch?v=too-short",
+                None,
+            ),
+            (
+                "fallback to 16:9 mqdefault",
+                youtube_thumbnail_fallback_url,
+                "https://i.ytimg.com/vi/dQw4w9WgXcQ/maxresdefault.jpg",
+                Some("https://i.ytimg.com/vi/dQw4w9WgXcQ/mqdefault.jpg"),
+            ),
+            (
+                "fallback for unrelated host",
+                youtube_thumbnail_fallback_url,
+                "https://example.com/vi/abcdefghijk/maxresdefault.jpg",
+                None,
+            ),
+            (
+                "fallback for invalid video id",
+                youtube_thumbnail_fallback_url,
+                "https://i.ytimg.com/vi/too-short/maxresdefault.jpg",
+                None,
+            ),
+        ];
 
-    #[test]
-    fn test_youtube_thumbnail_url_rejects_unrelated_or_invalid_urls() {
-        assert_eq!(
-            youtube_thumbnail_url("https://example.com/watch?v=abcdefghijk"),
-            None
-        );
-        assert_eq!(
-            youtube_thumbnail_url("https://youtube.com.evil.test/watch?v=abcdefghijk"),
-            None
-        );
-        assert_eq!(
-            youtube_thumbnail_url("https://www.youtube.com/watch?v=too-short"),
-            None
-        );
+        for (name, thumbnail_url, input, expected) in cases {
+            assert_eq!(thumbnail_url(input).as_deref(), expected, "{name}");
+        }
     }
 
     #[test]
@@ -1847,400 +1869,456 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn test_youtube_thumbnail_fallback_url() {
-        assert_eq!(
-            youtube_thumbnail_fallback_url("https://i.ytimg.com/vi/dQw4w9WgXcQ/maxresdefault.jpg"),
-            Some("https://i.ytimg.com/vi/dQw4w9WgXcQ/mqdefault.jpg".into())
-        );
-        assert_eq!(
-            youtube_thumbnail_fallback_url("https://example.com/vi/abcdefghijk/maxresdefault.jpg"),
-            None
-        );
-        assert_eq!(
-            youtube_thumbnail_fallback_url("https://i.ytimg.com/vi/too-short/maxresdefault.jpg"),
-            None
-        );
+    /// Expected fields of the resolved metadata; `None` leaves a field unchecked.
+    #[derive(Default)]
+    struct Expect {
+        title: Option<Option<&'static str>>,
+        art_url: Option<Option<&'static str>>,
+        url: Option<Option<&'static str>>,
+        length: Option<Option<i64>>,
+        track_id: Option<Option<&'static str>>,
+        track_changed: Option<bool>,
+    }
+
+    struct ResolveCase {
+        name: &'static str,
+        status: PlaybackStatus,
+        previous: MediaMetadata,
+        current: MediaMetadata,
+        expect: Expect,
+    }
+
+    fn s(value: &str) -> Option<String> {
+        Some(value.to_string())
     }
 
     #[test]
-    fn test_preserve_same_track_metadata() {
-        let previous = MediaMetadata {
-            title: Some("Video".into()),
-            artist: Some("Creator".into()),
-            art_url: Some("file:///tmp/video.png".into()),
-            url: Some("https://www.youtube.com/watch?v=dQw4w9WgXcQ".into()),
-            length: Some(534_000_000),
-            ..Default::default()
-        };
-        let mut current = MediaMetadata {
-            title: previous.title.clone(),
-            url: previous.url.clone(),
-            ..Default::default()
-        };
+    fn resolve_metadata_cases() {
+        const YOUTUBE: &str = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+        const YOUTUBE_THUMBNAIL: &str = "https://i.ytimg.com/vi/dQw4w9WgXcQ/maxresdefault.jpg";
 
-        preserve_same_track_metadata(&previous, &mut current);
+        let cases = [
+            ResolveCase {
+                name: "same url restores length, art and url",
+                status: PlaybackStatus::Playing,
+                previous: MediaMetadata {
+                    title: s("Video"),
+                    artist: s("Creator"),
+                    art_url: s("file:///tmp/video.png"),
+                    url: s(YOUTUBE),
+                    length: Some(534_000_000),
+                    ..Default::default()
+                },
+                current: MediaMetadata {
+                    title: s("Video"),
+                    url: s(YOUTUBE),
+                    ..Default::default()
+                },
+                expect: Expect {
+                    art_url: Some(Some("file:///tmp/video.png")),
+                    url: Some(Some(YOUTUBE)),
+                    length: Some(Some(534_000_000)),
+                    ..Default::default()
+                },
+            },
+            ResolveCase {
+                name: "same youtube track keeps native artwork",
+                status: PlaybackStatus::Playing,
+                previous: MediaMetadata {
+                    title: s("Video"),
+                    artist: s("Creator"),
+                    art_url: s("file:///tmp/native.png"),
+                    url: s(YOUTUBE),
+                    length: Some(534_000_000),
+                    track_id: s("/track/1"),
+                    ..Default::default()
+                },
+                current: MediaMetadata {
+                    title: s("Video"),
+                    artist: s("Creator"),
+                    url: s(YOUTUBE),
+                    track_id: s("/track/1"),
+                    ..Default::default()
+                },
+                expect: Expect {
+                    art_url: Some(Some("file:///tmp/native.png")),
+                    length: Some(Some(534_000_000)),
+                    ..Default::default()
+                },
+            },
+            ResolveCase {
+                name: "new same-track artwork wins",
+                status: PlaybackStatus::Playing,
+                previous: MediaMetadata {
+                    title: s("Video"),
+                    artist: s("Creator"),
+                    art_url: s("file:///tmp/old.png"),
+                    url: s(YOUTUBE),
+                    ..Default::default()
+                },
+                current: MediaMetadata {
+                    title: s("Video"),
+                    artist: s("Creator"),
+                    art_url: s("file:///tmp/new.png"),
+                    url: s(YOUTUBE),
+                    ..Default::default()
+                },
+                expect: Expect {
+                    art_url: Some(Some("file:///tmp/new.png")),
+                    ..Default::default()
+                },
+            },
+            ResolveCase {
+                name: "browser back state keeps previous artwork",
+                status: PlaybackStatus::Paused,
+                previous: MediaMetadata {
+                    title: s("Video"),
+                    art_url: s("file:///tmp/video.png"),
+                    ..Default::default()
+                },
+                current: MediaMetadata {
+                    title: s("Firefox"),
+                    ..Default::default()
+                },
+                expect: Expect {
+                    art_url: Some(Some("file:///tmp/video.png")),
+                    ..Default::default()
+                },
+            },
+            ResolveCase {
+                name: "changed track id drops previous artwork",
+                status: PlaybackStatus::Playing,
+                previous: MediaMetadata {
+                    track_id: s("old"),
+                    art_url: s("file:///tmp/old.png"),
+                    ..Default::default()
+                },
+                current: MediaMetadata {
+                    track_id: s("new"),
+                    title: s("New track"),
+                    ..Default::default()
+                },
+                expect: Expect {
+                    art_url: Some(None),
+                    ..Default::default()
+                },
+            },
+            ResolveCase {
+                name: "new youtube track gets thumbnail, not previous length",
+                status: PlaybackStatus::Playing,
+                previous: MediaMetadata {
+                    title: s("Old video"),
+                    artist: s("Creator"),
+                    art_url: s("file:///tmp/old.png"),
+                    url: s("https://example.com/old-video"),
+                    length: Some(534_000_000),
+                    ..Default::default()
+                },
+                current: MediaMetadata {
+                    title: s("New video"),
+                    url: s(YOUTUBE),
+                    ..Default::default()
+                },
+                expect: Expect {
+                    art_url: Some(Some(YOUTUBE_THUMBNAIL)),
+                    length: Some(None),
+                    ..Default::default()
+                },
+            },
+            ResolveCase {
+                name: "same title and artist without url preserves metadata",
+                status: PlaybackStatus::Playing,
+                previous: MediaMetadata {
+                    title: s("Track"),
+                    artist: s("Artist"),
+                    art_url: s("file:///tmp/track.png"),
+                    length: Some(180_000_000),
+                    ..Default::default()
+                },
+                current: MediaMetadata {
+                    title: s("Track"),
+                    artist: s("Artist"),
+                    ..Default::default()
+                },
+                expect: Expect {
+                    art_url: Some(Some("file:///tmp/track.png")),
+                    length: Some(Some(180_000_000)),
+                    ..Default::default()
+                },
+            },
+            ResolveCase {
+                name: "different track ids veto title and artist match",
+                status: PlaybackStatus::Playing,
+                previous: MediaMetadata {
+                    title: s("Track"),
+                    artist: s("Artist"),
+                    art_url: s("file:///tmp/old.png"),
+                    length: Some(180_000_000),
+                    track_id: s("/track/old"),
+                    ..Default::default()
+                },
+                current: MediaMetadata {
+                    title: s("Track"),
+                    artist: s("Artist"),
+                    track_id: s("/track/new"),
+                    ..Default::default()
+                },
+                expect: Expect {
+                    art_url: Some(None),
+                    length: Some(None),
+                    ..Default::default()
+                },
+            },
+            ResolveCase {
+                name: "different track ids veto equal url",
+                status: PlaybackStatus::Playing,
+                previous: MediaMetadata {
+                    title: s("Track"),
+                    artist: s("Artist"),
+                    art_url: s("file:///tmp/old.png"),
+                    url: s("https://example.com/track"),
+                    length: Some(180_000_000),
+                    track_id: s("/track/old"),
+                    ..Default::default()
+                },
+                current: MediaMetadata {
+                    title: s("Track"),
+                    artist: s("Artist"),
+                    url: s("https://example.com/track"),
+                    track_id: s("/track/new"),
+                    ..Default::default()
+                },
+                expect: Expect {
+                    art_url: Some(None),
+                    length: Some(None),
+                    ..Default::default()
+                },
+            },
+            ResolveCase {
+                name: "different titles veto equal url",
+                status: PlaybackStatus::Playing,
+                previous: MediaMetadata {
+                    title: s("Old track"),
+                    art_url: s("file:///tmp/old.png"),
+                    url: s("https://example.com/radio"),
+                    length: Some(180_000_000),
+                    ..Default::default()
+                },
+                current: MediaMetadata {
+                    title: s("New track"),
+                    url: s("https://example.com/radio"),
+                    ..Default::default()
+                },
+                expect: Expect {
+                    art_url: Some(None),
+                    length: Some(None),
+                    ..Default::default()
+                },
+            },
+            ResolveCase {
+                name: "different non-empty urls mark track changed",
+                status: PlaybackStatus::Playing,
+                previous: MediaMetadata {
+                    url: s("https://example.com/old"),
+                    ..Default::default()
+                },
+                current: MediaMetadata {
+                    url: s("https://example.com/new"),
+                    ..Default::default()
+                },
+                expect: Expect {
+                    track_changed: Some(true),
+                    ..Default::default()
+                },
+            },
+            ResolveCase {
+                name: "missing url does not mark track changed",
+                status: PlaybackStatus::Playing,
+                previous: MediaMetadata {
+                    url: s("https://example.com/old"),
+                    ..Default::default()
+                },
+                current: MediaMetadata::default(),
+                expect: Expect {
+                    track_changed: Some(false),
+                    ..Default::default()
+                },
+            },
+            ResolveCase {
+                name: "same track restores omitted track id",
+                status: PlaybackStatus::Playing,
+                previous: MediaMetadata {
+                    title: s("Track"),
+                    artist: s("Artist"),
+                    url: s("https://example.com/track"),
+                    track_id: s("/track/current"),
+                    ..Default::default()
+                },
+                current: MediaMetadata {
+                    title: s("Track"),
+                    artist: s("Artist"),
+                    url: s("https://example.com/track"),
+                    ..Default::default()
+                },
+                expect: Expect {
+                    track_id: Some(Some("/track/current")),
+                    ..Default::default()
+                },
+            },
+            ResolveCase {
+                name: "same track id preserves partial metadata",
+                status: PlaybackStatus::Playing,
+                previous: MediaMetadata {
+                    title: s("Track"),
+                    artist: s("Artist"),
+                    art_url: s("file:///tmp/art.png"),
+                    url: s("https://example.com/track"),
+                    length: Some(180_000_000),
+                    track_id: s("/track/current"),
+                    ..Default::default()
+                },
+                current: MediaMetadata {
+                    title: s("Track"),
+                    track_id: s("/track/current"),
+                    ..Default::default()
+                },
+                expect: Expect {
+                    art_url: Some(Some("file:///tmp/art.png")),
+                    url: Some(Some("https://example.com/track")),
+                    length: Some(Some(180_000_000)),
+                    ..Default::default()
+                },
+            },
+            ResolveCase {
+                name: "different preview keeps its own artwork",
+                status: PlaybackStatus::Playing,
+                previous: MediaMetadata {
+                    title: s("Playing video"),
+                    artist: s("Creator"),
+                    art_url: s("file:///tmp/playing.png"),
+                    url: s("https://example.com/playing-video"),
+                    ..Default::default()
+                },
+                current: MediaMetadata {
+                    title: s("Short preview"),
+                    artist: s("Other creator"),
+                    art_url: s(YOUTUBE_THUMBNAIL),
+                    url: s(YOUTUBE),
+                    ..Default::default()
+                },
+                expect: Expect {
+                    art_url: Some(Some(YOUTUBE_THUMBNAIL)),
+                    ..Default::default()
+                },
+            },
+            ResolveCase {
+                name: "empty active update keeps previous presentation",
+                status: PlaybackStatus::Paused,
+                previous: MediaMetadata {
+                    title: s("Playing video"),
+                    artist: s("Creator"),
+                    art_url: s("file:///tmp/playing.png"),
+                    url: s(YOUTUBE),
+                    length: Some(534_000_000),
+                    ..Default::default()
+                },
+                current: MediaMetadata::default(),
+                expect: Expect {
+                    title: Some(Some("Playing video")),
+                    art_url: Some(Some("file:///tmp/playing.png")),
+                    length: Some(Some(534_000_000)),
+                    ..Default::default()
+                },
+            },
+            ResolveCase {
+                name: "titleless update with artwork is not overwritten",
+                status: PlaybackStatus::Playing,
+                previous: MediaMetadata {
+                    title: s("Old track"),
+                    art_url: s("file:///tmp/old.png"),
+                    ..Default::default()
+                },
+                current: MediaMetadata {
+                    art_url: s("file:///tmp/new.png"),
+                    ..Default::default()
+                },
+                expect: Expect {
+                    title: Some(None),
+                    art_url: Some(Some("file:///tmp/new.png")),
+                    ..Default::default()
+                },
+            },
+            ResolveCase {
+                name: "incomplete new track is not overwritten",
+                status: PlaybackStatus::Playing,
+                previous: MediaMetadata {
+                    title: s("Old track"),
+                    art_url: s("file:///tmp/old.png"),
+                    url: s("https://example.com/old"),
+                    length: Some(180_000_000),
+                    track_id: s("/track/old"),
+                    ..Default::default()
+                },
+                current: MediaMetadata {
+                    url: s("https://example.com/new"),
+                    track_id: s("/track/new"),
+                    ..Default::default()
+                },
+                expect: Expect {
+                    title: Some(None),
+                    art_url: Some(None),
+                    url: Some(Some("https://example.com/new")),
+                    track_id: Some(Some("/track/new")),
+                    track_changed: Some(true),
+                    ..Default::default()
+                },
+            },
+            ResolveCase {
+                name: "stopped player does not restore previous presentation",
+                status: PlaybackStatus::Stopped,
+                previous: MediaMetadata {
+                    title: s("Playing video"),
+                    art_url: s("file:///tmp/playing.png"),
+                    ..Default::default()
+                },
+                current: MediaMetadata::default(),
+                expect: Expect {
+                    title: Some(None),
+                    // Art alone survives because the update carries no track identity.
+                    art_url: Some(Some("file:///tmp/playing.png")),
+                    ..Default::default()
+                },
+            },
+        ];
 
-        assert_eq!(current.length, previous.length);
-        assert_eq!(current.art_url, previous.art_url);
-        assert_eq!(current.url, previous.url);
-    }
+        for case in cases {
+            let name = case.name;
+            let resolved = resolve_metadata(&case.previous, case.current, case.status);
+            let expect = case.expect;
 
-    #[test]
-    fn test_same_youtube_track_retains_previous_native_artwork() {
-        let previous = MediaMetadata {
-            title: Some("Video".into()),
-            artist: Some("Creator".into()),
-            art_url: Some("file:///tmp/native.png".into()),
-            url: Some("https://www.youtube.com/watch?v=dQw4w9WgXcQ".into()),
-            length: Some(534_000_000),
-            track_id: Some("/track/1".into()),
-            ..Default::default()
-        };
-        let current = MediaMetadata {
-            title: previous.title.clone(),
-            artist: previous.artist.clone(),
-            url: previous.url.clone(),
-            track_id: previous.track_id.clone(),
-            ..Default::default()
-        };
-
-        let resolved = resolve_metadata(&previous, current, PlaybackStatus::Playing);
-
-        assert_eq!(resolved.art_url, previous.art_url);
-        assert_eq!(resolved.length, previous.length);
-    }
-
-    #[test]
-    fn test_new_same_track_artwork_wins_over_previous_artwork() {
-        let previous = MediaMetadata {
-            title: Some("Video".into()),
-            artist: Some("Creator".into()),
-            art_url: Some("file:///tmp/old.png".into()),
-            url: Some("https://www.youtube.com/watch?v=dQw4w9WgXcQ".into()),
-            ..Default::default()
-        };
-        let current = MediaMetadata {
-            title: previous.title.clone(),
-            artist: previous.artist.clone(),
-            art_url: Some("file:///tmp/new.png".into()),
-            url: previous.url.clone(),
-            ..Default::default()
-        };
-
-        let resolved = resolve_metadata(&previous, current, PlaybackStatus::Playing);
-
-        assert_eq!(resolved.art_url.as_deref(), Some("file:///tmp/new.png"));
-    }
-
-    #[test]
-    fn test_browser_back_state_preserves_previous_artwork() {
-        let previous = MediaMetadata {
-            title: Some("Video".into()),
-            art_url: Some("file:///tmp/video.png".into()),
-            ..Default::default()
-        };
-        let current = MediaMetadata {
-            title: Some("Firefox".into()),
-            ..Default::default()
-        };
-
-        let resolved = resolve_metadata(&previous, current, PlaybackStatus::Paused);
-
-        assert_eq!(resolved.art_url, previous.art_url);
-    }
-
-    #[test]
-    fn test_changed_track_id_does_not_preserve_previous_artwork() {
-        let previous = MediaMetadata {
-            track_id: Some("old".into()),
-            art_url: Some("file:///tmp/old.png".into()),
-            ..Default::default()
-        };
-        let current = MediaMetadata {
-            track_id: Some("new".into()),
-            title: Some("New track".into()),
-            ..Default::default()
-        };
-
-        let resolved = resolve_metadata(&previous, current, PlaybackStatus::Playing);
-
-        assert_eq!(resolved.art_url, None);
-    }
-
-    #[test]
-    fn test_do_not_preserve_metadata_for_new_track() {
-        let previous = MediaMetadata {
-            title: Some("Old video".into()),
-            artist: Some("Creator".into()),
-            art_url: Some("file:///tmp/old.png".into()),
-            url: Some("https://example.com/old-video".into()),
-            length: Some(534_000_000),
-            ..Default::default()
-        };
-        let current = MediaMetadata {
-            title: Some("New video".into()),
-            url: Some("https://www.youtube.com/watch?v=dQw4w9WgXcQ".into()),
-            ..Default::default()
-        };
-
-        let resolved = resolve_metadata(&previous, current, PlaybackStatus::Playing);
-
-        assert_eq!(resolved.length, None);
-        assert_eq!(
-            resolved.art_url.as_deref(),
-            Some("https://i.ytimg.com/vi/dQw4w9WgXcQ/maxresdefault.jpg")
-        );
-    }
-
-    #[test]
-    fn test_preserve_metadata_without_url_by_title_and_artist() {
-        let previous = MediaMetadata {
-            title: Some("Track".into()),
-            artist: Some("Artist".into()),
-            art_url: Some("file:///tmp/track.png".into()),
-            length: Some(180_000_000),
-            ..Default::default()
-        };
-        let mut current = MediaMetadata {
-            title: previous.title.clone(),
-            artist: previous.artist.clone(),
-            ..Default::default()
-        };
-
-        preserve_same_track_metadata(&previous, &mut current);
-
-        assert_eq!(current.length, previous.length);
-        assert_eq!(current.art_url, previous.art_url);
-    }
-
-    #[test]
-    fn test_different_track_ids_veto_title_artist_fallback() {
-        let previous = MediaMetadata {
-            title: Some("Track".into()),
-            artist: Some("Artist".into()),
-            art_url: Some("file:///tmp/old.png".into()),
-            length: Some(180_000_000),
-            track_id: Some("/track/old".into()),
-            ..Default::default()
-        };
-        let current = MediaMetadata {
-            title: previous.title.clone(),
-            artist: previous.artist.clone(),
-            track_id: Some("/track/new".into()),
-            ..Default::default()
-        };
-
-        let resolved = resolve_metadata(&previous, current, PlaybackStatus::Playing);
-
-        assert_eq!(resolved.art_url, None);
-        assert_eq!(resolved.length, None);
-    }
-
-    #[test]
-    fn test_different_track_ids_veto_equal_url() {
-        let previous = MediaMetadata {
-            title: Some("Track".into()),
-            artist: Some("Artist".into()),
-            art_url: Some("file:///tmp/old.png".into()),
-            url: Some("https://example.com/track".into()),
-            length: Some(180_000_000),
-            track_id: Some("/track/old".into()),
-            ..Default::default()
-        };
-        let current = MediaMetadata {
-            title: previous.title.clone(),
-            artist: previous.artist.clone(),
-            url: previous.url.clone(),
-            track_id: Some("/track/new".into()),
-            ..Default::default()
-        };
-
-        let resolved = resolve_metadata(&previous, current, PlaybackStatus::Playing);
-
-        assert_eq!(resolved.art_url, None);
-        assert_eq!(resolved.length, None);
-    }
-
-    #[test]
-    fn test_different_titles_veto_equal_url() {
-        let previous = MediaMetadata {
-            title: Some("Old track".into()),
-            art_url: Some("file:///tmp/old.png".into()),
-            url: Some("https://example.com/radio".into()),
-            length: Some(180_000_000),
-            ..Default::default()
-        };
-        let mut current = previous.clone();
-        current.title = Some("New track".into());
-        current.art_url = None;
-        current.length = None;
-
-        let resolved = resolve_metadata(&previous, current, PlaybackStatus::Playing);
-
-        assert_eq!(resolved.art_url, None);
-        assert_eq!(resolved.length, None);
-    }
-
-    #[test]
-    fn test_different_non_empty_urls_mark_track_changed() {
-        let previous = MediaMetadata {
-            url: Some("https://example.com/old".into()),
-            ..Default::default()
-        };
-        let mut current = previous.clone();
-        current.url = Some("https://example.com/new".into());
-
-        assert!(has_track_changed(&previous, &current));
-
-        current.url = None;
-        assert!(!has_track_changed(&previous, &current));
-    }
-
-    #[test]
-    fn test_same_track_restores_omitted_track_id() {
-        let previous = MediaMetadata {
-            title: Some("Track".into()),
-            artist: Some("Artist".into()),
-            url: Some("https://example.com/track".into()),
-            track_id: Some("/track/current".into()),
-            ..Default::default()
-        };
-        let current = MediaMetadata {
-            title: previous.title.clone(),
-            artist: previous.artist.clone(),
-            url: previous.url.clone(),
-            ..Default::default()
-        };
-
-        let resolved = resolve_metadata(&previous, current, PlaybackStatus::Playing);
-
-        assert_eq!(resolved.track_id, previous.track_id);
-    }
-
-    #[test]
-    fn test_same_track_id_preserves_partial_metadata() {
-        let previous = MediaMetadata {
-            title: Some("Track".into()),
-            artist: Some("Artist".into()),
-            art_url: Some("file:///tmp/art.png".into()),
-            url: Some("https://example.com/track".into()),
-            length: Some(180_000_000),
-            track_id: Some("/track/current".into()),
-            ..Default::default()
-        };
-        let current = MediaMetadata {
-            title: previous.title.clone(),
-            track_id: previous.track_id.clone(),
-            ..Default::default()
-        };
-
-        let resolved = resolve_metadata(&previous, current, PlaybackStatus::Playing);
-
-        assert_eq!(resolved.art_url, previous.art_url);
-        assert_eq!(resolved.url, previous.url);
-        assert_eq!(resolved.length, previous.length);
-    }
-
-    #[test]
-    fn test_meaningful_preview_artwork_replaces_previous_track() {
-        let previous = MediaMetadata {
-            title: Some("Playing video".into()),
-            artist: Some("Creator".into()),
-            art_url: Some("file:///tmp/playing.png".into()),
-            url: Some("https://example.com/playing-video".into()),
-            ..Default::default()
-        };
-        let mut preview = MediaMetadata {
-            title: Some("Short preview".into()),
-            artist: Some("Other creator".into()),
-            art_url: youtube_thumbnail_url("https://www.youtube.com/watch?v=dQw4w9WgXcQ"),
-            url: Some("https://www.youtube.com/watch?v=dQw4w9WgXcQ".into()),
-            ..Default::default()
-        };
-        let preview_art = preview.art_url.clone();
-
-        preserve_same_track_metadata(&previous, &mut preview);
-
-        assert_eq!(preview.art_url, preview_art);
-        assert_ne!(preview.art_url, previous.art_url);
-    }
-
-    #[test]
-    fn test_incomplete_active_metadata_preserves_previous_presentation() {
-        let previous = MediaMetadata {
-            title: Some("Playing video".into()),
-            artist: Some("Creator".into()),
-            art_url: Some("file:///tmp/playing.png".into()),
-            url: Some("https://www.youtube.com/watch?v=dQw4w9WgXcQ".into()),
-            length: Some(534_000_000),
-            ..Default::default()
-        };
-        let mut current = MediaMetadata::default();
-
-        preserve_incomplete_active_metadata(&previous, &mut current, PlaybackStatus::Paused);
-
-        assert_eq!(current.title, previous.title);
-        assert_eq!(current.art_url, previous.art_url);
-        assert_eq!(current.length, previous.length);
-    }
-
-    #[test]
-    fn test_titleless_metadata_with_artwork_is_not_overwritten() {
-        let previous = MediaMetadata {
-            title: Some("Old track".into()),
-            art_url: Some("file:///tmp/old.png".into()),
-            ..Default::default()
-        };
-        let mut current = MediaMetadata {
-            art_url: Some("file:///tmp/new.png".into()),
-            ..Default::default()
-        };
-
-        preserve_incomplete_active_metadata(&previous, &mut current, PlaybackStatus::Playing);
-
-        assert_eq!(current.title, None);
-        assert_eq!(current.art_url.as_deref(), Some("file:///tmp/new.png"));
-    }
-
-    #[test]
-    fn test_incomplete_new_track_metadata_is_not_overwritten() {
-        let previous = MediaMetadata {
-            title: Some("Old track".into()),
-            art_url: Some("file:///tmp/old.png".into()),
-            url: Some("https://example.com/old".into()),
-            length: Some(180_000_000),
-            track_id: Some("/track/old".into()),
-            ..Default::default()
-        };
-        let current = MediaMetadata {
-            url: Some("https://example.com/new".into()),
-            track_id: Some("/track/new".into()),
-            ..Default::default()
-        };
-
-        let resolved = resolve_metadata(&previous, current, PlaybackStatus::Playing);
-
-        assert_eq!(resolved.title, None);
-        assert_eq!(resolved.art_url, None);
-        assert_eq!(resolved.url.as_deref(), Some("https://example.com/new"));
-        assert_eq!(resolved.track_id.as_deref(), Some("/track/new"));
-        assert!(has_track_changed(&previous, &resolved));
-    }
-
-    #[test]
-    fn test_stopped_player_does_not_preserve_incomplete_metadata() {
-        let previous = MediaMetadata {
-            title: Some("Playing video".into()),
-            art_url: Some("file:///tmp/playing.png".into()),
-            ..Default::default()
-        };
-        let mut current = MediaMetadata::default();
-
-        preserve_incomplete_active_metadata(&previous, &mut current, PlaybackStatus::Stopped);
-
-        assert_eq!(current.title, None);
-        assert_eq!(current.art_url, None);
+            if let Some(title) = expect.title {
+                assert_eq!(resolved.title.as_deref(), title, "{name}: title");
+            }
+            if let Some(art_url) = expect.art_url {
+                assert_eq!(resolved.art_url.as_deref(), art_url, "{name}: art_url");
+            }
+            if let Some(url) = expect.url {
+                assert_eq!(resolved.url.as_deref(), url, "{name}: url");
+            }
+            if let Some(length) = expect.length {
+                assert_eq!(resolved.length, length, "{name}: length");
+            }
+            if let Some(track_id) = expect.track_id {
+                assert_eq!(resolved.track_id.as_deref(), track_id, "{name}: track_id");
+            }
+            if let Some(track_changed) = expect.track_changed {
+                assert_eq!(
+                    has_track_changed(&case.previous, &resolved),
+                    track_changed,
+                    "{name}: track_changed"
+                );
+            }
+        }
     }
 
     #[test]

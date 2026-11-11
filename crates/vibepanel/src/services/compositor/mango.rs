@@ -953,29 +953,18 @@ mod tests {
     }
 
     #[test]
-    fn start_without_socket_env_is_a_no_op() {
+    fn no_socket_backend_is_inert() {
         let backend = backend_without_socket();
 
         backend.start(Arc::new(|_| {}), Arc::new(|_| {}));
-
-        assert!(
-            !backend.running.load(Ordering::SeqCst),
-            "backend must not report running without MANGO_INSTANCE_SIGNATURE"
-        );
+        assert!(!backend.running.load(Ordering::SeqCst));
         assert!(
             backend
                 .watch_threads
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .is_empty(),
-            "no watch threads should be spawned without a socket"
+                .is_empty()
         );
-    }
-
-    #[test]
-    fn commands_without_socket_do_not_panic() {
-        let backend = backend_without_socket();
-
         assert!(backend.send_command("get all-monitors").is_none());
         backend.switch_workspace(2);
         backend.quit_compositor();
@@ -1074,7 +1063,7 @@ mod tests {
     }
 
     #[test]
-    fn socket_workspace_parser_accepts_all_monitors_name_field() {
+    fn socket_workspace_parser_tracks_each_output() {
         let shared = Arc::new(MangoSharedState::default());
         let value = serde_json::json!({
             "monitors": [
@@ -1086,18 +1075,34 @@ mod tests {
                         {"index": 1, "is_active": false, "is_urgent": false, "client_count": 0},
                         {"index": 2, "is_active": true, "is_urgent": false, "client_count": 3}
                     ]
+                },
+                {
+                    "name": "HDMI-A-1",
+                    "active": false,
+                    "active_tags": [5],
+                    "tags": [
+                        {"index": 1, "is_urgent": true, "client_count": 1},
+                        {"index": 5, "is_active": true, "is_urgent": false, "client_count": 1}
+                    ]
                 }
             ]
         });
 
         assert!(apply_workspace_from_monitors(&shared, &value));
         let snapshot = shared.snapshot.read();
-        let output = snapshot.per_output.get("eDP-1").unwrap();
+        let edp = &snapshot.per_output["eDP-1"];
+        let hdmi = &snapshot.per_output["HDMI-A-1"];
 
-        assert!(output.active_workspace.contains(&2));
-        assert_eq!(output.window_counts.get(&2), Some(&3));
-        assert!(snapshot.active_workspace.contains(&2));
+        assert!(edp.active_workspace.contains(&2));
+        assert_eq!(edp.window_counts.get(&2), Some(&3));
+        assert!(hdmi.active_workspace.contains(&5));
+        // Only the active monitor sets the global active workspace.
+        assert_eq!(snapshot.active_workspace, HashSet::from([2]));
         assert!(snapshot.occupied_workspaces.contains(&2));
+
+        assert!(snapshot.urgent_workspaces.contains(&1));
+        assert_eq!(edp.urgent_workspaces, Some(HashSet::new()));
+        assert_eq!(hdmi.urgent_workspaces, Some(HashSet::from([1])));
         drop(snapshot);
         assert!(!apply_workspace_from_monitors(&shared, &value));
     }
@@ -1146,7 +1151,7 @@ mod tests {
     }
 
     #[test]
-    fn socket_window_layout_parser_tracks_each_output_and_active_output() {
+    fn socket_window_layout_parser_tracks_connected_outputs_and_active_output() {
         let shared = Arc::new(MangoSharedState::default());
         let value = serde_json::json!({
             "monitors": [
@@ -1166,99 +1171,14 @@ mod tests {
         drop(snapshot);
 
         assert!(!apply_window_layouts_from_monitors(&shared, &value));
-    }
 
-    #[test]
-    fn socket_window_layout_parser_removes_disconnected_outputs() {
-        let shared = Arc::new(MangoSharedState::default());
-        let initial = serde_json::json!({
-            "monitors": [
-                {"name": "eDP-1", "active": true, "layout_symbol": "T"},
-                {"name": "DP-1", "active": false, "layout_symbol": "G"}
-            ]
-        });
         let disconnected = serde_json::json!({
             "monitors": [
                 {"name": "eDP-1", "active": true, "layout_symbol": "T"}
             ]
         });
-
-        assert!(apply_window_layouts_from_monitors(&shared, &initial));
         assert!(apply_window_layouts_from_monitors(&shared, &disconnected));
         assert_eq!(shared.window_layouts.read().per_output.len(), 1);
-    }
-
-    #[test]
-    fn socket_workspace_parser_global_active_uses_active_monitor_only() {
-        let shared = Arc::new(MangoSharedState::default());
-        let value = serde_json::json!({
-            "monitors": [
-                {
-                    "name": "eDP-1",
-                    "active": true,
-                    "active_tags": [2],
-                    "tags": [
-                        {"index": 1, "is_active": false, "is_urgent": false, "client_count": 0},
-                        {"index": 2, "is_active": true, "is_urgent": false, "client_count": 1}
-                    ]
-                },
-                {
-                    "name": "DP-1",
-                    "active": false,
-                    "active_tags": [5],
-                    "tags": [
-                        {"index": 5, "is_active": true, "is_urgent": false, "client_count": 1}
-                    ]
-                }
-            ]
-        });
-
-        assert!(apply_workspace_from_monitors(&shared, &value));
-        let snapshot = shared.snapshot.read();
-
-        assert!(snapshot.per_output["eDP-1"].active_workspace.contains(&2));
-        assert!(snapshot.per_output["DP-1"].active_workspace.contains(&5));
-        assert_eq!(snapshot.active_workspace, HashSet::from([2]));
-    }
-
-    #[test]
-    fn socket_workspace_parser_tracks_urgency_per_output() {
-        let shared = Arc::new(MangoSharedState::default());
-        let value = serde_json::json!({
-            "monitors": [
-                {
-                    "name": "eDP-1",
-                    "active": true,
-                    "active_tags": [2],
-                    "tags": [
-                        {"index": 1, "is_urgent": false, "client_count": 0},
-                        {"index": 2, "is_urgent": false, "client_count": 1}
-                    ]
-                },
-                {
-                    "name": "HDMI-A-1",
-                    "active": false,
-                    "active_tags": [1],
-                    "tags": [
-                        {"index": 1, "is_urgent": true, "client_count": 1},
-                        {"index": 2, "is_urgent": false, "client_count": 0}
-                    ]
-                }
-            ]
-        });
-
-        assert!(apply_workspace_from_monitors(&shared, &value));
-        let snapshot = shared.snapshot.read();
-
-        assert!(snapshot.urgent_workspaces.contains(&1));
-        assert_eq!(
-            snapshot.per_output["eDP-1"].urgent_workspaces,
-            Some(HashSet::new())
-        );
-        assert_eq!(
-            snapshot.per_output["HDMI-A-1"].urgent_workspaces,
-            Some(HashSet::from([1]))
-        );
     }
 
     #[test]
@@ -1326,6 +1246,25 @@ mod tests {
         assert_eq!(*shared.focused_client_id.read(), None);
     }
 
+    fn listed(shared: &MangoSharedState) -> Vec<(u64, Option<i32>, bool)> {
+        shared
+            .windows
+            .read()
+            .iter()
+            .map(|w| (w.id, w.workspace_id, w.is_scratchpad))
+            .collect()
+    }
+
+    fn focused(shared: &MangoSharedState) -> Vec<u64> {
+        shared
+            .windows
+            .read()
+            .iter()
+            .filter(|w| w.is_focused)
+            .map(|w| w.id)
+            .collect()
+    }
+
     #[test]
     fn socket_window_list_parser_maps_mango_clients() {
         let shared = Arc::new(MangoSharedState::default());
@@ -1348,197 +1287,126 @@ mod tests {
                     "tags": [5],
                     "is_focused": false,
                     "is_urgent": true
-                }
-            ]
-        });
-
-        assert!(apply_window_list_from_clients(&shared, &value));
-        assert!(!apply_window_list_from_clients(&shared, &value));
-        let windows = shared.windows.read();
-
-        assert_eq!(windows.len(), 2);
-        let terminal = windows.iter().find(|window| window.id == 7).unwrap();
-        assert_eq!(terminal.title, "Terminal");
-        assert_eq!(terminal.app_id, "foot");
-        assert_eq!(terminal.workspace_id, Some(2));
-        assert_eq!(terminal.output.as_deref(), Some("eDP-1"));
-        assert!(terminal.is_focused);
-        assert!(!terminal.is_urgent);
-
-        let browser = windows.iter().find(|window| window.id == 8).unwrap();
-        assert_eq!(browser.workspace_id, Some(5));
-        assert_eq!(browser.output.as_deref(), Some("DP-1"));
-        assert!(!browser.is_focused);
-        assert!(browser.is_urgent);
-    }
-
-    #[test]
-    fn socket_window_list_parser_orders_by_workspace() {
-        let shared = Arc::new(MangoSharedState::default());
-        let value = serde_json::json!({
-            "clients": [
-                {"id": 30, "monitor": "eDP-1", "tags": [3]},
-                {"id": 10, "monitor": "eDP-1", "tags": [1]},
-                {"id": 20, "monitor": "eDP-1", "tags": [2]}
-            ]
-        });
-
-        assert!(apply_window_list_from_clients(&shared, &value));
-        let ids: Vec<_> = shared
-            .windows
-            .read()
-            .iter()
-            .map(|window| window.id)
-            .collect();
-
-        assert_eq!(ids, vec![10, 20, 30]);
-    }
-
-    #[test]
-    fn socket_window_list_parser_orders_outputs_by_geometry() {
-        let shared = Arc::new(MangoSharedState::default());
-        let monitors = serde_json::json!({
-            "monitors": [
-                {"name": "DP-1", "x": 1920, "y": 0, "tags": []},
-                {"name": "HDMI-A-1", "x": 0, "y": 0, "tags": []}
-            ]
-        });
-        let clients = serde_json::json!({
-            "clients": [
-                {"id": 20, "monitor": "DP-1", "tags": [1]},
-                {"id": 10, "monitor": "HDMI-A-1", "tags": [1]}
-            ]
-        });
-
-        assert!(apply_workspace_from_monitors(&shared, &monitors));
-        assert!(apply_window_list_from_clients(&shared, &clients));
-        let ids: Vec<_> = shared
-            .windows
-            .read()
-            .iter()
-            .map(|window| window.id)
-            .collect();
-
-        assert_eq!(ids, vec![10, 20]);
-    }
-
-    #[test]
-    fn socket_window_list_focus_update_clears_empty_workspace_focus() {
-        let shared = Arc::new(MangoSharedState::default());
-        let clients = serde_json::json!({
-            "clients": [
-                {"id": 10, "tags": [1], "is_focused": true},
-                {"id": 20, "tags": [2], "is_focused": false}
-            ]
-        });
-
-        assert!(apply_window_list_from_clients(&shared, &clients));
-        assert!(shared.windows.read()[0].is_focused);
-
-        assert!(apply_window_list_focus(&shared, None));
-
-        assert!(
-            shared
-                .windows
-                .read()
-                .iter()
-                .all(|window| !window.is_focused)
-        );
-    }
-
-    #[test]
-    fn socket_window_list_focus_update_moves_active_window() {
-        let shared = Arc::new(MangoSharedState::default());
-        let clients = serde_json::json!({
-            "clients": [
-                {"id": 10, "tags": [1], "is_focused": true},
-                {"id": 20, "tags": [2], "is_focused": false}
-            ]
-        });
-
-        assert!(apply_window_list_from_clients(&shared, &clients));
-        assert!(apply_window_list_focus(&shared, Some(20)));
-        let windows = shared.windows.read();
-
-        assert!(
-            !windows
-                .iter()
-                .find(|window| window.id == 10)
-                .unwrap()
-                .is_focused
-        );
-        assert!(
-            windows
-                .iter()
-                .find(|window| window.id == 20)
-                .unwrap()
-                .is_focused
-        );
-    }
-
-    #[test]
-    fn socket_window_list_parser_ignores_stale_all_clients_focus() {
-        let shared = Arc::new(MangoSharedState::default());
-
-        assert!(apply_focused_window_from_monitors(
-            &shared,
-            &serde_json::json!({
-                "monitors": [{
-                    "name": "DP-1",
-                    "active": true,
-                    "active_tags": [2],
-                    "active_client": {"id": 20, "title": "Browser", "appid": "firefox"}
-                }]
-            })
-        ));
-        assert!(apply_window_list_from_clients(
-            &shared,
-            &serde_json::json!({
-                "clients": [
-                    {"id": 10, "tags": [1], "is_focused": true},
-                    {"id": 20, "tags": [2], "is_focused": false}
-                ]
-            })
-        ));
-        let windows = shared.windows.read();
-
-        assert!(
-            !windows
-                .iter()
-                .find(|window| window.id == 10)
-                .unwrap()
-                .is_focused
-        );
-        assert!(
-            windows
-                .iter()
-                .find(|window| window.id == 20)
-                .unwrap()
-                .is_focused
-        );
-    }
-
-    #[test]
-    fn socket_window_list_parser_handles_optional_fields() {
-        let shared = Arc::new(MangoSharedState::default());
-        let value = serde_json::json!({
-            "clients": [
+                },
                 {"id": 9, "tags": []},
                 {"title": "missing id"}
             ]
         });
 
         assert!(apply_window_list_from_clients(&shared, &value));
+        assert!(!apply_window_list_from_clients(&shared, &value));
         let windows = shared.windows.read();
+        let window = |id| windows.iter().find(|window| window.id == id).unwrap();
 
-        assert_eq!(windows.len(), 1);
-        assert_eq!(windows[0].id, 9);
-        assert!(windows[0].title.is_empty());
-        assert!(windows[0].app_id.is_empty());
-        assert_eq!(windows[0].workspace_id, None);
-        assert_eq!(windows[0].output, None);
-        assert!(!windows[0].is_focused);
-        assert!(!windows[0].is_urgent);
+        assert_eq!(windows.len(), 3);
+        let terminal = window(7);
+        assert_eq!(terminal.title, "Terminal");
+        assert_eq!(terminal.app_id, "foot");
+        assert_eq!(terminal.workspace_id, Some(2));
+        assert_eq!(terminal.extra_workspace_ids, vec![3]);
+        assert_eq!(terminal.output.as_deref(), Some("eDP-1"));
+        assert!(terminal.is_focused);
+        assert!(!terminal.is_urgent);
+
+        let browser = window(8);
+        assert_eq!(browser.workspace_id, Some(5));
+        assert_eq!(browser.output.as_deref(), Some("DP-1"));
+        assert!(!browser.is_focused);
+        assert!(browser.is_urgent);
+
+        let bare = window(9);
+        assert!(bare.title.is_empty());
+        assert!(bare.app_id.is_empty());
+        assert_eq!(bare.workspace_id, None);
+        assert_eq!(bare.output, None);
+        assert!(!bare.is_focused);
+        assert!(!bare.is_urgent);
+    }
+
+    #[test]
+    fn socket_window_list_parser_orders_by_output_then_workspace() {
+        let cases = [
+            (
+                "by workspace",
+                serde_json::json!({ "monitors": [] }),
+                serde_json::json!({
+                    "clients": [
+                        {"id": 30, "monitor": "eDP-1", "tags": [3]},
+                        {"id": 10, "monitor": "eDP-1", "tags": [1]},
+                        {"id": 20, "monitor": "eDP-1", "tags": [2]}
+                    ]
+                }),
+                vec![10, 20, 30],
+            ),
+            (
+                "outputs by geometry",
+                serde_json::json!({
+                    "monitors": [
+                        {"name": "DP-1", "x": 1920, "y": 0, "tags": []},
+                        {"name": "HDMI-A-1", "x": 0, "y": 0, "tags": []}
+                    ]
+                }),
+                serde_json::json!({
+                    "clients": [
+                        {"id": 20, "monitor": "DP-1", "tags": [1]},
+                        {"id": 10, "monitor": "HDMI-A-1", "tags": [1]}
+                    ]
+                }),
+                vec![10, 20],
+            ),
+        ];
+
+        for (name, monitors, clients, expected) in cases {
+            let shared = Arc::new(MangoSharedState::default());
+            apply_workspace_from_monitors(&shared, &monitors);
+            assert!(apply_window_list_from_clients(&shared, &clients), "{name}");
+            let ids: Vec<_> = listed(&shared).into_iter().map(|(id, ..)| id).collect();
+            assert_eq!(ids, expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn socket_window_list_focus_update_follows_active_window() {
+        let shared = Arc::new(MangoSharedState::default());
+        let clients = serde_json::json!({
+            "clients": [
+                {"id": 10, "tags": [1], "is_focused": true},
+                {"id": 20, "tags": [2], "is_focused": false}
+            ]
+        });
+
+        assert!(apply_window_list_from_clients(&shared, &clients));
+        assert_eq!(focused(&shared), [10]);
+
+        assert!(apply_window_list_focus(&shared, Some(20)));
+        assert_eq!(focused(&shared), [20]);
+
+        // Switching to an empty workspace clears focus.
+        assert!(apply_window_list_focus(&shared, None));
+        assert!(focused(&shared).is_empty());
+    }
+
+    #[test]
+    fn socket_window_list_parser_ignores_stale_all_clients_focus() {
+        let shared = Arc::new(MangoSharedState::default());
+        let monitors = serde_json::json!({
+            "monitors": [{
+                "name": "DP-1",
+                "active": true,
+                "active_tags": [2],
+                "active_client": {"id": 20, "title": "Browser", "appid": "firefox"}
+            }]
+        });
+        let clients = serde_json::json!({
+            "clients": [
+                {"id": 10, "tags": [1], "is_focused": true},
+                {"id": 20, "tags": [2], "is_focused": false}
+            ]
+        });
+
+        assert!(apply_focused_window_from_monitors(&shared, &monitors));
+        assert!(apply_window_list_from_clients(&shared, &clients));
+        assert_eq!(focused(&shared), [20]);
     }
 
     #[test]
@@ -1559,131 +1427,75 @@ mod tests {
         assert!(!apply_keyboard_layout_from_monitors(&shared, &value));
     }
 
-    // --- scratchpad filtering ---
-    // Dismissed scratchpads have empty tags; summoned ones carry the visible
-    // tagset. Visibility is tags-based, not focus-based.
-
     #[test]
-    fn socket_window_list_hides_dismissed_scratchpads() {
-        let shared = Arc::new(MangoSharedState::default());
-        // Dismissed scratchpads and swallowed clients are not actionable taskbar entries.
-        let value = serde_json::json!({
-            "clients": [
-                {
-                    "id": 1, "tags": [],
-                    "is_scratchpad": true, "is_namedscratchpad": false
-                },
-                {
-                    "id": 2, "tags": [],
-                    "is_scratchpad": false, "is_namedscratchpad": true
-                },
-                {
-                    "id": 3, "tags": [1],
-                    "is_scratchpad": false, "is_namedscratchpad": false
-                },
-                {
-                    "id": 4, "tags": [1],
-                    "is_swallowedby": true
-                }
-            ]
-        });
+    fn window_list_filters_hidden_clients() {
+        // Dismissed scratchpads have empty (or missing) tags; summoned ones
+        // carry the visible tagset, focused or not. Tag 0 is an overlay above
+        // the bar.
+        // (name, clients, apply() result, listed (id, workspace, is_scratchpad))
+        let cases = [
+            (
+                "dismissed scratchpads and swallowed clients are hidden",
+                serde_json::json!([
+                    {"id": 1, "tags": [], "is_scratchpad": true, "is_namedscratchpad": false},
+                    {"id": 2, "tags": [], "is_scratchpad": false, "is_namedscratchpad": true},
+                    {"id": 3, "tags": [1], "is_scratchpad": false, "is_namedscratchpad": false},
+                    {"id": 4, "tags": [1], "is_swallowedby": true}
+                ]),
+                true,
+                vec![(3, Some(1), false)],
+            ),
+            (
+                "summoned scratchpad is kept and flagged",
+                serde_json::json!([
+                    {"id": 5, "tags": [1], "is_focused": false,
+                     "is_scratchpad": false, "is_namedscratchpad": true},
+                    {"id": 6, "tags": [2], "is_focused": true,
+                     "is_scratchpad": false, "is_namedscratchpad": false}
+                ]),
+                true,
+                vec![(5, Some(1), true), (6, Some(2), false)],
+            ),
+            (
+                "summoned scratchpad is kept when unfocused",
+                serde_json::json!([
+                    {"id": 10, "tags": [1], "is_focused": false,
+                     "is_scratchpad": true, "is_namedscratchpad": false}
+                ]),
+                true,
+                vec![(10, Some(1), true)],
+            ),
+            (
+                "scratchpad missing tags field is hidden",
+                serde_json::json!([
+                    {"id": 20, "is_scratchpad": false, "is_namedscratchpad": true}
+                ]),
+                false,
+                vec![],
+            ),
+            (
+                "special tag is hidden regardless of visibility",
+                serde_json::json!([
+                    {"id": 1, "tags": [0], "is_visible": false},
+                    {"id": 2, "tags": [0], "is_visible": true},
+                    {"id": 3, "tags": [0]},
+                    {"id": 4, "tags": [1], "is_visible": false}
+                ]),
+                true,
+                vec![(4, Some(1), false)],
+            ),
+        ];
 
-        assert!(apply_window_list_from_clients(&shared, &value));
-        let windows = shared.windows.read();
-
-        assert_eq!(windows.len(), 1, "only the normal client should remain");
-        assert_eq!(windows[0].id, 3);
-    }
-
-    #[test]
-    fn socket_window_list_keeps_summoned_scratchpad() {
-        // A summoned (tagged) scratchpad stays in the taskbar even when unfocused.
-        let shared = Arc::new(MangoSharedState::default());
-        let value = serde_json::json!({
-            "clients": [
-                {
-                    "id": 5, "tags": [1],
-                    "is_focused": false,
-                    "is_scratchpad": false, "is_namedscratchpad": true
-                },
-                {
-                    "id": 6, "tags": [2],
-                    "is_focused": true,
-                    "is_scratchpad": false, "is_namedscratchpad": false
-                }
-            ]
-        });
-
-        assert!(apply_window_list_from_clients(&shared, &value));
-        let windows = shared.windows.read();
-
-        assert_eq!(windows.len(), 2, "visible (tagged) scratchpad is kept");
-        let scratch = windows.iter().find(|w| w.id == 5).unwrap();
-        assert!(scratch.is_scratchpad, "visible scratchpad is flagged");
-        let normal = windows.iter().find(|w| w.id == 6).unwrap();
-        assert!(!normal.is_scratchpad);
-    }
-
-    #[test]
-    fn socket_window_list_keeps_summoned_scratchpad_when_unfocused() {
-        // Regression: a summoned scratchpad that lost focus must still show.
-        let shared = Arc::new(MangoSharedState::default());
-        let value = serde_json::json!({
-            "clients": [
-                {
-                    "id": 10, "tags": [1],
-                    "is_focused": false,
-                    "is_scratchpad": true, "is_namedscratchpad": false
-                }
-            ]
-        });
-
-        assert!(apply_window_list_from_clients(&shared, &value));
-        let windows = shared.windows.read();
-
-        assert_eq!(windows.len(), 1, "unfocused but visible scratchpad is kept");
-        assert_eq!(windows[0].id, 10);
-    }
-
-    #[test]
-    fn socket_window_list_hides_dismissed_scratchpad_missing_tags_field() {
-        // A missing tags field is treated the same as empty (hidden).
-        let shared = Arc::new(MangoSharedState::default());
-        let value = serde_json::json!({
-            "clients": [
-                {"id": 20, "is_scratchpad": false, "is_namedscratchpad": true}
-            ]
-        });
-
-        assert!(!apply_window_list_from_clients(&shared, &value));
-        let windows = shared.windows.read();
-
-        assert!(
-            windows.is_empty(),
-            "scratchpad without tags should be hidden"
-        );
-    }
-
-    // --- special overlay workspace (Tag 0) filtering ---
-
-    #[test]
-    fn socket_window_list_excludes_special_tags_regardless_of_visibility() {
-        let shared = Arc::new(MangoSharedState::default());
-        let value = serde_json::json!({
-            "clients": [
-                {"id": 1, "tags": [0], "is_visible": false},
-                {"id": 2, "tags": [0], "is_visible": true},
-                {"id": 3, "tags": [0]},
-                {"id": 4, "tags": [1], "is_visible": false}
-            ]
-        });
-
-        assert!(apply_window_list_from_clients(&shared, &value));
-        let windows = shared.windows.read();
-
-        assert_eq!(windows.len(), 1);
-        assert_eq!(windows[0].id, 4, "ordinary off-workspace client is kept");
-        assert_eq!(windows[0].workspace_id, Some(1));
+        for (name, clients, changed, expected) in cases {
+            let shared = Arc::new(MangoSharedState::default());
+            let value = serde_json::json!({ "clients": clients });
+            assert_eq!(
+                apply_window_list_from_clients(&shared, &value),
+                changed,
+                "{name}"
+            );
+            assert_eq!(listed(&shared), expected, "{name}");
+        }
     }
 
     #[test]
@@ -1695,33 +1507,12 @@ mod tests {
         let normal = serde_json::json!({
             "clients": [{"id": 9, "tags": [2], "is_visible": true}]
         });
+
         assert!(apply_window_list_from_clients(&shared, &normal));
-        {
-            let windows = shared.windows.read();
-            assert_eq!(windows.len(), 1);
-            assert_eq!(windows[0].id, 9);
-            assert!(!windows[0].is_scratchpad);
-            assert_eq!(windows[0].workspace_id, Some(2));
-        }
+        assert_eq!(listed(&shared), [(9, Some(2), false)]);
         assert!(apply_window_list_from_clients(&shared, &special));
-        assert!(shared.windows.read().is_empty());
+        assert!(listed(&shared).is_empty());
         assert!(apply_window_list_from_clients(&shared, &normal));
-        let windows = shared.windows.read();
-        assert_eq!(windows.len(), 1);
-        assert_eq!(windows[0].workspace_id, Some(2));
-        assert!(!windows[0].is_scratchpad);
-    }
-
-    #[test]
-    fn socket_window_list_keeps_every_tag_of_multi_tag_clients() {
-        let shared = Arc::new(MangoSharedState::default());
-        let value = serde_json::json!({
-            "clients": [{"id": 5, "tags": [2, 4], "monitor": "DP-1"}]
-        });
-
-        assert!(apply_window_list_from_clients(&shared, &value));
-        let windows = shared.windows.read();
-        assert_eq!(windows[0].workspace_id, Some(2));
-        assert_eq!(windows[0].extra_workspace_ids, vec![4]);
+        assert_eq!(listed(&shared), [(9, Some(2), false)]);
     }
 }

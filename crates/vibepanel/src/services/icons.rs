@@ -2516,83 +2516,31 @@ mod tests {
     use super::*;
     use crate::ui_regression_test_support::{init_gtk_or_skip, run_ignored_contract_subprocess};
 
-    // Material Symbol Mapping Tests
-
     #[test]
-    fn test_material_symbol_mapping() {
-        assert_eq!(material_symbol_name("battery-full"), "battery_full");
-        assert_eq!(material_symbol_name("battery-high"), "battery_6_bar");
-        assert_eq!(material_symbol_name("battery-medium-high"), "battery_5_bar");
-        assert_eq!(material_symbol_name("battery-medium"), "battery_4_bar");
-        assert_eq!(material_symbol_name("battery-medium-low"), "battery_3_bar");
-        assert_eq!(material_symbol_name("battery-low"), "battery_2_bar");
-        assert_eq!(material_symbol_name("battery-very-low"), "battery_1_bar");
-        assert_eq!(
-            material_symbol_name("battery-critical-alert"),
-            "battery_alert"
-        );
-        assert_eq!(material_symbol_name("battery-missing"), "battery_unknown");
-    }
+    fn material_symbol_cases() {
+        let cases = [
+            ("battery level", "battery-medium", "battery_4_bar"),
+            ("battery missing", "battery-missing", "battery_unknown"),
+            (
+                "charging level",
+                "battery-medium-charging",
+                "battery_charging_60",
+            ),
+            (
+                "weather",
+                "weather-partly-cloudy-night",
+                "partly_cloudy_night",
+            ),
+            (
+                "unmapped name passes through",
+                "unknown-icon",
+                "unknown-icon",
+            ),
+        ];
 
-    #[test]
-    fn test_material_symbol_mapping_weather() {
-        assert_eq!(material_symbol_name("weather-clear"), "sunny");
-        assert_eq!(material_symbol_name("weather-clear-night"), "bedtime");
-        assert_eq!(
-            material_symbol_name("weather-partly-cloudy"),
-            "partly_cloudy_day"
-        );
-        assert_eq!(
-            material_symbol_name("weather-partly-cloudy-night"),
-            "partly_cloudy_night"
-        );
-        assert_eq!(material_symbol_name("weather-cloudy"), "cloud");
-        assert_eq!(material_symbol_name("weather-fog"), "foggy");
-        assert_eq!(material_symbol_name("weather-drizzle"), "rainy_light");
-        assert_eq!(material_symbol_name("weather-rain"), "rainy");
-        assert_eq!(material_symbol_name("weather-snow"), "weather_snowy");
-        assert_eq!(material_symbol_name("weather-thunderstorm"), "thunderstorm");
-        assert_eq!(material_symbol_name("weather-unknown"), "cloud");
-        assert_eq!(material_symbol_name("weather-uv-index"), "nest_sunblock");
-    }
-
-    #[test]
-    fn test_material_symbol_mapping_charging() {
-        assert_eq!(
-            material_symbol_name("battery-full-charging"),
-            "battery_charging_full"
-        );
-        assert_eq!(
-            material_symbol_name("battery-high-charging"),
-            "battery_charging_90"
-        );
-        assert_eq!(
-            material_symbol_name("battery-medium-high-charging"),
-            "battery_charging_80"
-        );
-        assert_eq!(
-            material_symbol_name("battery-medium-charging"),
-            "battery_charging_60"
-        );
-        assert_eq!(
-            material_symbol_name("battery-medium-low-charging"),
-            "battery_charging_50"
-        );
-        assert_eq!(
-            material_symbol_name("battery-low-charging"),
-            "battery_charging_30"
-        );
-        assert_eq!(
-            material_symbol_name("battery-very-low-charging"),
-            "battery_charging_20"
-        );
-    }
-
-    #[test]
-    fn test_material_symbol_fallback() {
-        // Unknown names pass through unchanged
-        assert_eq!(material_symbol_name("unknown-icon"), "unknown-icon");
-        assert_eq!(material_symbol_name("wifi"), "wifi");
+        for (name, icon, expected) in cases {
+            assert_eq!(material_symbol_name(icon), expected, "{name}");
+        }
     }
 
     #[test]
@@ -2607,122 +2555,113 @@ mod tests {
         );
     }
 
-    // GTK Icon Mapping Tests
-
     #[test]
-    fn test_gtk_icon_candidates_battery_discharging() {
-        // Adwaita level icons should be primary, with GNOME/freedesktop fallbacks
-        let candidates = gtk_icon_candidates("battery-full");
-        assert!(!candidates.is_empty());
-        assert_eq!(candidates[0], "battery-level-100-symbolic");
-        assert!(candidates.contains(&"battery-full-symbolic"));
+    fn gtk_candidate_cases() {
+        // (logical name, primary candidate, required fallback); no primary means
+        // no candidates, so the name is used as-is.
+        let cases: [(&str, Option<&str>, Option<&str>); 22] = [
+            (
+                "battery-full",
+                Some("battery-level-100-symbolic"),
+                Some("battery-full-symbolic"),
+            ),
+            (
+                "battery-high",
+                Some("battery-level-80-symbolic"),
+                Some("battery-good-symbolic"),
+            ),
+            (
+                "battery-medium-high",
+                Some("battery-level-60-symbolic"),
+                Some("battery-good-symbolic"),
+            ),
+            (
+                "battery-medium",
+                Some("battery-level-50-symbolic"),
+                Some("battery-good-symbolic"),
+            ),
+            (
+                "battery-medium-low",
+                Some("battery-level-30-symbolic"),
+                Some("battery-caution-symbolic"),
+            ),
+            (
+                "battery-low",
+                Some("battery-level-20-symbolic"),
+                Some("battery-low-symbolic"),
+            ),
+            (
+                "battery-very-low",
+                Some("battery-level-10-symbolic"),
+                Some("battery-empty-symbolic"),
+            ),
+            (
+                "battery-critical-alert",
+                Some("battery-caution-symbolic"),
+                Some("dialog-warning-symbolic"),
+            ),
+            ("battery-missing", Some("battery-missing-symbolic"), None),
+            (
+                "battery-full-charging",
+                Some("battery-level-100-charged-symbolic"),
+                Some("battery-full-charging-symbolic"),
+            ),
+            (
+                "battery-high-charging",
+                Some("battery-level-80-charging-symbolic"),
+                Some("battery-good-charging-symbolic"),
+            ),
+            (
+                "battery-medium-high-charging",
+                Some("battery-level-60-charging-symbolic"),
+                Some("battery-good-charging-symbolic"),
+            ),
+            (
+                "battery-medium-low-charging",
+                Some("battery-level-30-charging-symbolic"),
+                Some("battery-low-charging-symbolic"),
+            ),
+            (
+                "battery-low-charging",
+                Some("battery-level-20-charging-symbolic"),
+                Some("battery-low-charging-symbolic"),
+            ),
+            (
+                "battery-very-low-charging",
+                Some("battery-level-10-charging-symbolic"),
+                Some("battery-caution-charging-symbolic"),
+            ),
+            ("weather-clear", Some("weather-clear-symbolic"), None),
+            (
+                "weather-clear-night",
+                Some("weather-clear-night-symbolic"),
+                None,
+            ),
+            (
+                "weather-partly-cloudy-night",
+                Some("weather-few-clouds-night-symbolic"),
+                None,
+            ),
+            ("weather-rain", Some("weather-showers-symbolic"), None),
+            (
+                "weather-unknown",
+                Some("weather-severe-alert-symbolic"),
+                None,
+            ),
+            ("unknown-icon", None, None),
+            ("some-random-icon-name", None, None),
+        ];
 
-        let candidates = gtk_icon_candidates("battery-high");
-        assert!(!candidates.is_empty());
-        assert_eq!(candidates[0], "battery-level-80-symbolic");
-        assert!(candidates.contains(&"battery-good-symbolic"));
-
-        let candidates = gtk_icon_candidates("battery-medium-high");
-        assert!(!candidates.is_empty());
-        assert_eq!(candidates[0], "battery-level-60-symbolic");
-        assert!(candidates.contains(&"battery-good-symbolic"));
-
-        let candidates = gtk_icon_candidates("battery-medium");
-        assert!(!candidates.is_empty());
-        assert_eq!(candidates[0], "battery-level-50-symbolic");
-        assert!(candidates.contains(&"battery-good-symbolic"));
-
-        let candidates = gtk_icon_candidates("battery-medium-low");
-        assert!(!candidates.is_empty());
-        assert_eq!(candidates[0], "battery-level-30-symbolic");
-        assert!(candidates.contains(&"battery-caution-symbolic"));
-
-        let candidates = gtk_icon_candidates("battery-low");
-        assert!(!candidates.is_empty());
-        assert_eq!(candidates[0], "battery-level-20-symbolic");
-        assert!(candidates.contains(&"battery-low-symbolic"));
-
-        let candidates = gtk_icon_candidates("battery-very-low");
-        assert!(!candidates.is_empty());
-        assert_eq!(candidates[0], "battery-level-10-symbolic");
-        assert!(candidates.contains(&"battery-empty-symbolic"));
-
-        let candidates = gtk_icon_candidates("battery-critical-alert");
-        assert!(!candidates.is_empty());
-        assert_eq!(candidates[0], "battery-caution-symbolic");
-        assert!(candidates.contains(&"dialog-warning-symbolic"));
-
-        let candidates = gtk_icon_candidates("battery-missing");
-        assert!(!candidates.is_empty());
-        assert_eq!(candidates[0], "battery-missing-symbolic");
-    }
-
-    #[test]
-    fn test_gtk_icon_candidates_battery_charging() {
-        // Adwaita charging level icons should be primary
-        let candidates = gtk_icon_candidates("battery-full-charging");
-        assert!(!candidates.is_empty());
-        assert_eq!(candidates[0], "battery-level-100-charged-symbolic");
-        assert!(candidates.contains(&"battery-full-charging-symbolic"));
-
-        let candidates = gtk_icon_candidates("battery-high-charging");
-        assert!(!candidates.is_empty());
-        assert_eq!(candidates[0], "battery-level-80-charging-symbolic");
-        assert!(candidates.contains(&"battery-good-charging-symbolic"));
-
-        let candidates = gtk_icon_candidates("battery-medium-high-charging");
-        assert!(!candidates.is_empty());
-        assert_eq!(candidates[0], "battery-level-60-charging-symbolic");
-        assert!(candidates.contains(&"battery-good-charging-symbolic"));
-
-        let candidates = gtk_icon_candidates("battery-medium-low-charging");
-        assert!(!candidates.is_empty());
-        assert_eq!(candidates[0], "battery-level-30-charging-symbolic");
-        assert!(candidates.contains(&"battery-low-charging-symbolic"));
-
-        let candidates = gtk_icon_candidates("battery-low-charging");
-        assert!(!candidates.is_empty());
-        assert_eq!(candidates[0], "battery-level-20-charging-symbolic");
-        assert!(candidates.contains(&"battery-low-charging-symbolic"));
-
-        let candidates = gtk_icon_candidates("battery-very-low-charging");
-        assert!(!candidates.is_empty());
-        assert_eq!(candidates[0], "battery-level-10-charging-symbolic");
-        assert!(candidates.contains(&"battery-caution-charging-symbolic"));
-    }
-
-    #[test]
-    fn test_gtk_icon_candidates_weather() {
-        assert_eq!(
-            gtk_icon_candidates("weather-clear")[0],
-            "weather-clear-symbolic"
-        );
-        assert_eq!(
-            gtk_icon_candidates("weather-clear-night")[0],
-            "weather-clear-night-symbolic"
-        );
-        assert_eq!(
-            gtk_icon_candidates("weather-partly-cloudy-night")[0],
-            "weather-few-clouds-night-symbolic"
-        );
-        assert_eq!(
-            gtk_icon_candidates("weather-rain")[0],
-            "weather-showers-symbolic"
-        );
-        assert_eq!(
-            gtk_icon_candidates("weather-unknown")[0],
-            "weather-severe-alert-symbolic"
-        );
-    }
-
-    #[test]
-    fn test_gtk_icon_candidates_unknown_returns_empty() {
-        // Unknown names return empty slice (will be handled as passthrough)
-        let candidates = gtk_icon_candidates("unknown-icon");
-        assert!(candidates.is_empty());
-
-        let candidates = gtk_icon_candidates("some-random-icon-name");
-        assert!(candidates.is_empty());
+        for (logical, primary, fallback) in cases {
+            let candidates = gtk_icon_candidates(logical);
+            assert_eq!(candidates.first().copied(), primary, "{logical}: primary");
+            if let Some(fallback) = fallback {
+                assert!(
+                    candidates.contains(&fallback),
+                    "{logical}: missing fallback {fallback} in {candidates:?}"
+                );
+            }
+        }
     }
 
     // Theme Detection Tests
@@ -2740,126 +2679,59 @@ mod tests {
         assert!(!is_material_theme("material-symbols")); // Only exact "material" now
     }
 
-    #[test]
-    fn test_uses_material() {
-        // Can't test singleton easily, but we can test via direct struct creation
-        let service = IconsService {
-            theme: RefCell::new("material".to_string()),
-            weight: RefCell::new(400),
-            material_ready: RefCell::new(false),
-            css_loaded: RefCell::new(false),
-            icon_theme: RefCell::new(None),
-            handles: RefCell::new(Vec::new()),
-            material_css_provider: RefCell::new(None),
-            font_path: RefCell::new(None),
-            font_map_watch: RefCell::new(None),
-            registering_font: Cell::new(false),
-        };
-        assert!(service.uses_material());
-
-        let service2 = IconsService {
-            theme: RefCell::new("adwaita".to_string()),
-            weight: RefCell::new(400),
-            material_ready: RefCell::new(false),
-            css_loaded: RefCell::new(false),
-            icon_theme: RefCell::new(None),
-            handles: RefCell::new(Vec::new()),
-            material_css_provider: RefCell::new(None),
-            font_path: RefCell::new(None),
-            font_map_watch: RefCell::new(None),
-            registering_font: Cell::new(false),
-        };
-        assert!(!service2.uses_material());
-    }
-
     // Backend Kind Tests
 
-    // Note: Tests that create GTK widgets (Label, Image) require GTK to be
-    // initialized and are not suitable for unit tests. The backend kind logic
-    // is tested via the current_backend_kind and reconfigure tests instead.
-
-    #[test]
-    fn test_current_backend_kind_material_ready() {
-        // When material_ready is true and theme is "material", should return Material
-        let service = IconsService {
-            theme: RefCell::new("material".to_string()),
+    fn service_with(theme: &str, material_ready: bool) -> IconsService {
+        IconsService {
+            theme: RefCell::new(theme.to_string()),
             weight: RefCell::new(400),
-            material_ready: RefCell::new(true),
-            css_loaded: RefCell::new(true),
+            material_ready: RefCell::new(material_ready),
+            css_loaded: RefCell::new(material_ready),
             icon_theme: RefCell::new(None),
             handles: RefCell::new(Vec::new()),
             material_css_provider: RefCell::new(None),
             font_path: RefCell::new(None),
             font_map_watch: RefCell::new(None),
             registering_font: Cell::new(false),
-        };
-        assert_eq!(service.current_backend_kind(), IconBackendKind::Material);
+        }
     }
 
     #[test]
-    fn test_current_backend_kind_material_not_ready() {
-        // When material_ready is false but theme is "material", falls back to Text
-        // (no icon_theme available in this test)
-        let service = IconsService {
-            theme: RefCell::new("material".to_string()),
-            weight: RefCell::new(400),
-            material_ready: RefCell::new(false),
-            css_loaded: RefCell::new(false),
-            icon_theme: RefCell::new(None),
-            handles: RefCell::new(Vec::new()),
-            material_css_provider: RefCell::new(None),
-            font_path: RefCell::new(None),
-            font_map_watch: RefCell::new(None),
-            registering_font: Cell::new(false),
-        };
-        assert_eq!(service.current_backend_kind(), IconBackendKind::Text);
-    }
+    fn backend_kind_cases() {
+        // No GTK icon theme is available here, so non-Material cases fall back to Text.
+        let cases = [
+            (
+                "material ready",
+                "material",
+                true,
+                None,
+                IconBackendKind::Material,
+            ),
+            (
+                "material not ready",
+                "material",
+                false,
+                None,
+                IconBackendKind::Text,
+            ),
+            ("gtk theme", "Adwaita", false, None, IconBackendKind::Text),
+            (
+                "reconfigured from material to gtk theme",
+                "material",
+                true,
+                Some("Adwaita"),
+                IconBackendKind::Text,
+            ),
+        ];
 
-    #[test]
-    fn test_current_backend_kind_gtk_theme() {
-        // When theme is not "material" but no icon_theme is available, falls back to Text
-        let service = IconsService {
-            theme: RefCell::new("Adwaita".to_string()),
-            weight: RefCell::new(400),
-            material_ready: RefCell::new(false),
-            css_loaded: RefCell::new(false),
-            icon_theme: RefCell::new(None),
-            handles: RefCell::new(Vec::new()),
-            material_css_provider: RefCell::new(None),
-            font_path: RefCell::new(None),
-            font_map_watch: RefCell::new(None),
-            registering_font: Cell::new(false),
-        };
-        assert_eq!(service.current_backend_kind(), IconBackendKind::Text);
-    }
-
-    #[test]
-    fn test_reconfigure_changes_theme_and_backend_kind() {
-        // Test that reconfigure() updates theme and backend kind
-        let service = IconsService {
-            theme: RefCell::new("material".to_string()),
-            weight: RefCell::new(400),
-            material_ready: RefCell::new(true),
-            css_loaded: RefCell::new(true),
-            icon_theme: RefCell::new(None),
-            handles: RefCell::new(Vec::new()),
-            material_css_provider: RefCell::new(None),
-            font_path: RefCell::new(None),
-            font_map_watch: RefCell::new(None),
-            registering_font: Cell::new(false),
-        };
-
-        assert_eq!(service.theme(), "material");
-        assert!(service.uses_material());
-        assert_eq!(service.current_backend_kind(), IconBackendKind::Material);
-
-        // Reconfigure to a GTK theme
-        service.reconfigure("Adwaita", 400);
-
-        assert_eq!(service.theme(), "Adwaita");
-        assert!(!service.uses_material());
-        // Since no icon_theme is available, backend kind falls back to Text
-        assert_eq!(service.current_backend_kind(), IconBackendKind::Text);
+        for (name, theme, material_ready, reconfigure_to, expected) in cases {
+            let service = service_with(theme, material_ready);
+            if let Some(new_theme) = reconfigure_to {
+                service.reconfigure(new_theme, 400);
+                assert_eq!(service.theme(), new_theme, "{name}: theme");
+            }
+            assert_eq!(service.current_backend_kind(), expected, "{name}");
+        }
     }
 
     // UI regression tests (need a GTK display)

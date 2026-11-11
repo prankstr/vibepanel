@@ -90,13 +90,6 @@ fn test_toast_position_parse_contract() {
 }
 
 #[test]
-fn test_calculate_center_margin_contract() {
-    assert_eq!(calculate_center_margin(1920, POPOVER_WIDTH), 760);
-    assert_eq!(calculate_center_margin(400, POPOVER_WIDTH), 0);
-    assert_eq!(calculate_center_margin(320, POPOVER_WIDTH), 0);
-}
-
-#[test]
 fn test_toast_horizontal_layout_contract() {
     let side_margin = 8;
     let cases = [
@@ -152,6 +145,13 @@ fn test_toast_horizontal_layout_contract() {
             Some(Edge::Left),
             760,
         ),
+        (
+            ToastPosition::TopCenter,
+            Some(POPOVER_WIDTH),
+            Some(Edge::Left),
+            0,
+        ),
+        (ToastPosition::TopCenter, Some(320), Some(Edge::Left), 0),
     ];
 
     for (position, monitor_width, expected_edge, expected_margin) in cases {
@@ -189,28 +189,6 @@ fn test_toast_surface_margin_independent_of_shadow_setting() {
         0
     );
     assert_eq!(toast_surface_margin(), SHADOW_MARGIN);
-}
-
-#[test]
-fn test_notification_toast_critical_class_does_not_apply_visual_tokens() {
-    let css = crate::widgets::css::widget_css(&Config::default());
-
-    assert!(
-        css.contains(
-            ".notification-row.notification-critical {\n    border-left: 3px solid var(--color-state-warning);"
-        ),
-        "critical notification rows should consume the shared warning border token"
-    );
-    assert!(
-        css.contains(
-            ".notification-row.notification-critical {\n    background-color: var(--color-row-critical-background);"
-        ),
-        "critical notification rows should consume the row critical background token"
-    );
-    assert!(
-        !css.contains(".notification-toast-critical {"),
-        "critical toasts intentionally keep main's neutral visual styling"
-    );
 }
 
 fn run_test_notification_toast_structure() {
@@ -500,60 +478,58 @@ fn run_test_notification_toast_surface_pixels() {
         return;
     }
 
-    let background_color = "#445566";
-    let outline_color = "#80a0c0";
-    let mut config = toast_pixel_config(background_color);
-    config.theme.outline = true;
-    config.theme.outline_width = 4;
-    config.theme.outline_color = outline_color.to_string();
-    config.theme.outline_opacity = 0.5;
+    {
+        let background_color = "#445566";
+        let outline_color = "#80a0c0";
+        let mut config = toast_pixel_config(background_color);
+        config.theme.outline = true;
+        config.theme.outline_width = 4;
+        config.theme.outline_color = outline_color.to_string();
+        config.theme.outline_opacity = 0.5;
 
-    let (window, _css_provider, _override_css_provider, surface) =
-        toast_surface_fixture(&config, None);
-    // Baseline for replacing SurfaceStyleManager with static surface CSS.
-    assert_pixel_close(
-        center_pixel_of_toast(&window, &surface),
-        Rgba8::from_hex(background_color),
-        "production toast surface should use popover opacity, not transparent widget opacity",
-    );
-    assert_pixel_close(
-        edge_pixel_of_toast(&window, &surface),
-        Rgba8::from_hex(outline_color)
-            .with_alpha(128)
-            .premultiply_alpha(),
-        "production toast surface should render configured surface outline color and opacity",
-    );
+        let (window, _css_provider, _override_css_provider, surface) =
+            toast_surface_fixture(&config, None);
+        // Baseline for replacing SurfaceStyleManager with static surface CSS.
+        assert_pixel_close(
+            center_pixel_of_toast(&window, &surface),
+            Rgba8::from_hex(background_color),
+            "production toast surface should use popover opacity, not transparent widget opacity",
+        );
+        assert_pixel_close(
+            edge_pixel_of_toast(&window, &surface),
+            Rgba8::from_hex(outline_color)
+                .with_alpha(128)
+                .premultiply_alpha(),
+            "production toast surface should render configured surface outline color and opacity",
+        );
 
-    window.close();
-    flush_gtk();
-}
-
-fn run_test_notification_toast_user_css_outline_pixel() {
-    if !init_gtk_or_skip("notification toast pixel UI regression test") {
-        return;
+        window.close();
+        flush_gtk();
     }
 
-    let background_color = "#101820";
-    let css_color = "#00ff00";
-    let mut config = toast_pixel_config(background_color);
-    config.theme.outline = true;
-    config.theme.outline_width = 4;
-    config.theme.outline_color = "accent".to_string();
-    config.theme.outline_opacity = 1.0;
-    config.theme.accent = Some("#224466".to_string());
+    {
+        let background_color = "#101820";
+        let css_color = "#00ff00";
+        let mut config = toast_pixel_config(background_color);
+        config.theme.outline = true;
+        config.theme.outline_width = 4;
+        config.theme.outline_color = "accent".to_string();
+        config.theme.outline_opacity = 1.0;
+        config.theme.accent = Some("#224466".to_string());
 
-    let user_css = format!(".notification-toast {{ --surface-outline-color: {css_color}; }}");
-    let (window, _css_provider, _override_css_provider, surface) =
-        toast_surface_fixture(&config, Some(&user_css));
+        let user_css = format!(".notification-toast {{ --surface-outline-color: {css_color}; }}");
+        let (window, _css_provider, _override_css_provider, surface) =
+            toast_surface_fixture(&config, Some(&user_css));
 
-    assert_pixel_close(
-        edge_pixel_of_toast(&window, &surface),
-        Rgba8::from_hex(css_color),
-        "user CSS should override production toast surface outline color",
-    );
+        assert_pixel_close(
+            edge_pixel_of_toast(&window, &surface),
+            Rgba8::from_hex(css_color),
+            "user CSS should override production toast surface outline color",
+        );
 
-    window.close();
-    flush_gtk();
+        window.close();
+        flush_gtk();
+    }
 }
 
 fn run_test_notification_toast_layer_shell_structure() {
@@ -748,12 +724,6 @@ fn test_ui_regression_notification_toast_surface_pixels() {
 
 #[test]
 #[ignore = "UI regression test: opens GTK windows; run under Xvfb"]
-fn test_ui_regression_notification_toast_user_css_outline_pixel() {
-    run_toast_ui_regression_subprocess("toast.user_css_outline_pixel");
-}
-
-#[test]
-#[ignore = "UI regression test: opens GTK windows; run under Xvfb"]
 fn test_ui_regression_notification_toast_window_freed_after_close() {
     run_toast_ui_regression_subprocess("toast.window_freed_after_close");
 }
@@ -771,7 +741,6 @@ fn notification_toast_ui_regression_runner() {
         Ok("toast.structure") => run_test_notification_toast_structure(),
         Ok("toast.layer_shell_structure") => run_test_notification_toast_layer_shell_structure(),
         Ok("toast.surface_pixels") => run_test_notification_toast_surface_pixels(),
-        Ok("toast.user_css_outline_pixel") => run_test_notification_toast_user_css_outline_pixel(),
         Ok("toast.window_freed_after_close") => {
             run_test_notification_toast_window_freed_after_close()
         }

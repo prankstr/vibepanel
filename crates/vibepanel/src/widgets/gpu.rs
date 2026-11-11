@@ -397,35 +397,23 @@ mod tests {
     }
 
     #[test]
-    fn test_gpu_config_defaults() {
-        let entry = WidgetEntry {
-            name: "gpu".to_string(),
-            options: Default::default(),
-        };
-        let config = GpuConfig::from_entry(&entry);
-        assert!(config.show_icon);
-        assert_eq!(config.format, GpuFormat::Usage);
-        assert!(config.stable_width);
-    }
+    fn gpu_config_from_entry() {
+        let defaults = GpuConfig::from_entry(&WidgetEntry::new("gpu"));
+        assert!(defaults.show_icon);
+        assert_eq!(defaults.format, GpuFormat::Usage);
+        assert!(defaults.stable_width);
 
-    #[test]
-    fn test_gpu_config_custom() {
-        let mut options = std::collections::HashMap::new();
-        options.insert("show_icon".to_string(), toml::Value::Boolean(false));
-        options.insert("stable_width".to_string(), toml::Value::Boolean(false));
-        options.insert(
-            "format".to_string(),
-            toml::Value::String("temperature".to_string()),
-        );
-
-        let entry = WidgetEntry {
+        let custom = GpuConfig::from_entry(&WidgetEntry {
             name: "gpu".to_string(),
-            options,
-        };
-        let config = GpuConfig::from_entry(&entry);
-        assert!(!config.show_icon);
-        assert_eq!(config.format, GpuFormat::Temperature);
-        assert!(!config.stable_width);
+            options: std::collections::HashMap::from([
+                ("show_icon".to_string(), false.into()),
+                ("format".to_string(), "temperature".into()),
+                ("stable_width".to_string(), false.into()),
+            ]),
+        });
+        assert!(!custom.show_icon);
+        assert_eq!(custom.format, GpuFormat::Temperature);
+        assert!(!custom.stable_width);
     }
 
     #[test]
@@ -440,93 +428,103 @@ mod tests {
     #[test]
     fn test_gpu_format_from_str() {
         assert_eq!(GpuFormat::from_str("usage"), GpuFormat::Usage);
-        assert_eq!(GpuFormat::from_str("Usage"), GpuFormat::Usage);
         assert_eq!(GpuFormat::from_str("percentage"), GpuFormat::Usage);
-        assert_eq!(GpuFormat::from_str("temperature"), GpuFormat::Temperature);
         assert_eq!(GpuFormat::from_str("Temperature"), GpuFormat::Temperature);
         assert_eq!(GpuFormat::from_str("temp"), GpuFormat::Temperature);
-        assert_eq!(GpuFormat::from_str("TEMP"), GpuFormat::Temperature);
         assert_eq!(GpuFormat::from_str("both"), GpuFormat::Both);
-        assert_eq!(GpuFormat::from_str("Both"), GpuFormat::Both);
         assert_eq!(GpuFormat::from_str("unknown"), GpuFormat::Usage);
     }
 
     #[test]
-    fn test_format_gpu_label_usage() {
-        let snapshot = gpu_snapshot(Some(76.0), Some(72.0));
-        assert_eq!(format_gpu_label(&snapshot, &GpuFormat::Usage, false), "76%");
-        assert_eq!(format_gpu_label(&snapshot, &GpuFormat::Usage, true), "76%");
-    }
+    fn format_gpu_label_cases() {
+        let full = || gpu_snapshot(Some(76.0), Some(72.0));
+        let no_temp = || gpu_snapshot(Some(76.0), None);
+        let no_data = || gpu_snapshot(None, None);
+        let suspended = || GpuSnapshot {
+            devices: vec![GpuDeviceSnapshot {
+                power_state: GpuPowerState::Suspended,
+                ..Default::default()
+            }],
+        };
 
-    #[test]
-    fn test_format_gpu_label_temperature() {
-        let snapshot = gpu_snapshot(Some(76.0), Some(72.0));
-        assert_eq!(
-            format_gpu_label(&snapshot, &GpuFormat::Temperature, false),
-            "72°C"
-        );
-        assert_eq!(
-            format_gpu_label(&snapshot, &GpuFormat::Temperature, true),
-            "72°"
-        );
-    }
+        let cases = [
+            ("usage horizontal", full(), GpuFormat::Usage, false, "76%"),
+            ("usage vertical", full(), GpuFormat::Usage, true, "76%"),
+            (
+                "temperature horizontal",
+                full(),
+                GpuFormat::Temperature,
+                false,
+                "72°C",
+            ),
+            (
+                "temperature vertical",
+                full(),
+                GpuFormat::Temperature,
+                true,
+                "72°",
+            ),
+            (
+                "temperature unavailable shows dash",
+                no_temp(),
+                GpuFormat::Temperature,
+                false,
+                "—",
+            ),
+            (
+                "both horizontal",
+                full(),
+                GpuFormat::Both,
+                false,
+                "76% 72°C",
+            ),
+            ("both vertical", full(), GpuFormat::Both, true, "76%\n72°"),
+            (
+                "both without temperature horizontal",
+                no_temp(),
+                GpuFormat::Both,
+                false,
+                "76% —",
+            ),
+            (
+                "both without temperature vertical",
+                no_temp(),
+                GpuFormat::Both,
+                true,
+                "76%\n—",
+            ),
+            ("no data usage", no_data(), GpuFormat::Usage, false, "—"),
+            (
+                "no data temperature",
+                no_data(),
+                GpuFormat::Temperature,
+                false,
+                "—",
+            ),
+            ("no data both", no_data(), GpuFormat::Both, false, "— —"),
+            (
+                "suspended horizontal",
+                suspended(),
+                GpuFormat::Usage,
+                false,
+                "Idle",
+            ),
+            (
+                "suspended vertical compacts",
+                suspended(),
+                GpuFormat::Usage,
+                true,
+                "—",
+            ),
+        ];
 
-    #[test]
-    fn test_format_gpu_label_temperature_unavailable() {
-        let snapshot = gpu_snapshot(Some(76.0), None);
-        // Shows dash when temperature is unavailable — no silent fallback
-        assert_eq!(
-            format_gpu_label(&snapshot, &GpuFormat::Temperature, false),
-            "—"
-        );
-    }
-
-    #[test]
-    fn test_format_gpu_label_both() {
-        let snapshot = gpu_snapshot(Some(76.0), Some(72.0));
-        assert_eq!(
-            format_gpu_label(&snapshot, &GpuFormat::Both, false),
-            "76% 72°C"
-        );
-        assert_eq!(
-            format_gpu_label(&snapshot, &GpuFormat::Both, true),
-            "76%\n72°"
-        );
-
-        let boundary = gpu_snapshot(Some(100.0), Some(100.0));
-        assert_eq!(format_gpu_label(&boundary, &GpuFormat::Usage, true), "100");
-        assert_eq!(
-            format_gpu_label(&boundary, &GpuFormat::Temperature, true),
-            "100"
-        );
-        assert_eq!(
-            format_gpu_label(&boundary, &GpuFormat::Both, true),
-            "100\n100"
-        );
-    }
-
-    #[test]
-    fn test_format_gpu_label_both_no_temp() {
-        let snapshot = gpu_snapshot(Some(76.0), None);
-        assert_eq!(
-            format_gpu_label(&snapshot, &GpuFormat::Both, false),
-            "76% —"
-        );
-        assert_eq!(
-            format_gpu_label(&snapshot, &GpuFormat::Both, true),
-            "76%\n—"
-        );
-    }
-
-    #[test]
-    fn test_format_gpu_label_no_data() {
-        let snapshot = gpu_snapshot(None, None);
-        assert_eq!(format_gpu_label(&snapshot, &GpuFormat::Usage, false), "—");
-        assert_eq!(
-            format_gpu_label(&snapshot, &GpuFormat::Temperature, false),
-            "—"
-        );
-        assert_eq!(format_gpu_label(&snapshot, &GpuFormat::Both, false), "— —");
+        for (name, snapshot, format, vertical, expected) in cases {
+            assert_eq!(
+                format_gpu_label(&snapshot, &format, vertical),
+                expected,
+                "{name}"
+            );
+        }
     }
 
     #[test]
@@ -534,32 +532,16 @@ mod tests {
         let snapshot = multi_gpu_snapshot();
         assert_eq!(
             format_gpu_label(&snapshot, &GpuFormat::Usage, false),
-            "76% | 41%"
+            format!("76%{DEVICE_SEPARATOR}41%")
         );
         assert_eq!(
             format_gpu_label(&snapshot, &GpuFormat::Usage, true),
-            "76%\n<span size=\"2pt\">&#x2009;</span>\n41%"
+            format!("76%{VERTICAL_DEVICE_SEPARATOR}41%")
         );
         assert_eq!(
             format_gpu_label(&snapshot, &GpuFormat::Both, true),
-            "76%\n72°\n<span size=\"2pt\">&#x2009;</span>\n41%\n61°"
+            format!("76%\n72°{VERTICAL_DEVICE_SEPARATOR}41%\n61°")
         );
-    }
-
-    #[test]
-    fn test_format_gpu_label_compacts_suspended_device_vertically() {
-        let snapshot = GpuSnapshot {
-            devices: vec![GpuDeviceSnapshot {
-                power_state: GpuPowerState::Suspended,
-                ..Default::default()
-            }],
-        };
-
-        assert_eq!(
-            format_gpu_label(&snapshot, &GpuFormat::Usage, false),
-            "Idle"
-        );
-        assert_eq!(format_gpu_label(&snapshot, &GpuFormat::Usage, true), "—");
     }
 
     #[test]

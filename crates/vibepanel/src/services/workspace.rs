@@ -352,169 +352,162 @@ mod tests {
         workspaces.iter().map(|workspace| workspace.id).collect()
     }
 
-    #[test]
-    fn test_workspace_from_meta_no_active() {
-        let snapshot = WorkspaceSnapshot::default();
-        let meta = make_meta(1);
-
-        let ws = Workspace::from_meta(&meta, &snapshot);
-
-        assert_eq!(ws.id, 1);
-        assert!(!ws.active);
-        assert!(!ws.occupied);
-        assert!(!ws.urgent);
+    fn ids(ids: &[i32]) -> HashSet<i32> {
+        ids.iter().copied().collect()
     }
 
-    #[test]
-    fn test_workspace_from_meta_single_active() {
-        let mut snapshot = WorkspaceSnapshot::default();
-        snapshot.active_workspace.insert(2);
-
-        // Workspace 2 should be active
-        let ws2 = Workspace::from_meta(&make_meta(2), &snapshot);
-        assert!(ws2.active);
-
-        // Workspace 1 should not be active
-        let ws1 = Workspace::from_meta(&make_meta(1), &snapshot);
-        assert!(!ws1.active);
-
-        // Workspace 3 should not be active
-        let ws3 = Workspace::from_meta(&make_meta(3), &snapshot);
-        assert!(!ws3.active);
-    }
-
-    #[test]
-    fn test_workspace_from_meta_multiple_active() {
-        // Multi-tag view: workspaces 1, 3, 5 are all active
-        let mut snapshot = WorkspaceSnapshot::default();
-        snapshot.active_workspace.insert(1);
-        snapshot.active_workspace.insert(3);
-        snapshot.active_workspace.insert(5);
-
-        // All three should be marked active
-        assert!(Workspace::from_meta(&make_meta(1), &snapshot).active);
-        assert!(Workspace::from_meta(&make_meta(3), &snapshot).active);
-        assert!(Workspace::from_meta(&make_meta(5), &snapshot).active);
-
-        // Others should not be active
-        assert!(!Workspace::from_meta(&make_meta(2), &snapshot).active);
-        assert!(!Workspace::from_meta(&make_meta(4), &snapshot).active);
-    }
-
-    #[test]
-    fn test_workspace_from_meta_occupied_and_urgent() {
-        let mut snapshot = WorkspaceSnapshot::default();
-        snapshot.occupied_workspaces.insert(1);
-        snapshot.occupied_workspaces.insert(2);
-        snapshot.urgent_workspaces.insert(2);
-        snapshot.window_counts.insert(1, 3);
-        snapshot.window_counts.insert(2, 1);
-
-        let ws1 = Workspace::from_meta(&make_meta(1), &snapshot);
-        assert!(ws1.occupied);
-        assert!(!ws1.urgent);
-        assert_eq!(ws1.window_count, Some(3));
-
-        let ws2 = Workspace::from_meta(&make_meta(2), &snapshot);
-        assert!(ws2.occupied);
-        assert!(ws2.urgent);
-        assert_eq!(ws2.window_count, Some(1));
-
-        let ws3 = Workspace::from_meta(&make_meta(3), &snapshot);
-        assert!(!ws3.occupied);
-        assert!(!ws3.urgent);
-        assert_eq!(ws3.window_count, None);
-    }
-
-    #[test]
-    fn test_workspace_from_meta_per_output_single_active() {
-        let mut snapshot = WorkspaceSnapshot::default();
-
-        // Set up per-output state for "eDP-1"
-        let mut per_output_state = PerOutputState::default();
-        per_output_state.active_workspace.insert(2);
-        per_output_state.occupied_workspaces.insert(2);
-        per_output_state.window_counts.insert(2, 5);
-        snapshot
-            .per_output
-            .insert("eDP-1".to_string(), per_output_state);
-
-        // Workspace 2 should be active on eDP-1
-        let ws2 = Workspace::from_meta_per_output(&make_meta(2), &snapshot, "eDP-1");
-        assert!(ws2.active);
-        assert!(ws2.occupied);
-        assert_eq!(ws2.window_count, Some(5));
-
-        // Workspace 1 should not be active on eDP-1
-        let ws1 = Workspace::from_meta_per_output(&make_meta(1), &snapshot, "eDP-1");
-        assert!(!ws1.active);
-    }
-
-    #[test]
-    fn test_workspace_from_meta_per_output_uses_output_urgency() {
-        let mut snapshot = WorkspaceSnapshot::default();
-        snapshot.urgent_workspaces.insert(1);
-
-        let internal = PerOutputState {
-            urgent_workspaces: Some(HashSet::new()),
+    fn global(active: &[i32], occupied: &[i32], urgent: &[i32]) -> WorkspaceSnapshot {
+        WorkspaceSnapshot {
+            active_workspace: ids(active),
+            occupied_workspaces: ids(occupied),
+            urgent_workspaces: ids(urgent),
             ..Default::default()
-        };
-        let external = PerOutputState {
-            urgent_workspaces: Some(HashSet::from([1])),
+        }
+    }
+
+    fn output(active: &[i32], occupied: &[i32], urgent: Option<&[i32]>) -> PerOutputState {
+        PerOutputState {
+            active_workspace: ids(active),
+            occupied_workspaces: ids(occupied),
+            urgent_workspaces: urgent.map(ids),
             ..Default::default()
+        }
+    }
+
+    fn with_outputs<const N: usize>(
+        mut snapshot: WorkspaceSnapshot,
+        outputs: [(&str, PerOutputState); N],
+    ) -> WorkspaceSnapshot {
+        for (name, state) in outputs {
+            snapshot.per_output.insert(name.to_string(), state);
+        }
+        snapshot
+    }
+
+    #[test]
+    fn from_meta_picks_output_or_global_state() {
+        let mut counted = global(&[], &[1, 2], &[2]);
+        counted.window_counts = HashMap::from([(1, 3), (2, 1)]);
+        let mut counted_output = output(&[2], &[2], None);
+        counted_output.window_counts = HashMap::from([(2, 5)]);
+        // Global urgency on 1, but each output reports its own.
+        let output_urgency = || {
+            with_outputs(
+                global(&[], &[], &[1]),
+                [
+                    ("eDP-1", output(&[], &[], Some(&[]))),
+                    ("HDMI-A-1", output(&[], &[], Some(&[1]))),
+                ],
+            )
         };
-        snapshot.per_output.insert("eDP-1".to_string(), internal);
-        snapshot.per_output.insert("HDMI-A-1".to_string(), external);
 
-        assert!(!Workspace::from_meta_per_output(&make_meta(1), &snapshot, "eDP-1").urgent);
-        assert!(Workspace::from_meta_per_output(&make_meta(1), &snapshot, "HDMI-A-1").urgent);
-    }
+        // (name, snapshot, output, [(id, active, occupied, urgent, window_count)])
+        let cases = [
+            (
+                "no active",
+                global(&[], &[], &[]),
+                None,
+                vec![(1, false, false, false, None)],
+            ),
+            (
+                "single active",
+                global(&[2], &[], &[]),
+                None,
+                vec![
+                    (1, false, false, false, None),
+                    (2, true, false, false, None),
+                    (3, false, false, false, None),
+                ],
+            ),
+            (
+                "multiple active",
+                global(&[1, 3, 5], &[], &[]),
+                None,
+                vec![
+                    (1, true, false, false, None),
+                    (2, false, false, false, None),
+                    (3, true, false, false, None),
+                    (4, false, false, false, None),
+                    (5, true, false, false, None),
+                ],
+            ),
+            (
+                "occupied and urgent",
+                counted,
+                None,
+                vec![
+                    (1, false, true, false, Some(3)),
+                    (2, false, true, true, Some(1)),
+                    (3, false, false, false, None),
+                ],
+            ),
+            (
+                "output single active",
+                with_outputs(WorkspaceSnapshot::default(), [("eDP-1", counted_output)]),
+                Some("eDP-1"),
+                vec![
+                    (1, false, false, false, None),
+                    (2, true, true, false, Some(5)),
+                ],
+            ),
+            (
+                "output without urgency ignores global urgency",
+                output_urgency(),
+                Some("eDP-1"),
+                vec![(1, false, false, false, None)],
+            ),
+            (
+                "output uses its own urgency",
+                output_urgency(),
+                Some("HDMI-A-1"),
+                vec![(1, false, false, true, None)],
+            ),
+            (
+                "output without urgency data falls back to global urgency",
+                with_outputs(
+                    global(&[], &[], &[1]),
+                    [("eDP-1", PerOutputState::default())],
+                ),
+                Some("eDP-1"),
+                vec![(1, false, false, true, None)],
+            ),
+            (
+                "output multiple active",
+                with_outputs(
+                    WorkspaceSnapshot::default(),
+                    [("DP-1", output(&[1, 3, 5], &[], None))],
+                ),
+                Some("DP-1"),
+                vec![
+                    (1, true, false, false, None),
+                    (2, false, false, false, None),
+                    (3, true, false, false, None),
+                    (4, false, false, false, None),
+                    (5, true, false, false, None),
+                ],
+            ),
+            (
+                "unknown output falls back to global",
+                global(&[1], &[1], &[]),
+                Some("HDMI-1"),
+                vec![(1, true, true, false, None)],
+            ),
+        ];
 
-    #[test]
-    fn test_workspace_from_meta_per_output_falls_back_to_global_urgency() {
-        let mut snapshot = WorkspaceSnapshot::default();
-        snapshot.urgent_workspaces.insert(1);
-        snapshot
-            .per_output
-            .insert("eDP-1".to_string(), PerOutputState::default());
-
-        assert!(Workspace::from_meta_per_output(&make_meta(1), &snapshot, "eDP-1").urgent);
-    }
-
-    #[test]
-    fn test_workspace_from_meta_per_output_multiple_active() {
-        // Multi-tag view on a specific output
-        let mut snapshot = WorkspaceSnapshot::default();
-
-        let mut per_output_state = PerOutputState::default();
-        per_output_state.active_workspace.insert(1);
-        per_output_state.active_workspace.insert(3);
-        per_output_state.active_workspace.insert(5);
-        snapshot
-            .per_output
-            .insert("DP-1".to_string(), per_output_state);
-
-        // All three should be active on DP-1
-        assert!(Workspace::from_meta_per_output(&make_meta(1), &snapshot, "DP-1").active);
-        assert!(Workspace::from_meta_per_output(&make_meta(3), &snapshot, "DP-1").active);
-        assert!(Workspace::from_meta_per_output(&make_meta(5), &snapshot, "DP-1").active);
-
-        // Others should not be active
-        assert!(!Workspace::from_meta_per_output(&make_meta(2), &snapshot, "DP-1").active);
-        assert!(!Workspace::from_meta_per_output(&make_meta(4), &snapshot, "DP-1").active);
-    }
-
-    #[test]
-    fn test_workspace_from_meta_per_output_fallback_to_global() {
-        // When per-output state doesn't exist, should fall back to global
-        let mut snapshot = WorkspaceSnapshot::default();
-        snapshot.active_workspace.insert(1);
-        snapshot.occupied_workspaces.insert(1);
-
-        // No per-output state for "HDMI-1", should use global
-        let ws = Workspace::from_meta_per_output(&make_meta(1), &snapshot, "HDMI-1");
-        assert!(ws.active);
-        assert!(ws.occupied);
+        for (name, snapshot, output, expected) in cases {
+            let actual: Vec<_> = expected
+                .iter()
+                .map(|&(id, ..)| {
+                    let meta = make_meta(id);
+                    let ws = match output {
+                        Some(output) => Workspace::from_meta_per_output(&meta, &snapshot, output),
+                        None => Workspace::from_meta(&meta, &snapshot),
+                    };
+                    (ws.id, ws.active, ws.occupied, ws.urgent, ws.window_count)
+                })
+                .collect();
+            assert_eq!(actual, expected, "{name}");
+        }
     }
 
     #[test]

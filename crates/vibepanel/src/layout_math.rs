@@ -203,395 +203,255 @@ pub fn compute_linear_allocation(
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_clamp_width_natural_fits() {
-        assert_eq!(clamp_width(100, 50, 80), 80);
+    fn sizes(min: i32, natural: i32) -> Option<SectionSizes> {
+        Some(SectionSizes { min, natural })
     }
 
     #[test]
-    fn test_clamp_width_natural_too_large() {
-        assert_eq!(clamp_width(60, 50, 80), 60);
+    fn clamp_width_cases() {
+        // (name, available, min, natural, expected)
+        let cases = [
+            ("natural fits", 100, 50, 80, 80),
+            ("natural too large", 60, 50, 80, 60),
+            // Can't create space that isn't there, even below min.
+            ("available below min", 30, 50, 80, 30),
+            ("no space", 0, 50, 80, 0),
+            ("negative space", -10, 50, 80, 0),
+            ("exact fit", 80, 50, 80, 80),
+        ];
+
+        for (name, available, min, natural, expected) in cases {
+            assert_eq!(
+                clamp_width(available, min, natural),
+                expected,
+                "{name}: clamp_width({available}, {min}, {natural})"
+            );
+        }
     }
 
     #[test]
-    fn test_clamp_width_available_less_than_min() {
-        // When available < min, we still use available (can't magically create space)
-        assert_eq!(clamp_width(30, 50, 80), 30);
-    }
+    fn center_priority_allocation_cases() {
+        struct Case {
+            name: &'static str,
+            interior: i32,
+            left: Option<SectionSizes>,
+            left_expand: bool,
+            center: SectionSizes,
+            right: Option<SectionSizes>,
+            right_expand: bool,
+            /// (left_x, left_width, center_x, center_width, right_x, right_width)
+            expected: (i32, i32, i32, i32, i32, i32),
+        }
 
-    #[test]
-    fn test_clamp_width_no_space() {
-        assert_eq!(clamp_width(0, 50, 80), 0);
-        assert_eq!(clamp_width(-10, 50, 80), 0);
-    }
-
-    #[test]
-    fn test_clamp_width_exact_fit() {
-        assert_eq!(clamp_width(80, 50, 80), 80);
-    }
-
-    #[test]
-    fn test_center_priority_center_anchored() {
-        // With 400px interior, center should be at 150-250 (centered 100px widget)
-        let alloc = compute_center_priority_allocation(
-            400,
-            8,
-            None,
-            false,
-            SectionSizes {
-                min: 50,
-                natural: 100,
+        let center = SectionSizes {
+            min: 50,
+            natural: 100,
+        };
+        let cases = [
+            Case {
+                name: "only center is anchored to the true center",
+                interior: 400,
+                left: None,
+                left_expand: false,
+                center,
+                right: None,
+                right_expand: false,
+                expected: (0, 0, 150, 100, 400, 0),
             },
-            None,
-            false,
-        );
-
-        assert_eq!(alloc.center_width, 100);
-        assert_eq!(alloc.center_x, 150); // (400 - 100) / 2
-    }
-
-    #[test]
-    fn test_center_priority_with_left_and_right_no_expand() {
-        // 400px interior, center 100px, left and right each want 100px
-        // Without expand, sections get clamped to natural size
-        let alloc = compute_center_priority_allocation(
-            400,
-            8,
-            Some(SectionSizes {
-                min: 50,
-                natural: 100,
-            }),
-            false,
-            SectionSizes {
-                min: 50,
-                natural: 100,
+            Case {
+                name: "left and right clamp to natural without expand",
+                interior: 400,
+                left: sizes(50, 100),
+                left_expand: false,
+                center,
+                right: sizes(50, 100),
+                right_expand: false,
+                expected: (0, 100, 150, 100, 300, 100),
             },
-            Some(SectionSizes {
-                min: 50,
-                natural: 100,
-            }),
-            false,
-        );
-
-        // Center at 150-250
-        assert_eq!(alloc.center_width, 100);
-        assert_eq!(alloc.center_x, 150);
-
-        // Left gets clamped to natural size (100)
-        assert_eq!(alloc.left_width, 100);
-        assert_eq!(alloc.left_x, 0);
-
-        // Right gets clamped to natural size (100), positioned at right edge
-        assert_eq!(alloc.right_width, 100);
-        assert_eq!(alloc.right_x, 300); // 400 - 100
-    }
-
-    #[test]
-    fn test_center_priority_with_left_and_right_both_expand() {
-        // 400px interior, center 100px, left and right each want 100px
-        // With expand, sections get full budget
-        let alloc = compute_center_priority_allocation(
-            400,
-            8,
-            Some(SectionSizes {
-                min: 50,
-                natural: 100,
-            }),
-            true,
-            SectionSizes {
-                min: 50,
-                natural: 100,
+            Case {
+                name: "both expand get the full budget",
+                interior: 400,
+                left: sizes(50, 100),
+                left_expand: true,
+                center,
+                right: sizes(50, 100),
+                right_expand: true,
+                expected: (0, 142, 150, 100, 258, 142),
             },
-            Some(SectionSizes {
-                min: 50,
-                natural: 100,
-            }),
-            true,
-        );
-
-        // Center at 150-250
-        assert_eq!(alloc.center_width, 100);
-        assert_eq!(alloc.center_x, 150);
-
-        // Left gets full budget of 150 - 8 = 142
-        assert_eq!(alloc.left_width, 142);
-        assert_eq!(alloc.left_x, 0);
-
-        // Right gets full budget of 400 - 250 - 8 = 142
-        assert_eq!(alloc.right_width, 142);
-        assert_eq!(alloc.right_x, 258); // 400 - 142
-    }
-
-    #[test]
-    fn test_center_priority_left_expand_only() {
-        // Only left section has expander
-        let alloc = compute_center_priority_allocation(
-            400,
-            8,
-            Some(SectionSizes {
-                min: 50,
-                natural: 100,
-            }),
-            true, // left expands
-            SectionSizes {
-                min: 50,
-                natural: 100,
+            Case {
+                name: "only left expands",
+                interior: 400,
+                left: sizes(50, 100),
+                left_expand: true,
+                center,
+                right: sizes(50, 100),
+                right_expand: false,
+                expected: (0, 142, 150, 100, 300, 100),
             },
-            Some(SectionSizes {
-                min: 50,
-                natural: 100,
-            }),
-            false, // right does not expand
-        );
-
-        // Left gets full budget
-        assert_eq!(alloc.left_width, 142);
-
-        // Right gets clamped to natural
-        assert_eq!(alloc.right_width, 100);
-        assert_eq!(alloc.right_x, 300); // 400 - 100
-    }
-
-    #[test]
-    fn test_center_priority_constrained() {
-        // 200px interior, center wants 100px, left wants 80px, right wants 80px
-        // Budget for each side: (200 - 100) / 2 - 8 = 42px
-        // Without expand, sections are clamped (42 < 80, so they get 42)
-        let alloc = compute_center_priority_allocation(
-            200,
-            8,
-            Some(SectionSizes {
-                min: 30,
-                natural: 80,
-            }),
-            false,
-            SectionSizes {
-                min: 50,
-                natural: 100,
+            Case {
+                name: "constrained sides clamp to budget",
+                interior: 200,
+                left: sizes(30, 80),
+                left_expand: false,
+                center,
+                right: sizes(30, 80),
+                right_expand: false,
+                expected: (0, 42, 50, 100, 158, 42),
             },
-            Some(SectionSizes {
-                min: 30,
-                natural: 80,
-            }),
-            false,
-        );
+        ];
 
-        // Center should be at 50-150
-        assert_eq!(alloc.center_width, 100);
-        assert_eq!(alloc.center_x, 50);
-
-        // Left and right get clamped to budget (42px each)
-        assert_eq!(alloc.left_width, 42); // budget: 50 - 8 = 42
-        assert_eq!(alloc.right_width, 42); // budget: 200 - 150 - 8 = 42
+        for case in cases {
+            let alloc = compute_center_priority_allocation(
+                case.interior,
+                8,
+                case.left,
+                case.left_expand,
+                case.center,
+                case.right,
+                case.right_expand,
+            );
+            assert_eq!(
+                (
+                    alloc.left_x,
+                    alloc.left_width,
+                    alloc.center_x,
+                    alloc.center_width,
+                    alloc.right_x,
+                    alloc.right_width,
+                ),
+                case.expected,
+                "{}: (left_x, left_width, center_x, center_width, right_x, right_width)",
+                case.name
+            );
+        }
     }
 
     #[test]
-    fn test_center_priority_only_center() {
-        let alloc = compute_center_priority_allocation(
-            400,
-            8,
-            None,
-            false,
-            SectionSizes {
-                min: 50,
-                natural: 100,
+    fn linear_allocation_cases() {
+        struct Case {
+            name: &'static str,
+            interior: i32,
+            left: Option<SectionSizes>,
+            left_expand: bool,
+            right: Option<SectionSizes>,
+            right_expand: bool,
+            /// (left_x, left_width, right_x, right_width)
+            expected: (i32, i32, i32, i32),
+        }
+
+        let cases = [
+            Case {
+                name: "both fit",
+                interior: 400,
+                left: sizes(50, 100),
+                left_expand: false,
+                right: sizes(50, 100),
+                right_expand: false,
+                expected: (0, 100, 300, 100),
             },
-            None,
-            false,
-        );
+            Case {
+                name: "right keeps priority, left truncates (regression)",
+                interior: 200,
+                left: sizes(50, 300),
+                left_expand: false,
+                right: sizes(50, 100),
+                right_expand: false,
+                expected: (0, 92, 100, 100),
+            },
+            Case {
+                name: "constrained left shrinks",
+                interior: 150,
+                left: sizes(50, 100),
+                left_expand: false,
+                right: sizes(50, 100),
+                right_expand: false,
+                expected: (0, 42, 50, 100),
+            },
+            Case {
+                name: "only left",
+                interior: 400,
+                left: sizes(50, 100),
+                left_expand: false,
+                right: None,
+                right_expand: false,
+                expected: (0, 100, 400, 0),
+            },
+            Case {
+                name: "only right",
+                interior: 400,
+                left: None,
+                left_expand: false,
+                right: sizes(50, 100),
+                right_expand: false,
+                expected: (0, 0, 300, 100),
+            },
+            Case {
+                name: "empty",
+                interior: 400,
+                left: None,
+                left_expand: false,
+                right: None,
+                right_expand: false,
+                expected: (0, 0, 400, 0),
+            },
+            Case {
+                name: "right expand fills remaining space",
+                interior: 400,
+                left: sizes(50, 100),
+                left_expand: false,
+                right: sizes(0, 0),
+                right_expand: true,
+                expected: (0, 100, 108, 292),
+            },
+            Case {
+                name: "left expand fills remaining space",
+                interior: 400,
+                left: sizes(0, 0),
+                left_expand: true,
+                right: sizes(50, 100),
+                right_expand: false,
+                expected: (0, 292, 300, 100),
+            },
+            Case {
+                name: "both expand share remaining space",
+                interior: 400,
+                left: sizes(50, 100),
+                left_expand: true,
+                right: sizes(50, 100),
+                right_expand: true,
+                expected: (0, 196, 204, 196),
+            },
+            Case {
+                name: "single expander fills section",
+                interior: 400,
+                left: None,
+                left_expand: false,
+                right: sizes(0, 0),
+                right_expand: true,
+                expected: (0, 0, 0, 400),
+            },
+        ];
 
-        assert_eq!(alloc.center_width, 100);
-        assert_eq!(alloc.center_x, 150);
-        assert_eq!(alloc.left_width, 0);
-        assert_eq!(alloc.right_width, 0);
-    }
-
-    #[test]
-    fn test_linear_both_fit() {
-        let alloc = compute_linear_allocation(
-            400,
-            8,
-            Some(SectionSizes {
-                min: 50,
-                natural: 100,
-            }),
-            false,
-            Some(SectionSizes {
-                min: 50,
-                natural: 100,
-            }),
-            false,
-        );
-
-        assert_eq!(alloc.right_width, 100);
-        assert_eq!(alloc.right_x, 300);
-        assert_eq!(alloc.left_width, 100);
-        assert_eq!(alloc.left_x, 0);
-    }
-
-    #[test]
-    fn test_linear_right_priority_left_truncates() {
-        let alloc = compute_linear_allocation(
-            200,
-            8,
-            Some(SectionSizes {
-                min: 50,
-                natural: 300,
-            }),
-            false,
-            Some(SectionSizes {
-                min: 50,
-                natural: 100,
-            }),
-            false,
-        );
-
-        assert_eq!(alloc.right_width, 100);
-        assert_eq!(alloc.right_x, 100);
-        assert_eq!(alloc.left_width, 92);
-        assert_eq!(alloc.left_x, 0);
-    }
-
-    #[test]
-    fn test_linear_only_left() {
-        let alloc = compute_linear_allocation(
-            400,
-            8,
-            Some(SectionSizes {
-                min: 50,
-                natural: 100,
-            }),
-            false,
-            None,
-            false,
-        );
-
-        assert_eq!(alloc.left_width, 100);
-        assert_eq!(alloc.left_x, 0);
-        assert_eq!(alloc.right_width, 0);
-    }
-
-    #[test]
-    fn test_linear_only_right() {
-        let alloc = compute_linear_allocation(
-            400,
-            8,
-            None,
-            false,
-            Some(SectionSizes {
-                min: 50,
-                natural: 100,
-            }),
-            false,
-        );
-
-        assert_eq!(alloc.left_width, 0);
-        assert_eq!(alloc.right_width, 100);
-        assert_eq!(alloc.right_x, 300);
-    }
-
-    #[test]
-    fn test_linear_constrained() {
-        let alloc = compute_linear_allocation(
-            150,
-            8,
-            Some(SectionSizes {
-                min: 50,
-                natural: 100,
-            }),
-            false,
-            Some(SectionSizes {
-                min: 50,
-                natural: 100,
-            }),
-            false,
-        );
-
-        assert_eq!(alloc.right_width, 100);
-        assert_eq!(alloc.left_width, 42);
-    }
-
-    #[test]
-    fn test_linear_empty() {
-        let alloc = compute_linear_allocation(400, 8, None, false, None, false);
-
-        assert_eq!(alloc.left_width, 0);
-        assert_eq!(alloc.right_width, 0);
-    }
-
-    #[test]
-    fn test_linear_right_expand_fills_remaining_space() {
-        let alloc = compute_linear_allocation(
-            400,
-            8,
-            Some(SectionSizes {
-                min: 50,
-                natural: 100,
-            }),
-            false,
-            Some(SectionSizes { min: 0, natural: 0 }),
-            true,
-        );
-
-        assert_eq!(alloc.left_width, 100);
-        assert_eq!(alloc.right_width, 292);
-        assert_eq!(alloc.right_x, 108);
-    }
-
-    #[test]
-    fn test_linear_left_expand_fills_remaining_space() {
-        let alloc = compute_linear_allocation(
-            400,
-            8,
-            Some(SectionSizes { min: 0, natural: 0 }),
-            true,
-            Some(SectionSizes {
-                min: 50,
-                natural: 100,
-            }),
-            false,
-        );
-
-        assert_eq!(alloc.left_width, 292);
-        assert_eq!(alloc.right_width, 100);
-        assert_eq!(alloc.right_x, 300);
-    }
-
-    #[test]
-    fn test_linear_both_expand_share_remaining_space() {
-        let alloc = compute_linear_allocation(
-            400,
-            8,
-            Some(SectionSizes {
-                min: 50,
-                natural: 100,
-            }),
-            true,
-            Some(SectionSizes {
-                min: 50,
-                natural: 100,
-            }),
-            true,
-        );
-
-        assert_eq!(alloc.left_width, 196);
-        assert_eq!(alloc.right_width, 196);
-        assert_eq!(alloc.right_x, 204);
-    }
-
-    #[test]
-    fn test_linear_single_expander_fills_section() {
-        let alloc = compute_linear_allocation(
-            400,
-            8,
-            None,
-            false,
-            Some(SectionSizes { min: 0, natural: 0 }),
-            true,
-        );
-
-        assert_eq!(alloc.left_width, 0);
-        assert_eq!(alloc.right_width, 400);
-        assert_eq!(alloc.right_x, 0);
+        for case in cases {
+            let alloc = compute_linear_allocation(
+                case.interior,
+                8,
+                case.left,
+                case.left_expand,
+                case.right,
+                case.right_expand,
+            );
+            assert_eq!(
+                (
+                    alloc.left_x,
+                    alloc.left_width,
+                    alloc.right_x,
+                    alloc.right_width
+                ),
+                case.expected,
+                "{}: (left_x, left_width, right_x, right_width)",
+                case.name
+            );
+        }
     }
 }

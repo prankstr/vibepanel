@@ -911,12 +911,15 @@ fn run_gtk_app(config: Config, config_source: Option<PathBuf>) -> ExitCode {
 #[cfg(test)]
 mod cli_tests {
     use super::*;
+    use clap::CommandFactory;
 
     #[test]
-    fn parses_notifications_unread_command() {
-        let args = Args::try_parse_from(["vibepanel", "notifications", "unread"])
-            .expect("command should parse");
+    fn cli_definition_is_valid() {
+        Args::command().debug_assert();
 
+        // User scripts call this to poll unread notifications.
+        let args = Args::try_parse_from(["vibepanel", "notifications", "unread"])
+            .expect("notifications unread should parse");
         assert!(matches!(
             args.command,
             Some(Command::Notifications {

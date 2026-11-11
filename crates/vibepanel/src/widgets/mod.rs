@@ -560,23 +560,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn popover_kind_system_widgets() {
-        assert_eq!(popover_kind_for("cpu"), PopoverKind::System);
-        assert_eq!(popover_kind_for("memory"), PopoverKind::System);
-        assert_eq!(popover_kind_for("disk"), PopoverKind::System);
-        assert_eq!(popover_kind_for("disk-home"), PopoverKind::System);
-        assert_eq!(popover_kind_for("disk-"), PopoverKind::Unmergeable);
-        assert_eq!(popover_kind_for("gpu"), PopoverKind::System);
-        assert_eq!(popover_kind_for("network_speed"), PopoverKind::System);
-    }
+    fn popover_kind_for_widgets() {
+        let cases = [
+            ("cpu", PopoverKind::System),
+            ("memory", PopoverKind::System),
+            ("disk", PopoverKind::System),
+            ("disk-home", PopoverKind::System),
+            ("disk-", PopoverKind::Unmergeable),
+            ("gpu", PopoverKind::System),
+            ("network_speed", PopoverKind::System),
+            ("clock", PopoverKind::CalendarWeather),
+            ("weather", PopoverKind::CalendarWeather),
+            ("battery", PopoverKind::Unmergeable),
+            ("media", PopoverKind::Unmergeable),
+            ("unknown", PopoverKind::Unmergeable),
+        ];
 
-    #[test]
-    fn popover_kind_non_system_widgets() {
-        assert_eq!(popover_kind_for("clock"), PopoverKind::CalendarWeather);
-        assert_eq!(popover_kind_for("weather"), PopoverKind::CalendarWeather);
-        assert_eq!(popover_kind_for("battery"), PopoverKind::Unmergeable);
-        assert_eq!(popover_kind_for("media"), PopoverKind::Unmergeable);
-        assert_eq!(popover_kind_for("unknown"), PopoverKind::Unmergeable);
+        for (name, expected) in cases {
+            assert_eq!(popover_kind_for(name), expected, "{name}");
+        }
     }
 
     #[test]

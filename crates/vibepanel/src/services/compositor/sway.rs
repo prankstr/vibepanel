@@ -1138,14 +1138,19 @@ mod tests {
 
         let ws_list = SwayBackend::workspace_meta_from_ipc(&workspaces, &mut snapshot);
 
-        assert_eq!(ws_list[0].id, 0);
-        assert_eq!(ws_list[0].idx, 0);
-        assert_eq!(ws_list[1].id, 1);
-        assert_eq!(ws_list[1].idx, 1);
-        assert_eq!(ws_list[2].id, 10);
-        assert_eq!(ws_list[2].idx, 10);
-        assert_eq!(ws_list[3].name, "web");
-        assert_eq!(ws_list[3].idx, -1);
+        let listed: Vec<_> = ws_list
+            .iter()
+            .map(|ws| (ws.id, ws.idx, ws.name.as_str()))
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                (0, 0, "0"),
+                (1, 1, "1"),
+                (10, 10, "10"),
+                (synthetic_id_for_name("web"), -1, "web"),
+            ]
+        );
     }
 
     #[test]

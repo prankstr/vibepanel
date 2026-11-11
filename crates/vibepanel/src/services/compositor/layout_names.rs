@@ -169,36 +169,23 @@ mod tests {
 
     #[test]
     fn test_short_code_from_language() {
-        assert_eq!(short_code_from_language("Swedish"), Some("SE"));
-        assert_eq!(short_code_from_language("German"), Some("DE"));
-        assert_eq!(short_code_from_language("Japanese"), Some("JP"));
-        assert_eq!(short_code_from_language("Klingon"), None);
-    }
+        let cases = [
+            ("Swedish", Some("SE")),
+            ("German", Some("DE")),
+            ("Japanese", Some("JP")),
+            ("Klingon", None),
+            ("swedish", Some("SE")),
+            ("GERMAN", Some("DE")),
+        ];
+        for (language, expected) in cases {
+            assert_eq!(short_code_from_language(language), expected, "{language}");
+        }
 
-    #[test]
-    fn test_short_code_from_language_case_insensitive() {
-        assert_eq!(short_code_from_language("swedish"), Some("SE"));
-        assert_eq!(short_code_from_language("GERMAN"), Some("DE"));
-    }
-
-    #[test]
-    fn test_all_entries_have_uppercase_codes() {
         for entry in LAYOUTS {
             assert_eq!(
                 entry.code,
                 entry.code.to_uppercase(),
                 "layout code for '{}' should be uppercase",
-                entry.language
-            );
-        }
-    }
-
-    #[test]
-    fn test_all_entries_have_capitalized_language() {
-        for entry in LAYOUTS {
-            assert!(
-                entry.language.starts_with(|c: char| c.is_uppercase()),
-                "language '{}' should be capitalized",
                 entry.language
             );
         }

@@ -631,35 +631,148 @@ button:hover {{
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::css;
+
+    fn normalize(text: &str) -> String {
+        text.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    fn normalize_selector(selector: &str) -> String {
+        selector
+            .split(',')
+            .map(normalize)
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    /// Parse CSS into `(selector, ["prop: value", ...])` rules in source order,
+    /// ignoring comments and whitespace.
+    pub(in crate::widgets::css) fn rules(css: &str) -> Vec<(String, Vec<String>)> {
+        let mut text = String::new();
+        let mut rest = css;
+        while let Some(start) = rest.find("/*") {
+            text.push_str(&rest[..start]);
+            rest = rest[start + 2..]
+                .find("*/")
+                .map_or("", |end| &rest[start + 2 + end + 2..]);
+        }
+        text.push_str(rest);
+
+        text.split('}')
+            .filter_map(|block| {
+                let (selector, body) = block.split_once('{')?;
+                let declarations = body
+                    .split(';')
+                    .filter_map(|declaration| {
+                        let (property, value) = declaration.split_once(':')?;
+                        Some(format!("{}: {}", normalize(property), normalize(value)))
+                    })
+                    .collect();
+                Some((normalize_selector(selector), declarations))
+            })
+            .collect()
+    }
+
+    /// Declarations of the first rule whose selector list matches `selector`.
+    pub(in crate::widgets::css) fn declarations(css: &str, selector: &str) -> Vec<String> {
+        let selector = normalize_selector(selector);
+        rules(css)
+            .into_iter()
+            .find(|(s, _)| *s == selector)
+            .unwrap_or_else(|| panic!("no rule for {selector:?}"))
+            .1
+    }
 
     #[test]
     fn scales_clear_gtk_theme_chrome() {
         let css = css(false);
+        let cases: [(&str, &[&str]); 3] = [
+            (
+                "scale > trough",
+                &[
+                    "border: none",
+                    "outline: none",
+                    "box-shadow: none",
+                    "background-image: none",
+                ],
+            ),
+            (
+                "scale > trough > highlight, scale > trough > fill",
+                &[
+                    "margin: 0",
+                    "border: none",
+                    "box-shadow: none",
+                    "background-image: none",
+                ],
+            ),
+            (
+                "scale > trough > slider",
+                &["border: none", "box-shadow: none", "background-image: none"],
+            ),
+        ];
 
-        assert!(css.contains(
-            "scale > trough {\n    border: none;\n    outline: none;\n    box-shadow: none;\n    background-image: none;\n}"
-        ));
-        assert!(css.contains(
-            "scale > trough > highlight,\nscale > trough > fill {\n    margin: 0;\n    border: none;\n    box-shadow: none;\n    background-image: none;\n}"
-        ));
-        assert!(css.contains(
-            "scale > trough > slider {\n    border: none;\n    box-shadow: none;\n    background-image: none;\n}"
-        ));
+        for (selector, expected) in cases {
+            assert_eq!(declarations(&css, selector), expected, "{selector}");
+        }
     }
 
     #[test]
     fn entries_clear_gtk_theme_chrome() {
         let css = css(false);
+        let hover_selector = ".popover entry:hover";
+        let chrome_selector =
+            ".popover entry, .popover entry:focus-within, .popover entry:disabled";
 
-        let hover = css
-            .find(".popover entry:hover {\n    background: var(--color-card-overlay-hover);")
-            .expect("entry hover rule");
-        let chrome = css
-            .find(".popover entry,\n.popover entry:focus-within,\n.popover entry:disabled {\n    background: var(--color-card-overlay);\n    background-image: none;\n    border: none;\n    box-shadow: none;")
-            .expect("entry chrome rule");
-        assert!(hover < chrome);
-        assert!(css.contains(".popover entry:disabled {\n    opacity: 0.5;\n}"));
+        let hover = declarations(&css, hover_selector);
+        assert!(
+            hover.contains(&"background: var(--color-card-overlay-hover)".to_string()),
+            "{hover_selector}: {hover:?}"
+        );
+        let chrome = declarations(&css, chrome_selector);
+        for expected in [
+            "background: var(--color-card-overlay)",
+            "background-image: none",
+            "border: none",
+            "box-shadow: none",
+        ] {
+            assert!(
+                chrome.contains(&expected.to_string()),
+                "{chrome_selector}: missing {expected}"
+            );
+        }
+        assert_eq!(
+            declarations(&css, ".popover entry:disabled"),
+            ["opacity: 0.5"],
+            ".popover entry:disabled"
+        );
+
+        // Equally specific: the chrome rule must come after hover to win.
+        let position = |selector: &str| {
+            rules(&css)
+                .iter()
+                .position(|(s, _)| *s == normalize_selector(selector))
+                .unwrap_or_else(|| panic!("no rule for {selector:?}"))
+        };
+        assert!(
+            position(hover_selector) < position(chrome_selector),
+            "hover rule must precede entry chrome rule"
+        );
+    }
+
+    // Regression (27912f76): with an outline and rounded corners, the
+    // background must stay inside the border instead of bleeding past it.
+    #[test]
+    fn surface_backgrounds_stay_inside_the_outline() {
+        let css = css(false);
+        for selector in [
+            ".popover",
+            ".notification-toast, window.media-window > .media-content, .osd",
+        ] {
+            assert!(
+                declarations(&css, selector).contains(&"background-clip: padding-box".to_string()),
+                "{selector}"
+            );
+        }
     }
 }

@@ -418,34 +418,35 @@ mod tests {
     }
 
     #[test]
-    fn test_weather_config_defaults() {
-        let entry = WidgetEntry {
-            name: "weather".to_string(),
-            options: Default::default(),
-        };
-        let config = WeatherConfig::from_entry(&entry);
+    fn weather_config_from_entry() {
+        let cases = [
+            ("defaults", vec![], true, DEFAULT_FORMAT),
+            (
+                "custom",
+                vec![
+                    ("show_icon", toml::Value::Boolean(false)),
+                    (
+                        "format",
+                        toml::Value::String("{temperature} {condition}".to_string()),
+                    ),
+                ],
+                false,
+                "{temperature} {condition}",
+            ),
+        ];
 
-        assert!(config.show_icon);
-        assert_eq!(config.format, DEFAULT_FORMAT);
-    }
-
-    #[test]
-    fn test_weather_config_custom() {
-        let mut options = std::collections::HashMap::new();
-        options.insert("show_icon".to_string(), toml::Value::Boolean(false));
-        options.insert(
-            "format".to_string(),
-            toml::Value::String("{temperature} {condition}".to_string()),
-        );
-
-        let entry = WidgetEntry {
-            name: "weather".to_string(),
-            options,
-        };
-        let config = WeatherConfig::from_entry(&entry);
-
-        assert!(!config.show_icon);
-        assert_eq!(config.format, "{temperature} {condition}");
+        for (name, options, show_icon, format) in cases {
+            let entry = WidgetEntry {
+                name: "weather".to_string(),
+                options: options
+                    .into_iter()
+                    .map(|(key, value)| (key.to_string(), value))
+                    .collect(),
+            };
+            let config = WeatherConfig::from_entry(&entry);
+            assert_eq!(config.show_icon, show_icon, "{name}: show_icon");
+            assert_eq!(config.format, format, "{name}: format");
+        }
     }
 
     #[test]
@@ -461,31 +462,21 @@ mod tests {
     }
 
     #[test]
-    fn test_format_label_compacts_temperature_in_vertical_mode() {
-        assert_eq!(format_label(&test_snapshot(), "{temperature}", true), "21");
-    }
-
-    #[test]
-    fn test_format_label_ignores_user_format_in_vertical_mode() {
+    fn format_label_vertical_shows_compact_temperature_only() {
         let snapshot = test_snapshot();
 
         // Wide or compound format strings collapse to just the temperature
         // in vertical mode to prevent them from breaking the vertical bar.
-        assert_eq!(
-            format_label(&snapshot, "{temperature} {feels_like}", true),
-            "21"
-        );
-        assert_eq!(format_label(&snapshot, "{condition}", true), "21");
-        assert_eq!(format_label(&snapshot, "{wind}", true), "21");
-        assert_eq!(format_label(&snapshot, "{humidity}", true), "21");
-        assert_eq!(
-            format_label(
-                &snapshot,
-                "{temperature} {condition} {feels_like} {humidity} {wind}",
-                true
-            ),
-            "21"
-        );
+        for format in [
+            "{temperature}",
+            "{temperature} {feels_like}",
+            "{condition}",
+            "{wind}",
+            "{humidity}",
+            "{temperature} {condition} {feels_like} {humidity} {wind}",
+        ] {
+            assert_eq!(format_label(&snapshot, format, true), "21", "{format}");
+        }
     }
 
     #[test]
@@ -501,18 +492,28 @@ mod tests {
     }
 
     #[test]
-    fn test_icon_for_weather_code() {
-        let current = test_snapshot().current.unwrap();
-        assert_eq!(icon_for_current(&current), "weather-partly-cloudy");
-    }
+    fn icon_for_current_cases() {
+        let cases = [
+            (
+                "partly cloudy day",
+                Some(2),
+                Some(true),
+                "weather-partly-cloudy",
+            ),
+            (
+                "partly cloudy night",
+                Some(2),
+                Some(false),
+                "weather-partly-cloudy-night",
+            ),
+            ("clear night", Some(0), Some(false), "weather-clear-night"),
+        ];
 
-    #[test]
-    fn test_icon_for_weather_code_night() {
-        let mut current = test_snapshot().current.unwrap();
-        current.is_day = Some(false);
-        assert_eq!(icon_for_current(&current), "weather-partly-cloudy-night");
-
-        current.weather_code = Some(0);
-        assert_eq!(icon_for_current(&current), "weather-clear-night");
+        for (name, weather_code, is_day, expected) in cases {
+            let mut current = test_snapshot().current.unwrap();
+            current.weather_code = weather_code;
+            current.is_day = is_day;
+            assert_eq!(icon_for_current(&current), expected, "{name}");
+        }
     }
 }

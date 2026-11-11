@@ -833,30 +833,32 @@ mod tests {
         }
     }
 
+    // Regression (d344bed8): a completed connect must finish even before the keyboard is released.
     #[test]
-    fn pending_connect_completes_without_keyboard_release() {
-        let mut state = VpnKeyboardState::new();
-        state.begin_connect("vpn-1");
+    fn check_pending() {
+        let cases = [
+            (
+                "regression: completes without keyboard release",
+                false,
+                false,
+            ),
+            ("completes and restores after keyboard release", true, true),
+        ];
 
-        let (connect_completed, should_restore) =
-            state.check_pending(&test_snapshot("vpn-1", VpnState::Activated));
+        for (name, keyboard_released, expected_restore) in cases {
+            let mut state = VpnKeyboardState::new();
+            state.begin_connect("vpn-1");
+            state.keyboard_released = keyboard_released;
 
-        assert!(connect_completed);
-        assert!(!should_restore);
-        assert!(state.pending_connects.is_empty());
-    }
+            let (connect_completed, should_restore) =
+                state.check_pending(&test_snapshot("vpn-1", VpnState::Activated));
 
-    #[test]
-    fn pending_connect_completes_and_restores_after_keyboard_release() {
-        let mut state = VpnKeyboardState::new();
-        state.begin_connect("vpn-1");
-        state.keyboard_released = true;
-
-        let (connect_completed, should_restore) =
-            state.check_pending(&test_snapshot("vpn-1", VpnState::Activated));
-
-        assert!(connect_completed);
-        assert!(should_restore);
-        assert!(state.pending_connects.is_empty());
+            assert!(connect_completed, "{name}: connect completed");
+            assert_eq!(should_restore, expected_restore, "{name}: should restore");
+            assert!(
+                state.pending_connects.is_empty(),
+                "{name}: pending connects cleared"
+            );
+        }
     }
 }

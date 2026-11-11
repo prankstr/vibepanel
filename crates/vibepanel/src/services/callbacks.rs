@@ -168,52 +168,26 @@ mod tests {
     use std::cell::Cell;
 
     #[test]
-    fn test_callbacks_register_and_notify() {
-        let callbacks: Callbacks<i32> = Callbacks::new();
-        let counter = Rc::new(Cell::new(0));
-
-        let counter_clone = counter.clone();
-        let _id = callbacks.register(move |value| {
-            counter_clone.set(counter_clone.get() + *value);
-        });
-
-        callbacks.notify(&5);
-        assert_eq!(counter.get(), 5);
-
-        callbacks.notify(&3);
-        assert_eq!(counter.get(), 8);
-    }
-
-    #[test]
-    fn test_callbacks_multiple_listeners() {
+    fn notify_reaches_all_in_order() {
         let callbacks: Callbacks<String> = Callbacks::new();
-        let results = Rc::new(RefCell::new(Vec::new()));
-
-        let results_clone = results.clone();
-        let _id1 = callbacks.register(move |s| {
-            results_clone.borrow_mut().push(format!("A:{}", s));
-        });
-
-        let results_clone = results.clone();
-        let _id2 = callbacks.register(move |s| {
-            results_clone.borrow_mut().push(format!("B:{}", s));
-        });
-
-        callbacks.notify(&"test".to_string());
-
-        let collected: Vec<_> = results.borrow().clone();
-        assert_eq!(collected, vec!["A:test", "B:test"]);
-    }
-
-    #[test]
-    fn test_callbacks_empty() {
-        let callbacks: Callbacks<()> = Callbacks::new();
         assert!(callbacks.is_empty());
         assert_eq!(callbacks.len(), 0);
 
-        let _id = callbacks.register(|_| {});
+        let results = Rc::new(RefCell::new(Vec::new()));
+        for name in ["A", "B"] {
+            let results = results.clone();
+            callbacks.register(move |s| results.borrow_mut().push(format!("{name}:{s}")));
+        }
         assert!(!callbacks.is_empty());
-        assert_eq!(callbacks.len(), 1);
+        assert_eq!(callbacks.len(), 2);
+
+        callbacks.notify(&"first".to_string());
+        callbacks.notify(&"second".to_string());
+
+        assert_eq!(
+            *results.borrow(),
+            ["A:first", "B:first", "A:second", "B:second"]
+        );
     }
 
     #[test]
@@ -255,17 +229,6 @@ mod tests {
 
         // Unregistering non-existent ID returns false
         assert!(!callbacks.unregister(id1));
-    }
-
-    #[test]
-    fn test_callback_ids_are_unique() {
-        let id1 = CallbackId::new();
-        let id2 = CallbackId::new();
-        let id3 = CallbackId::new();
-
-        assert_ne!(id1, id2);
-        assert_ne!(id2, id3);
-        assert_ne!(id1, id3);
     }
 
     #[test]

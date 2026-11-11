@@ -124,18 +124,19 @@ mod tests {
     }
 
     #[test]
-    fn test_spacer_config_default() {
-        let entry = make_entry(HashMap::new());
-        let config = SpacerConfig::from_entry(&entry);
-        assert_eq!(config.width, None);
-    }
+    fn spacer_config_width() {
+        let cases = [
+            ("default", HashMap::new(), None),
+            (
+                "custom",
+                HashMap::from([("width".to_string(), toml::Value::Integer(100))]),
+                Some(100),
+            ),
+        ];
 
-    #[test]
-    fn test_spacer_config_options() {
-        let mut options = HashMap::new();
-        options.insert("width".to_string(), toml::Value::Integer(100));
-        let entry = make_entry(options);
-        let config = SpacerConfig::from_entry(&entry);
-        assert_eq!(config.width, Some(100));
+        for (name, options, expected) in cases {
+            let config = SpacerConfig::from_entry(&make_entry(options));
+            assert_eq!(config.width, expected, "{name}");
+        }
     }
 }

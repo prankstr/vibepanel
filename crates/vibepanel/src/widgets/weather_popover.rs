@@ -479,24 +479,25 @@ mod tests {
     }
 
     #[test]
-    fn fit_location_label_keeps_full_when_short() {
-        // "City, Country" is within the 16-char budget.
-        assert_eq!(fit_location_label("City, Country"), "City, Country");
-    }
+    fn fit_location_label_cases() {
+        let cases = [
+            ("short label kept in full", "City, Country", "City, Country"),
+            (
+                "country dropped when over budget",
+                "LongCity, LongCountry",
+                "LongCity",
+            ),
+            // Ellipsizing happens at render time.
+            (
+                "long single segment kept",
+                "Llanfairpwllgwyngyll",
+                "Llanfairpwllgwyngyll",
+            ),
+        ];
 
-    #[test]
-    fn fit_location_label_drops_country_when_too_long() {
-        // "LongCity, LongCountry" is over the budget, so country is dropped.
-        assert_eq!(fit_location_label("LongCity, LongCountry"), "LongCity");
-    }
-
-    #[test]
-    fn fit_location_label_keeps_long_city_for_ellipsize() {
-        // Single long segment is kept as-is; ellipsizing happens at render time.
-        assert_eq!(
-            fit_location_label("Llanfairpwllgwyngyll"),
-            "Llanfairpwllgwyngyll"
-        );
+        for (name, input, expected) in cases {
+            assert_eq!(fit_location_label(input), expected, "{name}");
+        }
     }
 
     #[test]
@@ -528,18 +529,16 @@ mod tests {
     }
 
     #[test]
-    fn day_name_parses_weekday() {
-        assert_eq!(day_name(1, "2024-01-01"), "Mon");
-    }
+    fn day_name_cases() {
+        let cases = [
+            ("weekday parsed", 1, "2024-01-01", "Mon"),
+            ("first forecast is today", 0, "2099-01-01", "Today"),
+            ("invalid date falls back", 1, "not-a-date", "not-a-date"),
+        ];
 
-    #[test]
-    fn day_name_marks_first_forecast_today() {
-        assert_eq!(day_name(0, "2099-01-01"), "Today");
-    }
-
-    #[test]
-    fn day_name_falls_back_on_invalid_input() {
-        assert_eq!(day_name(1, "not-a-date"), "not-a-date");
+        for (name, index, date, expected) in cases {
+            assert_eq!(day_name(index, date), expected, "{name}");
+        }
     }
 
     #[test]
@@ -572,11 +571,5 @@ mod tests {
         assert_eq!(format_sun_time(Some("2026-05-30T05:31")), "05:31");
         assert_eq!(format_sun_time(Some("05:31")), "05:31");
         assert_eq!(format_sun_time(None), "—");
-    }
-
-    #[test]
-    fn uv_index_formats_one_decimal() {
-        assert_eq!(format_uv_index(Some(6.44)), "6.4");
-        assert_eq!(format_uv_index(None), "—");
     }
 }

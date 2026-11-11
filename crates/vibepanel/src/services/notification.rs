@@ -1169,19 +1169,14 @@ mod tests {
     }
 
     #[test]
-    fn unread_query_wire_contract_matches_introspection() {
+    fn introspection_exposes_unread_query_and_activation_token() {
         let node_info = gio::DBusNodeInfo::for_xml(NOTIFICATIONS_XML).unwrap();
-        let interface = node_info
+        let unread = node_info
             .lookup_interface(VIBEPANEL_NOTIFICATIONS_INTERFACE)
             .unwrap();
-        assert!(interface.lookup_method(UNREAD_METHOD).is_some());
-    }
-
-    #[test]
-    fn activation_token_signal_is_exposed() {
-        let node_info = gio::DBusNodeInfo::for_xml(NOTIFICATIONS_XML).unwrap();
-        let interface = node_info.lookup_interface(NOTIFICATIONS_NAME).unwrap();
-        assert!(interface.lookup_signal("ActivationToken").is_some());
+        assert!(unread.lookup_method(UNREAD_METHOD).is_some());
+        let notifications = node_info.lookup_interface(NOTIFICATIONS_NAME).unwrap();
+        assert!(notifications.lookup_signal("ActivationToken").is_some());
     }
 
     fn accept(svc: &NotificationService, n: Notification) {
@@ -1198,113 +1193,83 @@ mod tests {
     }
 
     #[test]
-    fn muted_transient_is_dropped_from_map() {
-        let svc = make_service();
-        svc.muted.set(true);
+    fn muted_transients_are_dropped_from_map() {
+        // Unmuted transients stay until the toast manager closes them on dismiss/timeout;
+        // muted non-transients are kept as history (only their toasts are suppressed).
+        let cases = [
+            ("muted transient is dropped", true, true, false),
+            ("unmuted transient remains", false, true, true),
+            ("muted non-transient remains", true, false, true),
+        ];
 
-        accept(&svc, make_notification(1, true, 1.0));
+        for (name, muted, transient, kept) in cases {
+            let svc = make_service();
+            svc.muted.set(muted);
 
-        assert!(
-            !svc.notifications.borrow().contains_key(&1),
-            "muted transient should not linger in the map"
-        );
+            accept(&svc, make_notification(1, transient, 1.0));
+
+            assert_eq!(svc.notifications.borrow().contains_key(&1), kept, "{name}");
+        }
     }
 
     #[test]
-    fn unmuted_transient_remains_until_toast_lifecycle_ends() {
-        let svc = make_service();
-        // muted = false (default)
+    fn enforce_limit_evicts_oldest_history_and_ignores_transients() {
+        type Timestamp = fn(usize) -> f64;
+        let cases: [(&str, usize, u32, Timestamp); 2] = [
+            (
+                "history at cap plus newer transients",
+                MAX_NOTIFICATIONS,
+                50,
+                |i| (1000 + i) as f64,
+            ),
+            // Older than any history: they would be evicted first if transients counted.
+            (
+                "history over cap plus older transients",
+                MAX_NOTIFICATIONS + 2,
+                5,
+                |i| -100.0 - i as f64,
+            ),
+        ];
 
-        accept(&svc, make_notification(1, true, 1.0));
+        for (name, history, transients, transient_timestamp) in cases {
+            let svc = make_service();
+            for i in 0..history as u32 {
+                svc.notifications
+                    .borrow_mut()
+                    .insert(i + 1, make_notification(i + 1, false, i as f64));
+            }
+            let transient_ids: Vec<u32> = (0..transients).map(|i| 10_000 + i).collect();
+            for (i, &id) in transient_ids.iter().enumerate() {
+                svc.notifications
+                    .borrow_mut()
+                    .insert(id, make_notification(id, true, transient_timestamp(i)));
+            }
 
-        assert!(
-            svc.notifications.borrow().contains_key(&1),
-            "unmuted transient must stay in the map - the toast manager closes it on dismiss/timeout"
-        );
-    }
+            svc.enforce_notification_limit();
 
-    #[test]
-    fn muted_non_transient_remains_in_map() {
-        let svc = make_service();
-        svc.muted.set(true);
-
-        accept(&svc, make_notification(1, false, 1.0));
-
-        assert!(
-            svc.notifications.borrow().contains_key(&1),
-            "muted non-transients are stored as history (only toasts are suppressed)"
-        );
-    }
-
-    #[test]
-    fn enforce_limit_excludes_transients_from_count() {
-        let svc = make_service();
-        // Fill exactly to the cap with history, then add transients on top.
-        for i in 0..(MAX_NOTIFICATIONS as u32) {
-            svc.notifications
-                .borrow_mut()
-                .insert(i + 1, make_notification(i + 1, false, i as f64));
-        }
-        for i in 0..50u32 {
-            let id = MAX_NOTIFICATIONS as u32 + 100 + i;
-            svc.notifications
-                .borrow_mut()
-                .insert(id, make_notification(id, true, (1000 + i) as f64));
-        }
-
-        svc.enforce_notification_limit();
-
-        assert_eq!(
-            svc.notifications.borrow().len(),
-            MAX_NOTIFICATIONS + 50,
-            "transients should not trigger eviction even when total > cap"
-        );
-    }
-
-    #[test]
-    fn enforce_limit_evicts_oldest_history_only() {
-        let svc = make_service();
-        // 102 history (timestamps 0..102) + 5 transients with very old timestamps.
-        for i in 0..102u32 {
-            svc.notifications
-                .borrow_mut()
-                .insert(i + 1, make_notification(i + 1, false, i as f64));
-        }
-        for i in 0..5u32 {
-            let id = 1000 + i;
-            // Older than any history - would be first evicted if transients counted.
-            svc.notifications
-                .borrow_mut()
-                .insert(id, make_notification(id, true, -100.0 - i as f64));
-        }
-
-        svc.enforce_notification_limit();
-
-        let map = svc.notifications.borrow();
-        // History over the cap (ids 1, 2 = oldest two) should be evicted.
-        assert!(
-            !map.contains_key(&1),
-            "oldest history (id=1) should be evicted"
-        );
-        assert!(
-            !map.contains_key(&2),
-            "second-oldest history (id=2) should be evicted"
-        );
-        assert!(map.contains_key(&3), "third-oldest history must survive");
-        // All transients survive despite older timestamps.
-        for i in 0..5u32 {
-            assert!(
-                map.contains_key(&(1000 + i)),
-                "transient id={} must not be evicted",
-                1000 + i
+            let map = svc.notifications.borrow();
+            let evicted = (history - MAX_NOTIFICATIONS) as u32;
+            assert_eq!(
+                map.len(),
+                MAX_NOTIFICATIONS + transients as usize,
+                "{name}: only history over the cap is evicted"
             );
+            for id in 1..=evicted {
+                assert!(!map.contains_key(&id), "{name}: history id={id} evicted");
+            }
+            assert!(
+                map.contains_key(&(evicted + 1)),
+                "{name}: oldest history within the cap survives"
+            );
+            for id in &transient_ids {
+                assert!(map.contains_key(id), "{name}: transient id={id} kept");
+            }
         }
     }
 
     #[test]
     fn unread_count_uses_seen_ids_and_excludes_transients() {
         let svc = make_service();
-        svc.backend_available.set(true);
         svc.notifications
             .borrow_mut()
             .insert(1, make_notification(1, false, 10.0));
@@ -1314,21 +1279,13 @@ mod tests {
         svc.notifications
             .borrow_mut()
             .insert(3, make_notification(3, true, 30.0));
+        assert_eq!(svc.unread_count(), 0, "no notification backend");
 
+        svc.backend_available.set(true);
         assert_eq!(svc.unread_count(), 2);
         svc.seen_ids.borrow_mut().insert(1);
         assert_eq!(svc.unread_count(), 1);
         svc.seen_ids.borrow_mut().insert(2);
-        assert_eq!(svc.unread_count(), 0);
-    }
-
-    #[test]
-    fn unread_count_is_zero_without_notification_backend() {
-        let svc = make_service();
-        svc.notifications
-            .borrow_mut()
-            .insert(1, make_notification(1, false, 10.0));
-
         assert_eq!(svc.unread_count(), 0);
     }
 

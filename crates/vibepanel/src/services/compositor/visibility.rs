@@ -778,7 +778,10 @@ mod tests {
 
     #[test]
     fn stop_interrupts_idle_and_throttled_waits() {
-        for throttle in [Duration::ZERO, Duration::from_secs(60)] {
+        for (name, throttle) in [
+            ("idle", Duration::ZERO),
+            ("throttled", Duration::from_secs(60)),
+        ] {
             let signal = Arc::new(RefreshSignal::default());
             let waiting = signal.clone();
             let (done, result) = std::sync::mpsc::channel();
@@ -786,12 +789,18 @@ mod tests {
                 done.send(waiting.wait(None, Instant::now() + throttle))
                     .unwrap();
             });
-            assert!(result.recv_timeout(Duration::from_millis(20)).is_err());
+            assert!(
+                result.recv_timeout(Duration::from_millis(20)).is_err(),
+                "{name}"
+            );
             if !throttle.is_zero() {
                 signal.request();
             }
             signal.stop();
-            assert!(!result.recv_timeout(Duration::from_secs(1)).unwrap());
+            assert!(
+                !result.recv_timeout(Duration::from_secs(1)).unwrap(),
+                "{name}"
+            );
             worker.join().unwrap();
         }
     }
@@ -868,7 +877,11 @@ mod tests {
         ]);
         let scene = niri_scene(&workspaces, &windows, true).unwrap();
         for output in ["A", "B"] {
-            assert_eq!(scene[output].decision(&[bar()]), HideDecision::Show);
+            assert_eq!(
+                scene[output].decision(&[bar()]),
+                HideDecision::Show,
+                "{output}"
+            );
         }
     }
 
@@ -977,11 +990,14 @@ mod tests {
         let scene = mango_scene(&monitors, &clients).unwrap();
         assert_eq!(scene["A"].decision(&[edge]), HideDecision::Hide);
         assert_eq!(scene["B"].decision(&[edge]), HideDecision::Hide);
-        for (field, value) in [("is_floating", json!(false)), ("tags", json!([2]))] {
+        for (name, field, value) in [
+            ("tiled", "is_floating", json!(false)),
+            ("hidden tag", "tags", json!([2])),
+        ] {
             let mut clients = clients.clone();
             clients["clients"][0][field] = value;
             let scene = mango_scene(&monitors, &clients).unwrap();
-            assert_eq!(scene["B"].decision(&[edge]), HideDecision::Show);
+            assert_eq!(scene["B"].decision(&[edge]), HideDecision::Show, "{name}");
         }
     }
 
@@ -1016,11 +1032,14 @@ mod tests {
             hyprland_scene(&monitors, &clients).unwrap()["B"].decision(&[bar]),
             HideDecision::Hide
         );
-        for fullscreen in [json!(2), json!(true)] {
+        for (name, fullscreen) in [
+            ("fullscreen mode", json!(2)),
+            ("fullscreen bool", json!(true)),
+        ] {
             clients[0]["fullscreen"] = fullscreen;
             let scene = hyprland_scene(&monitors, &clients).unwrap();
-            assert_eq!(scene["A"].decision(&[bar]), HideDecision::Hide);
-            assert_eq!(scene["B"].decision(&[bar]), HideDecision::Show);
+            assert_eq!(scene["A"].decision(&[bar]), HideDecision::Hide, "{name}");
+            assert_eq!(scene["B"].decision(&[bar]), HideDecision::Show, "{name}");
         }
     }
 

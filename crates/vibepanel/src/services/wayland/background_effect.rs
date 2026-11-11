@@ -1147,173 +1147,145 @@ mod tests {
         assert!(native_blur_supported(5, 0, 0));
     }
 
-    /// Helper: compute total pixel area covered by non-overlapping scanline rects.
-    fn total_area(rects: &[(i32, i32, i32, i32)]) -> i64 {
+    type Rect = (i32, i32, i32, i32);
+
+    fn total_area(rects: &[Rect]) -> i64 {
         rects.iter().map(|&(_, _, w, h)| w as i64 * h as i64).sum()
     }
 
-    /// Helper: rasterize to a pixel grid and count set pixels (detects overlaps).
-    fn rasterize_pixel_count(
-        rects: &[(i32, i32, i32, i32)],
-        bx: i32,
-        by: i32,
-        bw: i32,
-        bh: i32,
-    ) -> usize {
-        let mut grid = vec![false; (bw * bh) as usize];
-        for &(rx, ry, rw, rh) in rects {
-            for py in ry..ry + rh {
-                for px in rx..rx + rw {
-                    let idx = ((py - by) * bw + (px - bx)) as usize;
-                    grid[idx] = true;
-                }
-            }
+    #[test]
+    fn degenerate_and_clamped_shapes() {
+        let cases = [
+            ("zero width", (0, 0, 0, 10, 5), vec![]),
+            ("zero height", (0, 0, 10, 0, 5), vec![]),
+            ("negative width", (0, 0, -5, 10, 5), vec![]),
+            ("negative height", (0, 0, 10, -3, 5), vec![]),
+            (
+                "negative radius is one rect",
+                (0, 0, 40, 30, -5),
+                vec![(0, 0, 40, 30)],
+            ),
+            ("1x1", (5, 10, 1, 1, 0), vec![(5, 10, 1, 1)]),
+            (
+                "1x1 radius clamps to plain rect",
+                (0, 0, 1, 1, 10),
+                vec![(0, 0, 1, 1)],
+            ),
+            (
+                "zero radius is one rect",
+                (10, 20, 100, 50, 0),
+                vec![(10, 20, 100, 50)],
+            ),
+        ];
+
+        for (name, (x, y, w, h, r), expected) in cases {
+            assert_eq!(
+                compute_rounded_rect_rects(x, y, w, h, r),
+                expected,
+                "{name}"
+            );
         }
-        grid.iter().filter(|&&v| v).count()
-    }
 
-    // ── Degenerate / invalid inputs ─────────────────────────────────────
-
-    #[test]
-    fn zero_width_returns_empty() {
-        assert!(compute_rounded_rect_rects(0, 0, 0, 10, 5).is_empty());
+        // A pill (radius = half the height) has no central rect, only scanlines.
+        let pill = compute_rounded_rect_rects(0, 0, 20, 10, 5);
+        assert!(!pill.is_empty());
+        assert!(pill.iter().all(|&(_, _, _, rh)| rh == 1), "{pill:?}");
     }
 
     #[test]
-    fn zero_height_returns_empty() {
-        assert!(compute_rounded_rect_rects(0, 0, 10, 0, 5).is_empty());
-    }
+    fn rounded_rect_invariants() {
+        let sizes = [
+            (20, 20),
+            (100, 40),
+            (40, 100),
+            (3, 3),
+            (50, 50),
+            (2, 2),
+            (3, 7),
+            (30, 30),
+            (50, 20),
+            (20, 50),
+            (40, 40),
+            (31, 31),
+            (100, 50),
+        ];
+        let radii = [0, 1, 5, 7, 8, 10, 15, 20, 50];
+        let origins = [(0, 0), (10, 20), (100, 200)];
 
-    #[test]
-    fn negative_width_returns_empty() {
-        assert!(compute_rounded_rect_rects(0, 0, -5, 10, 5).is_empty());
-    }
+        for (w, h) in sizes {
+            for radius in radii {
+                let at_origin = compute_rounded_rect_rects(0, 0, w, h, radius);
+                for (x, y) in origins {
+                    let row = format!("{w}x{h} r={radius} at ({x},{y})");
+                    let rects = compute_rounded_rect_rects(x, y, w, h, radius);
+                    assert!(!rects.is_empty(), "{row}: empty");
 
-    #[test]
-    fn negative_height_returns_empty() {
-        assert!(compute_rounded_rect_rects(0, 0, 10, -3, 5).is_empty());
-    }
+                    let shifted: Vec<Rect> = at_origin
+                        .iter()
+                        .map(|&(rx, ry, rw, rh)| (rx + x, ry + y, rw, rh))
+                        .collect();
+                    assert_eq!(rects, shifted, "{row}: origin must only shift rects");
 
-    #[test]
-    fn one_by_one_returns_single_rect() {
-        let rects = compute_rounded_rect_rects(5, 10, 1, 1, 0);
-        assert_eq!(rects, vec![(5, 10, 1, 1)]);
-    }
+                    let mut grid = vec![vec![false; w as usize]; h as usize];
+                    for &(rx, ry, rw, rh) in &rects {
+                        assert!(rw > 0 && rh > 0, "{row}: non-positive dim ({rw},{rh})");
+                        assert!(
+                            rx >= x && ry >= y && rx + rw <= x + w && ry + rh <= y + h,
+                            "{row}: ({rx},{ry},{rw},{rh}) outside bbox"
+                        );
+                        for py in ry - y..ry - y + rh {
+                            for px in rx - x..rx - x + rw {
+                                grid[py as usize][px as usize] = true;
+                            }
+                        }
+                    }
 
-    #[test]
-    fn one_by_one_with_radius_returns_single_rect() {
-        // radius clamps to min(1/2, 1/2) = 0 → plain rect
-        let rects = compute_rounded_rect_rects(0, 0, 1, 1, 10);
-        assert_eq!(rects, vec![(0, 0, 1, 1)]);
-    }
+                    let area = total_area(&rects);
+                    let bbox = w as i64 * h as i64;
+                    let pixels = grid.iter().flatten().filter(|&&set| set).count() as i64;
+                    assert_eq!(area, pixels, "{row}: overlapping rects");
+                    assert!(area <= bbox, "{row}: area {area} > bbox {bbox}");
+                    if radius == 0 {
+                        assert_eq!(area, bbox, "{row}: zero radius must fill bbox");
+                    }
 
-    // ── Zero / negative radius ──────────────────────────────────────────
-
-    #[test]
-    fn zero_radius_returns_single_rect() {
-        let rects = compute_rounded_rect_rects(10, 20, 100, 50, 0);
-        assert_eq!(rects, vec![(10, 20, 100, 50)]);
-    }
-
-    #[test]
-    fn negative_radius_returns_single_rect() {
-        let rects = compute_rounded_rect_rects(0, 0, 40, 30, -5);
-        assert_eq!(rects, vec![(0, 0, 40, 30)]);
-    }
-
-    // ── Bounding-box containment ────────────────────────────────────────
-
-    #[test]
-    fn all_rects_within_bounding_box() {
-        for radius in [1, 5, 10, 20, 50] {
-            for (w, h) in [(20, 20), (100, 40), (40, 100), (3, 3), (50, 50)] {
-                let x = 10;
-                let y = 20;
-                let rects = compute_rounded_rect_rects(x, y, w, h, radius);
-                for &(rx, ry, rw, rh) in &rects {
                     assert!(
-                        rx >= x && ry >= y && rx + rw <= x + w && ry + rh <= y + h,
-                        "rect ({rx},{ry},{rw},{rh}) outside bbox ({x},{y},{w},{h}) with r={radius}"
+                        grid.iter().all(|line| line.contains(&true)),
+                        "{row}: uncovered row"
                     );
+                    for (top, line) in grid.iter().enumerate() {
+                        assert_eq!(
+                            *line,
+                            grid[h as usize - 1 - top],
+                            "{row}: row {top} not vertically symmetric"
+                        );
+                        let mirrored: Vec<bool> = line.iter().rev().copied().collect();
+                        assert_eq!(
+                            *line, mirrored,
+                            "{row}: row {top} not horizontally symmetric"
+                        );
+                    }
                 }
             }
         }
-    }
 
-    #[test]
-    fn all_rects_have_positive_dimensions() {
-        for radius in [1, 5, 10, 20, 50] {
-            for (w, h) in [(20, 20), (100, 40), (2, 2), (3, 7)] {
-                let rects = compute_rounded_rect_rects(0, 0, w, h, radius);
-                for &(_, _, rw, rh) in &rects {
-                    assert!(
-                        rw > 0 && rh > 0,
-                        "non-positive dim ({rw},{rh}) for {w}x{h} r={radius}"
-                    );
-                }
-            }
-        }
-    }
-
-    // ── Area properties ─────────────────────────────────────────────────
-
-    #[test]
-    fn area_less_than_or_equal_to_bounding_box() {
-        for radius in [1, 5, 10, 20] {
-            for (w, h) in [(20, 20), (100, 40), (40, 100)] {
-                let rects = compute_rounded_rect_rects(0, 0, w, h, radius);
-                let area = total_area(&rects);
-                let bbox_area = w as i64 * h as i64;
-                assert!(
-                    area <= bbox_area,
-                    "area {area} > bbox {bbox_area} for {w}x{h} r={radius}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn zero_radius_area_equals_bounding_box() {
-        let rects = compute_rounded_rect_rects(0, 0, 100, 50, 0);
-        assert_eq!(total_area(&rects), 100 * 50);
-    }
-
-    #[test]
-    fn rounded_area_strictly_less_than_bounding_box() {
-        // With a non-trivial radius, corners are cut so area must be less.
-        let rects = compute_rounded_rect_rects(0, 0, 100, 50, 10);
-        let area = total_area(&rects);
-        let bbox = 100i64 * 50;
-        assert!(area < bbox, "expected area < {bbox}, got {area}");
-        // But should still cover the vast majority.
-        assert!(area > bbox * 90 / 100, "area {area} too small for {bbox}");
-    }
-
-    #[test]
-    fn no_pixel_overlaps() {
-        // Rasterize and verify unique pixel count matches summed rect area.
-        for radius in [1, 5, 10, 15] {
-            for (w, h) in [(30, 30), (50, 20), (20, 50)] {
-                let rects = compute_rounded_rect_rects(0, 0, w, h, radius);
-                let sum_area = total_area(&rects) as usize;
-                let pixel_count = rasterize_pixel_count(&rects, 0, 0, w, h);
-                assert_eq!(
-                    sum_area, pixel_count,
-                    "overlap detected for {w}x{h} r={radius}: sum={sum_area} pixels={pixel_count}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn zero_corner_inset_matches_default_rasterization() {
-        let default = compute_rounded_rect_rects(3, 7, 40, 24, 8);
-        let inset_zero = compute_rounded_rect_rects_with_corner_inset(3, 7, 40, 24, 8, 0);
-        assert_eq!(default, inset_zero);
+        // Rounding cuts the corners but keeps most of the area.
+        let area = total_area(&compute_rounded_rect_rects(0, 0, 100, 50, 10));
+        let bbox = 100 * 50;
+        assert!(
+            area < bbox && area > bbox * 90 / 100,
+            "100x50 r=10: area {area} vs bbox {bbox}"
+        );
     }
 
     #[test]
     fn corner_inset_trims_only_corner_scanlines() {
+        assert_eq!(
+            compute_rounded_rect_rects(3, 7, 40, 24, 8),
+            compute_rounded_rect_rects_with_corner_inset(3, 7, 40, 24, 8, 0),
+            "zero inset must match default rasterization"
+        );
+
         let base = compute_rounded_rect_rects(0, 0, 40, 30, 8);
         let inset = compute_rounded_rect_rects_with_corner_inset(0, 0, 40, 30, 8, 1);
 
@@ -1329,122 +1301,6 @@ mod tests {
                 "right edge should move inward or stay"
             );
             assert!(after.2 > 0, "scanline width must stay positive");
-        }
-    }
-
-    // ── Symmetry ────────────────────────────────────────────────────────
-
-    #[test]
-    fn vertical_symmetry() {
-        // The top and bottom halves should mirror each other.
-        let (w, h, r) = (40, 40, 10);
-        let rects = compute_rounded_rect_rects(0, 0, w, h, r);
-        let mut grid = vec![vec![false; w as usize]; h as usize];
-        for &(rx, ry, rw, rh) in &rects {
-            for py in ry..ry + rh {
-                for px in rx..rx + rw {
-                    grid[py as usize][px as usize] = true;
-                }
-            }
-        }
-        for y in 0..h as usize / 2 {
-            let mirror_y = h as usize - 1 - y;
-            assert_eq!(
-                grid[y], grid[mirror_y],
-                "row {y} != mirrored row {mirror_y}"
-            );
-        }
-    }
-
-    #[test]
-    fn horizontal_symmetry() {
-        // Left and right insets should be equal (symmetric corners).
-        let (w, h, r) = (40, 40, 10);
-        let rects = compute_rounded_rect_rects(0, 0, w, h, r);
-        let mut grid = vec![vec![false; w as usize]; h as usize];
-        for &(rx, ry, rw, rh) in &rects {
-            for py in ry..ry + rh {
-                for px in rx..rx + rw {
-                    grid[py as usize][px as usize] = true;
-                }
-            }
-        }
-        for (y, row) in grid.iter().enumerate() {
-            for x in 0..w as usize / 2 {
-                let mirror_x = w as usize - 1 - x;
-                assert_eq!(
-                    row[x], row[mirror_x],
-                    "({x},{y}) != mirror ({mirror_x},{y})"
-                );
-            }
-        }
-    }
-
-    // ── Pill shape (oversized radius) ───────────────────────────────────
-
-    #[test]
-    fn oversized_radius_clamps_to_pill() {
-        // radius=100 on a 20x10 rect → clamped to min(10, 5) = 5
-        let rects = compute_rounded_rect_rects(0, 0, 20, 10, 100);
-        assert!(!rects.is_empty());
-        for &(rx, ry, rw, rh) in &rects {
-            assert!(rx >= 0 && ry >= 0 && rx + rw <= 20 && ry + rh <= 10);
-        }
-    }
-
-    #[test]
-    fn pill_shape_has_no_central_rect_when_height_equals_two_radii() {
-        // 20x10 with r=5 → clamped radius = 5, height = 2*5 = 10 → no center
-        let rects = compute_rounded_rect_rects(0, 0, 20, 10, 5);
-        // All rects should be height=1 scanlines (no tall central rect).
-        for &(_, _, _, rh) in &rects {
-            assert_eq!(rh, 1, "expected all scanlines, got height {rh}");
-        }
-    }
-
-    // ── Offset (non-zero origin) ────────────────────────────────────────
-
-    #[test]
-    fn offset_origin_shifts_all_rects() {
-        let base = compute_rounded_rect_rects(0, 0, 30, 30, 8);
-        let shifted = compute_rounded_rect_rects(100, 200, 30, 30, 8);
-        assert_eq!(base.len(), shifted.len());
-        for (b, s) in base.iter().zip(shifted.iter()) {
-            assert_eq!(b.0 + 100, s.0, "x mismatch");
-            assert_eq!(b.1 + 200, s.1, "y mismatch");
-            assert_eq!(b.2, s.2, "width mismatch");
-            assert_eq!(b.3, s.3, "height mismatch");
-        }
-    }
-
-    // ── Odd dimensions ──────────────────────────────────────────────────
-
-    #[test]
-    fn odd_dimensions_produce_valid_rects() {
-        let rects = compute_rounded_rect_rects(0, 0, 31, 31, 7);
-        assert!(!rects.is_empty());
-        let pixel_count = rasterize_pixel_count(&rects, 0, 0, 31, 31);
-        let sum_area = total_area(&rects) as usize;
-        assert_eq!(sum_area, pixel_count, "overlap with odd dims");
-    }
-
-    // ── Full coverage: every row has at least one pixel ─────────────────
-
-    #[test]
-    fn every_row_covered() {
-        for radius in [1, 5, 10] {
-            let (w, h) = (30, 30);
-            let rects = compute_rounded_rect_rects(0, 0, w, h, radius);
-            let mut row_covered = vec![false; h as usize];
-            for &(_, ry, _, rh) in &rects {
-                for y in ry..ry + rh {
-                    row_covered[y as usize] = true;
-                }
-            }
-            assert!(
-                row_covered.iter().all(|&c| c),
-                "not all rows covered for r={radius}"
-            );
         }
     }
 }

@@ -2251,43 +2251,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_dbm_to_percent_boundaries() {
-        // -100 dBm (very weak) should map to 0%
-        assert_eq!(dbm_to_percent(-10000), 0);
-        // -50 dBm (excellent) should map to 100%
-        assert_eq!(dbm_to_percent(-5000), 100);
-    }
+    fn test_dbm_to_percent() {
+        let cases = [
+            ("-100 dBm floor", -10000, 0),
+            ("-50 dBm ceiling", -5000, 100),
+            ("-75 dBm midpoint", -7500, 50),
+            ("-60 dBm", -6000, 80),
+            ("-90 dBm", -9000, 20),
+            ("-40 dBm clamps high", -4000, 100),
+            ("-30 dBm clamps high", -3000, 100),
+            ("0 dBm clamps high", 0, 100),
+            ("-110 dBm clamps low", -11000, 0),
+            ("-150 dBm clamps low", -15000, 0),
+            ("-55 dBm good", -5500, 90),
+            ("-70 dBm fair", -7000, 60),
+            ("-85 dBm weak", -8500, 30),
+        ];
 
-    #[test]
-    fn test_dbm_to_percent_midpoints() {
-        // -75 dBm should map to 50%
-        assert_eq!(dbm_to_percent(-7500), 50);
-        // -60 dBm should map to 80%
-        assert_eq!(dbm_to_percent(-6000), 80);
-        // -90 dBm should map to 20%
-        assert_eq!(dbm_to_percent(-9000), 20);
-    }
-
-    #[test]
-    fn test_dbm_to_percent_clamping() {
-        // Values better than -50 dBm should clamp to 100%
-        assert_eq!(dbm_to_percent(-4000), 100); // -40 dBm
-        assert_eq!(dbm_to_percent(-3000), 100); // -30 dBm
-        assert_eq!(dbm_to_percent(0), 100); // 0 dBm (unrealistic but should handle)
-
-        // Values worse than -100 dBm should clamp to 0%
-        assert_eq!(dbm_to_percent(-11000), 0); // -110 dBm
-        assert_eq!(dbm_to_percent(-15000), 0); // -150 dBm
-    }
-
-    #[test]
-    fn test_dbm_to_percent_typical_values() {
-        // Typical Wi-Fi signal strengths
-        // -55 dBm (good signal) -> 90%
-        assert_eq!(dbm_to_percent(-5500), 90);
-        // -70 dBm (fair signal) -> 60%
-        assert_eq!(dbm_to_percent(-7000), 60);
-        // -85 dBm (weak signal) -> 30%
-        assert_eq!(dbm_to_percent(-8500), 30);
+        for (name, dbm_times_100, expected) in cases {
+            assert_eq!(dbm_to_percent(dbm_times_100), expected, "{name}");
+        }
     }
 }

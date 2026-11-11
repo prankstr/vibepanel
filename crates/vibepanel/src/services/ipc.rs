@@ -337,171 +337,147 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_message_roundtrip() {
-        let cases = vec![
-            IpcMessage::Volume {
-                percent: 42,
-                muted: false,
-            },
-            IpcMessage::Volume {
-                percent: 100,
-                muted: true,
-            },
-            IpcMessage::VolumeUnavailable,
-            IpcMessage::Brightness { percent: 75 },
-            IpcMessage::ToggleInhibitor,
+    fn roundtrip_cases() {
+        let cases = [
+            (
+                "volume unmuted",
+                IpcMessage::Volume {
+                    percent: 42,
+                    muted: false,
+                },
+            ),
+            (
+                "volume muted",
+                IpcMessage::Volume {
+                    percent: 100,
+                    muted: true,
+                },
+            ),
+            ("volume unavailable", IpcMessage::VolumeUnavailable),
+            ("brightness", IpcMessage::Brightness { percent: 75 }),
+            ("toggle inhibitor", IpcMessage::ToggleInhibitor),
+            (
+                "bar show",
+                IpcMessage::Bar {
+                    action: BarIpcAction::Show,
+                },
+            ),
+            (
+                "bar hide",
+                IpcMessage::Bar {
+                    action: BarIpcAction::Hide,
+                },
+            ),
+            (
+                "bar toggle",
+                IpcMessage::Bar {
+                    action: BarIpcAction::Toggle,
+                },
+            ),
+            (
+                "popover show",
+                IpcMessage::Popover {
+                    action: PopoverIpcAction::Show("clock".to_string()),
+                },
+            ),
+            (
+                "popover hide without target",
+                IpcMessage::Popover {
+                    action: PopoverIpcAction::Hide(None),
+                },
+            ),
+            (
+                "popover hide with target",
+                IpcMessage::Popover {
+                    action: PopoverIpcAction::Hide(Some("battery".to_string())),
+                },
+            ),
+            (
+                "popover toggle",
+                IpcMessage::Popover {
+                    action: PopoverIpcAction::Toggle("quick-settings".to_string()),
+                },
+            ),
         ];
 
-        for msg in cases {
+        for (name, msg) in cases {
             let wire = msg.to_wire();
-            let parsed = IpcMessage::from_wire(&wire).expect("failed to parse");
-            assert_eq!(msg, parsed);
+            assert_eq!(
+                IpcMessage::from_wire(&wire),
+                Some(msg),
+                "{name}: wire {wire:?}"
+            );
         }
     }
 
     #[test]
-    fn test_from_wire_rejects_empty() {
-        assert_eq!(IpcMessage::from_wire(""), None);
-        assert_eq!(IpcMessage::from_wire("   "), None);
-    }
-
-    #[test]
-    fn test_from_wire_rejects_garbage() {
-        assert_eq!(IpcMessage::from_wire("hello"), None);
-        assert_eq!(IpcMessage::from_wire("not_a_message"), None);
-        assert_eq!(IpcMessage::from_wire("volume"), None);
-        assert_eq!(IpcMessage::from_wire("brightness"), None);
-    }
-
-    #[test]
-    fn test_from_wire_rejects_missing_fields() {
-        // volume needs percent and muted
-        assert_eq!(IpcMessage::from_wire("volume:"), None);
-        assert_eq!(IpcMessage::from_wire("volume:42"), None);
-        // brightness needs percent
-        assert_eq!(IpcMessage::from_wire("brightness:"), None);
-    }
-
-    #[test]
-    fn test_from_wire_rejects_non_numeric() {
-        assert_eq!(IpcMessage::from_wire("volume:abc:0"), None);
-        assert_eq!(IpcMessage::from_wire("brightness:xyz"), None);
-    }
-
-    #[test]
-    fn test_from_wire_muted_non_one_is_unmuted() {
-        // Any non-"1" value for the muted field is treated as unmuted.
-        assert_eq!(
-            IpcMessage::from_wire("volume:42:abc"),
-            Some(IpcMessage::Volume {
-                percent: 42,
-                muted: false
-            })
-        );
-        assert_eq!(
-            IpcMessage::from_wire("volume:42:0"),
-            Some(IpcMessage::Volume {
-                percent: 42,
-                muted: false
-            })
-        );
-    }
-
-    #[test]
-    fn test_from_wire_rejects_extra_fields() {
-        assert_eq!(IpcMessage::from_wire("volume:42:0:extra"), None);
-    }
-
-    #[test]
-    fn test_from_wire_handles_whitespace() {
-        // Leading/trailing whitespace should be trimmed
-        assert_eq!(
-            IpcMessage::from_wire("  volume:42:1  "),
-            Some(IpcMessage::Volume {
-                percent: 42,
-                muted: true
-            })
-        );
-        assert_eq!(
-            IpcMessage::from_wire("\ntoggle_inhibitor\n"),
-            Some(IpcMessage::ToggleInhibitor)
-        );
-    }
-
-    #[test]
-    fn test_bar_message_roundtrip() {
-        let cases = vec![
-            IpcMessage::Bar {
-                action: BarIpcAction::Show,
-            },
-            IpcMessage::Bar {
-                action: BarIpcAction::Hide,
-            },
-            IpcMessage::Bar {
-                action: BarIpcAction::Toggle,
-            },
+    fn from_wire_accepts() {
+        let cases = [
+            (
+                "surrounding spaces are trimmed",
+                "  volume:42:1  ",
+                IpcMessage::Volume {
+                    percent: 42,
+                    muted: true,
+                },
+            ),
+            (
+                "surrounding newlines are trimmed",
+                "\ntoggle_inhibitor\n",
+                IpcMessage::ToggleInhibitor,
+            ),
+            (
+                "muted field other than 1 is unmuted",
+                "volume:42:abc",
+                IpcMessage::Volume {
+                    percent: 42,
+                    muted: false,
+                },
+            ),
+            // Exact text, so a newer CLI still reaches an older running panel.
+            (
+                "popover hide without target",
+                "popover:hide",
+                IpcMessage::Popover {
+                    action: PopoverIpcAction::Hide(None),
+                },
+            ),
         ];
-        for msg in cases {
-            let wire = msg.to_wire();
-            let parsed = IpcMessage::from_wire(&wire).expect("failed to parse");
-            assert_eq!(msg, parsed);
+
+        for (name, wire, expected) in cases {
+            assert_eq!(IpcMessage::from_wire(wire), Some(expected), "{name}");
         }
     }
 
     #[test]
-    fn test_popover_message_roundtrip() {
-        let cases = vec![
-            IpcMessage::Popover {
-                action: PopoverIpcAction::Show("clock".to_string()),
-            },
-            IpcMessage::Popover {
-                action: PopoverIpcAction::Hide(None),
-            },
-            IpcMessage::Popover {
-                action: PopoverIpcAction::Hide(Some("battery".to_string())),
-            },
-            IpcMessage::Popover {
-                action: PopoverIpcAction::Toggle("quick-settings".to_string()),
-            },
+    fn rejects() {
+        let cases = [
+            ("empty", ""),
+            ("whitespace only", "   "),
+            ("unknown word", "hello"),
+            ("unknown identifier", "not_a_message"),
+            ("bare volume", "volume"),
+            ("bare brightness", "brightness"),
+            ("volume without fields", "volume:"),
+            ("volume without muted", "volume:42"),
+            ("brightness without percent", "brightness:"),
+            ("non-numeric volume", "volume:abc:0"),
+            ("non-numeric brightness", "brightness:xyz"),
+            ("volume extra field", "volume:42:0:extra"),
+            ("bar without action", "bar:"),
+            ("bar unknown action", "bar:unknown"),
+            ("bare bar", "bar"),
+            ("popover show empty target", "popover:show:"),
+            ("popover toggle empty target", "popover:toggle:"),
+            ("popover show without target", "popover:show"),
+            ("popover toggle without target", "popover:toggle"),
+            ("popover without action", "popover:"),
+            ("popover unknown action", "popover:unknown:foo"),
+            ("bare popover", "popover"),
         ];
-        for msg in cases {
-            let wire = msg.to_wire();
-            let parsed = IpcMessage::from_wire(&wire).expect("failed to parse");
-            assert_eq!(msg, parsed);
+
+        for (name, wire) in cases {
+            assert_eq!(IpcMessage::from_wire(wire), None, "{name}: {wire:?}");
         }
-    }
-
-    #[test]
-    fn test_from_wire_rejects_bar_garbage() {
-        assert_eq!(IpcMessage::from_wire("bar:"), None);
-        assert_eq!(IpcMessage::from_wire("bar:unknown"), None);
-        assert_eq!(IpcMessage::from_wire("bar"), None);
-    }
-
-    #[test]
-    fn test_from_wire_rejects_targetless_popover_show_and_toggle() {
-        // show and toggle require a target
-        assert_eq!(IpcMessage::from_wire("popover:show:"), None);
-        assert_eq!(IpcMessage::from_wire("popover:toggle:"), None);
-        // bare "popover:show" without colon is just unknown
-        assert_eq!(IpcMessage::from_wire("popover:show"), None);
-        assert_eq!(IpcMessage::from_wire("popover:toggle"), None);
-    }
-
-    #[test]
-    fn test_from_wire_accepts_targetless_popover_hide() {
-        assert_eq!(
-            IpcMessage::from_wire("popover:hide"),
-            Some(IpcMessage::Popover {
-                action: PopoverIpcAction::Hide(None),
-            })
-        );
-    }
-
-    #[test]
-    fn test_from_wire_rejects_popover_garbage() {
-        assert_eq!(IpcMessage::from_wire("popover:"), None);
-        assert_eq!(IpcMessage::from_wire("popover:unknown:foo"), None);
-        assert_eq!(IpcMessage::from_wire("popover"), None);
     }
 }

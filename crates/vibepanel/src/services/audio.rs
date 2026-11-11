@@ -2252,33 +2252,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn percent_to_valid_volume_maps_100_to_normal() {
+    fn volume_percent_limits() {
         assert_eq!(percent_to_valid_volume(100), Volume::NORMAL);
-    }
-
-    #[test]
-    fn percent_to_valid_volume_clamps_to_pulse_max() {
         assert_eq!(percent_to_valid_volume(u32::MAX), Volume::MAX);
-    }
 
-    #[test]
-    fn volume_ui_max_percent_stays_within_valid_volume_range() {
         let ui_max = volume_ui_max_percent();
         assert!(ui_max >= 100);
         assert!(ui_max <= valid_volume_percent(u32::MAX));
-    }
 
-    #[test]
-    fn volume_user_max_percent_respects_overdrive_flag() {
         assert_eq!(volume_user_max_percent(false), 100);
-        assert_eq!(volume_user_max_percent(true), volume_ui_max_percent());
-    }
+        assert_eq!(volume_user_max_percent(true), ui_max);
 
-    #[test]
-    fn valid_volume_percent_is_idempotent() {
         for percent in [50, 100, 150, u32::MAX] {
             let normalized = valid_volume_percent(percent);
-            assert_eq!(valid_volume_percent(normalized), normalized);
+            assert_eq!(valid_volume_percent(normalized), normalized, "{percent}");
         }
     }
 
@@ -2305,18 +2292,22 @@ mod tests {
         assert_eq!(bounded_relative_volume_target(50, 0, 153), None);
     }
 
-    #[test]
-    fn cached_app_mute_toggles_compose_across_stale_enumeration() {
-        let stream = AppVolumeSnapshot {
+    fn stream(volume: u32, muted: bool) -> AppVolumeSnapshot {
+        AppVolumeSnapshot {
             index: 7,
             app_name: "App".to_string(),
             app_id: "app".to_string(),
             app_icon_name: String::new(),
             media_description: "Playback".to_string(),
-            volume: 50,
-            muted: false,
+            volume,
+            muted,
             channel_count: 2,
-        };
+        }
+    }
+
+    #[test]
+    fn cached_app_mute_toggles_compose_across_stale_enumeration() {
+        let stream = stream(50, false);
         let mut state = PulseWorkerState {
             app_volumes: vec![stream.clone()],
             ..Default::default()
@@ -2344,43 +2335,8 @@ mod tests {
     }
 
     #[test]
-    fn post_revision_mute_disagreement_preserves_backend_state() {
-        let mut streams = vec![AppVolumeSnapshot {
-            index: 7,
-            app_name: "App".to_string(),
-            app_id: "app".to_string(),
-            app_icon_name: String::new(),
-            media_description: "Playback".to_string(),
-            volume: 50,
-            muted: false,
-            channel_count: 2,
-        }];
-        let mut pending_mutes = HashMap::from([(
-            7,
-            PendingAppMute {
-                muted: true,
-                revision: 1,
-            },
-        )]);
-
-        reconcile_pending_app_mutes(&mut streams, &mut pending_mutes, 1);
-
-        assert!(pending_mutes.is_empty());
-        assert!(!streams[0].muted);
-    }
-
-    #[test]
     fn stale_enumeration_preserves_pending_app_volume() {
-        let stream = AppVolumeSnapshot {
-            index: 7,
-            app_name: "App".to_string(),
-            app_id: "app".to_string(),
-            app_icon_name: String::new(),
-            media_description: "Playback".to_string(),
-            volume: 50,
-            muted: false,
-            channel_count: 2,
-        };
+        let stream = stream(50, false);
         let mut state = PulseWorkerState {
             app_volumes: vec![stream.clone()],
             ..Default::default()
@@ -2396,44 +2352,9 @@ mod tests {
     }
 
     #[test]
-    fn post_revision_volume_disagreement_preserves_backend_state() {
-        let mut streams = vec![AppVolumeSnapshot {
-            index: 7,
-            app_name: "App".to_string(),
-            app_id: "app".to_string(),
-            app_icon_name: String::new(),
-            media_description: "Playback".to_string(),
-            volume: 60,
-            muted: false,
-            channel_count: 2,
-        }];
-        let mut pending_volumes = HashMap::from([(
-            7,
-            PendingAppVolume {
-                volume: 75,
-                revision: 1,
-            },
-        )]);
-
-        reconcile_pending_app_volumes(&mut streams, &mut pending_volumes, 1);
-
-        assert!(pending_volumes.is_empty());
-        assert_eq!(streams[0].volume, 60);
-    }
-
-    #[test]
     fn older_volume_failure_preserves_newer_pending_change() {
         let mut state = PulseWorkerState {
-            app_volumes: vec![AppVolumeSnapshot {
-                index: 7,
-                app_name: "App".to_string(),
-                app_id: "app".to_string(),
-                app_icon_name: String::new(),
-                media_description: "Playback".to_string(),
-                volume: 50,
-                muted: false,
-                channel_count: 2,
-            }],
+            app_volumes: vec![stream(50, false)],
             ..Default::default()
         };
 
@@ -2454,49 +2375,84 @@ mod tests {
     }
 
     #[test]
-    fn missing_default_sink_clears_control_state() {
-        let mut state = PulseWorkerState {
-            default_sink_name: Some("removed".to_string()),
+    fn post_revision_disagreement_preserves_backend_mute() {
+        let backend = stream(50, false);
+        let mut streams = vec![backend.clone()];
+        let mut pending = HashMap::from([(
+            7,
+            PendingAppMute {
+                muted: true,
+                revision: 1,
+            },
+        )]);
+
+        reconcile_pending_app_mutes(&mut streams, &mut pending, 1);
+
+        assert!(pending.is_empty(), "pending mute must be dropped");
+        assert_eq!(streams[0].muted, backend.muted, "backend mute must win");
+    }
+
+    #[test]
+    fn post_revision_disagreement_preserves_backend_volume() {
+        let backend = stream(60, false);
+        let mut streams = vec![backend.clone()];
+        let mut pending = HashMap::from([(
+            7,
+            PendingAppVolume {
+                volume: 75,
+                revision: 1,
+            },
+        )]);
+
+        reconcile_pending_app_volumes(&mut streams, &mut pending, 1);
+
+        assert!(pending.is_empty(), "pending volume must be dropped");
+        assert_eq!(streams[0].volume, backend.volume, "backend volume must win");
+    }
+
+    fn state_with_default_sink(name: &str) -> PulseWorkerState {
+        PulseWorkerState {
+            default_sink_name: Some(name.to_string()),
             default_sink_index: Some(7),
+            channel_count: 2,
             control_available: true,
+            last_volume_request: Some(50),
+            stuck_attempts: 1,
             ..Default::default()
-        };
-        let sinks = vec![SinkInfoSnapshot {
-            name: "remaining".to_string(),
+        }
+    }
+
+    fn sinks_named(name: &str) -> Vec<SinkInfoSnapshot> {
+        vec![SinkInfoSnapshot {
+            name: name.to_string(),
             description: "Remaining".to_string(),
             port_description: None,
             form_factor: None,
             device_icon_name: None,
             is_default: false,
             port_available: None,
-        }];
-
-        clear_missing_default_sink_state(&mut state, &sinks);
-
-        assert_eq!(state.default_sink_name, None);
-        assert_eq!(state.default_sink_index, None);
-        assert!(!state.control_available);
+        }]
     }
 
     #[test]
-    fn present_default_sink_preserves_control_state() {
-        let mut state = PulseWorkerState {
-            default_sink_name: Some("remaining".to_string()),
-            default_sink_index: Some(7),
-            control_available: true,
-            ..Default::default()
-        };
-        let sinks = vec![SinkInfoSnapshot {
-            name: "remaining".to_string(),
-            description: "Remaining".to_string(),
-            port_description: None,
-            form_factor: None,
-            device_icon_name: None,
-            is_default: true,
-            port_available: None,
-        }];
+    fn missing_default_sink_clears_controls() {
+        let mut state = state_with_default_sink("removed");
 
-        clear_missing_default_sink_state(&mut state, &sinks);
+        clear_missing_default_sink_state(&mut state, &sinks_named("remaining"));
+
+        assert_eq!(state.default_sink_name, None);
+        assert_eq!(state.default_sink_index, None);
+        assert_eq!(state.channel_count, 0);
+        assert!(!state.control_available);
+        assert_eq!(state.last_volume_request, None);
+        assert_eq!(state.stuck_attempts, 0);
+    }
+
+    #[test]
+    fn present_default_sink_keeps_controls() {
+        let mut state = state_with_default_sink("remaining");
+
+        clear_missing_default_sink_state(&mut state, &sinks_named("remaining"));
 
         assert_eq!(state.default_sink_name.as_deref(), Some("remaining"));
         assert_eq!(state.default_sink_index, Some(7));
@@ -2508,6 +2464,9 @@ mod tests {
         let mut state = PulseWorkerState {
             default_source_name: Some("sink.monitor".to_string()),
             default_source_index: Some(9),
+            mic_muted: Some(true),
+            mic_volume: Some(42),
+            mic_channel_count: 1,
             mic_control_available: true,
             ..Default::default()
         };
@@ -2516,49 +2475,6 @@ mod tests {
         assert_eq!(state.default_source_name.as_deref(), Some("sink.monitor"));
 
         clear_missing_default_source_state(&mut state, &[]);
-        assert_eq!(state.default_source_name, None);
-        assert_eq!(state.default_source_index, None);
-        assert!(!state.mic_control_available);
-    }
-
-    #[test]
-    fn clear_default_sink_state_disables_stale_controls() {
-        let mut state = PulseWorkerState {
-            volume: 42,
-            muted: true,
-            default_sink_name: Some("sink".to_string()),
-            default_sink_index: Some(7),
-            channel_count: 2,
-            control_available: true,
-            last_volume_request: Some(50),
-            stuck_attempts: 1,
-            ..Default::default()
-        };
-
-        clear_default_sink_state(&mut state);
-
-        assert_eq!(state.default_sink_name, None);
-        assert_eq!(state.default_sink_index, None);
-        assert_eq!(state.channel_count, 0);
-        assert!(!state.control_available);
-        assert_eq!(state.last_volume_request, None);
-        assert_eq!(state.stuck_attempts, 0);
-    }
-
-    #[test]
-    fn clear_default_source_state_disables_stale_controls() {
-        let mut state = PulseWorkerState {
-            mic_muted: Some(true),
-            mic_volume: Some(42),
-            default_source_name: Some("source".to_string()),
-            default_source_index: Some(9),
-            mic_channel_count: 1,
-            mic_control_available: true,
-            ..Default::default()
-        };
-
-        clear_default_source_state(&mut state);
-
         assert_eq!(state.default_source_name, None);
         assert_eq!(state.default_source_index, None);
         assert_eq!(state.mic_muted, None);
