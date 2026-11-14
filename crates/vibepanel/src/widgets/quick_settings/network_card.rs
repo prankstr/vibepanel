@@ -24,8 +24,8 @@ use super::components::ListRow;
 use super::ui_helpers::{
     ExpandableCard, ExpandableCardBase, ScanButton, add_disabled_placeholder, add_placeholder_row,
     build_accent_subtitle, build_error_subtitle, clear_list_box, close_row_menu_popover,
-    create_qs_list_box, create_row_action_label, create_row_menu_action, create_row_menu_button,
-    present_row_menu_popover, set_icon_active,
+    collapse_revealer_instant, create_qs_list_box, create_row_action_label, create_row_menu_action,
+    create_row_menu_button, present_row_menu_popover, set_icon_active,
 };
 use super::window::current_quick_settings_window;
 use crate::services::icons::{IconHandle, IconsService};
@@ -370,6 +370,11 @@ impl MobileRowState {
 /// State for the network card in the Quick Settings panel.
 pub struct NetworkCardState {
     pub base: ExpandableCardBase,
+    /// Card owned by the window; weak to avoid a cycle through its expander. Used to hide the
+    /// card when `wifi = false` and there is no Ethernet/modem device left to show.
+    pub card: glib::WeakRef<gtk4::Widget>,
+    /// `[widgets.quick_settings] wifi` — `false` removes every Wi-Fi control from the card.
+    pub wifi_ui: Cell<bool>,
     pub title_label: RefCell<Option<Label>>,
     pub subtitle_label: RefCell<Option<Label>>,
     pub scan_button: RefCell<Option<Rc<ScanButton>>>,
@@ -406,6 +411,8 @@ impl NetworkCardState {
     pub fn new() -> Self {
         Self {
             base: ExpandableCardBase::new(),
+            card: glib::WeakRef::new(),
+            wifi_ui: Cell::new(true),
             title_label: RefCell::new(None),
             subtitle_label: RefCell::new(None),
             scan_button: RefCell::new(None),
@@ -488,7 +495,7 @@ pub fn build_wifi_details(state: &Rc<NetworkCardState>) -> NetworkDetailsResult 
     // scan button only while Wi-Fi is enabled; the row hides when all are hidden.
     let wifi_switch_row = GtkBox::new(Orientation::Horizontal, 8);
     wifi_switch_row.add_css_class(qs::NETWORK_SECTION_ROW);
-    wifi_switch_row.set_visible(wifi_header_visible(&snapshot));
+    wifi_switch_row.set_visible(state.wifi_ui.get() && wifi_header_visible(&snapshot));
     // Disable baseline alignment to prevent GTK baseline issues with Switch widget
     wifi_switch_row.set_baseline_position(gtk4::BaselinePosition::Center);
 
@@ -497,7 +504,7 @@ pub fn build_wifi_details(state: &Rc<NetworkCardState>) -> NetworkDetailsResult 
     wifi_label.add_css_class(color::PRIMARY);
     wifi_label.add_css_class(qs::NETWORK_SECTION_LABEL);
     wifi_label.set_valign(gtk4::Align::Center);
-    wifi_label.set_visible(snapshot.has_non_wifi_device());
+    wifi_label.set_visible(state.wifi_ui.get() && snapshot.has_non_wifi_device());
     wifi_switch_row.append(&wifi_label);
 
     // Spacer to push scan button and switch to the right
@@ -515,7 +522,7 @@ pub fn build_wifi_details(state: &Rc<NetworkCardState>) -> NetworkDetailsResult 
     let wifi_switch = Switch::new();
     wifi_switch.set_valign(gtk4::Align::Center);
     wifi_switch.set_active(snapshot.wifi_enabled().unwrap_or(false));
-    wifi_switch.set_visible(snapshot.has_non_wifi_device());
+    wifi_switch.set_visible(state.wifi_ui.get() && snapshot.has_non_wifi_device());
     wifi_switch_row.append(&wifi_switch);
 
     container.append(&wifi_switch_row);
@@ -534,6 +541,8 @@ pub fn build_wifi_details(state: &Rc<NetworkCardState>) -> NetworkDetailsResult 
     }
     scroller.set_max_content_height(360);
     scroller.set_propagate_natural_height(true);
+    // `wifi = false`: no network list (it would only ever say "no Wi-Fi").
+    scroller.set_visible(state.wifi_ui.get());
 
     container.append(&scroller);
 
@@ -640,7 +649,9 @@ pub fn build_wifi_details(state: &Rc<NetworkCardState>) -> NetworkDetailsResult 
     *state.wifi_switch.borrow_mut() = Some(wifi_switch.clone());
 
     // Populate with current network state
-    populate_wifi_list(state, &list_box, &snapshot);
+    if state.wifi_ui.get() {
+        populate_wifi_list(state, &list_box, &snapshot);
+    }
 
     NetworkDetailsResult {
         container,
@@ -1718,13 +1729,19 @@ fn wifi_header_visible(snapshot: &NetworkSnapshot) -> bool {
     snapshot.has_non_wifi_device() || snapshot.wifi_enabled().unwrap_or(false)
 }
 
+/// Whether the network card exists at all. With Wi-Fi UI off (`wifi = false`) it is only
+/// worth showing when there is an Ethernet or modem device behind it.
+pub fn network_card_visible(state: &NetworkCardState, snapshot: &NetworkSnapshot) -> bool {
+    state.wifi_ui.get() || snapshot.has_non_wifi_device()
+}
+
 /// Update the scan button UI and animate while scanning.
 pub fn update_scan_ui(state: &NetworkCardState, snapshot: &NetworkSnapshot) {
     let scanning = snapshot.scanning();
     let wifi_enabled = snapshot.wifi_enabled().unwrap_or(false);
 
     if let Some(scan_btn) = state.scan_button.borrow().as_ref() {
-        scan_btn.set_visible(wifi_enabled);
+        scan_btn.set_visible(wifi_enabled && state.wifi_ui.get());
         scan_btn.set_sensitive(!scanning);
         scan_btn.set_scanning(scanning);
     }
@@ -1963,7 +1980,8 @@ pub fn on_network_changed(
         // Card toggle is only sensitive on WiFi-only devices (no ethernet port, no usable modem)
         // When ethernet or a supported modem (SIM + profile) is present, users must use the switch in expanded view
         toggle.set_sensitive(
-            snapshot.available()
+            state.wifi_ui.get()
+                && snapshot.available()
                 && snapshot.has_wifi_device()
                 && !snapshot.has_ethernet_device()
                 && !snapshot.mobile_supported(),
@@ -1971,14 +1989,15 @@ pub fn on_network_changed(
     }
 
     // Update Wi-Fi label and switch visibility (only show when alternative network device present)
+    let wifi_ui = state.wifi_ui.get();
     if let Some(row) = state.wifi_switch_row.borrow().as_ref() {
-        row.set_visible(wifi_header_visible(snapshot));
+        row.set_visible(wifi_ui && wifi_header_visible(snapshot));
     }
     if let Some(wifi_label) = state.wifi_label.borrow().as_ref() {
-        wifi_label.set_visible(snapshot.has_non_wifi_device());
+        wifi_label.set_visible(wifi_ui && snapshot.has_non_wifi_device());
     }
     if let Some(wifi_switch) = state.wifi_switch.borrow().as_ref() {
-        wifi_switch.set_visible(snapshot.has_non_wifi_device());
+        wifi_switch.set_visible(wifi_ui && snapshot.has_non_wifi_device());
         if wifi_switch.is_active() != enabled {
             wifi_switch.set_active(enabled);
         }
@@ -2065,8 +2084,29 @@ pub fn on_network_changed(
 
     update_scan_ui(state, snapshot);
 
+    // `wifi = false`: hide the whole card when no Ethernet/modem device remains, and fold an
+    // open details panel first so it doesn't linger without its card.
+    if !wifi_ui {
+        let visible = network_card_visible(state, snapshot);
+        if let Some(revealer) = state.base.revealer.borrow().as_ref() {
+            if !visible && revealer.reveals_child() {
+                collapse_revealer_instant(revealer);
+                if let Some(arrow) = state.base.arrow.borrow().as_ref() {
+                    arrow.widget().remove_css_class(state::EXPANDED);
+                }
+            }
+            revealer.set_visible(visible);
+        }
+        if let Some(card) = state.card.upgrade() {
+            card.set_visible(visible);
+        }
+    }
+
     let password_dialog_active = state.password_target_ssid.borrow().is_some();
-    if !password_dialog_active && let Some(list_box) = state.base.list_box.borrow().as_ref() {
+    if wifi_ui
+        && !password_dialog_active
+        && let Some(list_box) = state.base.list_box.borrow().as_ref()
+    {
         populate_wifi_list(state, list_box, snapshot);
         // Apply Pango font attrs to dynamically created list rows
         SurfaceStyleManager::global().apply_pango_attrs_all(list_box);
