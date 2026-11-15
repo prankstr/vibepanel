@@ -12,6 +12,7 @@ use wayland_client::{Connection, EventQueue, Proxy};
 
 pub mod activation;
 pub mod background_effect;
+pub mod idle_inhibit;
 
 /// Resolved Wayland surface identity for a GTK widget.
 pub(super) struct SurfaceInfo {
