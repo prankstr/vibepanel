@@ -23,7 +23,7 @@
 //! - **weather**: Open-Meteo-backed weather and forecast data
 
 mod wayland;
-pub use wayland::{activation, background_effect};
+pub use wayland::{activation, background_effect, idle_inhibit};
 
 pub mod audio;
 pub mod bar_manager;

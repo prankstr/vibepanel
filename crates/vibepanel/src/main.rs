@@ -698,7 +698,7 @@ fn run_gtk_app(config: Config, config_source: Option<PathBuf>) -> ExitCode {
             "Surface style manager initialized with theme styles (pango_font_rendering={})",
             config_for_activate.advanced.pango_font_rendering
         );
-        // Initialize idle inhibitor service (uses logind D-Bus API)
+        // Initialize idle inhibitor service (Wayland idle-inhibit + logind)
         let _ = services::idle_inhibitor::IdleInhibitorService::global();
         debug!("Idle inhibitor service initialized");
 
