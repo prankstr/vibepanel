@@ -28,7 +28,8 @@ use tracing::{debug, warn};
 use super::callbacks::{CallbackId, Callbacks};
 use super::idle_inhibit::{IdleInhibitProtocol, WaylandIdleInhibitor};
 
-/// How often to check that the Wayland inhibitor's bar surface still exists.
+/// How often to check that the Wayland inhibitor's bar surface still exists
+/// and is mapped.
 const SURFACE_CHECK_INTERVAL_SECS: u32 = 2;
 
 /// Canonical snapshot of idle inhibitor state.
@@ -59,7 +60,8 @@ pub struct IdleInhibitorService {
     wayland: Option<IdleInhibitProtocol>,
     /// Active Wayland inhibitor, attached to a bar surface.
     wayland_inhibitor: RefCell<Option<WaylandIdleInhibitor>>,
-    /// Periodic check that re-attaches the Wayland inhibitor when bars are recreated.
+    /// Periodic check that re-attaches the Wayland inhibitor when bars are
+    /// recreated or hidden.
     surface_check: RefCell<Option<glib::SourceId>>,
 }
 
@@ -74,7 +76,7 @@ impl IdleInhibitorService {
             Err(e) => {
                 warn!(
                     "IdleInhibitorService: failed to connect to system bus: {}. \
-                     Idle inhibition will not work.",
+                     logind idle inhibition unavailable.",
                     e
                 );
                 None
@@ -150,7 +152,7 @@ impl IdleInhibitorService {
         }
     }
 
-    // Internal - logind Inhibit API
+    // Internal - logind Inhibit API and Wayland idle-inhibit
 
     fn enable_inhibitor(&self) {
         let logind_ok = self.acquire_logind_lock();
@@ -164,12 +166,13 @@ impl IdleInhibitorService {
         }
 
         if wayland_ok {
-            self.refresh_wayland_inhibitor();
+            self.refresh_wayland_inhibitor(true);
 
-            // Bars are recreated on monitor hotplug / config reload and the
-            // inhibitor dies with its surface, so keep it attached.
+            // Bars are recreated on monitor hotplug / config reload and can be
+            // hidden via IPC, which makes the inhibitor inert, so keep it
+            // attached to a mapped bar.
             let id = glib::timeout_add_seconds_local(SURFACE_CHECK_INTERVAL_SECS, || {
-                IdleInhibitorService::global().refresh_wayland_inhibitor();
+                IdleInhibitorService::global().refresh_wayland_inhibitor(false);
                 glib::ControlFlow::Continue
             });
             if let Some(old) = self.surface_check.borrow_mut().replace(id) {
@@ -239,24 +242,32 @@ impl IdleInhibitorService {
         }
     }
 
-    /// Ensure a Wayland inhibitor is attached to a live bar surface.
+    /// Ensure a Wayland inhibitor is attached to a mapped bar surface.
     ///
     /// No-op when the protocol is unavailable or when the current inhibitor's
-    /// surface still exists.
-    fn refresh_wayland_inhibitor(&self) {
+    /// surface still exists and is mapped. Logs once when no mapped bar is
+    /// available, on `first_attempt` or when a previous inhibitor is lost.
+    fn refresh_wayland_inhibitor(&self, first_attempt: bool) {
         let Some(protocol) = self.wayland.as_ref() else {
             return;
         };
 
         let mut slot = self.wayland_inhibitor.borrow_mut();
+        let was_attached = slot.is_some();
         if let Some(inhibitor) = slot.as_ref() {
             if inhibitor.is_alive() {
                 return;
             }
-            debug!("IdleInhibitorService: bar surface gone, re-attaching Wayland inhibitor");
+            debug!(
+                "IdleInhibitorService: bar surface gone or hidden, re-attaching Wayland inhibitor"
+            );
             *slot = None;
         }
         *slot = protocol.acquire();
+
+        if slot.is_none() && (was_attached || first_attempt) {
+            debug!("IdleInhibitorService: no mapped bar to attach the Wayland inhibitor to");
+        }
     }
 
     fn disable_inhibitor(&self) {

@@ -14,7 +14,6 @@ use std::rc::Rc;
 
 use gtk4::prelude::{Cast, SurfaceExt, WidgetExt};
 use tracing::{debug, warn};
-use wayland_client::backend::ObjectId;
 use wayland_client::protocol::wl_registry;
 use wayland_client::{Connection, Dispatch, EventQueue, QueueHandle};
 use wayland_protocols::wp::idle_inhibit::zv1::client::{
@@ -75,14 +74,18 @@ impl Dispatch<ZwpIdleInhibitorV1, ()> for IdleInhibitState {
     }
 }
 
-/// Live bar surfaces (one per monitor), skipping destroyed ones.
-fn live_bar_surfaces() -> Vec<SurfaceInfo> {
+/// Mapped bar surfaces (one per monitor). Compositors ignore inhibitors on
+/// unmapped surfaces, e.g. bars hidden via IPC.
+fn mapped_bar_surfaces() -> impl Iterator<Item = SurfaceInfo> {
     gtk4::Window::list_toplevels()
         .into_iter()
-        .filter(|widget| widget.has_css_class(class::BAR_WINDOW))
+        .filter(|widget| widget.has_css_class(class::BAR_WINDOW) && widget.is_mapped())
         .filter_map(|widget| SurfaceInfo::from_widget(&widget))
-        .filter(|surface| !surface.wayland_surface.is_destroyed())
-        .collect()
+        .filter(|surface| surface_is_usable(&surface.wayland_surface))
+}
+
+fn surface_is_usable(surface: &gdk4_wayland::WaylandSurface) -> bool {
+    !surface.is_destroyed() && surface.is_mapped()
 }
 
 /// Handle to the compositor's idle-inhibit manager.
@@ -137,11 +140,11 @@ impl IdleInhibitProtocol {
         })
     }
 
-    /// Create an inhibitor on one of the live bar surfaces.
+    /// Create an inhibitor on one of the mapped bar surfaces.
     ///
-    /// Returns `None` when no bar surface exists (yet).
+    /// Returns `None` when no bar surface is mapped.
     pub fn acquire(&self) -> Option<WaylandIdleInhibitor> {
-        let surface = live_bar_surfaces().into_iter().next()?;
+        let surface = mapped_bar_surfaces().next()?;
         let inhibitor = self
             .manager
             .create_inhibitor(&surface.wl_surface, &self.qh, ());
@@ -151,7 +154,7 @@ impl IdleInhibitProtocol {
         debug!("Wayland idle inhibitor created");
         Some(WaylandIdleInhibitor {
             inhibitor,
-            surface_id: surface.surface_id,
+            surface: surface.wayland_surface,
             connection: self.connection.clone(),
         })
     }
@@ -160,17 +163,18 @@ impl IdleInhibitProtocol {
 /// An active `zwp_idle_inhibitor_v1`. Destroyed on drop.
 pub struct WaylandIdleInhibitor {
     inhibitor: ZwpIdleInhibitorV1,
-    surface_id: ObjectId,
+    // Held as the GDK surface rather than an `ObjectId`: GDK-owned proxies
+    // have no liveness tracking, so a recreated bar can reuse the same id.
+    surface: gdk4_wayland::WaylandSurface,
     connection: Connection,
 }
 
 impl WaylandIdleInhibitor {
-    /// Whether the surface this inhibitor is attached to still exists
-    /// (bars are recreated on monitor hotplug and config reload).
+    /// Whether the surface this inhibitor is attached to still exists and is
+    /// mapped (bars are recreated on monitor hotplug and config reload, and
+    /// can be hidden via IPC).
     pub fn is_alive(&self) -> bool {
-        live_bar_surfaces()
-            .iter()
-            .any(|surface| surface.surface_id == self.surface_id)
+        surface_is_usable(&self.surface)
     }
 }
 
