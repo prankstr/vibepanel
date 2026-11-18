@@ -1225,14 +1225,10 @@ fn is_application_sink_input(info: &SinkInputInfo<'_>) -> bool {
     }
 
     let media_role = sink_input_prop(info, "media.role").unwrap_or_default();
-    if matches!(
+    !matches!(
         media_role.as_str(),
         "filter" | "abstract" | "test" | "event"
-    ) {
-        return false;
-    }
-
-    true
+    )
 }
 
 /// Fetch the default sink state (called from command handler, locks mainloop).

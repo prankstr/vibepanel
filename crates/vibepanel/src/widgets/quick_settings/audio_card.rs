@@ -698,11 +698,7 @@ pub fn attach_volume_scroll_controller(widget: &impl IsA<gtk4::Widget>, step: i3
         step,
         move || {
             let snapshot = AudioService::global().current();
-            if !snapshot.available || !snapshot.control_available {
-                return false;
-            }
-
-            true
+            snapshot.available && snapshot.control_available
         },
         |direction, step| {
             AudioService::global().set_volume_relative(direction * step);
