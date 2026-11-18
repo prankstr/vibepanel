@@ -1669,29 +1669,13 @@ impl QuickSettingsWindowHandle {
 
     /// Derive anchor position and monitor from the bar widget.
     ///
-    /// Replicates the bar widget click handler's positioning logic.
+    /// With several Quick Settings widgets on one bar this is the last one
+    /// built; their clicks and edge areas anchor on their own widget instead.
     fn get_anchor_info(&self) -> (PopoverAnchor, Option<Monitor>) {
-        let widget_ref = self.bar_widget.borrow();
-        let Some(ref widget) = *widget_ref else {
-            return (PopoverAnchor::default(), None);
-        };
-        let Some(native) = widget.native() else {
-            return (PopoverAnchor::default(), None);
-        };
-        let Some(bounds) = widget.compute_bounds(&native) else {
-            return (PopoverAnchor::default(), None);
-        };
-
-        let anchor = PopoverAnchor {
-            x: (bounds.x() + bounds.width() / 2.0) as i32,
-            y: (bounds.y() + bounds.height() / 2.0) as i32,
-        };
-
-        let monitor = native
-            .surface()
-            .and_then(|s| s.display().monitor_at_surface(&s));
-
-        (anchor, monitor)
+        self.bar_widget
+            .borrow()
+            .as_ref()
+            .map_or((PopoverAnchor::default(), None), bar_widget_anchor)
     }
 
     pub fn toggle_at(&self, anchor: PopoverAnchor, monitor: Option<Monitor>) {
@@ -1780,6 +1764,68 @@ impl crate::popover_registry::PopoverToggleable for QuickSettingsWindowHandle {
             .and_then(|s| s.display().monitor_at_surface(&s))
             .and_then(|m| m.connector())
             .map(|c| c.to_string())
+    }
+}
+
+/// Anchor (the widget's centre in its bar surface) and monitor for Quick
+/// Settings opened from `widget`.
+pub(super) fn bar_widget_anchor(widget: &gtk4::Widget) -> (PopoverAnchor, Option<Monitor>) {
+    let Some(native) = widget.native() else {
+        return (PopoverAnchor::default(), None);
+    };
+    let Some(bounds) = widget.compute_bounds(&native) else {
+        return (PopoverAnchor::default(), None);
+    };
+    let anchor = PopoverAnchor {
+        x: (bounds.x() + bounds.width() / 2.0) as i32,
+        y: (bounds.y() + bounds.height() / 2.0) as i32,
+    };
+    let monitor = native
+        .surface()
+        .and_then(|s| s.display().monitor_at_surface(&s));
+    (anchor, monitor)
+}
+
+/// Edge-area toggle for one Quick Settings bar widget. A bar's widgets share
+/// one handle, so this anchors on its own widget rather than the handle's.
+pub(super) struct QuickSettingsEdgeToggle {
+    handle: QuickSettingsWindowHandle,
+    widget: glib::WeakRef<gtk4::Widget>,
+}
+
+impl QuickSettingsEdgeToggle {
+    pub(super) fn new(handle: QuickSettingsWindowHandle, widget: &gtk4::Widget) -> Self {
+        Self {
+            handle,
+            widget: widget.downgrade(),
+        }
+    }
+}
+
+impl crate::popover_registry::PopoverToggleable for QuickSettingsEdgeToggle {
+    fn ipc_show(&self) {
+        if self.handle.ipc_is_visible() {
+            return;
+        }
+        match self.widget.upgrade() {
+            Some(widget) => {
+                let (anchor, monitor) = bar_widget_anchor(&widget);
+                self.handle.toggle_at(anchor, monitor);
+            }
+            None => self.handle.ipc_show(),
+        }
+    }
+
+    fn ipc_hide(&self) {
+        self.handle.ipc_hide();
+    }
+
+    fn ipc_is_visible(&self) -> bool {
+        self.handle.ipc_is_visible()
+    }
+
+    fn monitor_connector(&self) -> Option<String> {
+        self.handle.monitor_connector()
     }
 }
 

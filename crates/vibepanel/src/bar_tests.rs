@@ -290,6 +290,96 @@ fn run_layer_shell_bar_position_contract() {
     }
 }
 
+/// Clicking the edge area beside a Quick Settings widget opens it where
+/// clicking the widget does, also when the bar has several Quick Settings
+/// widgets sharing one window.
+fn run_layer_shell_quick_settings_edge_click_contract() {
+    use gtk4_layer_shell::LayerShell;
+    let Some(context) = layer_shell_context_or_skip() else {
+        return;
+    };
+    let mut config = layer_shell_test_config();
+    config.bar.position = "left".to_string();
+    config.bar.screen_margin = 12;
+    // The centre widget is found first; the end one is built last.
+    let placement = vec![WidgetPlacement::Single("quick_settings".to_string())];
+    config.widgets.left = Vec::new();
+    config.widgets.center = placement.clone();
+    config.widgets.right = placement;
+    let bar = present_layer_shell_bar(&context, &config, true);
+    let bar_window = bar.window.clone();
+    let widget = || {
+        find_descendant_with_class(
+            bar_window.upcast_ref(),
+            crate::styles::widget::QUICK_SETTINGS,
+        )
+        .expect("quick settings bar widget")
+    };
+    wait_for_bar_contract(|| {
+        widget()
+            .compute_bounds(&bar_window)
+            .is_some_and(|b| b.height() > 0.0)
+    });
+    let bounds = widget().compute_bounds(&bar_window).unwrap();
+    // Pointer coordinates are screen pixels on the headless output.
+    let widget_x = (bounds.x() + bounds.width() / 2.0) as i32;
+    let widget_y = (bounds.y() + bounds.height() / 2.0) as i32;
+
+    let qs_window = || {
+        context
+            .app
+            .windows()
+            .into_iter()
+            .find(|w| w.title().as_deref() == Some("vibepanel quick settings"))
+    };
+    // Top of the content on screen, whether the surface spans the monitor
+    // or is shrink-wrapped and positioned by its bottom margin.
+    let screen_top = || {
+        qs_window().filter(|w| w.is_visible()).and_then(|w| {
+            let content =
+                find_descendant_with_class(w.upcast_ref(), crate::styles::qs::WINDOW_CONTAINER)?;
+            let y = content.compute_bounds(&w)?.y().round() as i32;
+            let surface_top = context.monitor.geometry().height()
+                - w.margin(gtk4_layer_shell::Edge::Bottom)
+                - w.height();
+            Some(surface_top + y)
+        })
+    };
+    let settle = || {
+        let until = std::time::Instant::now() + std::time::Duration::from_millis(800);
+        while std::time::Instant::now() < until {
+            flush_gtk();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    };
+    let pointer = std::env::var("VIBEPANEL_TEST_POINTER").unwrap();
+    let open_at = |x: i32| {
+        std::fs::write(&pointer, format!("{x} {widget_y} click")).unwrap();
+        wait_for_bar_contract(|| qs_window().is_some_and(|w| w.is_visible()));
+        settle();
+        let top = screen_top();
+        std::fs::write(&pointer, "1000 600 click").unwrap();
+        wait_for_bar_contract(|| qs_window().is_none_or(|w| !w.is_visible()));
+        std::fs::write(&pointer, "1000 601").unwrap();
+        settle();
+        top
+    };
+    // The first open sizes the window; compare the opens after it.
+    open_at(widget_x);
+    let from_widget = open_at(widget_x);
+    let from_edge = open_at(2);
+    assert!(from_widget.is_some(), "widget click opens Quick Settings");
+    assert!(
+        from_edge
+            .zip(from_widget)
+            .is_some_and(|(e, w)| (e - w).abs() <= 1),
+        "edge-area click at y {widget_y} opens where the widget click does: \
+         edge top {from_edge:?}, widget top {from_widget:?}"
+    );
+    bar.window.close();
+    flush_gtk();
+}
+
 fn run_layer_shell_popover_on_show_reversal_contract() {
     let Some(context) = layer_shell_context_or_skip() else {
         return;
@@ -1335,6 +1425,11 @@ layer_shell_contract_tests!(
         test_layer_shell_popover_placement,
         "popover.placement",
         run_layer_shell_popover_placement_contract()
+    ),
+    (
+        test_layer_shell_quick_settings_edge_click,
+        "quick-settings.edge-click",
+        run_layer_shell_quick_settings_edge_click_contract()
     ),
     (
         test_layer_shell_popover_on_show_reversal,
