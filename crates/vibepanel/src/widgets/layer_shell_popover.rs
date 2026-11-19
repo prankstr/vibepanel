@@ -1274,6 +1274,7 @@ where
 
 const HEIGHT_FREEZE_DATA_KEY: &str = "vibepanel-surface-height-freeze";
 const HEIGHT_FREEZE_RELEASE_HOOK_KEY: &str = "vibepanel-surface-height-freeze-release-hook";
+const PLACER_REVEAL_HOOK_KEY: &str = "vibepanel-placer-reveal-hook";
 
 /// Keeps a shrink-wrapped layer-shell surface at a constant height while child
 /// revealers animate. Expansion pins the final height; collapse pins the initial
@@ -1333,9 +1334,21 @@ impl SurfaceHeightFreeze {
             old_height_requests.push((active.clone(), active.height_request()));
             active.set_height_request(child_nat);
         }
-        let (root_min_width, _, _, _) = root.measure(Orientation::Horizontal, -1);
-        let (_, target, _, _) =
-            root.measure(Orientation::Vertical, root.width().max(root_min_width));
+        // Where the content settles, not where a transition has it now.
+        let placer = self
+            .blur_widget
+            .upgrade()
+            .and_then(|content| content.ancestor(PopoverPlacer::static_type()))
+            .and_downcast::<PopoverPlacer>();
+        let measure = || {
+            let (root_min_width, _, _, _) = root.measure(Orientation::Horizontal, -1);
+            root.measure(Orientation::Vertical, root.width().max(root_min_width))
+                .1
+        };
+        let target = match &placer {
+            Some(placer) => placer.measure_settled(measure),
+            None => measure(),
+        };
         for (active, request) in old_height_requests {
             active.set_height_request(request);
         }
@@ -1534,12 +1547,16 @@ fn clear_surface_height_freeze(window: &ApplicationWindow) {
     }
 }
 
-/// Animate a revealer without resizing its layer-shell surface every frame.
+/// Animate a revealer inside a popover. The [`PopoverPlacer`] moves the
+/// content's height and edges together while it animates, and a
+/// shrink-wrapped layer-shell surface isn't resized every frame.
 pub(crate) fn animate_reveal(revealer: &gtk4::Revealer, expanding: bool) {
     if revealer.reveals_child() == expanding {
         return;
     }
-    if let Some(freeze) = surface_height_freeze_for(revealer) {
+    if surface_shrink_wraps()
+        && let Some(freeze) = surface_height_freeze_for(revealer)
+    {
         if expanding {
             freeze.begin_expand(revealer);
         } else {
@@ -1547,7 +1564,34 @@ pub(crate) fn animate_reveal(revealer: &gtk4::Revealer, expanding: bool) {
         }
         ensure_height_freeze_release_hook(revealer, &freeze);
     }
+    if ConfigManager::global().animations_enabled()
+        && let Some(placer) = revealer
+            .ancestor(PopoverPlacer::static_type())
+            .and_downcast::<PopoverPlacer>()
+    {
+        ensure_placer_reveal_hook(revealer);
+        placer.begin_reveal(revealer);
+    }
     revealer.set_reveal_child(expanding);
+}
+
+fn ensure_placer_reveal_hook(revealer: &gtk4::Revealer) {
+    unsafe {
+        if revealer.data::<bool>(PLACER_REVEAL_HOOK_KEY).is_some() {
+            return;
+        }
+        revealer.set_data(PLACER_REVEAL_HOOK_KEY, true);
+    }
+    let end = |revealer: &gtk4::Revealer| {
+        if let Some(placer) = revealer
+            .ancestor(PopoverPlacer::static_type())
+            .and_downcast::<PopoverPlacer>()
+        {
+            placer.end_reveal(revealer);
+        }
+    };
+    revealer.connect_child_revealed_notify(end);
+    revealer.connect_unmap(end);
 }
 
 fn ensure_height_freeze_release_hook(revealer: &gtk4::Revealer, freeze: &Rc<SurfaceHeightFreeze>) {
