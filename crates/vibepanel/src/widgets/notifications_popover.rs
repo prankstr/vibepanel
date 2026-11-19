@@ -3,7 +3,6 @@
 //! This module handles the popover that appears when clicking the notification
 //! bell icon, showing a scrollable list of notifications with dismiss controls.
 
-use gtk4::gdk::Monitor;
 use gtk4::prelude::*;
 use gtk4::{
     Align, Box as GtkBox, Button, Image, Label, Orientation, PolicyType, Revealer,
@@ -23,7 +22,6 @@ use crate::services::tooltip::set_tooltip;
 use crate::styles::{button, card, color, notification as notif, surface};
 
 use super::css::DISMISS_ANIMATION_MS;
-use super::layer_shell_popover::popover_max_content_height;
 use super::notifications_common::{
     POPOVER_WIDTH, app_label_text, create_notification_body, create_notification_image_widget,
     format_timestamp,
@@ -34,22 +32,6 @@ pub type ClosePopoverCallback = Rc<dyn Fn()>;
 
 /// Dismiss animation as a Duration for timeout callbacks.
 const DISMISS_ANIMATION_DURATION: Duration = Duration::from_millis(DISMISS_ANIMATION_MS);
-
-/// Estimated header height (title + padding + separator space).
-const HEADER_HEIGHT_ESTIMATE: i32 = 48;
-
-/// Total vertical padding from surface styles, shadow margin, and list padding.
-/// Surface padding (16px top + 16px bottom) + shadow margin (8px top + 8px bottom)
-/// + notification-list top padding (8px).
-const CONTAINER_VERTICAL_OVERHEAD: i32 = 64;
-
-/// Compute the maximum ScrolledWindow height based on monitor geometry.
-pub(crate) fn compute_max_scroll_height(monitor: Option<Monitor>) -> i32 {
-    popover_max_content_height(
-        monitor.as_ref(),
-        HEADER_HEIGHT_ESTIMATE + CONTAINER_VERTICAL_OVERHEAD,
-    )
-}
 
 /// Build the full popover content widget.
 ///
@@ -62,7 +44,6 @@ pub(crate) fn compute_max_scroll_height(monitor: Option<Monitor>) -> i32 {
 pub(super) fn build_popover_content(
     on_close: Option<ClosePopoverCallback>,
     suppress_rebuild: Rc<Cell<bool>>,
-    monitor: Option<Monitor>,
 ) -> gtk4::Widget {
     let root = GtkBox::new(Orientation::Vertical, 0);
     root.add_css_class(notif::POPOVER);
@@ -82,12 +63,9 @@ pub(super) fn build_popover_content(
         &last_scroll,
     );
 
-    let max_height = compute_max_scroll_height(monitor);
-
     let scrolled = ScrolledWindow::new();
     scrolled.set_policy(PolicyType::Never, PolicyType::Automatic);
     scrolled.set_propagate_natural_height(true);
-    scrolled.set_max_content_height(max_height);
     scrolled.add_css_class(notif::SCROLL);
     let last_scroll_for_adjustment = Rc::clone(&last_scroll);
     scrolled.vadjustment().connect_value_changed(move |_| {

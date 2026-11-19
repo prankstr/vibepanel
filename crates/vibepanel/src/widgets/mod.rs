@@ -41,11 +41,10 @@ mod network_speed;
 mod notifications;
 mod notifications_common;
 mod notifications_popover;
-#[cfg(test)]
-pub(crate) use notifications_popover::compute_max_scroll_height;
 mod notifications_toast;
 mod osd;
 pub(crate) mod polkit_window;
+pub(crate) mod popover_placer;
 pub(crate) mod ripple;
 mod rounded_picture;
 pub(crate) mod scale_box;

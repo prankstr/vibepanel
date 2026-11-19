@@ -131,7 +131,8 @@ fn expect_popover_anchor(position: BarPosition, edge: gtk4_layer_shell::Edge) ->
     edge == bar_edge_for_position(position)
         || match edge {
             gtk4_layer_shell::Edge::Right => position.is_horizontal(),
-            gtk4_layer_shell::Edge::Bottom => position.is_vertical(),
+            // Vertical-bar popovers span the screen height.
+            gtk4_layer_shell::Edge::Top | gtk4_layer_shell::Edge::Bottom => position.is_vertical(),
             _ => false,
         }
 }
@@ -285,6 +286,495 @@ fn run_layer_shell_bar_position_contract() {
             "{name}: monitor"
         );
 
+        window.close();
+        flush_gtk();
+    }
+}
+
+/// Quick Settings on a vertical bar opens centred on its widget whether the
+/// widget itself or the edge area beside it is clicked, also when the bar
+/// has several Quick Settings widgets sharing one window.
+fn run_layer_shell_quick_settings_edge_click_contract() {
+    let Some(context) = layer_shell_context_or_skip() else {
+        return;
+    };
+    for (position, section, animations) in [
+        ("left", "center", false),
+        ("left", "center", true),
+        ("left", "right", true),
+        ("left", "left", true),
+        ("right", "right", true),
+        // The centre widget is found first; the end one is built last.
+        ("left", "center+right", true),
+    ] {
+        let mut config = layer_shell_test_config();
+        config.bar.position = position.to_string();
+        config.bar.screen_margin = 12;
+        config.theme.animations = animations;
+        let placement = vec![WidgetPlacement::Single("quick_settings".to_string())];
+        config.widgets.left = Vec::new();
+        match section {
+            "left" => config.widgets.left = placement,
+            "center" => config.widgets.center = placement,
+            "right" => config.widgets.right = placement,
+            _ => {
+                config.widgets.center = placement.clone();
+                config.widgets.right = placement;
+            }
+        }
+        let case = format!("{position} bar, {section} section, animations={animations}");
+        let bar = present_layer_shell_bar(&context, &config, true);
+        let bar_window = bar.window.clone();
+        let widget = || {
+            find_descendant_with_class(
+                bar_window.upcast_ref(),
+                crate::styles::widget::QUICK_SETTINGS,
+            )
+            .expect("quick settings bar widget")
+        };
+        wait_for_bar_contract(|| {
+            widget()
+                .compute_bounds(&bar_window)
+                .is_some_and(|b| b.height() > 0.0)
+        });
+        let bounds = widget().compute_bounds(&bar_window).unwrap();
+        // Pointer coordinates are screen pixels on the 1280px headless output.
+        let bar_x = if position == "left" {
+            0
+        } else {
+            1280 - bar_window.width()
+        };
+        let widget_x = bar_x + (bounds.x() + bounds.width() / 2.0) as i32;
+        let widget_y = (bounds.y() + bounds.height() / 2.0) as i32;
+        let edge_x = if position == "left" { 2 } else { 1277 };
+        let away_x = if position == "left" { 1000 } else { 200 };
+
+        let qs_window = || {
+            context
+                .app
+                .windows()
+                .into_iter()
+                .find(|w| w.title().as_deref() == Some("vibepanel quick settings"))
+        };
+        let placed = || {
+            qs_window()
+                .filter(|w| w.is_visible())
+                .and_then(|w| {
+                    find_descendant_with_class(w.upcast_ref(), crate::styles::qs::WINDOW_CONTAINER)
+                        .and_then(|content| content.compute_bounds(&w))
+                })
+                .map(|b| (b.y().round() as i32, b.height().round() as i32))
+        };
+        let pointer = std::env::var("VIBEPANEL_TEST_POINTER").unwrap();
+        for (name, x) in [("widget", widget_x), ("edge area", edge_x)] {
+            std::fs::write(&pointer, format!("{x} {widget_y} click")).unwrap();
+            let surface = context.monitor.geometry().height();
+            let gap = crate::widgets::layer_shell_popover::POPOVER_FAR_EDGE_MARGIN;
+            // Centred on the widget, clamped inside the edge gaps. Edge hover
+            // can shift the widget bounds by a pixel.
+            let centred = |(top, height): (i32, i32)| {
+                (top - (widget_y - height / 2).clamp(gap, surface - gap - height)).abs() <= 1
+            };
+            let settled = std::time::Instant::now() + std::time::Duration::from_secs(4);
+            while !placed().is_some_and(centred) && std::time::Instant::now() < settled {
+                flush_gtk();
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            let observed = placed();
+            assert!(
+                observed.is_some_and(centred),
+                "{case}: {name} click at ({x}, {widget_y}) opens centred on the widget, \
+                 got (top, height) {observed:?}"
+            );
+            std::fs::write(&pointer, format!("{away_x} 600 click")).unwrap();
+            wait_for_bar_contract(|| qs_window().is_none_or(|w| !w.is_visible()));
+            std::fs::write(&pointer, format!("{away_x} 601")).unwrap();
+        }
+        bar.window.close();
+        flush_gtk();
+    }
+}
+
+/// Left/right-bar popovers open centred on their button wherever it is.
+fn run_layer_shell_vertical_popover_home_contract() {
+    let Some(context) = layer_shell_context_or_skip() else {
+        return;
+    };
+    for animations in [false, true] {
+        let mut config = layer_shell_test_config();
+        config.bar.position = "left".to_string();
+        config.theme.animations = animations;
+        apply_layer_shell_config(&config, true);
+        let popover = LayerShellPopover::new(&context.app, "contract", || {
+            let content = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+            content.set_size_request(200, 100);
+            content.upcast::<gtk4::Widget>()
+        });
+        for anchor_y in [200, 400, 600] {
+            popover.show_at(
+                PopoverAnchor { x: 20, y: anchor_y },
+                Some(context.monitor.clone()),
+            );
+            let window = popover.test_window().expect("popover window");
+            let centre = || {
+                crate::ui_regression_test_support::find_descendant_with_class(
+                    window.upcast_ref(),
+                    crate::styles::surface::POPOVER,
+                )
+                .and_then(|content| content.compute_bounds(&window))
+                .map(|b| (b.y() + b.height() / 2.0).round() as i32)
+            };
+            let settled = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while centre() != Some(anchor_y) && std::time::Instant::now() < settled {
+                flush_gtk();
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            assert_eq!(
+                centre(),
+                Some(anchor_y),
+                "animations={animations}: popover centred on anchor {anchor_y} (surface {}px)",
+                window.height()
+            );
+            assert_eq!(
+                window.height(),
+                context.monitor.geometry().height(),
+                "popover surface spans the monitor"
+            );
+
+            // Growth past the bottom edge holds the bottom at the edge gap.
+            let content = crate::ui_regression_test_support::find_descendant_with_class(
+                window.upcast_ref(),
+                crate::styles::surface::POPOVER,
+            )
+            .expect("popover content");
+            content.set_size_request(200, 400);
+            let bottom = || {
+                content
+                    .compute_bounds(&window)
+                    .map(|b| (b.y() + b.height()).round() as i32)
+            };
+            let expected_bottom =
+                window.height() - crate::widgets::layer_shell_popover::POPOVER_FAR_EDGE_MARGIN;
+            let expected = if anchor_y + 200 > expected_bottom {
+                expected_bottom
+            } else {
+                anchor_y - 50 + 400
+            };
+            let settled = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while bottom() != Some(expected) && std::time::Instant::now() < settled {
+                flush_gtk();
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            assert_eq!(
+                bottom(),
+                Some(expected),
+                "grown popover bottom at anchor {anchor_y}"
+            );
+            popover.hide();
+            wait_for_bar_contract(|| !window.is_visible());
+        }
+        if let Some(window) = popover.test_window() {
+            window.close();
+        }
+        flush_gtk();
+    }
+}
+
+/// Gaps between `class`'s content in popover `window` and the top and bottom
+/// screen edges, on a `position` bar that reserves `reserved` pixels.
+fn popover_screen_gaps(
+    context: &LayerShellContext,
+    window: &gtk4::Window,
+    class: &str,
+    position: BarPosition,
+    reserved: i32,
+) -> Option<(i32, i32)> {
+    use gtk4_layer_shell::{Edge, LayerShell};
+    if !window.is_visible() {
+        return None;
+    }
+    let bounds = find_descendant_with_class(window.upcast_ref(), class)?.compute_bounds(window)?;
+    let screen = context.monitor.geometry().height();
+    let surface_top = match position {
+        BarPosition::Top => reserved + window.margin(Edge::Top),
+        BarPosition::Bottom => screen - reserved - window.margin(Edge::Bottom) - window.height(),
+        // Shrink-wrapped and held up by its bottom margin, or full height.
+        _ => screen - window.margin(Edge::Bottom) - window.height(),
+    };
+    let top = surface_top + bounds.y().round() as i32;
+    let bottom = top + bounds.height().round() as i32;
+    Some((top, screen - bottom))
+}
+
+/// Popovers too tall for the screen stop at the edge gap away from the bar
+/// (both gaps on left/right bars) and scroll the rest, on every bar.
+fn run_layer_shell_popover_height_cap_contract() {
+    let Some(context) = layer_shell_context_or_skip() else {
+        return;
+    };
+    let headless_sway = std::env::var("VIBEPANEL_HEADLESS_SWAY_TEST").as_deref() == Ok("1");
+    let swaymsg = |command: &str| {
+        let status = std::process::Command::new("swaymsg")
+            .args(["-q", command])
+            .status()
+            .unwrap();
+        assert!(status.success(), "swaymsg {command}");
+    };
+    // A short output so Quick Settings overflows it too.
+    if headless_sway {
+        swaymsg("output HEADLESS-1 mode 1280x300");
+        wait_for_bar_contract(|| context.monitor.geometry().height() == 300);
+    }
+    let gap = crate::widgets::layer_shell_popover::POPOVER_FAR_EDGE_MARGIN;
+    for (name, position) in [
+        ("top", BarPosition::Top),
+        ("bottom", BarPosition::Bottom),
+        ("left", BarPosition::Left),
+    ] {
+        let mut config = layer_shell_test_config();
+        config.bar.position = name.to_string();
+        let bar = present_layer_shell_bar(&context, &config, true);
+        wait_for_bar_contract(|| bar.window.is_mapped());
+        let reserved = bar.window.exclusive_zone();
+        let screen = context.monitor.geometry().height();
+        let anchor = if position.is_horizontal() {
+            PopoverAnchor { x: 640, y: 16 }
+        } else {
+            PopoverAnchor {
+                x: 16,
+                y: screen / 2,
+            }
+        };
+        let check = |name: &str, window: &gtk4::Window, class: &str| {
+            let fits = |(top, bottom): (i32, i32)| match position {
+                BarPosition::Top => (bottom - gap).abs() <= 1,
+                BarPosition::Bottom => (top - gap).abs() <= 1,
+                _ => (top - gap).abs() <= 1 && (bottom - gap).abs() <= 1,
+            };
+            let gaps = || popover_screen_gaps(&context, window, class, position, reserved);
+            let settled = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while !gaps().is_some_and(fits) && std::time::Instant::now() < settled {
+                flush_gtk();
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            if position.is_vertical() {
+                // Sway sizes surfaces anchored to both edges to the output,
+                // but other compositors honour the requested size.
+                let (_, requested, _, _) =
+                    window.measure(gtk4::Orientation::Vertical, window.width());
+                assert_eq!(
+                    requested, screen,
+                    "{position:?} bar, {name}: surface asks for the screen height"
+                );
+            }
+            let observed = gaps();
+            assert!(
+                observed.is_some_and(fits),
+                "{position:?} bar, {name}: stops {gap}px from the far screen edge, \
+                 got (top, bottom) gaps {observed:?} on a {screen}px screen \
+                 (surface {}px)",
+                window.height()
+            );
+        };
+
+        let popover = LayerShellPopover::new(&context.app, "height-cap", || {
+            let list = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+            list.set_size_request(200, 3000);
+            let scrolled = gtk4::ScrolledWindow::new();
+            scrolled.set_policy(gtk4::PolicyType::Never, gtk4::PolicyType::Automatic);
+            scrolled.set_propagate_natural_height(true);
+            scrolled.set_child(Some(&list));
+            scrolled.upcast::<gtk4::Widget>()
+        });
+        popover.show_at(anchor, Some(context.monitor.clone()));
+        let window = popover.test_window().expect("popover window");
+        check(
+            "popover",
+            window.upcast_ref(),
+            crate::styles::surface::POPOVER,
+        );
+        popover.hide();
+        wait_for_bar_contract(|| !window.is_visible());
+        window.close();
+
+        if headless_sway {
+            let qs = crate::widgets::QuickSettingsWindowHandle::new(
+                context.app.clone(),
+                Default::default(),
+            );
+            qs.toggle_at(anchor, Some(context.monitor.clone()));
+            let qs_window = || {
+                context
+                    .app
+                    .windows()
+                    .into_iter()
+                    .find(|w| w.title().as_deref() == Some("vibepanel quick settings"))
+            };
+            wait_for_bar_contract(|| qs_window().is_some_and(|w| w.is_visible()));
+            check(
+                "quick settings",
+                &qs_window().unwrap(),
+                crate::styles::qs::WINDOW_CONTAINER,
+            );
+            qs.destroy();
+        }
+        bar.window.close();
+        flush_gtk();
+    }
+    if headless_sway {
+        swaymsg("output HEADLESS-1 mode 1280x800");
+        wait_for_bar_contract(|| context.monitor.geometry().height() == 800);
+    }
+}
+
+/// On a top bar a card closing while another opens, like a Quick Settings
+/// swap, moves the popover's height steadily from old to new, reaching the
+/// screen cap only as the cards finish. The surface neither clips it nor
+/// grows past the taller end, and shrinks to fit afterwards.
+fn run_layer_shell_top_bar_reveal_swap_contract() {
+    let Some(context) = layer_shell_context_or_skip() else {
+        return;
+    };
+    let mut config = layer_shell_test_config();
+    config.theme.animations = true;
+    apply_layer_shell_config(&config, true);
+    let card = |height: i32, revealed: bool| {
+        let child = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+        child.set_size_request(200, height);
+        gtk4::Revealer::builder()
+            .transition_type(gtk4::RevealerTransitionType::SlideDown)
+            .transition_duration(300)
+            .reveal_child(revealed)
+            .child(&child)
+            .build()
+    };
+    // (header, closing card, opening card). The last one opens past the
+    // screen cap: the content stops at the cap and scrolls.
+    for (header_height, old_height, new_height) in [
+        (50, 150, 150),
+        (50, 150, 250),
+        (50, 250, 150),
+        (450, 150, 360),
+    ] {
+        let old = card(old_height, true);
+        let new = card(new_height, false);
+        let content = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+        let header = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+        header.set_size_request(200, header_height);
+        content.append(&header);
+        content.append(&old);
+        content.append(&new);
+        // Like Quick Settings, the cards scroll when capped.
+        let scrolled = gtk4::ScrolledWindow::new();
+        scrolled.set_policy(gtk4::PolicyType::Never, gtk4::PolicyType::Automatic);
+        scrolled.set_propagate_natural_height(true);
+        scrolled.set_child(Some(&content));
+        let popover = LayerShellPopover::new(&context.app, "swap", move || {
+            scrolled.clone().upcast::<gtk4::Widget>()
+        });
+        popover.show_at(
+            PopoverAnchor { x: 640, y: 16 },
+            Some(context.monitor.clone()),
+        );
+        let window = popover.test_window().expect("popover window");
+        let window_for_height = window.clone();
+        let content_height = move || {
+            let window = &window_for_height;
+            find_descendant_with_class(window.upcast_ref(), crate::styles::surface::POPOVER)
+                .and_then(|c| c.compute_bounds(window))
+                .map(|b| b.y() + b.height())
+                .map_or(0, |bottom| bottom.round() as i32)
+        };
+        let settled = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while std::time::Instant::now() < settled {
+            flush_gtk();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let before = content_height();
+        // Shadow margin below the content.
+        let margin = window.height() - before;
+        let samples: Rc<RefCell<Vec<(i32, i32)>>> = Rc::default();
+        // (content height, opening card height) each frame.
+        let paces: Rc<RefCell<Vec<(i32, i32)>>> = Rc::default();
+        {
+            let samples = Rc::clone(&samples);
+            let paces = Rc::clone(&paces);
+            let window_for_tick = window.clone();
+            let content_height = content_height.clone();
+            let new = new.clone();
+            window.add_tick_callback(move |_, _| {
+                samples
+                    .borrow_mut()
+                    .push((content_height(), window_for_tick.height()));
+                paces.borrow_mut().push((content_height(), new.height()));
+                gtk4::glib::ControlFlow::Continue
+            });
+        }
+        crate::widgets::layer_shell_popover::animate_reveal(&old, false);
+        crate::widgets::layer_shell_popover::animate_reveal(&new, true);
+        wait_for_bar_contract(|| !old.is_child_revealed() && new.is_child_revealed());
+        let settled = std::time::Instant::now() + std::time::Duration::from_millis(300);
+        while std::time::Instant::now() < settled {
+            flush_gtk();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let after = content_height();
+        let samples = samples.borrow().clone();
+        let case = format!("{old_height}px card swapped for {new_height}px");
+        assert!(samples.len() > 3, "{case}: animated: {samples:?}");
+        let screen = context.monitor.geometry().height();
+        if header_height + new_height < screen / 2 {
+            assert_eq!(after - before, new_height - old_height, "{case}: settles");
+        } else {
+            assert!(
+                after > before && after < header_height + new_height,
+                "{case}: grows to the cap ({before} to {after}) on a {screen}px screen, surface {}px",
+                window.height()
+            );
+            // It gets there with the card, not ahead of it. Far enough for
+            // a pixel of rounding not to count.
+            assert!(after - before >= 50, "{case}: grows {}px", after - before);
+            let paces = paces.borrow();
+            for (content, card) in paces.iter() {
+                let grown = f64::from(content - before) / f64::from(after - before);
+                let opened = f64::from(*card) / f64::from(new_height);
+                assert!(
+                    (grown - opened).abs() <= 0.1,
+                    "{case}: popover {grown:.2} of the way with the card {opened:.2} open: {paces:?}"
+                );
+            }
+        }
+        let (low, high) = (before.min(after), before.max(after));
+        for pair in samples.windows(2) {
+            let ((h0, _), (h1, _)) = (pair[0], pair[1]);
+            assert!(
+                (low - 2..=high + 2).contains(&h1) && (h1 - h0) * (after - before).signum() >= -2,
+                "{case}: height moves steadily from {before} to {after}: {samples:?}"
+            );
+        }
+        assert!(
+            samples.iter().all(|(content, surface)| content <= surface),
+            "{case}: surface never clips the content: {samples:?}"
+        );
+        assert!(
+            samples
+                .iter()
+                .all(|(_, surface)| *surface <= high + margin + 2),
+            "{case}: surface reserves no more than the taller end: {samples:?}"
+        );
+        // Frozen at the start, released at the end: no resizes in between.
+        let resizes = samples.windows(2).filter(|p| p[0].1 != p[1].1).count();
+        assert!(
+            resizes <= 2,
+            "{case}: surface resizes {resizes} times: {samples:?}"
+        );
+        assert!(
+            window.height() < after + 40,
+            "{case}: surface shrinks to fit ({}px for {after}px of content)",
+            window.height()
+        );
+        popover.hide();
+        wait_for_bar_contract(|| !window.is_visible());
         window.close();
         flush_gtk();
     }
@@ -1127,7 +1617,9 @@ fn run_layer_shell_always_hotplug_contract() {
     };
     let mut config = layer_shell_test_config();
     config.bar.background_opacity = 0.6;
-    let height = crate::widgets::compute_max_scroll_height;
+    let height = |monitor: Option<gtk4::gdk::Monitor>| {
+        crate::widgets::layer_shell_popover::popover_height_cap(&monitor.unwrap(), 0)
+    };
     config.bar.auto_hide = vibepanel_core::config::AutoHide::Never;
     apply_layer_shell_config(&config, false);
     let never_height = height(Some(context.monitor.clone()));
@@ -1140,7 +1632,7 @@ fn run_layer_shell_always_hotplug_contract() {
         assert_eq!(
             height(Some(context.monitor.clone())),
             never_height,
-            "{mode:?}: notification height must not count bar thickness twice"
+            "{mode:?}: popover height cap must not count bar thickness twice"
         );
     }
     config.bar.auto_hide = vibepanel_core::config::AutoHide::Never;
@@ -1202,7 +1694,7 @@ fn run_layer_shell_always_hotplug_contract() {
         wait_for_bar_contract(|| context.monitor.geometry().height() == 120);
         assert!(
             height(Some(context.monitor.clone())) < 120,
-            "short outputs must not use the 500px missing-monitor fallback"
+            "short outputs cap popovers below their height"
         );
         let status = std::process::Command::new("swaymsg")
             .args(["-q", "output HEADLESS-1 mode 1280x800"])
@@ -1335,6 +1827,26 @@ layer_shell_contract_tests!(
         test_layer_shell_popover_placement,
         "popover.placement",
         run_layer_shell_popover_placement_contract()
+    ),
+    (
+        test_layer_shell_vertical_popover_home,
+        "popover.vertical-home",
+        run_layer_shell_vertical_popover_home_contract()
+    ),
+    (
+        test_layer_shell_quick_settings_edge_click,
+        "quick-settings.edge-click",
+        run_layer_shell_quick_settings_edge_click_contract()
+    ),
+    (
+        test_layer_shell_popover_height_cap,
+        "popover.height-cap",
+        run_layer_shell_popover_height_cap_contract()
+    ),
+    (
+        test_layer_shell_top_bar_reveal_swap,
+        "popover.top-bar-reveal-swap",
+        run_layer_shell_top_bar_reveal_swap_contract()
     ),
     (
         test_layer_shell_popover_on_show_reversal,

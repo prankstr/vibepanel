@@ -28,7 +28,6 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use gtk4::gdk::Monitor;
 use gtk4::pango::EllipsizeMode;
 use gtk4::prelude::*;
 use gtk4::{
@@ -51,17 +50,13 @@ use crate::services::tooltip::set_tooltip;
 use crate::styles::{button, card, color, icon, surface, system_popover as sp};
 use crate::widgets::gpu_format;
 use crate::widgets::history_graph::{HistoryGraph, HistoryScale, HistorySeries};
-use crate::widgets::layer_shell_popover::{animate_reveal, popover_max_content_height};
+use crate::widgets::layer_shell_popover::animate_reveal;
 
 const GPU_TITLE_MAX_CHARS: i32 = 44;
 const GPU_GRAPH_HEIGHT: i32 = 56;
 const SYSTEM_GRAPH_HEIGHT: i32 = 56;
 const GPU_VALUE_MAX_CHARS: i32 = 20;
 const GPU_DEVICES_MAX_HEIGHT: i32 = 360;
-
-/// Non-scrolling height around the popover content: 16px surface padding and
-/// 8px shadow margin on each side.
-const SYSTEM_POPOVER_OVERHEAD: i32 = 48;
 
 /// A single pre-allocated per-core row with its updatable widgets.
 #[derive(Clone)]
@@ -1092,19 +1087,10 @@ pub(crate) fn wire_system_popover_for_menu(menu_handle: &Rc<crate::widgets::base
     let gpu_callback_id: Rc<Cell<Option<CallbackId>>> = Rc::new(Cell::new(None));
     let system_callback_id: Rc<Cell<Option<CallbackId>>> = Rc::new(Cell::new(None));
 
-    // Content is built once and reused, so the monitor-based height cap is
-    // reapplied on every show in case geometry changed.
-    let scroller: Rc<RefCell<Option<ScrolledWindow>>> = Rc::default();
-    let monitor: Rc<RefCell<Option<Monitor>>> = Rc::default();
-
     let controller_for_builder = controller.clone();
-    let scroller_for_builder = scroller.clone();
-    let monitor_for_builder = monitor.clone();
-    menu_handle.set_builder_with_monitor(move |anchor_monitor| {
+    menu_handle.set_builder(move || {
         let (widget, ctrl) = build_system_popover_with_controller();
         *controller_for_builder.borrow_mut() = Some(ctrl);
-        *scroller_for_builder.borrow_mut() = widget.downcast_ref::<ScrolledWindow>().cloned();
-        *monitor_for_builder.borrow_mut() = anchor_monitor;
         widget
     });
 
@@ -1115,12 +1101,6 @@ pub(crate) fn wire_system_popover_for_menu(menu_handle: &Rc<crate::widgets::base
     let gpu_cb_for_show = gpu_callback_id.clone();
     let system_cb_for_show = system_callback_id.clone();
     menu_handle.set_on_show(move || {
-        if let Some(window) = scroller.borrow().as_ref() {
-            window.set_max_content_height(popover_max_content_height(
-                monitor.borrow().as_ref(),
-                SYSTEM_POPOVER_OVERHEAD,
-            ));
-        }
         let gpu_service = GpuService::global();
 
         // A close-animation reversal fires on_show before on_close, so retain
