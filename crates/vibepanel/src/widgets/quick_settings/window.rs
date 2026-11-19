@@ -33,9 +33,10 @@ use crate::services::vpn::VpnService;
 use crate::styles::{qs, state, surface};
 use crate::widgets::layer_shell_popover::{
     AnimDirection, BarPopoverChrome, Dismissible, PopoverAnchor, SurfaceAnimation, animate_reveal,
-    calculate_popover_bar_margin, calculate_popover_bottom_margin, calculate_popover_right_margin,
-    configure_popover_layer_anchors, install_surface_height_freeze, popover_bar_edge,
-    popover_height_cap, popover_keyboard_mode, reset_popover_margins, setup_esc_handler,
+    calculate_popover_bar_margin, calculate_popover_right_margin, configure_popover_layer_anchors,
+    install_surface_height_freeze, popover_bar_edge, popover_height_cap, popover_keyboard_mode,
+    popover_vertical_placement, reset_popover_margins, setup_esc_handler,
+    sync_popover_surface_height,
 };
 use crate::widgets::popover_placer::PopoverPlacer;
 
@@ -103,8 +104,6 @@ fn clear_current_qs_window() {
 }
 
 const QUICK_SETTINGS_CONTENT_WIDTH: i32 = 320;
-/// First-open estimate for side-bar placement before GTK reports a mapped height.
-const QUICK_SETTINGS_CONTENT_HEIGHT_ESTIMATE: i32 = 520;
 /// CSS `padding: 16px` on `.vp-surface-popover` (both sides).
 const QUICK_SETTINGS_POPOVER_PADDING: i32 = 32;
 const QUICK_SETTINGS_OUTER_MARGIN: i32 = 4;
@@ -196,7 +195,7 @@ pub struct QuickSettingsWindow {
     anim: SurfaceAnimation,
     /// Wrapper providing transparent margins for surface shadows.
     margin_wrapper: GtkBox,
-    /// Caps the animation shell's height.
+    /// Caps the animation shell's height and positions it on left/right bars.
     placer: PopoverPlacer,
     /// Content container (surface styles, focus suppression).
     outer_container: RefCell<Option<GtkBox>>,
@@ -206,9 +205,6 @@ pub struct QuickSettingsWindow {
     /// Cached window width from the first successful map. Layer shell surfaces
     /// report 0 width when hidden, so we cache the real value for re-opens.
     cached_width: Cell<i32>,
-    /// Cached window height for vertical bar placement. Mirrors cached_width:
-    /// hidden layer-shell surfaces can report 0 height on re-open.
-    cached_height: Cell<i32>,
     /// Logical open state. True from show_panel() until hide_panel() is called.
     /// Used by toggle_at() and Dismissible so clicks during close animation
     /// re-open the panel instead of being silently swallowed.
@@ -295,7 +291,6 @@ impl QuickSettingsWindow {
             anchor: Cell::new(PopoverAnchor::default()),
             anchor_monitor: RefCell::new(None),
             cached_width: Cell::new(0),
-            cached_height: Cell::new(0),
             logically_open: Cell::new(false),
             cards_config: config.cards,
             toggle_cards: RefCell::new(Vec::new()),
@@ -330,6 +325,22 @@ impl QuickSettingsWindow {
         qs.placer.set_child(qs.anim.shell());
         margin_wrapper.append(&qs.placer);
         window.set_child(Some(&margin_wrapper));
+
+        // The open animation drives its own blur region; afterwards the blur
+        // follows the content as the placer moves it.
+        {
+            let qs_weak = Rc::downgrade(&qs);
+            qs.placer.connect_placed(move || {
+                if let Some(qs) = qs_weak.upgrade()
+                    && !qs.anim.is_active()
+                    && let Some(outer) = qs.outer_container.borrow().as_ref()
+                    && let Some(blur) =
+                        crate::services::background_effect::BackgroundEffectManager::global()
+                {
+                    blur.follow_blur_region(&qs.window, outer);
+                }
+            });
+        }
 
         // Store outer container reference.
         *qs.outer_container.borrow_mut() = Some(outer.clone());
@@ -1345,12 +1356,13 @@ impl QuickSettingsWindow {
 
         configure_popover_layer_anchors(&self.window);
         reset_popover_margins(&self.window);
+        sync_popover_surface_height(&self.window, &monitor);
 
         // Set bar-edge margin using shared helper
         let bar_margin = calculate_popover_bar_margin();
         self.window.set_margin(popover_bar_edge(), bar_margin);
-
         // The placer caps the panel to the screen; the rest scrolls.
+        self.placer.set_vertical(popover_vertical_placement(anchor));
         self.placer.set_height_cap(Some(popover_height_cap(
             &monitor,
             SurfaceStyleManager::global().shadow_margin(QUICK_SETTINGS_OUTER_MARGIN),
@@ -1380,34 +1392,9 @@ impl QuickSettingsWindow {
                 QUICK_SETTINGS_MIN_EDGE_MARGIN,
             );
             self.window.set_margin(Edge::Right, right_margin);
-        } else if !is_horizontal && anchor.y > 0 {
-            let h = self.window.height();
-            let window_height = if h > 0 {
-                self.cached_height.set(h);
-                h
-            } else if self.cached_height.get() > 0 {
-                self.cached_height.get()
-            } else {
-                // Never mapped — estimate from content + CSS padding + shadow margins.
-                let shadow_m =
-                    SurfaceStyleManager::global().shadow_margin(QUICK_SETTINGS_OUTER_MARGIN);
-                QUICK_SETTINGS_CONTENT_HEIGHT_ESTIMATE
-                    + QUICK_SETTINGS_POPOVER_PADDING
-                    + 2 * shadow_m
-            };
-            let bottom_margin = calculate_popover_bottom_margin(
-                anchor.y,
-                geom.height(),
-                window_height,
-                QUICK_SETTINGS_MIN_EDGE_MARGIN,
-            );
-            self.window.set_margin(Edge::Bottom, bottom_margin);
         } else if is_horizontal {
             self.window
                 .set_margin(Edge::Right, QUICK_SETTINGS_DEFAULT_RIGHT_MARGIN);
-        } else {
-            self.window
-                .set_margin(Edge::Bottom, QUICK_SETTINGS_MIN_EDGE_MARGIN);
         }
     }
 
@@ -1445,6 +1432,10 @@ impl QuickSettingsWindow {
             self.start_animation(AnimDirection::Opening, generation);
             self.refresh_network_card();
         } else {
+            // Size and place the surface before it maps; home is where this
+            // open centres.
+            self.placer.reset_home();
+            self.update_position();
             let qs_weak = Rc::downgrade(self);
             self.anim
                 .present_hidden_then(&self.window, generation, move || {

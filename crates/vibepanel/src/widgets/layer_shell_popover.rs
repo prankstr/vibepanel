@@ -20,7 +20,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use vibepanel_core::config::BarPosition;
 
-use super::popover_placer::PopoverPlacer;
+use super::popover_placer::{PopoverPlacer, VerticalPlacement};
 use super::scale_box::ScaleBox;
 use crate::services::background_effect::{BackgroundEffectManager, rounded_bounds, sync_blur};
 use crate::services::compositor::CompositorManager;
@@ -361,7 +361,6 @@ const POPOVER_DEFAULT_WIDTH_ESTIMATE: i32 = 320;
 
 const POPOVER_MIN_VALID_WIDTH: i32 = 20;
 const POPOVER_MIN_VALID_HEIGHT: i32 = 20;
-const POPOVER_DEFAULT_HEIGHT_ESTIMATE: i32 = 360;
 
 /// Monitor-local widget center used to place bar-adjacent popovers.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -1002,6 +1001,28 @@ pub(crate) fn popover_height_cap(monitor: &Monitor, far_margin: i32) -> i32 {
     }
 }
 
+/// Size a popover surface for the bar position. On left/right bars it spans
+/// `monitor`'s height like the bar does: gtk4-layer-shell requests the
+/// window's own size even when anchored to both edges, and the compositor
+/// honours it. On top/bottom bars it shrink-wraps its content.
+pub(crate) fn sync_popover_surface_height(window: &ApplicationWindow, monitor: &Monitor) {
+    let height = if ConfigManager::global().bar_position().is_horizontal() {
+        -1
+    } else {
+        monitor.geometry().height()
+    };
+    window.set_size_request(-1, height);
+}
+
+/// Placement for a popover's [`PopoverPlacer`]: vertical on left/right bars,
+/// centred on `anchor` when it has one.
+pub(crate) fn popover_vertical_placement(anchor: PopoverAnchor) -> Option<VerticalPlacement> {
+    (!ConfigManager::global().bar_position().is_horizontal()).then_some(VerticalPlacement {
+        anchor_y: (anchor.y > 0).then_some(anchor.y),
+        edge_gap: POPOVER_FAR_EDGE_MARGIN,
+    })
+}
+
 /// `monitor_height` less `bar_reservation` and a far-edge gap at each of
 /// `gaps` ends.
 fn height_cap_for(monitor_height: i32, bar_reservation: i32, far_margin: i32, gaps: i32) -> i32 {
@@ -1030,8 +1051,11 @@ pub(crate) fn popover_exclusive_zone() -> i32 {
     }
 }
 
-/// Configure layer-shell anchors so the popover hugs the bar edge and can be
-/// positioned along the opposite axis with a single far-edge margin.
+/// Configure layer-shell anchors so the popover hugs the bar edge.
+///
+/// On top/bottom bars it is positioned along the bar with a single far-edge
+/// margin. On left/right bars it spans the screen height and a
+/// [`PopoverPlacer`] positions the content inside it.
 pub fn configure_popover_layer_anchors(window: &ApplicationWindow) {
     window.set_exclusive_zone(popover_exclusive_zone());
     match ConfigManager::global().bar_position() {
@@ -1048,13 +1072,13 @@ pub fn configure_popover_layer_anchors(window: &ApplicationWindow) {
             window.set_anchor(Edge::Right, true);
         }
         BarPosition::Left => {
-            window.set_anchor(Edge::Top, false);
+            window.set_anchor(Edge::Top, true);
             window.set_anchor(Edge::Bottom, true);
             window.set_anchor(Edge::Left, true);
             window.set_anchor(Edge::Right, false);
         }
         BarPosition::Right => {
-            window.set_anchor(Edge::Top, false);
+            window.set_anchor(Edge::Top, true);
             window.set_anchor(Edge::Bottom, true);
             window.set_anchor(Edge::Left, false);
             window.set_anchor(Edge::Right, true);
@@ -1109,15 +1133,6 @@ pub fn calculate_popover_right_margin(
         // Window is too wide for monitor, just use minimum margin
         min_edge_margin.max(max_margin)
     }
-}
-
-pub fn calculate_popover_bottom_margin(
-    anchor_y: i32,
-    monitor_height: i32,
-    window_height: i32,
-    min_edge_margin: i32,
-) -> i32 {
-    calculate_popover_right_margin(anchor_y, monitor_height, window_height, min_edge_margin)
 }
 
 /// Get the appropriate keyboard mode for layer-shell popovers.
@@ -1263,6 +1278,9 @@ const HEIGHT_FREEZE_RELEASE_HOOK_KEY: &str = "vibepanel-surface-height-freeze-re
 /// Keeps a shrink-wrapped layer-shell surface at a constant height while child
 /// revealers animate. Expansion pins the final height; collapse pins the initial
 /// height, avoiding per-frame Wayland surface configures and buffer reallocations.
+///
+/// Only for top/bottom bars: on left/right bars the surface already has a
+/// constant height, and [`PopoverPlacer`] places each frame of the content.
 struct SurfaceHeightFreeze {
     window: glib::WeakRef<ApplicationWindow>,
     blur_widget: glib::WeakRef<gtk4::Widget>,
@@ -1283,7 +1301,8 @@ impl SurfaceHeightFreeze {
     }
 
     fn begin_expand(self: &Rc<Self>, revealer: &gtk4::Revealer) {
-        if !ConfigManager::global().animations_enabled()
+        if !surface_shrink_wraps()
+            || !ConfigManager::global().animations_enabled()
             || self.active.borrow().iter().any(|active| active == revealer)
         {
             return;
@@ -1337,7 +1356,8 @@ impl SurfaceHeightFreeze {
     }
 
     fn begin_collapse(self: &Rc<Self>, revealer: &gtk4::Revealer) {
-        if !ConfigManager::global().animations_enabled()
+        if !surface_shrink_wraps()
+            || !ConfigManager::global().animations_enabled()
             || self.active.borrow().iter().any(|active| active == revealer)
         {
             return;
@@ -1427,6 +1447,10 @@ impl SurfaceHeightFreeze {
 
     fn release(&self) {
         self.frozen_height.set(0);
+        // Vertical-bar surfaces keep their full-height size request.
+        if !surface_shrink_wraps() {
+            return;
+        }
         if let Some(window) = self.window.upgrade() {
             window.set_size_request(-1, -1);
             if let Some(widget) = window.child() {
@@ -1469,6 +1493,11 @@ impl SurfaceHeightFreeze {
             blur.apply_blur_region_animated(&window, &content, 1.0);
         }
     }
+}
+
+/// Whether popover surfaces resize with their content (top/bottom bars).
+fn surface_shrink_wraps() -> bool {
+    ConfigManager::global().bar_position().is_horizontal()
 }
 
 /// Install shared revealer surface-freeze handling on a popover window.
@@ -1572,7 +1601,7 @@ pub struct LayerShellPopover {
     builder: Rc<dyn Fn() -> gtk4::Widget>,
     window: RefCell<Option<ApplicationWindow>>,
     chrome: BarPopoverChrome,
-    /// Caps the animation shell's height.
+    /// Caps the animation shell's height and positions it on left/right bars.
     placer: PopoverPlacer,
     /// Open/close animation. Its persistent shell is never destroyed; builder
     /// content is placed inside it and swapped on each show.
@@ -1838,6 +1867,14 @@ impl LayerShellPopover {
             window.set_monitor(Some(monitor));
         }
         self.open_chrome(&window);
+        // Size and place the surface before it maps; home is where this
+        // open centres.
+        self.placer.reset_home();
+        self.update_position_for_size(
+            window
+                .child()
+                .and_then(|child| measured_popover_size(&child)),
+        );
 
         if ConfigManager::global().animations_enabled() {
             let weak_self = Rc::downgrade(self);
@@ -1852,14 +1889,8 @@ impl LayerShellPopover {
             // the reused surface transparent if the idle pass is delayed.
             self.anim.snap_open();
             window.set_opacity(1.0);
-
-            // Position before map using GTK's natural size so the first visible
+            // Positioned above using GTK's natural size so the first visible
             // frame is already placed; the idle pass refines with the real size.
-            self.update_position_for_size(
-                window
-                    .child()
-                    .and_then(|child| measured_popover_size(&child)),
-            );
             window.set_visible(true);
             window.present();
             CompositorManager::global().refresh_pointer_focus();
@@ -1937,6 +1968,19 @@ impl LayerShellPopover {
         outer.append(&self.placer);
         window.set_child(Some(&outer));
         install_surface_height_freeze(&window, self.anim.shell());
+
+        // The open animation drives its own blur region; afterwards the blur
+        // follows the content as the placer moves it.
+        let weak_self = Rc::downgrade(self);
+        self.placer.connect_placed(move || {
+            if let Some(popover) = weak_self.upgrade()
+                && !popover.anim.is_active()
+                && let Some(window) = popover.window.borrow().as_ref()
+                && let Some(blur) = BackgroundEffectManager::global()
+            {
+                blur.follow_blur_region(window, popover.anim.shell());
+            }
+        });
 
         let weak_self = Rc::downgrade(self);
         setup_esc_handler(&window, move || {
@@ -2016,6 +2060,7 @@ impl LayerShellPopover {
 
         configure_popover_layer_anchors(window);
         reset_popover_margins(window);
+        sync_popover_surface_height(window, &monitor);
         // The bar side may have changed since the shell was built; the
         // height cap counts on it having no margin.
         if let Some(outer) = window.child() {
@@ -2025,6 +2070,7 @@ impl LayerShellPopover {
         // Set margin on the bar-adjacent edge
         let bar_edge = popover_bar_edge();
         window.set_margin(bar_edge, calculate_popover_bar_margin());
+        self.placer.set_vertical(popover_vertical_placement(anchor));
         self.placer.set_height_cap(Some(popover_height_cap(
             &monitor,
             SurfaceStyleManager::global().shadow_margin(SHADOW_MARGIN),
@@ -2054,27 +2100,6 @@ impl LayerShellPopover {
                 let fallback_margin = SurfaceStyleManager::global().shadow_margin(SHADOW_MARGIN);
                 window.set_margin(Edge::Right, fallback_margin);
             }
-        } else if anchor.y > 0 {
-            let window_height = if let Some((_, height)) = size_override {
-                height
-            } else {
-                let h = window.height();
-                if h > POPOVER_MIN_VALID_HEIGHT {
-                    h
-                } else {
-                    POPOVER_DEFAULT_HEIGHT_ESTIMATE
-                }
-            };
-            let bottom_margin = calculate_popover_bottom_margin(
-                anchor.y,
-                geom.height(),
-                window_height,
-                POPOVER_MIN_EDGE_MARGIN,
-            );
-            window.set_margin(Edge::Bottom, bottom_margin);
-        } else {
-            let fallback_margin = SurfaceStyleManager::global().shadow_margin(SHADOW_MARGIN);
-            window.set_margin(Edge::Bottom, fallback_margin);
         }
     }
 }
@@ -2139,18 +2164,18 @@ mod tests {
 
     #[test]
     fn popover_margin_centers_anchor_and_clamps_to_edges() {
-        type MarginFn = fn(i32, i32, i32, i32) -> i32;
-        let right: MarginFn = calculate_popover_right_margin;
-        let bottom: MarginFn = calculate_popover_bottom_margin;
         let cases = [
-            ("right centered on anchor", right, 500, 1000, 400),
-            ("right clamped near left edge", right, 20, 1000, 796),
-            ("right clamped near right edge", right, 990, 1000, 4),
-            ("bottom uses same axis math", bottom, 400, 800, 300),
+            ("centered on anchor", 500, 1000, 400),
+            ("clamped near left edge", 20, 1000, 796),
+            ("clamped near right edge", 990, 1000, 4),
         ];
 
-        for (name, margin, anchor, monitor, expected) in cases {
-            assert_eq!(margin(anchor, monitor, 200, 4), expected, "{name}");
+        for (name, anchor, monitor, expected) in cases {
+            assert_eq!(
+                calculate_popover_right_margin(anchor, monitor, 200, 4),
+                expected,
+                "{name}"
+            );
         }
     }
 

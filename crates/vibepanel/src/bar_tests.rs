@@ -131,7 +131,8 @@ fn expect_popover_anchor(position: BarPosition, edge: gtk4_layer_shell::Edge) ->
     edge == bar_edge_for_position(position)
         || match edge {
             gtk4_layer_shell::Edge::Right => position.is_horizontal(),
-            gtk4_layer_shell::Edge::Bottom => position.is_vertical(),
+            // Vertical-bar popovers span the screen height.
+            gtk4_layer_shell::Edge::Top | gtk4_layer_shell::Edge::Bottom => position.is_vertical(),
             _ => false,
         }
 }
@@ -290,94 +291,193 @@ fn run_layer_shell_bar_position_contract() {
     }
 }
 
-/// Clicking the edge area beside a Quick Settings widget opens it where
-/// clicking the widget does, also when the bar has several Quick Settings
-/// widgets sharing one window.
+/// Quick Settings on a vertical bar opens centred on its widget whether the
+/// widget itself or the edge area beside it is clicked, also when the bar
+/// has several Quick Settings widgets sharing one window.
 fn run_layer_shell_quick_settings_edge_click_contract() {
-    use gtk4_layer_shell::LayerShell;
     let Some(context) = layer_shell_context_or_skip() else {
         return;
     };
-    let mut config = layer_shell_test_config();
-    config.bar.position = "left".to_string();
-    config.bar.screen_margin = 12;
-    // The centre widget is found first; the end one is built last.
-    let placement = vec![WidgetPlacement::Single("quick_settings".to_string())];
-    config.widgets.left = Vec::new();
-    config.widgets.center = placement.clone();
-    config.widgets.right = placement;
-    let bar = present_layer_shell_bar(&context, &config, true);
-    let bar_window = bar.window.clone();
-    let widget = || {
-        find_descendant_with_class(
-            bar_window.upcast_ref(),
-            crate::styles::widget::QUICK_SETTINGS,
-        )
-        .expect("quick settings bar widget")
-    };
-    wait_for_bar_contract(|| {
-        widget()
-            .compute_bounds(&bar_window)
-            .is_some_and(|b| b.height() > 0.0)
-    });
-    let bounds = widget().compute_bounds(&bar_window).unwrap();
-    // Pointer coordinates are screen pixels on the headless output.
-    let widget_x = (bounds.x() + bounds.width() / 2.0) as i32;
-    let widget_y = (bounds.y() + bounds.height() / 2.0) as i32;
-
-    let qs_window = || {
-        context
-            .app
-            .windows()
-            .into_iter()
-            .find(|w| w.title().as_deref() == Some("vibepanel quick settings"))
-    };
-    // Top of the content on screen, whether the surface spans the monitor
-    // or is shrink-wrapped and positioned by its bottom margin.
-    let screen_top = || {
-        qs_window().filter(|w| w.is_visible()).and_then(|w| {
-            let content =
-                find_descendant_with_class(w.upcast_ref(), crate::styles::qs::WINDOW_CONTAINER)?;
-            let y = content.compute_bounds(&w)?.y().round() as i32;
-            let surface_top = context.monitor.geometry().height()
-                - w.margin(gtk4_layer_shell::Edge::Bottom)
-                - w.height();
-            Some(surface_top + y)
-        })
-    };
-    let settle = || {
-        let until = std::time::Instant::now() + std::time::Duration::from_millis(800);
-        while std::time::Instant::now() < until {
-            flush_gtk();
-            std::thread::sleep(std::time::Duration::from_millis(5));
+    for (position, section, animations) in [
+        ("left", "center", false),
+        ("left", "center", true),
+        ("left", "right", true),
+        ("left", "left", true),
+        ("right", "right", true),
+        // The centre widget is found first; the end one is built last.
+        ("left", "center+right", true),
+    ] {
+        let mut config = layer_shell_test_config();
+        config.bar.position = position.to_string();
+        config.bar.screen_margin = 12;
+        config.theme.animations = animations;
+        let placement = vec![WidgetPlacement::Single("quick_settings".to_string())];
+        config.widgets.left = Vec::new();
+        match section {
+            "left" => config.widgets.left = placement,
+            "center" => config.widgets.center = placement,
+            "right" => config.widgets.right = placement,
+            _ => {
+                config.widgets.center = placement.clone();
+                config.widgets.right = placement;
+            }
         }
+        let case = format!("{position} bar, {section} section, animations={animations}");
+        let bar = present_layer_shell_bar(&context, &config, true);
+        let bar_window = bar.window.clone();
+        let widget = || {
+            find_descendant_with_class(
+                bar_window.upcast_ref(),
+                crate::styles::widget::QUICK_SETTINGS,
+            )
+            .expect("quick settings bar widget")
+        };
+        wait_for_bar_contract(|| {
+            widget()
+                .compute_bounds(&bar_window)
+                .is_some_and(|b| b.height() > 0.0)
+        });
+        let bounds = widget().compute_bounds(&bar_window).unwrap();
+        // Pointer coordinates are screen pixels on the 1280px headless output.
+        let bar_x = if position == "left" {
+            0
+        } else {
+            1280 - bar_window.width()
+        };
+        let widget_x = bar_x + (bounds.x() + bounds.width() / 2.0) as i32;
+        let widget_y = (bounds.y() + bounds.height() / 2.0) as i32;
+        let edge_x = if position == "left" { 2 } else { 1277 };
+        let away_x = if position == "left" { 1000 } else { 200 };
+
+        let qs_window = || {
+            context
+                .app
+                .windows()
+                .into_iter()
+                .find(|w| w.title().as_deref() == Some("vibepanel quick settings"))
+        };
+        let placed = || {
+            qs_window()
+                .filter(|w| w.is_visible())
+                .and_then(|w| {
+                    find_descendant_with_class(w.upcast_ref(), crate::styles::qs::WINDOW_CONTAINER)
+                        .and_then(|content| content.compute_bounds(&w))
+                })
+                .map(|b| (b.y().round() as i32, b.height().round() as i32))
+        };
+        let pointer = std::env::var("VIBEPANEL_TEST_POINTER").unwrap();
+        for (name, x) in [("widget", widget_x), ("edge area", edge_x)] {
+            std::fs::write(&pointer, format!("{x} {widget_y} click")).unwrap();
+            let surface = context.monitor.geometry().height();
+            let gap = crate::widgets::layer_shell_popover::POPOVER_FAR_EDGE_MARGIN;
+            // Centred on the widget, clamped inside the edge gaps. Edge hover
+            // can shift the widget bounds by a pixel.
+            let centred = |(top, height): (i32, i32)| {
+                (top - (widget_y - height / 2).clamp(gap, surface - gap - height)).abs() <= 1
+            };
+            let settled = std::time::Instant::now() + std::time::Duration::from_secs(4);
+            while !placed().is_some_and(centred) && std::time::Instant::now() < settled {
+                flush_gtk();
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            let observed = placed();
+            assert!(
+                observed.is_some_and(centred),
+                "{case}: {name} click at ({x}, {widget_y}) opens centred on the widget, \
+                 got (top, height) {observed:?}"
+            );
+            std::fs::write(&pointer, format!("{away_x} 600 click")).unwrap();
+            wait_for_bar_contract(|| qs_window().is_none_or(|w| !w.is_visible()));
+            std::fs::write(&pointer, format!("{away_x} 601")).unwrap();
+        }
+        bar.window.close();
+        flush_gtk();
+    }
+}
+
+/// Left/right-bar popovers open centred on their button wherever it is.
+fn run_layer_shell_vertical_popover_home_contract() {
+    let Some(context) = layer_shell_context_or_skip() else {
+        return;
     };
-    let pointer = std::env::var("VIBEPANEL_TEST_POINTER").unwrap();
-    let open_at = |x: i32| {
-        std::fs::write(&pointer, format!("{x} {widget_y} click")).unwrap();
-        wait_for_bar_contract(|| qs_window().is_some_and(|w| w.is_visible()));
-        settle();
-        let top = screen_top();
-        std::fs::write(&pointer, "1000 600 click").unwrap();
-        wait_for_bar_contract(|| qs_window().is_none_or(|w| !w.is_visible()));
-        std::fs::write(&pointer, "1000 601").unwrap();
-        settle();
-        top
-    };
-    // The first open sizes the window; compare the opens after it.
-    open_at(widget_x);
-    let from_widget = open_at(widget_x);
-    let from_edge = open_at(2);
-    assert!(from_widget.is_some(), "widget click opens Quick Settings");
-    assert!(
-        from_edge
-            .zip(from_widget)
-            .is_some_and(|(e, w)| (e - w).abs() <= 1),
-        "edge-area click at y {widget_y} opens where the widget click does: \
-         edge top {from_edge:?}, widget top {from_widget:?}"
-    );
-    bar.window.close();
-    flush_gtk();
+    for animations in [false, true] {
+        let mut config = layer_shell_test_config();
+        config.bar.position = "left".to_string();
+        config.theme.animations = animations;
+        apply_layer_shell_config(&config, true);
+        let popover = LayerShellPopover::new(&context.app, "contract", || {
+            let content = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+            content.set_size_request(200, 100);
+            content.upcast::<gtk4::Widget>()
+        });
+        for anchor_y in [200, 400, 600] {
+            popover.show_at(
+                PopoverAnchor { x: 20, y: anchor_y },
+                Some(context.monitor.clone()),
+            );
+            let window = popover.test_window().expect("popover window");
+            let centre = || {
+                crate::ui_regression_test_support::find_descendant_with_class(
+                    window.upcast_ref(),
+                    crate::styles::surface::POPOVER,
+                )
+                .and_then(|content| content.compute_bounds(&window))
+                .map(|b| (b.y() + b.height() / 2.0).round() as i32)
+            };
+            let settled = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while centre() != Some(anchor_y) && std::time::Instant::now() < settled {
+                flush_gtk();
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            assert_eq!(
+                centre(),
+                Some(anchor_y),
+                "animations={animations}: popover centred on anchor {anchor_y} (surface {}px)",
+                window.height()
+            );
+            assert_eq!(
+                window.height(),
+                context.monitor.geometry().height(),
+                "popover surface spans the monitor"
+            );
+
+            // Growth past the bottom edge holds the bottom at the edge gap.
+            let content = crate::ui_regression_test_support::find_descendant_with_class(
+                window.upcast_ref(),
+                crate::styles::surface::POPOVER,
+            )
+            .expect("popover content");
+            content.set_size_request(200, 400);
+            let bottom = || {
+                content
+                    .compute_bounds(&window)
+                    .map(|b| (b.y() + b.height()).round() as i32)
+            };
+            let expected_bottom =
+                window.height() - crate::widgets::layer_shell_popover::POPOVER_FAR_EDGE_MARGIN;
+            let expected = if anchor_y + 200 > expected_bottom {
+                expected_bottom
+            } else {
+                anchor_y - 50 + 400
+            };
+            let settled = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while bottom() != Some(expected) && std::time::Instant::now() < settled {
+                flush_gtk();
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            assert_eq!(
+                bottom(),
+                Some(expected),
+                "grown popover bottom at anchor {anchor_y}"
+            );
+            popover.hide();
+            wait_for_bar_contract(|| !window.is_visible());
+        }
+        if let Some(window) = popover.test_window() {
+            window.close();
+        }
+        flush_gtk();
+    }
 }
 
 /// Gaps between `class`'s content in popover `window` and the top and bottom
@@ -449,15 +549,23 @@ fn run_layer_shell_popover_height_cap_contract() {
             let fits = |(top, bottom): (i32, i32)| match position {
                 BarPosition::Top => (bottom - gap).abs() <= 1,
                 BarPosition::Bottom => (top - gap).abs() <= 1,
-                // Positioning on left/right bars comes later; the height
-                // leaves the gap at both ends.
-                _ => (top + bottom - 2 * gap).abs() <= 1,
+                _ => (top - gap).abs() <= 1 && (bottom - gap).abs() <= 1,
             };
             let gaps = || popover_screen_gaps(&context, window, class, position, reserved);
             let settled = std::time::Instant::now() + std::time::Duration::from_secs(2);
             while !gaps().is_some_and(fits) && std::time::Instant::now() < settled {
                 flush_gtk();
                 std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            if position.is_vertical() {
+                // Sway sizes surfaces anchored to both edges to the output,
+                // but other compositors honour the requested size.
+                let (_, requested, _, _) =
+                    window.measure(gtk4::Orientation::Vertical, window.width());
+                assert_eq!(
+                    requested, screen,
+                    "{position:?} bar, {name}: surface asks for the screen height"
+                );
             }
             let observed = gaps();
             assert!(
@@ -1566,6 +1674,11 @@ layer_shell_contract_tests!(
         test_layer_shell_popover_placement,
         "popover.placement",
         run_layer_shell_popover_placement_contract()
+    ),
+    (
+        test_layer_shell_vertical_popover_home,
+        "popover.vertical-home",
+        run_layer_shell_vertical_popover_home_contract()
     ),
     (
         test_layer_shell_quick_settings_edge_click,
