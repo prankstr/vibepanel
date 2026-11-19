@@ -480,6 +480,25 @@ impl PopoverPlacer {
         result
     }
 
+    /// Like [`Self::measure_settled`], with the height cap lifted too, and
+    /// return its result with the cap, so a caller can adjust the uncapped
+    /// height before capping it.
+    pub(crate) fn measure_uncapped<R>(&self, measure: impl FnOnce() -> R) -> (R, Option<i32>) {
+        self.measure_settled(|| {
+            let imp = self.imp();
+            let cap = imp.height_cap.take();
+            if cap.is_none() {
+                return (measure(), None);
+            }
+            // Drop measurements cached under the cap, before and after.
+            self.queue_resize();
+            let result = measure();
+            imp.height_cap.set(cap);
+            self.queue_resize();
+            (result, cap)
+        })
+    }
+
     /// Recentre on the anchor at the next layout, e.g. on a fresh open.
     pub(crate) fn reset_home(&self) {
         self.imp().home.set(None);

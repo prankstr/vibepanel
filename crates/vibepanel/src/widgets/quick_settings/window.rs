@@ -178,7 +178,7 @@ fn rebuild_card_rows(grid: &GtkBox, cards: &[ToggleCardInfo]) {
             .filter_map(|card| card.revealer.as_ref())
             .find(|revealer| revealer.reveals_child())
         {
-            accordion.collapse_others(expanded);
+            accordion.collapse_others(expanded, false);
         }
     }
 }

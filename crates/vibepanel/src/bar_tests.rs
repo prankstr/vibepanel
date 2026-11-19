@@ -627,6 +627,159 @@ fn run_layer_shell_popover_height_cap_contract() {
     }
 }
 
+/// On a top bar a card closing while another opens, like a Quick Settings
+/// swap, moves the popover's height steadily from old to new, reaching the
+/// screen cap only as the cards finish. The surface neither clips it nor
+/// grows past the taller end, and shrinks to fit afterwards.
+fn run_layer_shell_top_bar_reveal_swap_contract() {
+    let Some(context) = layer_shell_context_or_skip() else {
+        return;
+    };
+    let mut config = layer_shell_test_config();
+    config.theme.animations = true;
+    apply_layer_shell_config(&config, true);
+    let card = |height: i32, revealed: bool| {
+        let child = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+        child.set_size_request(200, height);
+        gtk4::Revealer::builder()
+            .transition_type(gtk4::RevealerTransitionType::SlideDown)
+            .transition_duration(300)
+            .reveal_child(revealed)
+            .child(&child)
+            .build()
+    };
+    // (header, closing card, opening card). The last one opens past the
+    // screen cap: the content stops at the cap and scrolls.
+    for (header_height, old_height, new_height) in [
+        (50, 150, 150),
+        (50, 150, 250),
+        (50, 250, 150),
+        (450, 150, 360),
+    ] {
+        let old = card(old_height, true);
+        let new = card(new_height, false);
+        let content = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+        let header = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+        header.set_size_request(200, header_height);
+        content.append(&header);
+        content.append(&old);
+        content.append(&new);
+        // Like Quick Settings, the cards scroll when capped.
+        let scrolled = gtk4::ScrolledWindow::new();
+        scrolled.set_policy(gtk4::PolicyType::Never, gtk4::PolicyType::Automatic);
+        scrolled.set_propagate_natural_height(true);
+        scrolled.set_child(Some(&content));
+        let popover = LayerShellPopover::new(&context.app, "swap", move || {
+            scrolled.clone().upcast::<gtk4::Widget>()
+        });
+        popover.show_at(
+            PopoverAnchor { x: 640, y: 16 },
+            Some(context.monitor.clone()),
+        );
+        let window = popover.test_window().expect("popover window");
+        let window_for_height = window.clone();
+        let content_height = move || {
+            let window = &window_for_height;
+            find_descendant_with_class(window.upcast_ref(), crate::styles::surface::POPOVER)
+                .and_then(|c| c.compute_bounds(window))
+                .map(|b| b.y() + b.height())
+                .map_or(0, |bottom| bottom.round() as i32)
+        };
+        let settled = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while std::time::Instant::now() < settled {
+            flush_gtk();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let before = content_height();
+        // Shadow margin below the content.
+        let margin = window.height() - before;
+        let samples: Rc<RefCell<Vec<(i32, i32)>>> = Rc::default();
+        // (content height, opening card height) each frame.
+        let paces: Rc<RefCell<Vec<(i32, i32)>>> = Rc::default();
+        {
+            let samples = Rc::clone(&samples);
+            let paces = Rc::clone(&paces);
+            let window_for_tick = window.clone();
+            let content_height = content_height.clone();
+            let new = new.clone();
+            window.add_tick_callback(move |_, _| {
+                samples
+                    .borrow_mut()
+                    .push((content_height(), window_for_tick.height()));
+                paces.borrow_mut().push((content_height(), new.height()));
+                gtk4::glib::ControlFlow::Continue
+            });
+        }
+        crate::widgets::layer_shell_popover::animate_reveal(&old, false);
+        crate::widgets::layer_shell_popover::animate_reveal(&new, true);
+        wait_for_bar_contract(|| !old.is_child_revealed() && new.is_child_revealed());
+        let settled = std::time::Instant::now() + std::time::Duration::from_millis(300);
+        while std::time::Instant::now() < settled {
+            flush_gtk();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let after = content_height();
+        let samples = samples.borrow().clone();
+        let case = format!("{old_height}px card swapped for {new_height}px");
+        assert!(samples.len() > 3, "{case}: animated: {samples:?}");
+        let screen = context.monitor.geometry().height();
+        if header_height + new_height < screen / 2 {
+            assert_eq!(after - before, new_height - old_height, "{case}: settles");
+        } else {
+            assert!(
+                after > before && after < header_height + new_height,
+                "{case}: grows to the cap ({before} to {after}) on a {screen}px screen, surface {}px",
+                window.height()
+            );
+            // It gets there with the card, not ahead of it. Far enough for
+            // a pixel of rounding not to count.
+            assert!(after - before >= 50, "{case}: grows {}px", after - before);
+            let paces = paces.borrow();
+            for (content, card) in paces.iter() {
+                let grown = f64::from(content - before) / f64::from(after - before);
+                let opened = f64::from(*card) / f64::from(new_height);
+                assert!(
+                    (grown - opened).abs() <= 0.1,
+                    "{case}: popover {grown:.2} of the way with the card {opened:.2} open: {paces:?}"
+                );
+            }
+        }
+        let (low, high) = (before.min(after), before.max(after));
+        for pair in samples.windows(2) {
+            let ((h0, _), (h1, _)) = (pair[0], pair[1]);
+            assert!(
+                (low - 2..=high + 2).contains(&h1) && (h1 - h0) * (after - before).signum() >= -2,
+                "{case}: height moves steadily from {before} to {after}: {samples:?}"
+            );
+        }
+        assert!(
+            samples.iter().all(|(content, surface)| content <= surface),
+            "{case}: surface never clips the content: {samples:?}"
+        );
+        assert!(
+            samples
+                .iter()
+                .all(|(_, surface)| *surface <= high + margin + 2),
+            "{case}: surface reserves no more than the taller end: {samples:?}"
+        );
+        // Frozen at the start, released at the end: no resizes in between.
+        let resizes = samples.windows(2).filter(|p| p[0].1 != p[1].1).count();
+        assert!(
+            resizes <= 2,
+            "{case}: surface resizes {resizes} times: {samples:?}"
+        );
+        assert!(
+            window.height() < after + 40,
+            "{case}: surface shrinks to fit ({}px for {after}px of content)",
+            window.height()
+        );
+        popover.hide();
+        wait_for_bar_contract(|| !window.is_visible());
+        window.close();
+        flush_gtk();
+    }
+}
+
 fn run_layer_shell_popover_on_show_reversal_contract() {
     let Some(context) = layer_shell_context_or_skip() else {
         return;
@@ -1689,6 +1842,11 @@ layer_shell_contract_tests!(
         test_layer_shell_popover_height_cap,
         "popover.height-cap",
         run_layer_shell_popover_height_cap_contract()
+    ),
+    (
+        test_layer_shell_top_bar_reveal_swap,
+        "popover.top-bar-reveal-swap",
+        run_layer_shell_top_bar_reveal_swap_contract()
     ),
     (
         test_layer_shell_popover_on_show_reversal,

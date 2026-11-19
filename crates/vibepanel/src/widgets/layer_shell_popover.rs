@@ -1320,10 +1320,18 @@ impl SurfaceHeightFreeze {
         let Some(root) = window.child() else {
             return;
         };
-        let mut revealers = self.active.borrow().clone();
-        revealers.push(revealer.clone());
-        let mut old_height_requests = Vec::with_capacity(revealers.len());
-        for active in revealers {
+        // Opening revealers count at full height, closing ones at none. A
+        // card that closes while another opens (an accordion swap) moves in
+        // step with it, so the content never outgrows the larger end.
+        let (mut opening, closing): (Vec<_>, Vec<_>) = self
+            .active
+            .borrow()
+            .iter()
+            .cloned()
+            .partition(|active| active.reveals_child());
+        opening.push(revealer.clone());
+        let mut old_height_requests = Vec::with_capacity(opening.len());
+        for active in opening {
             let Some(child) = active.child() else {
                 continue;
             };
@@ -1334,27 +1342,53 @@ impl SurfaceHeightFreeze {
             old_height_requests.push((active.clone(), active.height_request()));
             active.set_height_request(child_nat);
         }
-        // Where the content settles, not where a transition has it now.
+        // The closing height comes off the content before the placer caps it.
         let placer = self
             .blur_widget
             .upgrade()
             .and_then(|content| content.ancestor(PopoverPlacer::static_type()))
             .and_downcast::<PopoverPlacer>();
-        let measure = || {
-            let (root_min_width, _, _, _) = root.measure(Orientation::Horizontal, -1);
-            root.measure(Orientation::Vertical, root.width().max(root_min_width))
-                .1
+        // Minimum and natural height at the widget's width.
+        let heights = |widget: &gtk4::Widget| {
+            let (min_width, _, _, _) = widget.measure(Orientation::Horizontal, -1);
+            let (min, nat, _, _) =
+                widget.measure(Orientation::Vertical, widget.width().max(min_width));
+            (min, nat)
         };
-        let target = match &placer {
-            Some(placer) => placer.measure_settled(measure),
-            None => measure(),
+        let measure = || {
+            let (_, root_height) = heights(&root);
+            let content = placer
+                .as_ref()
+                .map_or((0, root_height), |placer| heights(placer.upcast_ref()));
+            (root_height, content)
+        };
+        let ((root_height, (content_min, content_height)), cap) = match &placer {
+            Some(placer) => placer.measure_uncapped(measure),
+            None => (measure(), None),
         };
         for (active, request) in old_height_requests {
             active.set_height_request(request);
         }
+        // A revealer inside a closing one is already part of its height.
+        let closing_height: i32 = closing
+            .iter()
+            .filter(|active| {
+                !closing
+                    .iter()
+                    .any(|outer| outer != *active && active.is_ancestor(outer))
+            })
+            .map(|active| heights(active.upcast_ref()).1)
+            .sum();
 
-        // Active collapses may over-reserve space, but avoid another surface resize.
-        let target = target.max(self.frozen_height.get());
+        // Each revealer rounds its own height mid-animation, so the sum can
+        // run a pixel over per closing one.
+        let content_target = content_height - closing_height + closing.len() as i32;
+        // Capped like the placer measures it: only what can scroll gives way.
+        let content_target = cap.map_or(content_target, |cap| {
+            content_target.min(cap).max(content_min)
+        });
+        // The frozen height already holds the content as it is now.
+        let target = (root_height - content_height + content_target).max(self.frozen_height.get());
         if target <= 0 {
             return;
         }

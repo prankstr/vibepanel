@@ -308,7 +308,7 @@ pub fn build_accent_subtitle(accent_word: &str, extra_parts: &[&str]) -> GtkBox 
 ///
 /// Each row of cards gets its own `AccordionManager` instance, so cards in
 /// different rows are independent. When a card is expanded, all other cards
-/// **in the same row** are collapsed instantly.
+/// **in the same row** collapse (see [`Self::collapse_others`]).
 pub struct AccordionManager {
     /// Registered expandable cards (stored as trait objects).
     cards: RefCell<Vec<Rc<dyn ExpandableCard>>>,
@@ -330,7 +330,14 @@ impl AccordionManager {
     /// Collapse all cards except the one with the given revealer.
     ///
     /// This should be called when a card is about to expand.
-    pub fn collapse_others(&self, except_revealer: &Revealer) {
+    ///
+    /// With `animate`, the others slide shut while the expanding card slides
+    /// open, so the popover's total height moves steadily instead of dropping
+    /// and growing back. Their details turn transparent at once, so only
+    /// empty space closes, and they move below the expanding card, so its
+    /// details always slide in from the top with nothing over them.
+    /// Otherwise they collapse instantly.
+    pub fn collapse_others(&self, except_revealer: &Revealer, animate: bool) {
         for card in self.cards.borrow().iter() {
             let base = card.base();
             if let Some(revealer) = base.revealer.borrow().as_ref() {
@@ -340,10 +347,20 @@ impl AccordionManager {
                 }
                 // Collapse this card if it's expanded
                 if revealer.reveals_child() {
-                    collapse_revealer_instant(revealer);
+                    if animate {
+                        hide_until_collapsed(revealer);
+                        move_below(revealer, except_revealer);
+                        animate_reveal(revealer, false);
+                    } else {
+                        collapse_revealer_instant(revealer);
+                    }
                     if let Some(arrow) = base.arrow.borrow().as_ref() {
                         arrow.widget().remove_css_class(state::EXPANDED);
                     }
+                } else if animate && revealer.is_child_revealed() {
+                    // Already closing, e.g. its own expander was just clicked.
+                    hide_until_collapsed(revealer);
+                    move_below(revealer, except_revealer);
                 }
             }
         }
@@ -375,7 +392,7 @@ impl AccordionManager {
 
             // Collapse other cards first (accordion behavior)
             if expanding {
-                accordion.collapse_others(revealer);
+                accordion.collapse_others(revealer, true);
             }
 
             animate_reveal(revealer, expanding);
@@ -554,6 +571,58 @@ pub fn collapse_revealer_instant(revealer: &Revealer) {
         revealer.set_reveal_child(false);
         revealer.set_transition_duration(old_dur);
     }
+}
+
+const HIDE_UNTIL_COLLAPSED_HOOK_KEY: &str = "vibepanel-hide-until-collapsed-hook";
+
+/// Move `closing` to just below `opening` in the box they share. A closing
+/// card above the opening one would otherwise shrink over its details: they
+/// would stand still and seem uncovered instead of sliding in. `closing` is
+/// transparent and `opening` usually has no height yet, so the move isn't
+/// seen. Reopening a card before a swap finishes cuts straight to it.
+fn move_below(closing: &Revealer, opening: &Revealer) {
+    if let Some(parent) = opening.parent().and_downcast::<GtkBox>()
+        && closing.parent().as_ref() == Some(parent.upcast_ref())
+    {
+        parent.reorder_child_after(closing, Some(opening));
+    }
+}
+
+/// Make `revealer`'s child transparent, and unreachable by pointer and
+/// keyboard, while it collapses. It comes back once collapsed, or as soon as
+/// the revealer opens again.
+fn hide_until_collapsed(revealer: &Revealer) {
+    if let Some(child) = revealer.child() {
+        child.set_opacity(0.0);
+        child.set_can_target(false);
+        child.set_can_focus(false);
+    }
+    unsafe {
+        if revealer
+            .data::<bool>(HIDE_UNTIL_COLLAPSED_HOOK_KEY)
+            .is_some()
+        {
+            return;
+        }
+        revealer.set_data(HIDE_UNTIL_COLLAPSED_HOOK_KEY, true);
+    }
+    let show = |revealer: &Revealer| {
+        if let Some(child) = revealer.child() {
+            child.set_opacity(1.0);
+            child.set_can_target(true);
+            child.set_can_focus(true);
+        }
+    };
+    revealer.connect_reveal_child_notify(move |revealer| {
+        if revealer.reveals_child() {
+            show(revealer);
+        }
+    });
+    revealer.connect_child_revealed_notify(move |revealer| {
+        if !revealer.is_child_revealed() {
+            show(revealer);
+        }
+    });
 }
 
 /// Clear all children from a ListBox.
@@ -799,7 +868,190 @@ impl ScanButton {
 
 #[cfg(test)]
 mod tests {
-    use super::{audio_input_icon_name, audio_output_icon_name, device_subtitle};
+    use super::{
+        AccordionManager, ExpandableCard, ExpandableCardBase, audio_input_icon_name,
+        audio_output_icon_name, device_subtitle,
+    };
+    use crate::widgets::layer_shell_popover::animate_reveal;
+    use gtk4::prelude::*;
+    use std::rc::Rc;
+
+    #[test]
+    #[ignore = "UI regression test: needs a GTK display; run under Xvfb"]
+    fn test_ui_regression_accordion_swap_hides_replaced_card() {
+        crate::ui_regression_test_support::run_ignored_contract_subprocess(
+            "widgets::quick_settings::ui_helpers::tests::accordion_runner",
+            "VIBEPANEL_ACCORDION_UI_REGRESSION_TEST",
+            "accordion.swap",
+            "accordion swap test",
+        );
+    }
+
+    #[test]
+    #[ignore = "internal runner for the accordion subprocess"]
+    fn accordion_runner() {
+        match std::env::var("VIBEPANEL_ACCORDION_UI_REGRESSION_TEST").as_deref() {
+            Ok("accordion.swap") => run_test_accordion_swap(),
+            Ok(other) => panic!("unknown accordion test: {other}"),
+            Err(_) => eprintln!("skipping accordion test: no test case selected"),
+        }
+    }
+
+    struct Card(ExpandableCardBase);
+
+    impl ExpandableCard for Card {
+        fn base(&self) -> &ExpandableCardBase {
+            &self.0
+        }
+    }
+
+    fn run_until(done: impl Fn() -> bool) {
+        let ctx = gtk4::glib::MainContext::default();
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while !done() && std::time::Instant::now() < until {
+            ctx.iteration(false);
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert!(done(), "timed out");
+    }
+
+    /// The replaced card's details vanish at once while it slides shut, and
+    /// come back once it's closed or when it's opened again mid-way.
+    fn run_test_accordion_swap() {
+        if !crate::ui_regression_test_support::init_gtk_or_skip("accordion swap test") {
+            return;
+        }
+        let mut config = vibepanel_core::Config::default();
+        config.theme.animations = true;
+        crate::services::config_manager::ConfigManager::replace_global_for_test(config);
+
+        let accordion = AccordionManager::new();
+        let column = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+        let card = |revealed: bool| {
+            let details = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+            details.set_size_request(200, 150);
+            let revealer = gtk4::Revealer::builder()
+                .transition_type(gtk4::RevealerTransitionType::SlideDown)
+                .transition_duration(300)
+                .reveal_child(revealed)
+                .child(&details)
+                .build();
+            column.append(&revealer);
+            let base = ExpandableCardBase::new();
+            *base.revealer.borrow_mut() = Some(revealer.clone());
+            accordion.register_dyn(Rc::new(Card(base)));
+            (revealer, details)
+        };
+        let (old, old_details) = card(true);
+        let (new, _) = card(false);
+        let window = gtk4::Window::builder()
+            .decorated(false)
+            .default_width(200)
+            .default_height(400)
+            .child(&column)
+            .build();
+        window.present();
+        run_until(|| old.is_mapped() && old.height() == 150);
+
+        let swap = |opening: &gtk4::Revealer| {
+            accordion.collapse_others(opening, true);
+            animate_reveal(opening, true);
+        };
+        // Where `details` sits in the window on every frame.
+        let track = |details: &gtk4::Widget| {
+            let tops: Rc<std::cell::RefCell<Vec<i32>>> = Rc::default();
+            let (tops_for_tick, details, window_for_tick) =
+                (Rc::clone(&tops), details.clone(), window.clone());
+            let tick = window.add_tick_callback(move |_, _| {
+                if let Some(bounds) = details.compute_bounds(&window_for_tick) {
+                    tops_for_tick.borrow_mut().push(bounds.y().round() as i32);
+                }
+                gtk4::glib::ControlFlow::Continue
+            });
+            (tops, tick)
+        };
+        // The new card's details slide down into place from the top, with
+        // the closing card below them.
+        let assert_slides_in = |tops: &[i32]| {
+            // Frames before the first layout still show the old place.
+            let start = (0..tops.len()).min_by_key(|i| tops[*i]).expect("frames");
+            let tops = &tops[start..];
+            let last = *tops.last().expect("frames");
+            assert_eq!(last, 0, "ends at the top: {tops:?}");
+            assert!(tops[0] < last - 50, "slides in from the top: {tops:?}");
+            assert!(
+                tops.windows(2).all(|p| p[1] >= p[0]),
+                "moves one way: {tops:?}"
+            );
+        };
+
+        let new_details = new.child().unwrap();
+        let (tops, tick) = track(&new_details);
+        swap(&new);
+        assert_eq!(old_details.opacity(), 0.0, "replaced card hides at once");
+        assert!(!old_details.can_target(), "hidden details take no clicks");
+        run_until(|| old.height() < 140 && old.height() > 10);
+        assert_eq!(old_details.opacity(), 0.0, "stays hidden while it closes");
+        run_until(|| !old.is_child_revealed() && new.is_child_revealed());
+        tick.remove();
+        assert_eq!(old_details.opacity(), 1.0, "opaque again once closed");
+        assert!(old_details.can_target(), "and clickable");
+        assert_slides_in(&tops.borrow());
+
+        // The same the other way round.
+        let (tops, tick) = track(&old_details.clone().upcast());
+        swap(&old);
+        run_until(|| old.is_child_revealed() && !new.is_child_revealed());
+        tick.remove();
+        assert_slides_in(&tops.borrow());
+
+        // Swap, and reopen the closing card before it's shut.
+        swap(&new);
+        run_until(|| new.is_child_revealed());
+        swap(&old);
+        assert_eq!(new_details.opacity(), 0.0);
+        run_until(|| new.height() < 140);
+        swap(&new);
+        assert_eq!(
+            new_details.opacity(),
+            1.0,
+            "reopened mid-way, the card shows at once"
+        );
+        assert_eq!(
+            old.child().unwrap().opacity(),
+            0.0,
+            "and the other one hides"
+        );
+        run_until(|| !old.is_child_revealed() && new.is_child_revealed());
+        assert_eq!(old.child().unwrap().opacity(), 1.0);
+
+        // A card already closing on its own is hidden and moved below too.
+        swap(&old);
+        run_until(|| old.is_child_revealed() && !new.is_child_revealed());
+        animate_reveal(&old, false);
+        run_until(|| old.height() < 140);
+        let (tops, tick) = track(&new_details);
+        swap(&new);
+        assert_eq!(old.child().unwrap().opacity(), 0.0, "closing card hides");
+        run_until(|| !old.is_child_revealed() && new.is_child_revealed());
+        tick.remove();
+        assert_slides_in(&tops.borrow());
+
+        // With animations off, nothing is left hidden.
+        let mut config = vibepanel_core::Config::default();
+        config.theme.animations = false;
+        crate::services::config_manager::ConfigManager::replace_global_for_test(config);
+        old.set_transition_duration(0);
+        new.set_transition_duration(0);
+        swap(&old);
+        assert_eq!(
+            new.child().unwrap().opacity(),
+            1.0,
+            "instant collapse stays opaque"
+        );
+
+        window.close();
+    }
 
     #[test]
     fn device_subtitle_cases() {
