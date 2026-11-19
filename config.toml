@@ -55,6 +55,8 @@ background_opacity = 1.0
 #   critical_threshold = 5
 #
 #   [widgets.quick_settings]
+#   # wifi = false  # No Wi-Fi adapter: hide the Wi-Fi icon/card (Ethernet and mobile stay).
+#   #               # Use network = false instead to drop the whole Network card and icons.
 #   # shutdown_command = "loginctl poweroff"
 #   # reboot_command = "loginctl reboot"
 #   # suspend_command = "loginctl suspend"

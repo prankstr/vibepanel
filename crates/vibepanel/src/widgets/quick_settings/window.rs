@@ -49,7 +49,7 @@ use super::idle_inhibitor_card::{self, IdleInhibitorCardState};
 use super::mic_card::{self, MicCardState, build_mic_details, build_mic_hint_label, build_mic_row};
 use super::network_card::{
     self, NetworkCardState, build_network_subtitle, build_wifi_details, is_material_unified,
-    resolve_material_network_icon,
+    network_card_visible, resolve_material_network_icon,
 };
 use super::power_card::{self, PowerCardExpanderState};
 use super::ui_helpers::{AccordionManager, ExpandableCard, collapse_revealer_instant};
@@ -591,7 +591,11 @@ impl QuickSettingsWindow {
         rebuild_card_rows(&grid, &toggle_cards);
         *qs.toggle_cards.borrow_mut() = toggle_cards;
         content.append(&grid);
-        if let Some(card) = qs.vpn.card.upgrade() {
+        // Cards that can hide at runtime re-flow the grid when their visibility changes.
+        for card in [qs.vpn.card.upgrade(), qs.network.card.upgrade()]
+            .into_iter()
+            .flatten()
+        {
             let weak_qs = Rc::downgrade(qs);
             let weak_grid = grid.downgrade();
             card.connect_visible_notify(move |_| {
@@ -635,6 +639,9 @@ impl QuickSettingsWindow {
         let network_service = NetworkService::global();
         let snapshot = network_service.snapshot();
 
+        // Must be set before the details are built: they read it to leave out the Wi-Fi controls.
+        qs.network.wifi_ui.set(qs.cards_config.wifi);
+
         let wifi_enabled = snapshot.wifi_enabled().unwrap_or(false);
         let wifi_connected = snapshot.connected();
         let wired_connected = snapshot.wired_connected();
@@ -667,9 +674,14 @@ impl QuickSettingsWindow {
         network_card.card.add_css_class(qs::WIFI);
 
         // Disable toggle if no Wi-Fi device (toggle controls Wi-Fi, not ethernet)
-        if !snapshot.has_wifi_device() {
+        if !snapshot.has_wifi_device() || !qs.cards_config.wifi {
             network_card.toggle.set_sensitive(false);
         }
+        // `wifi = false` and nothing but Wi-Fi (or no network service) → no card at all; it
+        // reappears if an Ethernet/modem device shows up (on_network_changed).
+        let card_visible = network_card_visible(&qs.network, &snapshot);
+        network_card.card.set_visible(card_visible);
+        qs.network.card.set(Some(&network_card.card));
 
         if !wifi_enabled && !wired_connected && !snapshot.mobile_active() {
             // Only apply wifi-disabled styling when actually showing a wifi icon
@@ -719,6 +731,7 @@ impl QuickSettingsWindow {
         network_revealer.set_child(Some(&network_details.container));
 
         *qs.network.base.list_box.borrow_mut() = Some(network_details.list_box);
+        network_revealer.set_visible(card_visible);
         *qs.network.base.revealer.borrow_mut() = Some(network_revealer.clone());
         *qs.network.scan_button.borrow_mut() = Some(network_details.scan_button);
 

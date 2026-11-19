@@ -64,6 +64,11 @@ pub struct QuickSettingsCardsConfig {
     /// Controls both the bar icons (Wi-Fi + cellular) and the QS Network card.
     /// Cellular UI within the card is driven by runtime modem detection.
     pub network: bool,
+    /// Whether the Wi-Fi part of the Network card/icon is shown. With `wifi = false`
+    /// (a machine with no Wi-Fi adapter) the bar icon appears only while Ethernet is
+    /// connected, and the panel card only exists when an Ethernet/modem device does —
+    /// without its Wi-Fi toggle, scan button and network list. Defaults to `true`.
+    pub wifi: bool,
     pub bluetooth: bool,
     pub vpn: bool,
     pub idle_inhibitor: bool,
@@ -81,6 +86,7 @@ impl Default for QuickSettingsCardsConfig {
     fn default() -> Self {
         Self {
             network: true,
+            wifi: true,
             bluetooth: true,
             vpn: true,
             idle_inhibitor: true,
@@ -101,6 +107,7 @@ impl Default for QuickSettingsCardsConfig {
 ///
 /// ```toml
 /// [widgets.quick_settings]
+/// wifi = false                         # no Wi-Fi adapter: hide Wi-Fi UI, keep Ethernet/mobile
 /// vpn = false                          # hide the VPN card
 /// idle_inhibitor = false               # hide the idle inhibitor card
 /// vpn_close_on_connect = true          # close panel when VPN connects successfully
@@ -123,6 +130,7 @@ impl WidgetConfig for QuickSettingsConfig {
     fn from_entry(entry: &WidgetEntry) -> Self {
         let known_options = &[
             "network",
+            "wifi",
             "bluetooth",
             "vpn",
             "idle_inhibitor",
@@ -181,6 +189,7 @@ impl WidgetConfig for QuickSettingsConfig {
         Self {
             cards: QuickSettingsCardsConfig {
                 network: get_bool("network"),
+                wifi: get_bool("wifi"),
                 bluetooth: get_bool("bluetooth"),
                 vpn: get_bool("vpn"),
                 idle_inhibitor: get_bool("idle_inhibitor"),
@@ -380,6 +389,12 @@ impl QuickSettingsWidget {
 
             let ctx = NetworkIconContext::for_bar(&snapshot);
             let wifi_icon = base.add_icon(network_icon_name(&ctx), &[icon::ICON, icon::TEXT]);
+            // `wifi = false`: this slot only ever shows Ethernet, so keep it out of the bar
+            // (no wasted space) unless a cable is connected.
+            let show_wifi_ui = cards.wifi;
+            wifi_icon
+                .widget()
+                .set_visible(show_wifi_ui || wired_connected);
 
             if !wifi_enabled && !wired_connected {
                 wifi_icon.widget().add_css_class(qs::WIFI_DISABLED_ICON);
@@ -397,6 +412,7 @@ impl QuickSettingsWidget {
             network_wifi_callback_id = Some(NetworkService::global().connect(
                 move |snapshot: &NetworkSnapshot| {
                     let widget = wifi_icon_handle.widget();
+                    widget.set_visible(show_wifi_ui || snapshot.wired_connected());
 
                     if !snapshot.available() {
                         widget.add_css_class(state::SERVICE_UNAVAILABLE);
@@ -698,6 +714,24 @@ mod tests {
     use crate::widgets::WidgetConfig;
     use std::collections::HashMap;
     use toml::Value;
+
+    #[test]
+    fn quick_settings_wifi_card_option_defaults_on_and_can_be_disabled() {
+        let default = QuickSettingsConfig::from_entry(&WidgetEntry::new("quick_settings"));
+        assert!(default.cards.wifi, "Wi-Fi UI is on by default");
+        assert!(default.cards.network);
+
+        let options: HashMap<String, Value> = [("wifi".to_string(), Value::Boolean(false))]
+            .into_iter()
+            .collect();
+        let off = QuickSettingsConfig::from_entry(&WidgetEntry {
+            name: "quick_settings".to_string(),
+            options,
+        });
+        assert!(!off.cards.wifi);
+        // only the Wi-Fi part goes: the Network card itself (Ethernet/mobile) stays enabled
+        assert!(off.cards.network);
+    }
 
     #[test]
     fn quick_settings_config_parses_power_commands_and_expanded_state() {
