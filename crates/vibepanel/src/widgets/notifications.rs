@@ -356,12 +356,12 @@ impl NotificationsWidget {
         let suppress_rebuild = Rc::clone(&inner.suppress_rebuild);
         let menu_handle = base.create_menu(|| GtkBox::new(Orientation::Vertical, 0).into());
         let handle_weak = Rc::downgrade(&menu_handle);
-        menu_handle.set_builder_with_monitor(move |monitor| {
+        menu_handle.set_builder(move || {
             NotificationService::global().mark_as_seen();
             let on_close: Option<ClosePopoverCallback> = handle_weak
                 .upgrade()
                 .map(|handle| Rc::new(move || handle.hide()) as ClosePopoverCallback);
-            build_popover_content(on_close, Rc::clone(&suppress_rebuild), monitor)
+            build_popover_content(on_close, Rc::clone(&suppress_rebuild))
         });
         *inner.menu_handle.borrow_mut() = Some(menu_handle);
 

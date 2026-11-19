@@ -380,6 +380,145 @@ fn run_layer_shell_quick_settings_edge_click_contract() {
     flush_gtk();
 }
 
+/// Gaps between `class`'s content in popover `window` and the top and bottom
+/// screen edges, on a `position` bar that reserves `reserved` pixels.
+fn popover_screen_gaps(
+    context: &LayerShellContext,
+    window: &gtk4::Window,
+    class: &str,
+    position: BarPosition,
+    reserved: i32,
+) -> Option<(i32, i32)> {
+    use gtk4_layer_shell::{Edge, LayerShell};
+    if !window.is_visible() {
+        return None;
+    }
+    let bounds = find_descendant_with_class(window.upcast_ref(), class)?.compute_bounds(window)?;
+    let screen = context.monitor.geometry().height();
+    let surface_top = match position {
+        BarPosition::Top => reserved + window.margin(Edge::Top),
+        BarPosition::Bottom => screen - reserved - window.margin(Edge::Bottom) - window.height(),
+        // Shrink-wrapped and held up by its bottom margin, or full height.
+        _ => screen - window.margin(Edge::Bottom) - window.height(),
+    };
+    let top = surface_top + bounds.y().round() as i32;
+    let bottom = top + bounds.height().round() as i32;
+    Some((top, screen - bottom))
+}
+
+/// Popovers too tall for the screen stop at the edge gap away from the bar
+/// (both gaps on left/right bars) and scroll the rest, on every bar.
+fn run_layer_shell_popover_height_cap_contract() {
+    let Some(context) = layer_shell_context_or_skip() else {
+        return;
+    };
+    let headless_sway = std::env::var("VIBEPANEL_HEADLESS_SWAY_TEST").as_deref() == Ok("1");
+    let swaymsg = |command: &str| {
+        let status = std::process::Command::new("swaymsg")
+            .args(["-q", command])
+            .status()
+            .unwrap();
+        assert!(status.success(), "swaymsg {command}");
+    };
+    // A short output so Quick Settings overflows it too.
+    if headless_sway {
+        swaymsg("output HEADLESS-1 mode 1280x300");
+        wait_for_bar_contract(|| context.monitor.geometry().height() == 300);
+    }
+    let gap = crate::widgets::layer_shell_popover::POPOVER_FAR_EDGE_MARGIN;
+    for (name, position) in [
+        ("top", BarPosition::Top),
+        ("bottom", BarPosition::Bottom),
+        ("left", BarPosition::Left),
+    ] {
+        let mut config = layer_shell_test_config();
+        config.bar.position = name.to_string();
+        let bar = present_layer_shell_bar(&context, &config, true);
+        wait_for_bar_contract(|| bar.window.is_mapped());
+        let reserved = bar.window.exclusive_zone();
+        let screen = context.monitor.geometry().height();
+        let anchor = if position.is_horizontal() {
+            PopoverAnchor { x: 640, y: 16 }
+        } else {
+            PopoverAnchor {
+                x: 16,
+                y: screen / 2,
+            }
+        };
+        let check = |name: &str, window: &gtk4::Window, class: &str| {
+            let fits = |(top, bottom): (i32, i32)| match position {
+                BarPosition::Top => (bottom - gap).abs() <= 1,
+                BarPosition::Bottom => (top - gap).abs() <= 1,
+                // Positioning on left/right bars comes later; the height
+                // leaves the gap at both ends.
+                _ => (top + bottom - 2 * gap).abs() <= 1,
+            };
+            let gaps = || popover_screen_gaps(&context, window, class, position, reserved);
+            let settled = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while !gaps().is_some_and(fits) && std::time::Instant::now() < settled {
+                flush_gtk();
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            let observed = gaps();
+            assert!(
+                observed.is_some_and(fits),
+                "{position:?} bar, {name}: stops {gap}px from the far screen edge, \
+                 got (top, bottom) gaps {observed:?} on a {screen}px screen \
+                 (surface {}px)",
+                window.height()
+            );
+        };
+
+        let popover = LayerShellPopover::new(&context.app, "height-cap", || {
+            let list = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+            list.set_size_request(200, 3000);
+            let scrolled = gtk4::ScrolledWindow::new();
+            scrolled.set_policy(gtk4::PolicyType::Never, gtk4::PolicyType::Automatic);
+            scrolled.set_propagate_natural_height(true);
+            scrolled.set_child(Some(&list));
+            scrolled.upcast::<gtk4::Widget>()
+        });
+        popover.show_at(anchor, Some(context.monitor.clone()));
+        let window = popover.test_window().expect("popover window");
+        check(
+            "popover",
+            window.upcast_ref(),
+            crate::styles::surface::POPOVER,
+        );
+        popover.hide();
+        wait_for_bar_contract(|| !window.is_visible());
+        window.close();
+
+        if headless_sway {
+            let qs = crate::widgets::QuickSettingsWindowHandle::new(
+                context.app.clone(),
+                Default::default(),
+            );
+            qs.toggle_at(anchor, Some(context.monitor.clone()));
+            let qs_window = || {
+                context
+                    .app
+                    .windows()
+                    .into_iter()
+                    .find(|w| w.title().as_deref() == Some("vibepanel quick settings"))
+            };
+            wait_for_bar_contract(|| qs_window().is_some_and(|w| w.is_visible()));
+            check(
+                "quick settings",
+                &qs_window().unwrap(),
+                crate::styles::qs::WINDOW_CONTAINER,
+            );
+            qs.destroy();
+        }
+        bar.window.close();
+        flush_gtk();
+    }
+    if headless_sway {
+        swaymsg("output HEADLESS-1 mode 1280x800");
+        wait_for_bar_contract(|| context.monitor.geometry().height() == 800);
+    }
+}
+
 fn run_layer_shell_popover_on_show_reversal_contract() {
     let Some(context) = layer_shell_context_or_skip() else {
         return;
@@ -1217,7 +1356,9 @@ fn run_layer_shell_always_hotplug_contract() {
     };
     let mut config = layer_shell_test_config();
     config.bar.background_opacity = 0.6;
-    let height = crate::widgets::compute_max_scroll_height;
+    let height = |monitor: Option<gtk4::gdk::Monitor>| {
+        crate::widgets::layer_shell_popover::popover_height_cap(&monitor.unwrap(), 0)
+    };
     config.bar.auto_hide = vibepanel_core::config::AutoHide::Never;
     apply_layer_shell_config(&config, false);
     let never_height = height(Some(context.monitor.clone()));
@@ -1230,7 +1371,7 @@ fn run_layer_shell_always_hotplug_contract() {
         assert_eq!(
             height(Some(context.monitor.clone())),
             never_height,
-            "{mode:?}: notification height must not count bar thickness twice"
+            "{mode:?}: popover height cap must not count bar thickness twice"
         );
     }
     config.bar.auto_hide = vibepanel_core::config::AutoHide::Never;
@@ -1292,7 +1433,7 @@ fn run_layer_shell_always_hotplug_contract() {
         wait_for_bar_contract(|| context.monitor.geometry().height() == 120);
         assert!(
             height(Some(context.monitor.clone())) < 120,
-            "short outputs must not use the 500px missing-monitor fallback"
+            "short outputs cap popovers below their height"
         );
         let status = std::process::Command::new("swaymsg")
             .args(["-q", "output HEADLESS-1 mode 1280x800"])
@@ -1430,6 +1571,11 @@ layer_shell_contract_tests!(
         test_layer_shell_quick_settings_edge_click,
         "quick-settings.edge-click",
         run_layer_shell_quick_settings_edge_click_contract()
+    ),
+    (
+        test_layer_shell_popover_height_cap,
+        "popover.height-cap",
+        run_layer_shell_popover_height_cap_contract()
     ),
     (
         test_layer_shell_popover_on_show_reversal,

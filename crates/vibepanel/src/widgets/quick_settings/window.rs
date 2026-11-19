@@ -35,8 +35,9 @@ use crate::widgets::layer_shell_popover::{
     AnimDirection, BarPopoverChrome, Dismissible, PopoverAnchor, SurfaceAnimation, animate_reveal,
     calculate_popover_bar_margin, calculate_popover_bottom_margin, calculate_popover_right_margin,
     configure_popover_layer_anchors, install_surface_height_freeze, popover_bar_edge,
-    popover_keyboard_mode, reset_popover_margins, setup_esc_handler,
+    popover_height_cap, popover_keyboard_mode, reset_popover_margins, setup_esc_handler,
 };
+use crate::widgets::popover_placer::PopoverPlacer;
 
 use super::audio_card::{
     self, AudioCardState, build_audio_details, build_audio_hint_label, build_audio_row,
@@ -107,10 +108,6 @@ const QUICK_SETTINGS_CONTENT_HEIGHT_ESTIMATE: i32 = 520;
 /// CSS `padding: 16px` on `.vp-surface-popover` (both sides).
 const QUICK_SETTINGS_POPOVER_PADDING: i32 = 32;
 const QUICK_SETTINGS_OUTER_MARGIN: i32 = 4;
-const QUICK_SETTINGS_FAR_EDGE_MARGIN: i32 = 8;
-/// Container padding (surface padding + margins) for height calculation.
-const QUICK_SETTINGS_CONTAINER_PADDING: i32 = 24;
-const QUICK_SETTINGS_MIN_HEIGHT_THRESHOLD: i32 = 100;
 const QUICK_SETTINGS_MIN_EDGE_MARGIN: i32 = 4;
 const QUICK_SETTINGS_DEFAULT_RIGHT_MARGIN: i32 = 8;
 const CARD_ROW_SPACING: i32 = 8;
@@ -199,6 +196,8 @@ pub struct QuickSettingsWindow {
     anim: SurfaceAnimation,
     /// Wrapper providing transparent margins for surface shadows.
     margin_wrapper: GtkBox,
+    /// Caps the animation shell's height.
+    placer: PopoverPlacer,
     /// Content container (surface styles, focus suppression).
     outer_container: RefCell<Option<GtkBox>>,
     /// Widget center in monitor coordinates.
@@ -270,9 +269,8 @@ impl QuickSettingsWindow {
         window.set_margin(Edge::Right, 8);
         window.set_keyboard_mode(popover_keyboard_mode());
 
-        // Create scroll container for height limiting.
-        // Max height will be set in update_position() based on monitor geometry.
-        // propagate_natural_height allows it to grow to fit content, max_content_height caps it.
+        // Grows to fit the content; the placer caps the panel to the screen
+        // and this scrolls the rest.
         let scroll_container = ScrolledWindow::new();
         scroll_container.set_hscrollbar_policy(PolicyType::Never);
         scroll_container.set_vscrollbar_policy(PolicyType::Automatic);
@@ -292,6 +290,7 @@ impl QuickSettingsWindow {
             chrome: BarPopoverChrome::default(),
             anim: SurfaceAnimation::new(),
             margin_wrapper: margin_wrapper.clone(),
+            placer: PopoverPlacer::new(),
             outer_container: RefCell::new(None),
             anchor: Cell::new(PopoverAnchor::default()),
             anchor_monitor: RefCell::new(None),
@@ -328,7 +327,8 @@ impl QuickSettingsWindow {
         let outer = Self::build_content(&qs);
 
         qs.anim.shell().set_child(&outer);
-        margin_wrapper.append(qs.anim.shell());
+        qs.placer.set_child(qs.anim.shell());
+        margin_wrapper.append(&qs.placer);
         window.set_child(Some(&margin_wrapper));
 
         // Store outer container reference.
@@ -1350,22 +1350,11 @@ impl QuickSettingsWindow {
         let bar_margin = calculate_popover_bar_margin();
         self.window.set_margin(popover_bar_edge(), bar_margin);
 
-        // Max height is constrained by the vertical axis. Top/bottom bars occupy
-        // vertical space; left/right bars occupy horizontal space and should not
-        // reduce the available popover height.
-        let vertical_bar_reservation = if is_horizontal {
-            crate::widgets::layer_shell_popover::calculate_bar_reserved_zone() + bar_margin
-        } else {
-            0
-        };
-        let max_height = geom.height()
-            - vertical_bar_reservation
-            - QUICK_SETTINGS_CONTAINER_PADDING
-            - QUICK_SETTINGS_FAR_EDGE_MARGIN;
-
-        if max_height > QUICK_SETTINGS_MIN_HEIGHT_THRESHOLD {
-            self.scroll_container.set_max_content_height(max_height);
-        }
+        // The placer caps the panel to the screen; the rest scrolls.
+        self.placer.set_height_cap(Some(popover_height_cap(
+            &monitor,
+            SurfaceStyleManager::global().shadow_margin(QUICK_SETTINGS_OUTER_MARGIN),
+        )));
 
         if is_horizontal && anchor.x > 0 {
             // Set right margin using shared helper
