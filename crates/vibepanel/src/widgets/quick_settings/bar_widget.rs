@@ -16,6 +16,7 @@ use super::audio_card::volume_icon_name;
 use super::bluetooth_card::bt_icon_name;
 use super::network_card::{NetworkIconContext, mobile_state_icon_name, network_icon_name};
 use super::vpn_card::vpn_icon_name;
+use super::window::{QuickSettingsEdgeToggle, bar_widget_anchor};
 use crate::services::audio::{AudioService, AudioSnapshot};
 use crate::services::bluetooth::{BluetoothService, BluetoothSnapshot};
 use crate::services::callbacks::CallbackId;
@@ -26,7 +27,6 @@ use crate::styles::{icon, qs, state, widget};
 use crate::widgets::BaseWidget;
 use crate::widgets::WidgetConfig;
 use crate::widgets::base::trigger_ripple_from_gesture;
-use crate::widgets::layer_shell_popover::PopoverAnchor;
 use crate::widgets::warn_unknown_options;
 use vibepanel_core::config::WidgetEntry;
 
@@ -614,29 +614,8 @@ impl QuickSettingsWidget {
                 // Claim the sequence to prevent BaseWidget's handler from firing
                 gesture.set_state(gtk4::EventSequenceState::Claimed);
 
-                if let Some(native) = root.native() {
-                    let surface = native.surface();
-                    let monitor = surface.as_ref().map(|s| {
-                        let display = s.display();
-                        display.monitor_at_surface(s)
-                    });
-
-                    if let Some(bounds) = root.compute_bounds(&native) {
-                        // Bounds are already in the native surface coordinate space;
-                        // adding screen_margin here would double-offset the anchor.
-                        let anchor = PopoverAnchor {
-                            x: (bounds.x() + bounds.width() / 2.0) as i32,
-                            y: (bounds.y() + bounds.height() / 2.0) as i32,
-                        };
-
-                        let monitor = monitor.flatten();
-                        qs_window_handle.toggle_at(anchor, monitor);
-                    } else {
-                        qs_window_handle.toggle_at(PopoverAnchor::default(), None);
-                    }
-                } else {
-                    qs_window_handle.toggle_at(PopoverAnchor::default(), None);
-                }
+                let (anchor, monitor) = bar_widget_anchor(root.upcast_ref());
+                qs_window_handle.toggle_at(anchor, monitor);
             });
         }
 
@@ -663,8 +642,10 @@ impl QuickSettingsWidget {
 
     pub(crate) fn edge_interaction(&self) -> crate::widgets::EdgeInteraction {
         crate::widgets::EdgeInteraction {
-            popover: Rc::new(self.qs_window_handle.clone())
-                as Rc<dyn crate::popover_registry::PopoverToggleable>,
+            popover: Rc::new(QuickSettingsEdgeToggle::new(
+                self.qs_window_handle.clone(),
+                self.base.widget().upcast_ref(),
+            )) as Rc<dyn crate::popover_registry::PopoverToggleable>,
             ripple: self.base.ripple_handle().cloned(),
         }
     }

@@ -946,7 +946,8 @@ impl BackgroundEffectManager {
         }
     }
 
-    /// Apply scaled content bounds from a GTK frame-clock tick.
+    /// Apply scaled content bounds, from a GTK frame-clock tick or when the
+    /// content moves during layout.
     ///
     /// During the open animation the ScaleBox scales its child around the center.
     /// This method sets the blur region to the transformed bounds so the compositor
@@ -975,6 +976,31 @@ impl BackgroundEffectManager {
             // Called only from GTK frame-clock ticks; GTK commits the surface for
             // that frame, so this path intentionally avoids an extra commit.
             self.flush();
+        }
+    }
+
+    /// Move an applied blur region to `content`'s current bounds from within
+    /// GTK layout, so it lands in the commit of the frame being laid out.
+    /// No-op unless blur is enabled and currently applied to the surface
+    /// (e.g. not while a close fades out).
+    pub fn follow_blur_region(
+        &self,
+        window: &gtk4::ApplicationWindow,
+        content: &impl gtk4::prelude::IsA<gtk4::Widget>,
+    ) {
+        if !crate::services::config_manager::ConfigManager::global().blur_enabled() {
+            return;
+        }
+        let Some(info) = SurfaceInfo::from_widget(window) else {
+            return;
+        };
+        let active = unsafe {
+            info.wayland_surface
+                .data::<bool>(BLUR_SURFACE_ACTIVE_KEY)
+                .is_some()
+        };
+        if active {
+            self.apply_blur_region_animated(window, content, 1.0);
         }
     }
 

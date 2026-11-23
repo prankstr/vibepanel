@@ -74,7 +74,7 @@ pub struct MenuHandle {
     /// The lazily-initialized popover
     popover: RefCell<Option<Rc<LayerShellPopover>>>,
     /// Builder for popover content. `RefCell` allows `set_builder()` replacement.
-    builder: RefCell<Rc<dyn Fn(Option<gtk4::gdk::Monitor>) -> gtk4::Widget>>,
+    builder: RefCell<Rc<dyn Fn() -> gtk4::Widget>>,
     /// Widget name for CSS styling
     widget_name: String,
     /// Parent widget container (used for popover anchor positioning)
@@ -109,7 +109,7 @@ impl MenuHandle {
     {
         Rc::new(Self {
             popover: RefCell::new(None),
-            builder: RefCell::new(Rc::new(move |_| builder())),
+            builder: RefCell::new(Rc::new(builder)),
             widget_name,
             parent: parent.upcast(),
             tracker_id: Cell::new(None),
@@ -123,7 +123,7 @@ impl MenuHandle {
     pub(crate) fn new_placeholder(widget_name: String, parent: impl IsA<gtk4::Widget>) -> Rc<Self> {
         Rc::new(Self {
             popover: RefCell::new(None),
-            builder: RefCell::new(Rc::new(|_| {
+            builder: RefCell::new(Rc::new(|| {
                 unreachable!(
                     "placeholder builder called — set_builder() must be called before showing the popover"
                 )
@@ -143,16 +143,6 @@ impl MenuHandle {
     /// has no effect because the `LayerShellPopover` captures the builder at
     /// creation time.
     pub(crate) fn set_builder<F: Fn() -> gtk4::Widget + 'static>(&self, builder: F) {
-        *self.builder.borrow_mut() = Rc::new(move |_| builder());
-    }
-
-    /// Replace the builder function with one that receives the anchor monitor.
-    pub(crate) fn set_builder_with_monitor<
-        F: Fn(Option<gtk4::gdk::Monitor>) -> gtk4::Widget + 'static,
-    >(
-        &self,
-        builder: F,
-    ) {
         *self.builder.borrow_mut() = Rc::new(builder);
     }
 
@@ -184,14 +174,7 @@ impl MenuHandle {
         };
 
         let builder = self.builder.borrow().clone();
-        let anchor_monitor = Rc::new(RefCell::new(None));
-        let builder_anchor_monitor = Rc::clone(&anchor_monitor);
-        let popover = LayerShellPopover::new(&app, &self.widget_name, move || {
-            builder(builder_anchor_monitor.borrow().clone())
-        });
-        popover.set_on_anchor_monitor_changed(move |monitor| {
-            *anchor_monitor.borrow_mut() = monitor;
-        });
+        let popover = LayerShellPopover::new(&app, &self.widget_name, move || builder());
 
         // Forward any stored on_close callback
         if let Some(ref cb) = *self.on_close.borrow() {

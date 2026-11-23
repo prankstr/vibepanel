@@ -33,10 +33,12 @@ use crate::services::vpn::VpnService;
 use crate::styles::{qs, state, surface};
 use crate::widgets::layer_shell_popover::{
     AnimDirection, BarPopoverChrome, Dismissible, PopoverAnchor, SurfaceAnimation, animate_reveal,
-    calculate_popover_bar_margin, calculate_popover_bottom_margin, calculate_popover_right_margin,
-    configure_popover_layer_anchors, install_surface_height_freeze, popover_bar_edge,
-    popover_keyboard_mode, reset_popover_margins, setup_esc_handler,
+    calculate_popover_bar_margin, calculate_popover_right_margin, configure_popover_layer_anchors,
+    install_surface_height_freeze, popover_bar_edge, popover_height_cap, popover_keyboard_mode,
+    popover_vertical_placement, reset_popover_margins, setup_esc_handler,
+    sync_popover_surface_height,
 };
+use crate::widgets::popover_placer::PopoverPlacer;
 
 use super::audio_card::{
     self, AudioCardState, build_audio_details, build_audio_hint_label, build_audio_row,
@@ -102,15 +104,9 @@ fn clear_current_qs_window() {
 }
 
 const QUICK_SETTINGS_CONTENT_WIDTH: i32 = 320;
-/// First-open estimate for side-bar placement before GTK reports a mapped height.
-const QUICK_SETTINGS_CONTENT_HEIGHT_ESTIMATE: i32 = 520;
 /// CSS `padding: 16px` on `.vp-surface-popover` (both sides).
 const QUICK_SETTINGS_POPOVER_PADDING: i32 = 32;
 const QUICK_SETTINGS_OUTER_MARGIN: i32 = 4;
-const QUICK_SETTINGS_FAR_EDGE_MARGIN: i32 = 8;
-/// Container padding (surface padding + margins) for height calculation.
-const QUICK_SETTINGS_CONTAINER_PADDING: i32 = 24;
-const QUICK_SETTINGS_MIN_HEIGHT_THRESHOLD: i32 = 100;
 const QUICK_SETTINGS_MIN_EDGE_MARGIN: i32 = 4;
 const QUICK_SETTINGS_DEFAULT_RIGHT_MARGIN: i32 = 8;
 const CARD_ROW_SPACING: i32 = 8;
@@ -182,7 +178,7 @@ fn rebuild_card_rows(grid: &GtkBox, cards: &[ToggleCardInfo]) {
             .filter_map(|card| card.revealer.as_ref())
             .find(|revealer| revealer.reveals_child())
         {
-            accordion.collapse_others(expanded);
+            accordion.collapse_others(expanded, false);
         }
     }
 }
@@ -199,6 +195,8 @@ pub struct QuickSettingsWindow {
     anim: SurfaceAnimation,
     /// Wrapper providing transparent margins for surface shadows.
     margin_wrapper: GtkBox,
+    /// Caps the animation shell's height and positions it on left/right bars.
+    placer: PopoverPlacer,
     /// Content container (surface styles, focus suppression).
     outer_container: RefCell<Option<GtkBox>>,
     /// Widget center in monitor coordinates.
@@ -207,9 +205,6 @@ pub struct QuickSettingsWindow {
     /// Cached window width from the first successful map. Layer shell surfaces
     /// report 0 width when hidden, so we cache the real value for re-opens.
     cached_width: Cell<i32>,
-    /// Cached window height for vertical bar placement. Mirrors cached_width:
-    /// hidden layer-shell surfaces can report 0 height on re-open.
-    cached_height: Cell<i32>,
     /// Logical open state. True from show_panel() until hide_panel() is called.
     /// Used by toggle_at() and Dismissible so clicks during close animation
     /// re-open the panel instead of being silently swallowed.
@@ -270,9 +265,8 @@ impl QuickSettingsWindow {
         window.set_margin(Edge::Right, 8);
         window.set_keyboard_mode(popover_keyboard_mode());
 
-        // Create scroll container for height limiting.
-        // Max height will be set in update_position() based on monitor geometry.
-        // propagate_natural_height allows it to grow to fit content, max_content_height caps it.
+        // Grows to fit the content; the placer caps the panel to the screen
+        // and this scrolls the rest.
         let scroll_container = ScrolledWindow::new();
         scroll_container.set_hscrollbar_policy(PolicyType::Never);
         scroll_container.set_vscrollbar_policy(PolicyType::Automatic);
@@ -292,11 +286,11 @@ impl QuickSettingsWindow {
             chrome: BarPopoverChrome::default(),
             anim: SurfaceAnimation::new(),
             margin_wrapper: margin_wrapper.clone(),
+            placer: PopoverPlacer::new(),
             outer_container: RefCell::new(None),
             anchor: Cell::new(PopoverAnchor::default()),
             anchor_monitor: RefCell::new(None),
             cached_width: Cell::new(0),
-            cached_height: Cell::new(0),
             logically_open: Cell::new(false),
             cards_config: config.cards,
             toggle_cards: RefCell::new(Vec::new()),
@@ -328,8 +322,25 @@ impl QuickSettingsWindow {
         let outer = Self::build_content(&qs);
 
         qs.anim.shell().set_child(&outer);
-        margin_wrapper.append(qs.anim.shell());
+        qs.placer.set_child(qs.anim.shell());
+        margin_wrapper.append(&qs.placer);
         window.set_child(Some(&margin_wrapper));
+
+        // The open animation drives its own blur region; afterwards the blur
+        // follows the content as the placer moves it.
+        {
+            let qs_weak = Rc::downgrade(&qs);
+            qs.placer.connect_placed(move || {
+                if let Some(qs) = qs_weak.upgrade()
+                    && !qs.anim.is_active()
+                    && let Some(outer) = qs.outer_container.borrow().as_ref()
+                    && let Some(blur) =
+                        crate::services::background_effect::BackgroundEffectManager::global()
+                {
+                    blur.follow_blur_region(&qs.window, outer);
+                }
+            });
+        }
 
         // Store outer container reference.
         *qs.outer_container.borrow_mut() = Some(outer.clone());
@@ -1345,27 +1356,17 @@ impl QuickSettingsWindow {
 
         configure_popover_layer_anchors(&self.window);
         reset_popover_margins(&self.window);
+        sync_popover_surface_height(&self.window, &monitor);
 
         // Set bar-edge margin using shared helper
         let bar_margin = calculate_popover_bar_margin();
         self.window.set_margin(popover_bar_edge(), bar_margin);
-
-        // Max height is constrained by the vertical axis. Top/bottom bars occupy
-        // vertical space; left/right bars occupy horizontal space and should not
-        // reduce the available popover height.
-        let vertical_bar_reservation = if is_horizontal {
-            crate::widgets::layer_shell_popover::calculate_bar_reserved_zone() + bar_margin
-        } else {
-            0
-        };
-        let max_height = geom.height()
-            - vertical_bar_reservation
-            - QUICK_SETTINGS_CONTAINER_PADDING
-            - QUICK_SETTINGS_FAR_EDGE_MARGIN;
-
-        if max_height > QUICK_SETTINGS_MIN_HEIGHT_THRESHOLD {
-            self.scroll_container.set_max_content_height(max_height);
-        }
+        // The placer caps the panel to the screen; the rest scrolls.
+        self.placer.set_vertical(popover_vertical_placement(anchor));
+        self.placer.set_height_cap(popover_height_cap(
+            &monitor,
+            SurfaceStyleManager::global().shadow_margin(QUICK_SETTINGS_OUTER_MARGIN),
+        ));
 
         if is_horizontal && anchor.x > 0 {
             // Set right margin using shared helper
@@ -1391,34 +1392,9 @@ impl QuickSettingsWindow {
                 QUICK_SETTINGS_MIN_EDGE_MARGIN,
             );
             self.window.set_margin(Edge::Right, right_margin);
-        } else if !is_horizontal && anchor.y > 0 {
-            let h = self.window.height();
-            let window_height = if h > 0 {
-                self.cached_height.set(h);
-                h
-            } else if self.cached_height.get() > 0 {
-                self.cached_height.get()
-            } else {
-                // Never mapped — estimate from content + CSS padding + shadow margins.
-                let shadow_m =
-                    SurfaceStyleManager::global().shadow_margin(QUICK_SETTINGS_OUTER_MARGIN);
-                QUICK_SETTINGS_CONTENT_HEIGHT_ESTIMATE
-                    + QUICK_SETTINGS_POPOVER_PADDING
-                    + 2 * shadow_m
-            };
-            let bottom_margin = calculate_popover_bottom_margin(
-                anchor.y,
-                geom.height(),
-                window_height,
-                QUICK_SETTINGS_MIN_EDGE_MARGIN,
-            );
-            self.window.set_margin(Edge::Bottom, bottom_margin);
         } else if is_horizontal {
             self.window
                 .set_margin(Edge::Right, QUICK_SETTINGS_DEFAULT_RIGHT_MARGIN);
-        } else {
-            self.window
-                .set_margin(Edge::Bottom, QUICK_SETTINGS_MIN_EDGE_MARGIN);
         }
     }
 
@@ -1456,6 +1432,10 @@ impl QuickSettingsWindow {
             self.start_animation(AnimDirection::Opening, generation);
             self.refresh_network_card();
         } else {
+            // Size and place the surface before it maps; home is where this
+            // open centres.
+            self.placer.reset_home();
+            self.update_position();
             let qs_weak = Rc::downgrade(self);
             self.anim
                 .present_hidden_then(&self.window, generation, move || {
@@ -1669,29 +1649,13 @@ impl QuickSettingsWindowHandle {
 
     /// Derive anchor position and monitor from the bar widget.
     ///
-    /// Replicates the bar widget click handler's positioning logic.
+    /// With several Quick Settings widgets on one bar this is the last one
+    /// built; their clicks and edge areas anchor on their own widget instead.
     fn get_anchor_info(&self) -> (PopoverAnchor, Option<Monitor>) {
-        let widget_ref = self.bar_widget.borrow();
-        let Some(ref widget) = *widget_ref else {
-            return (PopoverAnchor::default(), None);
-        };
-        let Some(native) = widget.native() else {
-            return (PopoverAnchor::default(), None);
-        };
-        let Some(bounds) = widget.compute_bounds(&native) else {
-            return (PopoverAnchor::default(), None);
-        };
-
-        let anchor = PopoverAnchor {
-            x: (bounds.x() + bounds.width() / 2.0) as i32,
-            y: (bounds.y() + bounds.height() / 2.0) as i32,
-        };
-
-        let monitor = native
-            .surface()
-            .and_then(|s| s.display().monitor_at_surface(&s));
-
-        (anchor, monitor)
+        self.bar_widget
+            .borrow()
+            .as_ref()
+            .map_or((PopoverAnchor::default(), None), bar_widget_anchor)
     }
 
     pub fn toggle_at(&self, anchor: PopoverAnchor, monitor: Option<Monitor>) {
@@ -1780,6 +1744,68 @@ impl crate::popover_registry::PopoverToggleable for QuickSettingsWindowHandle {
             .and_then(|s| s.display().monitor_at_surface(&s))
             .and_then(|m| m.connector())
             .map(|c| c.to_string())
+    }
+}
+
+/// Anchor (the widget's centre in its bar surface) and monitor for Quick
+/// Settings opened from `widget`.
+pub(super) fn bar_widget_anchor(widget: &gtk4::Widget) -> (PopoverAnchor, Option<Monitor>) {
+    let Some(native) = widget.native() else {
+        return (PopoverAnchor::default(), None);
+    };
+    let Some(bounds) = widget.compute_bounds(&native) else {
+        return (PopoverAnchor::default(), None);
+    };
+    let anchor = PopoverAnchor {
+        x: (bounds.x() + bounds.width() / 2.0) as i32,
+        y: (bounds.y() + bounds.height() / 2.0) as i32,
+    };
+    let monitor = native
+        .surface()
+        .and_then(|s| s.display().monitor_at_surface(&s));
+    (anchor, monitor)
+}
+
+/// Edge-area toggle for one Quick Settings bar widget. A bar's widgets share
+/// one handle, so this anchors on its own widget rather than the handle's.
+pub(super) struct QuickSettingsEdgeToggle {
+    handle: QuickSettingsWindowHandle,
+    widget: glib::WeakRef<gtk4::Widget>,
+}
+
+impl QuickSettingsEdgeToggle {
+    pub(super) fn new(handle: QuickSettingsWindowHandle, widget: &gtk4::Widget) -> Self {
+        Self {
+            handle,
+            widget: widget.downgrade(),
+        }
+    }
+}
+
+impl crate::popover_registry::PopoverToggleable for QuickSettingsEdgeToggle {
+    fn ipc_show(&self) {
+        if self.handle.ipc_is_visible() {
+            return;
+        }
+        match self.widget.upgrade() {
+            Some(widget) => {
+                let (anchor, monitor) = bar_widget_anchor(&widget);
+                self.handle.toggle_at(anchor, monitor);
+            }
+            None => self.handle.ipc_show(),
+        }
+    }
+
+    fn ipc_hide(&self) {
+        self.handle.ipc_hide();
+    }
+
+    fn ipc_is_visible(&self) -> bool {
+        self.handle.ipc_is_visible()
+    }
+
+    fn monitor_connector(&self) -> Option<String> {
+        self.handle.monitor_connector()
     }
 }
 
