@@ -562,8 +562,9 @@ where
 /// Collapse a revealer instantly without animation.
 ///
 /// This temporarily sets the transition duration to 0, collapses the revealer,
-/// then restores the original duration. Used for accordion behavior where
-/// closing other panels should be instant while the active panel animates open.
+/// then restores the original duration. Used where a card closes without
+/// a visible transition: row rebuilds, closing every card, and accordion
+/// swaps with animations off.
 pub fn collapse_revealer_instant(revealer: &Revealer) {
     if revealer.reveals_child() {
         let old_dur = revealer.transition_duration();

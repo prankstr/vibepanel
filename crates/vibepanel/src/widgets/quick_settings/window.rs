@@ -1363,10 +1363,10 @@ impl QuickSettingsWindow {
         self.window.set_margin(popover_bar_edge(), bar_margin);
         // The placer caps the panel to the screen; the rest scrolls.
         self.placer.set_vertical(popover_vertical_placement(anchor));
-        self.placer.set_height_cap(Some(popover_height_cap(
+        self.placer.set_height_cap(popover_height_cap(
             &monitor,
             SurfaceStyleManager::global().shadow_margin(QUICK_SETTINGS_OUTER_MARGIN),
-        )));
+        ));
 
         if is_horizontal && anchor.x > 0 {
             // Set right margin using shared helper

@@ -339,15 +339,20 @@ fn run_layer_shell_quick_settings_edge_click_contract() {
                 .is_some_and(|b| b.height() > 0.0)
         });
         let bounds = widget().compute_bounds(&bar_window).unwrap();
-        // Pointer coordinates are screen pixels on the 1280px headless output.
+        // Pointer coordinates are screen pixels.
+        let screen_width = context.monitor.geometry().width();
         let bar_x = if position == "left" {
             0
         } else {
-            1280 - bar_window.width()
+            screen_width - bar_window.width()
         };
         let widget_x = bar_x + (bounds.x() + bounds.width() / 2.0) as i32;
         let widget_y = (bounds.y() + bounds.height() / 2.0) as i32;
-        let edge_x = if position == "left" { 2 } else { 1277 };
+        let edge_x = if position == "left" {
+            2
+        } else {
+            screen_width - 3
+        };
 
         let qs_window = || {
             context
@@ -400,7 +405,7 @@ fn run_layer_shell_quick_settings_edge_click_contract() {
                 let window_x = if position == "left" {
                     window.margin(Edge::Left)
                 } else {
-                    1280 - window.margin(Edge::Right) - window.width()
+                    screen_width - window.margin(Edge::Right) - window.width()
                 };
                 let (top, height) = observed.unwrap();
                 (
@@ -1630,6 +1635,7 @@ fn run_layer_shell_always_hotplug_contract() {
     config.bar.background_opacity = 0.6;
     let height = |monitor: Option<gtk4::gdk::Monitor>| {
         crate::widgets::layer_shell_popover::popover_height_cap(&monitor.unwrap(), 0)
+            .expect("top bar has a height cap")
     };
     config.bar.auto_hide = vibepanel_core::config::AutoHide::Never;
     apply_layer_shell_config(&config, false);

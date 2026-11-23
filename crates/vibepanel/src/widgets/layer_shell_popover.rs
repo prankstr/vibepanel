@@ -990,21 +990,23 @@ pub(crate) const POPOVER_FAR_EDGE_MARGIN: i32 = 8;
 /// On top/bottom bars: the screen beyond the space the bar reserves and the
 /// popover's bar margin, less the far-edge gap, which `far_margin` is part
 /// of. Auto-hide bars reserve nothing; their thickness is already in the
-/// margin. On left/right bars: the screen less that gap at both ends.
-pub(crate) fn popover_height_cap(monitor: &Monitor, far_margin: i32) -> i32 {
-    let height = monitor.geometry().height();
-    if ConfigManager::global().bar_position().is_horizontal() {
-        let reservation = calculate_bar_reserved_zone() + calculate_popover_bar_margin();
-        height_cap_for(height, reservation, far_margin, 1)
-    } else {
-        height_cap_for(height, 0, far_margin, 2)
-    }
+/// margin. `None` on left/right bars, where the placer keeps the content
+/// within the edge gaps itself.
+pub(crate) fn popover_height_cap(monitor: &Monitor, far_margin: i32) -> Option<i32> {
+    ConfigManager::global()
+        .bar_position()
+        .is_horizontal()
+        .then(|| {
+            let reservation = calculate_bar_reserved_zone() + calculate_popover_bar_margin();
+            height_cap_for(monitor.geometry().height(), reservation, far_margin)
+        })
 }
 
 /// Size a popover surface for the bar position. On left/right bars it spans
-/// `monitor`'s height like the bar does: gtk4-layer-shell requests the
-/// window's own size even when anchored to both edges, and the compositor
-/// honours it. On top/bottom bars it shrink-wraps its content.
+/// `monitor`'s height and the placer positions the content inside it.
+/// Without this minimum the window keeps its natural height (a 16px strip on
+/// Sway), though gtk4-layer-shell leaves the height to the compositor when
+/// anchored to both edges. On top/bottom bars it shrink-wraps its content.
 pub(crate) fn sync_popover_surface_height(window: &ApplicationWindow, monitor: &Monitor) {
     let height = if ConfigManager::global().bar_position().is_horizontal() {
         -1
@@ -1023,10 +1025,9 @@ pub(crate) fn popover_vertical_placement(anchor: PopoverAnchor) -> Option<Vertic
     })
 }
 
-/// `monitor_height` less `bar_reservation` and a far-edge gap at each of
-/// `gaps` ends.
-fn height_cap_for(monitor_height: i32, bar_reservation: i32, far_margin: i32, gaps: i32) -> i32 {
-    (monitor_height - bar_reservation - gaps * far_margin.max(POPOVER_FAR_EDGE_MARGIN)).max(1)
+/// `monitor_height` less `bar_reservation` and the far-edge gap.
+fn height_cap_for(monitor_height: i32, bar_reservation: i32, far_margin: i32) -> i32 {
+    (monitor_height - bar_reservation - far_margin.max(POPOVER_FAR_EDGE_MARGIN)).max(1)
 }
 
 /// Get the edge that popovers should anchor to (same side as the bar).
@@ -2149,10 +2150,10 @@ impl LayerShellPopover {
         let bar_edge = popover_bar_edge();
         window.set_margin(bar_edge, calculate_popover_bar_margin());
         self.placer.set_vertical(popover_vertical_placement(anchor));
-        self.placer.set_height_cap(Some(popover_height_cap(
+        self.placer.set_height_cap(popover_height_cap(
             &monitor,
             SurfaceStyleManager::global().shadow_margin(SHADOW_MARGIN),
-        )));
+        ));
 
         if ConfigManager::global().bar_position().is_horizontal() {
             // Calculate horizontal position (center on anchor.x)
@@ -2232,12 +2233,10 @@ mod tests {
     #[test]
     fn height_cap_leaves_the_far_edge_gap_and_never_exceeds_screen() {
         // 1080 - 40 bar - 8 gap, which a 4px shadow margin is part of.
-        assert_eq!(height_cap_for(1080, 40, 4, 1), 1032);
+        assert_eq!(height_cap_for(1080, 40, 4), 1032);
         // A wider shadow margin is the gap.
-        assert_eq!(height_cap_for(1080, 40, 12, 1), 1028);
-        // Left/right bars: a gap at both ends.
-        assert_eq!(height_cap_for(1080, 0, 4, 2), 1064);
-        assert_eq!(height_cap_for(30, 40, 4, 1), 1);
+        assert_eq!(height_cap_for(1080, 40, 12), 1028);
+        assert_eq!(height_cap_for(30, 40, 4), 1);
     }
 
     #[test]

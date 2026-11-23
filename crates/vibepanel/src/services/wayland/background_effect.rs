@@ -946,7 +946,8 @@ impl BackgroundEffectManager {
         }
     }
 
-    /// Apply scaled content bounds from a GTK frame-clock tick.
+    /// Apply scaled content bounds, from a GTK frame-clock tick or when the
+    /// content moves during layout.
     ///
     /// During the open animation the ScaleBox scales its child around the center.
     /// This method sets the blur region to the transformed bounds so the compositor

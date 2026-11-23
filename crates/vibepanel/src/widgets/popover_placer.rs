@@ -146,8 +146,8 @@ mod imp {
     pub struct PopoverPlacer {
         pub(super) child: glib::WeakRef<gtk4::Widget>,
         pub(super) vertical: Cell<Option<VerticalPlacement>>,
-        /// Most height the content gets. Vertical placement keeps it within
-        /// the span instead, which on a full-height surface is the same.
+        /// Most height the content gets when it isn't placed vertically.
+        /// Vertical placement keeps it within the span instead.
         pub(super) height_cap: Cell<Option<i32>>,
         pub(super) home: Cell<Option<Home>>,
         /// Content rect last applied to the input region, in surface coordinates.
@@ -218,9 +218,8 @@ mod imp {
                 }
                 // The surface is sized to the monitor and the content is
                 // placed and capped within it in size_allocate. Asking for
-                // the content's height would grow the window past the screen:
-                // gtk4-layer-shell requests the window's size even when
-                // anchored to both edges, and some compositors honour it.
+                // the content's height would raise the window's minimum
+                // height past the screen.
                 _ => (0, 0, -1, -1),
             }
         }
