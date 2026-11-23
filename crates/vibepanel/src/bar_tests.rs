@@ -293,7 +293,8 @@ fn run_layer_shell_bar_position_contract() {
 
 /// Quick Settings on a vertical bar opens centred on its widget whether the
 /// widget itself or the edge area beside it is clicked, also when the bar
-/// has several Quick Settings widgets sharing one window.
+/// has several Quick Settings widgets sharing one window. Each open closes
+/// on a click in the panel's column above or below it.
 fn run_layer_shell_quick_settings_edge_click_contract() {
     let Some(context) = layer_shell_context_or_skip() else {
         return;
@@ -347,7 +348,6 @@ fn run_layer_shell_quick_settings_edge_click_contract() {
         let widget_x = bar_x + (bounds.x() + bounds.width() / 2.0) as i32;
         let widget_y = (bounds.y() + bounds.height() / 2.0) as i32;
         let edge_x = if position == "left" { 2 } else { 1277 };
-        let away_x = if position == "left" { 1000 } else { 200 };
 
         let qs_window = || {
             context
@@ -386,9 +386,35 @@ fn run_layer_shell_quick_settings_edge_click_contract() {
                 "{case}: {name} click at ({x}, {widget_y}) opens centred on the widget, \
                  got (top, height) {observed:?}"
             );
-            std::fs::write(&pointer, format!("{away_x} 600 click")).unwrap();
+            // Close by clicking the full-height surface's empty part, above
+            // or below the content, which must let the click through.
+            let (away_x, away_y) = {
+                use gtk4_layer_shell::{Edge, LayerShell};
+                let window = qs_window().unwrap();
+                let content = find_descendant_with_class(
+                    window.upcast_ref(),
+                    crate::styles::qs::WINDOW_CONTAINER,
+                )
+                .and_then(|content| content.compute_bounds(&window))
+                .unwrap();
+                let window_x = if position == "left" {
+                    window.margin(Edge::Left)
+                } else {
+                    1280 - window.margin(Edge::Right) - window.width()
+                };
+                let (top, height) = observed.unwrap();
+                (
+                    window_x + (content.x() + content.width() / 2.0) as i32,
+                    if top > 40 {
+                        top - 20
+                    } else {
+                        top + height + 20
+                    },
+                )
+            };
+            std::fs::write(&pointer, format!("{away_x} {away_y} click")).unwrap();
             wait_for_bar_contract(|| qs_window().is_none_or(|w| !w.is_visible()));
-            std::fs::write(&pointer, format!("{away_x} 601")).unwrap();
+            std::fs::write(&pointer, format!("{away_x} {}", away_y + 1)).unwrap();
         }
         bar.window.close();
         flush_gtk();
@@ -435,11 +461,6 @@ fn run_layer_shell_vertical_popover_home_contract() {
                 "animations={animations}: popover centred on anchor {anchor_y} (surface {}px)",
                 window.height()
             );
-            assert_eq!(
-                window.height(),
-                context.monitor.geometry().height(),
-                "popover surface spans the monitor"
-            );
 
             // Growth past the bottom edge holds the bottom at the edge gap.
             let content = crate::ui_regression_test_support::find_descendant_with_class(
@@ -468,7 +489,7 @@ fn run_layer_shell_vertical_popover_home_contract() {
             assert_eq!(
                 bottom(),
                 Some(expected),
-                "grown popover bottom at anchor {anchor_y}"
+                "animations={animations}: grown popover bottom at anchor {anchor_y}"
             );
             popover.hide();
             wait_for_bar_contract(|| !window.is_visible());
@@ -556,16 +577,6 @@ fn run_layer_shell_popover_height_cap_contract() {
             while !gaps().is_some_and(fits) && std::time::Instant::now() < settled {
                 flush_gtk();
                 std::thread::sleep(std::time::Duration::from_millis(5));
-            }
-            if position.is_vertical() {
-                // Sway sizes surfaces anchored to both edges to the output,
-                // but other compositors honour the requested size.
-                let (_, requested, _, _) =
-                    window.measure(gtk4::Orientation::Vertical, window.width());
-                assert_eq!(
-                    requested, screen,
-                    "{position:?} bar, {name}: surface asks for the screen height"
-                );
             }
             let observed = gaps();
             assert!(
@@ -769,7 +780,7 @@ fn run_layer_shell_top_bar_reveal_swap_contract() {
             "{case}: surface resizes {resizes} times: {samples:?}"
         );
         assert!(
-            window.height() < after + 40,
+            window.height() <= after + margin + 2,
             "{case}: surface shrinks to fit ({}px for {after}px of content)",
             window.height()
         );

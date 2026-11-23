@@ -791,8 +791,14 @@ mod tests {
                 (GAP, surface - 2 * GAP),
             ),
         ];
-        for (name, height, expected) in steps.iter().chain(steps.iter().rev()) {
-            assert_eq!(bounds(*height), *expected, "{name} at {height}px");
+        let growing = steps.iter().map(|step| ("growing", step));
+        let shrinking = steps.iter().rev().map(|step| ("shrinking", step));
+        for (direction, (name, height, expected)) in growing.chain(shrinking) {
+            assert_eq!(
+                bounds(*height),
+                *expected,
+                "{direction}: {name} at {height}px"
+            );
         }
         assert!(placed_count.get() > 0, "placement callback runs");
 
@@ -906,6 +912,7 @@ mod tests {
             top: span - full,
             height: full,
         };
+        let start = placer.imp().placed.get().expect("placed").0.placed;
         let expand = animate(&[(&grow, true)]);
         assert!(expand.len() > 3, "expansion is animated: {expand:?}");
         let edges = |p: &Placed| (p.top, p.top + p.height);
@@ -923,17 +930,21 @@ mod tests {
             "stays inside the gaps: {expand:?}"
         );
         assert_eq!(expand.last(), Some(&settled), "settles bottom-pinned");
-        let first_at = |edge: fn(&Placed) -> i32| {
-            expand
-                .iter()
-                .position(|p| edge(p) == edge(&settled))
-                .unwrap()
-        };
-        let (top_at, bottom_at) = (first_at(|p| p.top), first_at(|p| p.top + p.height));
-        assert!(
-            top_at.abs_diff(bottom_at) <= 1,
-            "edges arrive together (top at {top_at}, bottom at {bottom_at}): {expand:?}"
-        );
+        // Both edges share one progress. A pixel of rounding is about 0.015
+        // of the top's shorter trip.
+        let along = |value: i32, from: i32, to: i32| f64::from(value - from) / f64::from(to - from);
+        let ((start_top, start_bottom), (end_top, end_bottom)) = (edges(&start), edges(&settled));
+        for p in &expand {
+            let (top, bottom) = edges(p);
+            let (top, bottom) = (
+                along(top, start_top, end_top),
+                along(bottom, start_bottom, end_bottom),
+            );
+            assert!(
+                (top - bottom).abs() <= 0.03,
+                "edges move together (top {top:.2}, bottom {bottom:.2} of the way): {expand:?}"
+            );
+        }
 
         // Collapsing runs it back to home.
         let collapse = animate(&[(&grow, false)]);
@@ -1060,11 +1071,9 @@ mod tests {
             // Like a Quick Settings card: a list that gives way inside a
             // card, inside the popover's own scrolled window.
             let rows = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
-            rows.set_size_request(200, 900);
             let list = gtk4::ScrolledWindow::builder()
                 .hscrollbar_policy(gtk4::PolicyType::Never)
                 .propagate_natural_height(true)
-                .max_content_height(900)
                 .child(&rows)
                 .build();
             let card = gtk4::Revealer::builder()
@@ -1115,6 +1124,10 @@ mod tests {
             } else {
                 CAP
             };
+            // Taller than any window the display gives.
+            let tall = window.height() + 300;
+            rows.set_size_request(200, tall);
+            list.set_max_content_height(tall);
 
             // (placement, list height) each frame.
             let samples: Rc<RefCell<Vec<(Sized, i32)>>> = Rc::default();
@@ -1151,9 +1164,9 @@ mod tests {
             let open = expand.last().expect("animated").0;
             assert!(expand.len() > 5, "{mode}: animated: {expand:?}");
             assert_eq!(open.placed.height, span, "{mode}: fills its room");
-            assert_eq!(open.natural, HEADER + 900, "{mode}: content outgrows it");
+            assert_eq!(open.natural, HEADER + tall, "{mode}: content outgrows it");
             let list_open = list.height();
-            assert!(list_open < 900, "{mode}: the list gives way");
+            assert!(list_open < tall, "{mode}: the list gives way");
             let collapse = animate(false);
             assert_eq!(collapse.last().unwrap().0, closed, "{mode}: closes again");
 

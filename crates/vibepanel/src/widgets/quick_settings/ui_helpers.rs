@@ -905,6 +905,7 @@ mod tests {
         }
     }
 
+    #[track_caller]
     fn run_until(done: impl Fn() -> bool) {
         let ctx = gtk4::glib::MainContext::default();
         let until = std::time::Instant::now() + std::time::Duration::from_secs(3);
