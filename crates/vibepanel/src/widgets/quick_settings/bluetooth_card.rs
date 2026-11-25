@@ -19,10 +19,10 @@ use tracing::debug;
 
 use super::components::ListRow;
 use super::ui_helpers::{
-    ExpandableCard, ExpandableCardBase, ScanButton, add_disabled_placeholder, add_placeholder_row,
-    build_accent_subtitle, clear_list_box, close_row_menu_popover, create_qs_list_box,
-    create_row_action_label, create_row_menu_action, create_row_menu_button,
-    present_row_menu_popover, set_icon_active, set_subtitle_active,
+    ExpandableCard, ExpandableCardBase, KeptRow, ScanButton, add_disabled_placeholder,
+    add_placeholder_row, build_accent_subtitle, clear_list_box, close_row_menu_popover,
+    create_qs_list_box, create_row_action_label, create_row_menu_action, create_row_menu_button,
+    present_row_menu_popover, set_icon_active, set_list_rows, set_subtitle_active,
 };
 use crate::services::bluetooth::{
     BluetoothAuthRequest, BluetoothDevice, BluetoothService, BluetoothSnapshot,
@@ -172,7 +172,7 @@ pub fn build_bluetooth_details(state: &Rc<BluetoothCardState>) -> BluetoothDetai
     container.append(&scroller);
 
     // Populate with current Bluetooth state
-    populate_bluetooth_list(&list_box, &snapshot, state);
+    populate_bluetooth_list(&list_box, &snapshot, state, None);
 
     BluetoothDetailsResult {
         container,
@@ -182,13 +182,13 @@ pub fn build_bluetooth_details(state: &Rc<BluetoothCardState>) -> BluetoothDetai
 }
 
 /// Populate the Bluetooth list with device data from snapshot.
+/// `keep` is an open row menu's row, reused in place of its device's row.
 pub fn populate_bluetooth_list(
     list_box: &ListBox,
     snapshot: &BluetoothSnapshot,
     state: &BluetoothCardState,
+    mut keep: Option<&KeptRow>,
 ) {
-    clear_list_box(list_box);
-
     // Clear cached auth input if auth request identity changed (different device/type)
     // or if there's no auth request at all
     if state.update_auth_request_id(snapshot.auth_request.as_ref()) {
@@ -196,11 +196,13 @@ pub fn populate_bluetooth_list(
     }
 
     if !snapshot.has_adapter {
+        clear_list_box(list_box);
         add_placeholder_row(list_box, &tr!("Bluetooth unavailable"));
         return;
     }
 
     if !snapshot.powered {
+        clear_list_box(list_box);
         add_disabled_placeholder(
             list_box,
             "bluetooth-disabled-symbolic",
@@ -210,11 +212,13 @@ pub fn populate_bluetooth_list(
     }
 
     if !snapshot.is_ready {
+        clear_list_box(list_box);
         add_placeholder_row(list_box, &tr!("Scanning for devices..."));
         return;
     }
 
     if snapshot.devices.is_empty() {
+        clear_list_box(list_box);
         add_placeholder_row(list_box, &tr!("No Bluetooth devices"));
         return;
     }
@@ -223,13 +227,12 @@ pub fn populate_bluetooth_list(
 
     // Get target device path from auth request (if any) - borrow to avoid allocation
     let auth_target_device = snapshot.auth_request.as_ref().map(|r| r.device_path());
+    let mut rows = Vec::new();
 
     for dev in &snapshot.devices {
         // Use pairing_device_path from snapshot for accurate pairing state
-        let is_pairing = snapshot
-            .pairing_device_path
-            .as_ref()
-            .is_some_and(|p| p == &dev.path);
+        let is_pairing = is_pairing(snapshot, dev);
+        let menu_key = bt_menu_key(dev, is_pairing);
 
         let title = if !dev.name.is_empty() {
             dev.name.clone()
@@ -252,7 +255,7 @@ pub fn populate_bluetooth_list(
         let icon_handle = icons.create_icon(icon_name, &[icon::TEXT, row::QS_ICON, icon_color]);
         let leading_icon = icon_handle.widget();
 
-        let right_widget = create_bluetooth_action_widget(dev, is_pairing);
+        let right_widget = create_bluetooth_action_widget(dev, is_pairing, menu_key.clone(), state);
 
         let mut row_builder = ListRow::builder()
             .title(&title)
@@ -300,7 +303,10 @@ pub fn populate_bluetooth_list(
             });
         }
 
-        list_box.append(&row_result.row);
+        let row = keep
+            .take_if(|kept| menu_key.as_deref() == Some(kept.key.as_str()))
+            .map_or(row_result.row, |kept| kept.row.clone());
+        rows.push(row);
 
         // Insert auth row directly under the matching device row
         if let Some(target) = auth_target_device
@@ -308,8 +314,10 @@ pub fn populate_bluetooth_list(
             && target == dev.path
             && snapshot.auth_request.is_some()
         {
-            let auth_row = build_auth_row(snapshot.auth_request.as_ref().unwrap(), state);
-            list_box.append(&auth_row);
+            rows.push(build_auth_row(
+                snapshot.auth_request.as_ref().unwrap(),
+                state,
+            ));
         }
     }
 
@@ -319,16 +327,38 @@ pub fn populate_bluetooth_list(
         && !snapshot.devices.iter().any(|d| d.path == target)
         && snapshot.auth_request.is_some()
     {
-        let auth_row = build_auth_row(snapshot.auth_request.as_ref().unwrap(), state);
-        list_box.append(&auth_row);
+        rows.push(build_auth_row(
+            snapshot.auth_request.as_ref().unwrap(),
+            state,
+        ));
     }
+
+    set_list_rows(list_box, &rows);
+}
+
+fn is_pairing(snapshot: &BluetoothSnapshot, dev: &BluetoothDevice) -> bool {
+    snapshot.pairing_device_path.as_ref() == Some(&dev.path)
+}
+
+/// Row menu key: the device, what its row shows, and the state its menu
+/// actions depend on.
+fn bt_menu_key(dev: &BluetoothDevice, is_pairing: bool) -> Option<String> {
+    (!is_pairing && (dev.paired || dev.trusted)).then(|| {
+        format!(
+            "{}|{}|{:?}|{}|{}|{}",
+            dev.path, dev.name, dev.icon, dev.connected, dev.paired, dev.trusted
+        )
+    })
 }
 
 /// Create the action widget for a Bluetooth device row.
-fn create_bluetooth_action_widget(dev: &BluetoothDevice, is_pairing: bool) -> gtk4::Widget {
+fn create_bluetooth_action_widget(
+    dev: &BluetoothDevice,
+    is_pairing: bool,
+    menu_key: Option<String>,
+    state: &BluetoothCardState,
+) -> gtk4::Widget {
     let path = dev.path.clone();
-    let paired = dev.paired;
-    let trusted = dev.trusted;
 
     // If pairing is in progress, show nothing (hide the Pair button)
     if is_pairing {
@@ -336,8 +366,8 @@ fn create_bluetooth_action_widget(dev: &BluetoothDevice, is_pairing: bool) -> gt
         return placeholder.upcast();
     }
 
-    // Unpaired/untrusted devices: single "Pair" label (same style as Wi-Fi "Connect")
-    if !paired && !trusted {
+    // Unpaired/untrusted devices (no menu): single "Pair" label (same style as Wi-Fi "Connect")
+    let Some(menu_key) = menu_key else {
         let label = create_row_action_label(&tr!("Pair"));
         let path_clone = path.clone();
         label.connect_clicked(move |_| {
@@ -345,12 +375,13 @@ fn create_bluetooth_action_widget(dev: &BluetoothDevice, is_pairing: bool) -> gt
             bt.pair_device(&path_clone);
         });
         return label.upcast();
-    }
+    };
 
     // Paired or trusted devices: hamburger menu (Connect/Disconnect/Forget)
     let (menu_btn, menu_icon) = create_row_menu_button();
 
     let path_for_menu = path.clone();
+    let open_row_menu = Rc::clone(&state.base.open_row_menu);
 
     let menu_icon_widget = menu_icon.widget();
     menu_btn.connect_clicked(move |btn| {
@@ -415,7 +446,13 @@ fn create_bluetooth_action_widget(dev: &BluetoothDevice, is_pairing: bool) -> gt
 
         panel.append(&content_box);
         popover.set_child(Some(&panel));
-        present_row_menu_popover(&popover, btn, &menu_icon_widget);
+        present_row_menu_popover(
+            &popover,
+            btn,
+            &menu_icon_widget,
+            &open_row_menu,
+            menu_key.clone(),
+        );
     });
 
     menu_btn.upcast()
@@ -832,9 +869,11 @@ pub fn on_bluetooth_changed(state: &BluetoothCardState, snapshot: &BluetoothSnap
         scan_btn.set_scanning(snapshot.scanning);
     }
 
-    // Update device list
+    // Update device list, keeping an open row menu's row while its device is
+    // unchanged.
+    let keep = state.base.open_row_menu.row_to_keep();
     if let Some(list_box) = state.base.list_box.borrow().as_ref() {
-        populate_bluetooth_list(list_box, snapshot, state);
+        populate_bluetooth_list(list_box, snapshot, state, keep.as_ref());
         // Apply Pango font attrs to dynamically created list rows
         SurfaceStyleManager::global().apply_pango_attrs_all(list_box);
     }
