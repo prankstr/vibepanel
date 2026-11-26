@@ -21,8 +21,9 @@ use super::components::ListRow;
 use super::ui_helpers::{
     ExpandableCard, ExpandableCardBase, KeptRow, ScanButton, add_disabled_placeholder,
     add_placeholder_row, build_accent_subtitle, clear_list_box, close_row_menu_popover,
-    create_qs_list_box, create_row_action_label, create_row_menu_action, create_row_menu_button,
-    present_row_menu_popover, set_icon_active, set_list_rows, set_subtitle_active,
+    create_qs_list_box, create_row_menu_action, create_row_menu_button, focused_row_key,
+    present_row_menu_popover, restore_row_focus, set_icon_active, set_list_rows,
+    set_subtitle_active,
 };
 use crate::services::bluetooth::{
     BluetoothAuthRequest, BluetoothDevice, BluetoothService, BluetoothSnapshot,
@@ -228,6 +229,8 @@ pub fn populate_bluetooth_list(
     // Get target device path from auth request (if any) - borrow to avoid allocation
     let auth_target_device = snapshot.auth_request.as_ref().map(|r| r.device_path());
     let mut rows = Vec::new();
+    let focused = focused_row_key(list_box);
+    let mut focus_target = None;
 
     for dev in &snapshot.devices {
         // Use pairing_device_path from snapshot for accurate pairing state
@@ -255,13 +258,19 @@ pub fn populate_bluetooth_list(
         let icon_handle = icons.create_icon(icon_name, &[icon::TEXT, row::QS_ICON, icon_color]);
         let leading_icon = icon_handle.widget();
 
-        let right_widget = create_bluetooth_action_widget(dev, is_pairing, menu_key.clone(), state);
-
         let mut row_builder = ListRow::builder()
             .title(&title)
             .leading_widget(leading_icon)
-            .trailing_widget(right_widget)
             .css_class(qs::BT_ROW);
+        // Paired or saved devices get a menu with their other actions
+        if let Some(key) = menu_key.clone() {
+            row_builder = row_builder.trailing_widget(create_device_menu_widget(dev, key, state));
+        }
+        // A device being paired has no action until pairing settles.
+        if !is_pairing {
+            let path = dev.path.clone();
+            row_builder = row_builder.on_activate(move || activate_device(&path));
+        }
 
         if is_pairing {
             // Pairing in progress: show "Pairing..." subtitle
@@ -287,25 +296,13 @@ pub fn populate_bluetooth_list(
 
         let row_result = row_builder.build();
 
-        {
-            let path = dev.path.clone();
-            let paired = dev.paired;
-            let trusted = dev.trusted;
-            let connected = dev.connected;
-            row_result.row.connect_activate(move |_| {
-                let bt = BluetoothService::global();
-                if connected {
-                    bt.disconnect_device(&path);
-                } else if paired || trusted {
-                    bt.connect_device(&path);
-                }
-                // Unpaired/untrusted devices: handled by the "Pair" button gesture
-            });
-        }
-
         let row = keep
             .take_if(|kept| menu_key.as_deref() == Some(kept.key.as_str()))
             .map_or(row_result.row, |kept| kept.row.clone());
+        if focused.as_deref() == Some(dev.path.as_str()) {
+            focus_target = Some(row.clone());
+        }
+        row.set_widget_name(&dev.path);
         rows.push(row);
 
         // Insert auth row directly under the matching device row
@@ -334,6 +331,7 @@ pub fn populate_bluetooth_list(
     }
 
     set_list_rows(list_box, &rows);
+    restore_row_focus(list_box, focus_target.as_ref());
 }
 
 fn is_pairing(snapshot: &BluetoothSnapshot, dev: &BluetoothDevice) -> bool {
@@ -351,33 +349,33 @@ fn bt_menu_key(dev: &BluetoothDevice, is_pairing: bool) -> Option<String> {
     })
 }
 
-/// Create the action widget for a Bluetooth device row.
-fn create_bluetooth_action_widget(
+/// A device row's primary action: disconnect a connected device, connect a
+/// paired or saved one, and pair any other.
+fn activate_device(path: &str) {
+    let bt = BluetoothService::global();
+    let snapshot = bt.snapshot();
+    let Some(dev) = snapshot.devices.iter().find(|d| d.path == path) else {
+        return;
+    };
+    if dev.connected {
+        debug!("bt_disconnect_from_row path={}", path);
+        bt.disconnect_device(path);
+    } else if dev.paired || dev.trusted {
+        debug!("bt_connect_from_row path={}", path);
+        bt.connect_device(path);
+    } else {
+        debug!("bt_pair_from_row path={}", path);
+        bt.pair_device(path);
+    }
+}
+
+/// Create the menu (Connect/Disconnect/Forget) of a paired or saved device's row.
+fn create_device_menu_widget(
     dev: &BluetoothDevice,
-    is_pairing: bool,
-    menu_key: Option<String>,
+    menu_key: String,
     state: &BluetoothCardState,
 ) -> gtk4::Widget {
     let path = dev.path.clone();
-
-    // If pairing is in progress, show nothing (hide the Pair button)
-    if is_pairing {
-        let placeholder = GtkBox::new(Orientation::Horizontal, 0);
-        return placeholder.upcast();
-    }
-
-    // Unpaired/untrusted devices (no menu): single "Pair" label (same style as Wi-Fi "Connect")
-    let Some(menu_key) = menu_key else {
-        let label = create_row_action_label(&tr!("Pair"));
-        let path_clone = path.clone();
-        label.connect_clicked(move |_| {
-            let bt = BluetoothService::global();
-            bt.pair_device(&path_clone);
-        });
-        return label.upcast();
-    };
-
-    // Paired or trusted devices: hamburger menu (Connect/Disconnect/Forget)
     let (menu_btn, menu_icon) = create_row_menu_button();
 
     let path_for_menu = path.clone();

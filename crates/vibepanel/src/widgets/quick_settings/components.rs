@@ -32,8 +32,10 @@
 //!     .build();
 //! ```
 
+use std::rc::Rc;
+
 use gtk4::prelude::*;
-use gtk4::{Box as GtkBox, Button, Label, ListBoxRow, Orientation, Scale, ToggleButton};
+use gtk4::{Box as GtkBox, Button, Label, ListBoxRow, Orientation, Overlay, Scale, ToggleButton};
 
 use crate::services::icons::{IconHandle, IconsService};
 use crate::styles::color;
@@ -805,10 +807,30 @@ pub struct ListRowResult {
     pub title: Label,
 }
 
+/// A row's primary action, run when the row is activated.
+type RowAction = Rc<dyn Fn()>;
+
+const ROW_ACTION_KEY: &str = "vp-row-action";
+
+/// Run the primary action of `row`, if it has one. List boxes from
+/// `create_qs_list_box` call this on `row-activated` (click or Enter).
+pub fn run_row_action(row: &ListBoxRow) {
+    // SAFETY: ROW_ACTION_KEY is only ever set by `ListRow::build` with a `RowAction`.
+    let action = unsafe {
+        row.data::<RowAction>(ROW_ACTION_KEY)
+            .map(|ptr| ptr.as_ref().clone())
+    };
+    // Cloned first: the action may rebuild the list and drop this row.
+    if let Some(action) = action {
+        action();
+    }
+}
+
 /// Builder for list rows (Wi-Fi networks, Bluetooth devices, VPN connections).
 ///
 /// Creates a row with a title, optional subtitle, optional leading icon,
-/// and optional trailing widget.
+/// optional trailing widget, and an optional primary action run when the
+/// row itself is clicked or activated with the keyboard.
 ///
 /// # Example
 ///
@@ -818,6 +840,7 @@ pub struct ListRowResult {
 ///     .subtitle("Connected • Secured")
 ///     .leading_widget(icon_widget)
 ///     .trailing_widget(menu_button)
+///     .on_activate(|| connect())
 ///     .build();
 /// ```
 pub struct ListRow {
@@ -827,6 +850,7 @@ pub struct ListRow {
     leading_widget: Option<gtk4::Widget>,
     trailing_widget: Option<gtk4::Widget>,
     css_class: Option<String>,
+    on_activate: Option<RowAction>,
 }
 
 impl ListRow {
@@ -839,6 +863,7 @@ impl ListRow {
             leading_widget: None,
             trailing_widget: None,
             css_class: None,
+            on_activate: None,
         }
     }
 
@@ -878,6 +903,13 @@ impl ListRow {
         self
     }
 
+    /// Set the primary action, run when the row is clicked or activated.
+    /// The row gets a ripple and stays focusable next to its trailing widget.
+    pub fn on_activate<F: Fn() + 'static>(mut self, on_activate: F) -> Self {
+        self.on_activate = Some(Rc::new(on_activate));
+        self
+    }
+
     /// Build the list row.
     pub fn build(self) -> ListRowResult {
         use crate::styles::row;
@@ -905,6 +937,9 @@ impl ListRow {
             .title_class(row::QS_TITLE)
             .subtitle_class(row::QS_SUBTITLE);
 
+        let has_subtitle = self.subtitle_widget.is_some()
+            || self.subtitle.as_ref().is_some_and(|text| !text.is_empty());
+
         // Custom subtitle widget takes precedence over text
         if let Some(widget) = self.subtitle_widget {
             label_builder = label_builder.subtitle_widget(widget);
@@ -913,7 +948,26 @@ impl ListRow {
         }
 
         let label_result = label_builder.build();
-        hbox.append(&label_result.container);
+        if has_subtitle {
+            hbox.append(&label_result.container);
+        } else {
+            // Rows without a subtitle keep the two-line height, title centred.
+            let sizer = Overlay::new();
+            sizer.set_hexpand(true);
+            sizer.set_child(Some(&label_result.container));
+            let ghost = GtkBox::new(Orientation::Vertical, 0);
+            for class in [row::QS_TITLE, row::QS_SUBTITLE] {
+                let line = Label::new(Some(" "));
+                line.add_css_class(class);
+                ghost.append(&line);
+            }
+            ghost.set_opacity(0.0);
+            ghost.set_can_target(false);
+            ghost.set_accessible_role(gtk4::AccessibleRole::Presentation);
+            sizer.add_overlay(&ghost);
+            sizer.set_measure_overlay(&ghost, true);
+            hbox.append(&sizer);
+        }
 
         // Trailing widget (e.g., menu button)
         let has_trailing = self.trailing_widget.is_some();
@@ -922,16 +976,24 @@ impl ListRow {
             hbox.append(&trailing);
         }
 
-        list_row.set_child(Some(&hbox));
-        // When a trailing button is present it becomes the keyboard target —
-        // making the row itself non-focusable avoids a double focus ring
-        // (GTK keeps :focus-visible on the row even when a child button has
-        // focus).  Rows without trailing widgets remain focusable so they
-        // can be activated directly.
-        list_row.set_activatable(!has_trailing);
-        list_row.set_focusable(!has_trailing);
-        if has_trailing {
-            list_row.add_css_class(row::HAS_ACTION);
+        if let Some(action) = self.on_activate {
+            crate::widgets::base::add_ripple_to_row(&list_row, &hbox);
+            list_row.set_activatable(true);
+            list_row.set_focusable(true);
+            // SAFETY: read back as a `RowAction` by `run_row_action`.
+            unsafe {
+                list_row.set_data::<RowAction>(ROW_ACTION_KEY, action);
+            }
+        } else {
+            // Without an action the row is not a keyboard target; a trailing
+            // button is. GTK keeps :focus-visible on the row even when a
+            // child button has focus, so such rows suppress it via CSS.
+            list_row.set_child(Some(&hbox));
+            list_row.set_activatable(false);
+            list_row.set_focusable(false);
+            if has_trailing {
+                list_row.add_css_class(row::HAS_ACTION);
+            }
         }
 
         ListRowResult {

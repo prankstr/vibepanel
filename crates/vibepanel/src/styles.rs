@@ -200,9 +200,6 @@ pub mod row {
     /// Row icon class (`.qs-row-icon`).
     pub const QS_ICON: &str = "qs-row-icon";
 
-    /// Row action label (`.qs-row-action-label`).
-    pub const QS_ACTION_LABEL: &str = "qs-row-action-label";
-
     /// Row menu button (`.qs-row-menu-button`).
     pub const QS_MENU_BUTTON: &str = "qs-row-menu-button";
 

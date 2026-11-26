@@ -229,7 +229,7 @@ pub struct IwdService {
     /// our cancels from IWD's wrong-password agent errors.
     ///
     /// This is a global flag (not per-connection) which is safe because:
-    /// 1. The UI disables the connect button while a connection is in progress
+    /// 1. The UI disables the network's row while its connection is in progress
     /// 2. IWD rejects concurrent connects with InProgress error
     /// 3. GTK is single-threaded so set/check cannot race
     agent_canceled_by_us: Cell<bool>,
