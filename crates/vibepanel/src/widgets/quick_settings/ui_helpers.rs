@@ -36,11 +36,70 @@ pub struct ExpandableCardBase {
     pub revealer: RefCell<Option<Revealer>>,
     /// The arrow icon handle for expand indicator.
     pub arrow: RefCell<Option<IconHandle>>,
+    /// The open row menu, whose row list rebuilds keep.
+    pub open_row_menu: Rc<OpenRowMenu>,
 }
 
 impl ExpandableCardBase {
     pub fn new() -> Self {
         Self::default()
+    }
+}
+
+/// The open row menu's row, reused across a list rebuild.
+pub struct KeptRow {
+    pub key: String,
+    pub row: ListBoxRow,
+}
+
+/// Tracks the open row menu so list rebuilds can keep its row; removing the
+/// row would close the menu. Each menu's key names its item and the state its
+/// actions depend on.
+#[derive(Default)]
+pub struct OpenRowMenu {
+    menu: RefCell<Option<(String, gtk4::glib::WeakRef<ListBoxRow>)>>,
+}
+
+impl OpenRowMenu {
+    /// The open menu's row. Populating reuses it only for an item with the
+    /// same key; otherwise the row is dropped and the menu closes.
+    pub fn row_to_keep(&self) -> Option<KeptRow> {
+        let menu = self.menu.borrow();
+        let (key, row) = menu.as_ref()?;
+        Some(KeptRow {
+            key: key.clone(),
+            row: row.upgrade()?,
+        })
+    }
+
+    fn opened(&self, key: String, row: &ListBoxRow) {
+        *self.menu.borrow_mut() = Some((key, row.downgrade()));
+    }
+
+    fn closed(&self) {
+        self.menu.borrow_mut().take();
+    }
+}
+
+/// Replace the rows of `list_box` with `rows`. A row already in the list
+/// stays attached (keeping its popover open); the rest are inserted around it.
+/// Assumes at most one row of `rows` is already in the list.
+pub fn set_list_rows(list_box: &ListBox, rows: &[ListBoxRow]) {
+    let mut child = list_box.first_child();
+    while let Some(widget) = child {
+        child = widget.next_sibling();
+        let keep = widget
+            .downcast_ref::<ListBoxRow>()
+            .is_some_and(|row| rows.contains(row));
+        if !keep {
+            list_box.remove(&widget);
+        }
+    }
+
+    for (position, row) in rows.iter().enumerate() {
+        if row.parent().as_ref() != Some(list_box.upcast_ref()) {
+            list_box.insert(row, position as i32);
+        }
     }
 }
 
@@ -474,12 +533,21 @@ pub fn close_row_menu_popover(popover: &Popover) {
 }
 
 /// Attach and present a row menu with cleanup for dynamic list rebuilds.
+/// `menu_key` identifies the row's item and the state its actions depend on.
 pub fn present_row_menu_popover(
     popover: &Popover,
     button: &Button,
     menu_icon: &impl IsA<gtk4::Widget>,
+    open_row_menu: &Rc<OpenRowMenu>,
+    menu_key: String,
 ) {
     popover.set_parent(button);
+    if let Some(row) = button
+        .ancestor(ListBoxRow::static_type())
+        .and_downcast::<ListBoxRow>()
+    {
+        open_row_menu.opened(menu_key, &row);
+    }
 
     let menu_icon = menu_icon.as_ref();
     menu_icon.add_css_class(state::EXPANDED);
@@ -495,6 +563,7 @@ pub fn present_row_menu_popover(
     let icon_for_close = menu_icon.clone();
     let button_weak = button.downgrade();
     let unmap_handler_for_close = Rc::clone(&unmap_handler);
+    let open_row_menu = Rc::clone(open_row_menu);
     popover.connect_closed(move |popover| {
         if let Some(button) = button_weak.upgrade()
             && let Some(id) = unmap_handler_for_close.borrow_mut().take()
@@ -505,6 +574,7 @@ pub fn present_row_menu_popover(
         if popover.parent().is_some() {
             popover.unparent();
         }
+        open_row_menu.closed();
     });
 
     popover.popup();
@@ -870,8 +940,8 @@ impl ScanButton {
 #[cfg(test)]
 mod tests {
     use super::{
-        AccordionManager, ExpandableCard, ExpandableCardBase, audio_input_icon_name,
-        audio_output_icon_name, device_subtitle,
+        AccordionManager, ExpandableCard, ExpandableCardBase, OpenRowMenu, audio_input_icon_name,
+        audio_output_icon_name, device_subtitle, present_row_menu_popover, set_list_rows,
     };
     use crate::widgets::layer_shell_popover::animate_reveal;
     use gtk4::prelude::*;
@@ -896,6 +966,60 @@ mod tests {
             Ok(other) => panic!("unknown accordion test: {other}"),
             Err(_) => eprintln!("skipping accordion test: no test case selected"),
         }
+    }
+
+    #[test]
+    #[ignore = "UI regression test: needs a GTK display; run under Xvfb"]
+    fn test_ui_regression_row_menu_survives_list_rebuild() {
+        crate::ui_regression_test_support::run_ignored_contract_subprocess(
+            "widgets::quick_settings::ui_helpers::tests::row_menu_runner",
+            "VIBEPANEL_ROW_MENU_UI_REGRESSION_TEST",
+            "row_menu.rebuild",
+            "row menu rebuild test",
+        );
+    }
+
+    #[test]
+    #[ignore = "internal runner for the row menu subprocess"]
+    fn row_menu_runner() {
+        if std::env::var("VIBEPANEL_ROW_MENU_UI_REGRESSION_TEST").as_deref()
+            == Ok("row_menu.rebuild")
+        {
+            run_test_row_menu_survives_list_rebuild();
+        }
+    }
+
+    /// #300: a list rebuild while a row menu is open closed the menu.
+    fn run_test_row_menu_survives_list_rebuild() {
+        if !crate::ui_regression_test_support::init_gtk_or_skip("row menu rebuild test") {
+            return;
+        }
+        let list_box = gtk4::ListBox::new();
+        let (kept, button) = (gtk4::ListBoxRow::new(), gtk4::Button::new());
+        let stale = gtk4::ListBoxRow::new();
+        kept.set_child(Some(&button));
+        list_box.append(&stale);
+        list_box.append(&kept);
+        let window = gtk4::Window::builder().child(&list_box).build();
+        window.present();
+        run_until(|| button.is_mapped());
+
+        let open_row_menu = Rc::new(OpenRowMenu::default());
+        let popover = gtk4::Popover::new();
+        present_row_menu_popover(&popover, &button, &button, &open_row_menu, "key".into());
+        run_until(|| popover.is_visible());
+
+        let keep = open_row_menu.row_to_keep().expect("open menu has a row");
+        assert_eq!(keep.key, "key");
+        let rows = [gtk4::ListBoxRow::new(), keep.row, gtk4::ListBoxRow::new()];
+        set_list_rows(&list_box, &rows);
+        for (position, row) in rows.iter().enumerate() {
+            assert_eq!(row.index(), position as i32);
+        }
+        assert!(stale.parent().is_none(), "rows not passed in are removed");
+        assert!(popover.is_visible(), "menu stays open");
+
+        window.close();
     }
 
     struct Card(ExpandableCardBase);

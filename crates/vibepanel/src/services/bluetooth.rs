@@ -84,7 +84,7 @@ fn is_mac_like_name(name: &str) -> bool {
 }
 
 /// Authentication request types from the BlueZ Agent.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum BluetoothAuthRequest {
     /// Device requests a PIN code (user must enter it).
     /// PIN can be 1-16 alphanumeric characters.
@@ -195,7 +195,7 @@ struct PendingAuth {
 }
 
 /// A single Bluetooth device exposed by BlueZ.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct BluetoothDevice {
     pub path: String,
     pub name: String,
@@ -207,7 +207,7 @@ pub struct BluetoothDevice {
 }
 
 /// Canonical snapshot of Bluetooth state.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct BluetoothSnapshot {
     /// Whether we have discovered at least one adapter.
     pub has_adapter: bool,
@@ -1012,6 +1012,7 @@ impl BluetoothService {
                         .unwrap_or(false);
 
                     let mut snapshot = this.snapshot.borrow_mut();
+                    let previous = snapshot.clone();
                     snapshot.has_adapter = has_adapter;
                     snapshot.powered = powered;
                     snapshot.connected_devices = connected_count;
@@ -1044,6 +1045,12 @@ impl BluetoothService {
                             );
                             snapshot.auth_request = None;
                         }
+                    }
+
+                    // Discovery emits a stream of RSSI/ManufacturerData changes
+                    // that don't affect the snapshot; don't notify for those.
+                    if *snapshot == previous {
+                        return;
                     }
 
                     let snapshot_clone = snapshot.clone();

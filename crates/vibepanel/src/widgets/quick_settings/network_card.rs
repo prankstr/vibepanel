@@ -22,16 +22,16 @@ use tracing::debug;
 
 use super::components::ListRow;
 use super::ui_helpers::{
-    ExpandableCard, ExpandableCardBase, ScanButton, add_disabled_placeholder, add_placeholder_row,
-    build_accent_subtitle, build_error_subtitle, clear_list_box, close_row_menu_popover,
-    create_qs_list_box, create_row_action_label, create_row_menu_action, create_row_menu_button,
-    present_row_menu_popover, set_icon_active,
+    ExpandableCard, ExpandableCardBase, KeptRow, OpenRowMenu, ScanButton, add_disabled_placeholder,
+    add_placeholder_row, build_accent_subtitle, build_error_subtitle, clear_list_box,
+    close_row_menu_popover, create_qs_list_box, create_row_action_label, create_row_menu_action,
+    create_row_menu_button, present_row_menu_popover, set_icon_active, set_list_rows,
 };
 use super::window::current_quick_settings_window;
 use crate::services::icons::{IconHandle, IconsService};
 use crate::services::network::{
     AUTH_FAILURE_REASON, CONNECTION_FAILURE_REASON, NetworkConnectionState, NetworkService,
-    NetworkSnapshot, WifiNetwork,
+    NetworkSnapshot, SecurityType, WifiNetwork,
 };
 use crate::services::surfaces::SurfaceStyleManager;
 use crate::styles::{button, color, icon, qs, row, state, surface};
@@ -640,7 +640,7 @@ pub fn build_wifi_details(state: &Rc<NetworkCardState>) -> NetworkDetailsResult 
     *state.wifi_switch.borrow_mut() = Some(wifi_switch.clone());
 
     // Populate with current network state
-    populate_wifi_list(state, &list_box, &snapshot);
+    populate_wifi_list(state, &list_box, &snapshot, None);
 
     NetworkDetailsResult {
         container,
@@ -1069,10 +1069,12 @@ pub fn update_mobile_row(state: &NetworkCardState, snapshot: &NetworkSnapshot) {
 }
 
 /// Populate the Wi-Fi list with network data from snapshot.
+/// `keep` is an open row menu's row, reused in place of its network's row.
 pub fn populate_wifi_list(
     state: &NetworkCardState,
     list_box: &ListBox,
     snapshot: &NetworkSnapshot,
+    mut keep: Option<&KeptRow>,
 ) {
     // Unparent and unrealize the password box BEFORE clearing the list.
     // This is critical: when clear_list_box removes rows, the password box would become
@@ -1085,14 +1087,13 @@ pub fn populate_wifi_list(
         pwd_box.unparent();
     }
 
-    clear_list_box(list_box);
-
     // Check if Wi-Fi is disabled (or no Wi-Fi device exists)
     let wifi_enabled = snapshot.wifi_enabled().unwrap_or(false);
     let has_wifi = snapshot.has_wifi_device();
 
     if !wifi_enabled || !has_wifi {
         // Wi-Fi is off or unavailable
+        clear_list_box(list_box);
         if has_wifi && !wifi_enabled {
             // Device has Wi-Fi but it's disabled - show "Wi-Fi is disabled"
             add_disabled_placeholder(
@@ -1113,6 +1114,7 @@ pub fn populate_wifi_list(
     }
 
     if snapshot.networks().is_empty() {
+        clear_list_box(list_box);
         add_placeholder_row(list_box, &tr!("No networks found"));
         return;
     }
@@ -1124,6 +1126,7 @@ pub fn populate_wifi_list(
     let failed_reason = snapshot.failed_reason();
     let can_read_wifi_password = matches!(snapshot, NetworkSnapshot::NetworkManager(_));
     let mut inserted_password_row = false;
+    let mut rows = Vec::new();
 
     for net in snapshot.networks() {
         // Check if this network is currently being connected to
@@ -1193,11 +1196,15 @@ pub fn populate_wifi_list(
         };
 
         // Create action widget with click handler (or placeholder if connecting)
-        let right_widget = if is_connecting {
-            create_connecting_action_widget()
-        } else {
-            let can_share = net.active && (!net.security.is_secured() || can_read_wifi_password);
-            create_network_action_widget(net, can_share)
+        let menu_key = wifi_menu_key(net, connecting_ssid);
+        let open_row_menu = &state.base.open_row_menu;
+        let right_widget = match menu_key.clone() {
+            Some(key) if is_connecting => create_connecting_action_widget(open_row_menu, key),
+            key => {
+                let can_share =
+                    net.active && (!net.security.is_secured() || can_read_wifi_password);
+                create_network_action_widget(net, can_share, open_row_menu, key)
+            }
         };
 
         // Check if this network has a non-password failure to show inline
@@ -1242,19 +1249,22 @@ pub fn populate_wifi_list(
             let security = net.security;
             let known = net.known;
             let active = net.active;
-            let path = net.path.clone();
             row_result.row.connect_activate(move |_| {
                 let service = NetworkService::global();
                 if active {
                     service.disconnect();
                 } else if !security.is_secured() || known {
+                    let path = current_network(&ssid, security).and_then(|net| net.path);
                     service.connect_to_network(&ssid, None, path.as_deref());
                 }
                 // Secured, unknown networks: handled by the "Connect" button gesture
             });
         }
 
-        list_box.append(&row_result.row);
+        let row = keep
+            .take_if(|kept| menu_key.as_deref() == Some(kept.key.as_str()))
+            .map_or(row_result.row, |kept| kept.row.clone());
+        rows.push(row);
 
         // Insert password row directly under the matching network row
         if let Some(ref target) = target_ssid
@@ -1268,7 +1278,7 @@ pub fn populate_wifi_list(
             pwd_row.set_focusable(false);
             pwd_box.set_visible(true);
             pwd_row.set_child(Some(pwd_box));
-            list_box.append(&pwd_row);
+            rows.push(pwd_row);
             inserted_password_row = true;
         }
     }
@@ -1285,14 +1295,41 @@ pub fn populate_wifi_list(
         pwd_row.set_focusable(false);
         pwd_box.set_visible(true);
         pwd_row.set_child(Some(pwd_box));
-        list_box.append(&pwd_row);
+        rows.push(pwd_row);
+    }
+
+    set_list_rows(list_box, &rows);
+}
+
+/// Row menu key: the network plus the state its menu actions depend on.
+fn wifi_menu_key(net: &WifiNetwork, connecting_ssid: Option<&str>) -> Option<String> {
+    let id = format!("{}|{:?}", net.ssid, net.security);
+    if connecting_ssid == Some(net.ssid.as_str()) {
+        Some(format!("{id}|connecting"))
+    } else {
+        (net.active || net.known).then(|| format!("{id}|{}|{}", net.active, net.known))
     }
 }
 
+/// The network's current entry. Its AP path changes as scans pick the
+/// strongest AP, so actions on a kept row look it up when they run.
+fn current_network(ssid: &str, security: SecurityType) -> Option<WifiNetwork> {
+    let snapshot = NetworkService::global().snapshot();
+    snapshot
+        .networks()
+        .iter()
+        .find(|net| net.ssid == ssid && net.security == security)
+        .cloned()
+}
+
 /// Row menu for the network being connected: its only action is to cancel.
-fn create_connecting_action_widget() -> gtk4::Widget {
+fn create_connecting_action_widget(
+    open_row_menu: &Rc<OpenRowMenu>,
+    menu_key: String,
+) -> gtk4::Widget {
     let (menu_btn, menu_icon) = create_row_menu_button();
     let menu_icon_widget = menu_icon.widget();
+    let open_row_menu = Rc::clone(open_row_menu);
     menu_btn.connect_clicked(move |btn| {
         let popover = Popover::new();
         configure_popover(&popover);
@@ -1323,21 +1360,30 @@ fn create_connecting_action_widget() -> gtk4::Widget {
         SurfaceStyleManager::global().apply_pango_attrs_all(&content_box);
 
         popover.set_child(Some(&panel));
-        present_row_menu_popover(&popover, btn, &menu_icon_widget);
+        present_row_menu_popover(
+            &popover,
+            btn,
+            &menu_icon_widget,
+            &open_row_menu,
+            menu_key.clone(),
+        );
     });
     menu_btn.upcast()
 }
 
 /// Create the action widget for a network row.
-fn create_network_action_widget(net: &WifiNetwork, can_share: bool) -> gtk4::Widget {
+fn create_network_action_widget(
+    net: &WifiNetwork,
+    can_share: bool,
+    open_row_menu: &Rc<OpenRowMenu>,
+    menu_key: Option<String>,
+) -> gtk4::Widget {
     let ssid = net.ssid.clone();
     let is_active = net.active;
     let is_known = net.known;
 
-    // Determine if we need a menu (multiple actions) or single action label
-    let has_multiple_actions = is_active || is_known;
-
-    if !has_multiple_actions {
+    // Only active or known networks have a menu (multiple actions)
+    let Some(menu_key) = menu_key else {
         // Single action: just "Connect" as accent-colored text
         let action_label = create_row_action_label(&tr!("Connect"));
         let ssid_clone = ssid.clone();
@@ -1363,7 +1409,7 @@ fn create_network_action_widget(net: &WifiNetwork, can_share: bool) -> gtk4::Wid
             }
         });
         return action_label.upcast();
-    }
+    };
 
     // Known or active networks: hamburger menu with multiple actions.
     let (menu_btn, menu_icon) = create_row_menu_button();
@@ -1371,8 +1417,8 @@ fn create_network_action_widget(net: &WifiNetwork, can_share: bool) -> gtk4::Wid
     let is_active_clone = is_active;
     let is_known_clone = is_known;
     let ssid_for_actions = ssid.clone();
-    let path_for_actions = net.path.clone();
-    let path_for_forget = net.known_network_path.clone();
+    let security = net.security;
+    let open_row_menu = Rc::clone(open_row_menu);
 
     let menu_icon_widget = menu_icon.widget();
     menu_btn.connect_clicked(move |btn| {
@@ -1403,7 +1449,6 @@ fn create_network_action_widget(net: &WifiNetwork, can_share: bool) -> gtk4::Wid
             content_box.append(&action);
         } else {
             let ssid_clone = ssid_for_actions.clone();
-            let path_clone = path_for_actions.clone();
             let popover_weak = popover.downgrade();
             let action = create_row_menu_action(&tr!("Connect"), move || {
                 // Close popover first to avoid "still has children" warning
@@ -1413,7 +1458,8 @@ fn create_network_action_widget(net: &WifiNetwork, can_share: bool) -> gtk4::Wid
                 let network = NetworkService::global();
                 debug!("wifi_connect_from_menu ssid={}", ssid_clone);
                 // Known networks connect without password prompt
-                network.connect_to_network(&ssid_clone, None, path_clone.as_deref());
+                let path = current_network(&ssid_clone, security).and_then(|net| net.path);
+                network.connect_to_network(&ssid_clone, None, path.as_deref());
             });
             content_box.append(&action);
         }
@@ -1436,7 +1482,6 @@ fn create_network_action_widget(net: &WifiNetwork, can_share: bool) -> gtk4::Wid
         // Forget action for known networks
         if is_known_clone {
             let ssid_clone = ssid_for_actions.clone();
-            let path_clone = path_for_forget.clone();
             let popover_weak = popover.downgrade();
             let action = create_row_menu_action(&tr!("Forget"), move || {
                 // Close popover first to avoid "still has children" warning
@@ -1445,7 +1490,9 @@ fn create_network_action_widget(net: &WifiNetwork, can_share: bool) -> gtk4::Wid
                 }
                 let network = NetworkService::global();
                 debug!("wifi_forget_from_menu ssid={}", ssid_clone);
-                network.forget(&ssid_clone, path_clone.as_deref());
+                let path =
+                    current_network(&ssid_clone, security).and_then(|net| net.known_network_path);
+                network.forget(&ssid_clone, path.as_deref());
             });
             content_box.append(&action);
         }
@@ -1454,7 +1501,13 @@ fn create_network_action_widget(net: &WifiNetwork, can_share: bool) -> gtk4::Wid
         SurfaceStyleManager::global().apply_pango_attrs_all(&content_box);
 
         popover.set_child(Some(&panel));
-        present_row_menu_popover(&popover, btn, &menu_icon_widget);
+        present_row_menu_popover(
+            &popover,
+            btn,
+            &menu_icon_widget,
+            &open_row_menu,
+            menu_key.clone(),
+        );
     });
 
     menu_btn.upcast()
@@ -1500,7 +1553,7 @@ pub fn show_password_dialog_with_error(
 
     if let Some(list_box) = state.base.list_box.borrow().as_ref() {
         let snapshot = NetworkService::global().snapshot();
-        populate_wifi_list(state, list_box, &snapshot);
+        populate_wifi_list(state, list_box, &snapshot, None);
     }
 }
 
@@ -1635,7 +1688,7 @@ pub(super) fn hide_password_dialog(state: &NetworkCardState) {
 
     if let Some(list_box) = state.base.list_box.borrow().as_ref() {
         let snapshot = NetworkService::global().snapshot();
-        populate_wifi_list(state, list_box, &snapshot);
+        populate_wifi_list(state, list_box, &snapshot, None);
     }
 }
 
@@ -1794,7 +1847,7 @@ pub fn on_network_changed(
                     // no longer shows "Connected" (the list is normally skipped when
                     // the password dialog is visible).
                     if let Some(list_box) = state.base.list_box.borrow().as_ref() {
-                        populate_wifi_list(state, list_box, snapshot);
+                        populate_wifi_list(state, list_box, snapshot, None);
                         SurfaceStyleManager::global().apply_pango_attrs_all(list_box);
                     }
                     // Clear the failed state so we don't re-trigger
@@ -1890,7 +1943,7 @@ pub fn on_network_changed(
                     // no longer shows "Connected" (the list is normally skipped when
                     // the password dialog is visible).
                     if let Some(list_box) = state.base.list_box.borrow().as_ref() {
-                        populate_wifi_list(state, list_box, snapshot);
+                        populate_wifi_list(state, list_box, snapshot, None);
                         SurfaceStyleManager::global().apply_pango_attrs_all(list_box);
                     }
                     // Clear the failed state so we don't re-trigger
@@ -2067,7 +2120,8 @@ pub fn on_network_changed(
 
     let password_dialog_active = state.password_target_ssid.borrow().is_some();
     if !password_dialog_active && let Some(list_box) = state.base.list_box.borrow().as_ref() {
-        populate_wifi_list(state, list_box, snapshot);
+        let keep = state.base.open_row_menu.row_to_keep();
+        populate_wifi_list(state, list_box, snapshot, keep.as_ref());
         // Apply Pango font attrs to dynamically created list rows
         SurfaceStyleManager::global().apply_pango_attrs_all(list_box);
     }
