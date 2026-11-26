@@ -375,18 +375,37 @@ pub(crate) fn vp_button_from_icon_name(icon_name: &str) -> gtk4::Button {
 /// capture-phase gesture to trigger the ripple, and marks the row
 /// with `HAS_RIPPLE` so CSS can zero its padding.
 ///
-/// The caller should transfer any row padding to content margins before
-/// calling this (the CSS rule `.qs-row.vp-has-ripple { padding: 0 }`
-/// zeros the row padding so the ripple fills edge-to-edge).
+/// The `.qs-row` padding moves onto `content` as margins (the CSS rule
+/// `.qs-row.vp-has-ripple { padding: 0 }` zeros the row padding so the
+/// ripple fills edge-to-edge).
 pub(crate) fn add_ripple_to_row(list_row: &ListBoxRow, content: &impl IsA<gtk4::Widget>) {
     list_row.add_css_class(state::HAS_RIPPLE);
+
+    let content = content.as_ref();
+    content.set_margin_top(6);
+    content.set_margin_bottom(6);
+    content.set_margin_start(10);
+    content.set_margin_end(10);
 
     let (ripple_overlay, ripple_handle) = wrap_with_ripple(content);
 
     let gesture = GestureClick::new();
     gesture.set_propagation_phase(gtk4::PropagationPhase::Capture);
     gesture.connect_pressed(move |gesture, _n_press, x, y| {
-        trigger_ripple_from_gesture(gesture, x, y, &ripple_handle);
+        let Some(row) = gesture.widget().and_downcast::<ListBoxRow>() else {
+            return;
+        };
+        if !row.is_activatable() {
+            return;
+        }
+        // Buttons inside the row (e.g. a row menu) have their own feedback.
+        let on_button = row
+            .pick(x, y, gtk4::PickFlags::DEFAULT)
+            .and_then(|target| target.ancestor(gtk4::Button::static_type()))
+            .is_some_and(|button| button.is_ancestor(&row));
+        if !on_button {
+            trigger_ripple_from_gesture(gesture, x, y, &ripple_handle);
+        }
     });
     list_row.add_controller(gesture);
 

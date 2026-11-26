@@ -317,24 +317,6 @@ window.qs-wifi-qr-window {{
     margin-top: 1px;
 }}
 
-/* Row action labels - color via vp-accent */
-.qs-row-action-label {{
-    font-size: var(--font-size-sm);
-    min-width: 0;
-    min-height: 0;
-    padding: 0;
-    border-radius: var(--radius-widget);
-}}
-
-/* Content margin inside ripple overlay for breathing room around label */
-.qs-row-action-label label {{
-    padding: 6px 8px;
-}}
-
-.qs-row-action-label:hover {{
-    background: var(--color-card-overlay-hover);
-}}
-
 /* Subtitles - secondary info, color via vp-muted */
 .qs-toggle-subtitle,
 .qs-row-subtitle {{

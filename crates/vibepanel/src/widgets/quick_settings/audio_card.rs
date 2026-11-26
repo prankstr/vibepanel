@@ -20,7 +20,7 @@ use tr::tr;
 use super::components::SliderRow;
 use super::ui_helpers::{
     add_placeholder_row, append_device_row, audio_output_icon_name, clear_list_box,
-    create_device_row, create_qs_list_box, device_subtitle, focused_device,
+    create_device_row, create_qs_list_box, device_subtitle, focused_row_key,
 };
 use crate::services::audio::{AppVolumeSnapshot, AudioService, AudioSnapshot, SinkInfoSnapshot};
 use crate::services::config_manager::ConfigManager;
@@ -274,7 +274,7 @@ pub fn build_audio_hint_label() -> Label {
 ///
 /// Sinks with unavailable ports (e.g., headphones not plugged in) are omitted.
 fn populate_audio_sink_list(list_box: &ListBox, snapshot: &AudioSnapshot) {
-    let focused = focused_device(list_box);
+    let focused = focused_row_key(list_box);
     clear_list_box(list_box);
 
     if !snapshot.available {

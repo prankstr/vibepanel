@@ -5,6 +5,7 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
+use super::components::run_row_action;
 use crate::services::icons::{IconHandle, IconsService};
 use crate::services::tooltip::set_tooltip;
 use crate::styles::{button, color, icon, qs, row, state};
@@ -272,10 +273,6 @@ pub(super) fn create_device_row(
         content.append(&indicator);
     }
 
-    content.set_margin_top(6);
-    content.set_margin_bottom(6);
-    content.set_margin_start(10);
-    content.set_margin_end(10);
     add_ripple_to_row(&list_row, &content);
     list_row.set_activatable(true);
     list_row.set_focusable(true);
@@ -580,24 +577,6 @@ pub fn present_row_menu_popover(
     popover.popup();
 }
 
-/// Create a single inline action as accent-colored text (no background).
-///
-/// Use this for rows with only one action (e.g., VPN Connect/Disconnect,
-/// Wi-Fi Connect for unknown networks).
-///
-/// # CSS Classes Applied
-///
-/// - `.qs-row-action-label` on the button
-pub fn create_row_action_label(label_text: &str) -> Button {
-    let btn = crate::widgets::base::vp_button_with_label(label_text);
-    btn.set_has_frame(false);
-    btn.set_valign(gtk4::Align::Center);
-    btn.add_css_class(row::QS_ACTION_LABEL);
-    btn.add_css_class(color::ACCENT);
-
-    btn
-}
-
 /// Create a menu action button for row context menus.
 ///
 /// Use this inside popover menus created from `create_row_menu_button`.
@@ -703,10 +682,25 @@ pub fn clear_list_box(list_box: &ListBox) {
     }
 }
 
-/// Device lists are rebuilt on every change, including picking a device.
-/// Rows are named after their device so focus can return to the same one.
-pub(super) fn focused_device(list_box: &ListBox) -> Option<String> {
+/// Lists are rebuilt on every change, including activating a row. Rows are
+/// named after their item so focus can return to the same one.
+pub(super) fn focused_row_key(list_box: &ListBox) -> Option<String> {
     focused_row_of(list_box).map(|row| row.widget_name().to_string())
+}
+
+/// After a rebuild, return focus to `row` if the rebuild dropped it: to the
+/// row itself, or to its first focusable child (e.g. the menu of a busy row).
+pub(super) fn restore_row_focus(list_box: &ListBox, row: Option<&ListBoxRow>) {
+    let Some(row) = row else { return };
+    if focused_row_of(list_box).is_some() {
+        // Focus survived, e.g. in a row kept for its open menu.
+        return;
+    }
+    if row.is_focusable() {
+        row.grab_focus();
+    } else if let Some(child) = row.child() {
+        child.child_focus(gtk4::DirectionType::TabForward);
+    }
 }
 
 pub(super) fn append_device_row(
@@ -776,6 +770,7 @@ pub fn create_qs_list_box() -> ListBox {
     let list_box = ListBox::new();
     list_box.add_css_class(qs::LIST);
     list_box.set_selection_mode(SelectionMode::None);
+    list_box.connect_row_activated(|_, row| run_row_action(row));
     list_box.connect_move_cursor(move_focus_between_rows);
     list_box.connect_keynav_failed(|list_box, _| {
         // Default is an error bell plus claiming the key; let it pass so
@@ -941,9 +936,11 @@ impl ScanButton {
 mod tests {
     use super::{
         AccordionManager, ExpandableCard, ExpandableCardBase, OpenRowMenu, audio_input_icon_name,
-        audio_output_icon_name, device_subtitle, present_row_menu_popover, set_list_rows,
+        audio_output_icon_name, create_qs_list_box, device_subtitle, focused_row_key,
+        present_row_menu_popover, restore_row_focus, set_list_rows,
     };
     use crate::widgets::layer_shell_popover::animate_reveal;
+    use crate::widgets::quick_settings::components::ListRow;
     use gtk4::prelude::*;
     use std::rc::Rc;
 
@@ -972,21 +969,123 @@ mod tests {
     #[ignore = "UI regression test: needs a GTK display; run under Xvfb"]
     fn test_ui_regression_row_menu_survives_list_rebuild() {
         crate::ui_regression_test_support::run_ignored_contract_subprocess(
-            "widgets::quick_settings::ui_helpers::tests::row_menu_runner",
-            "VIBEPANEL_ROW_MENU_UI_REGRESSION_TEST",
+            "widgets::quick_settings::ui_helpers::tests::rows_runner",
+            "VIBEPANEL_ROWS_UI_REGRESSION_TEST",
             "row_menu.rebuild",
             "row menu rebuild test",
         );
     }
 
     #[test]
-    #[ignore = "internal runner for the row menu subprocess"]
-    fn row_menu_runner() {
-        if std::env::var("VIBEPANEL_ROW_MENU_UI_REGRESSION_TEST").as_deref()
-            == Ok("row_menu.rebuild")
-        {
-            run_test_row_menu_survives_list_rebuild();
+    #[ignore = "UI regression test: needs a GTK display; run under Xvfb"]
+    fn test_ui_regression_row_activation_runs_action() {
+        crate::ui_regression_test_support::run_ignored_contract_subprocess(
+            "widgets::quick_settings::ui_helpers::tests::rows_runner",
+            "VIBEPANEL_ROWS_UI_REGRESSION_TEST",
+            "row.activate",
+            "row activation test",
+        );
+    }
+
+    #[test]
+    #[ignore = "UI regression test: needs a GTK display; run under Xvfb"]
+    fn test_ui_regression_row_focus_survives_list_rebuild() {
+        crate::ui_regression_test_support::run_ignored_contract_subprocess(
+            "widgets::quick_settings::ui_helpers::tests::rows_runner",
+            "VIBEPANEL_ROWS_UI_REGRESSION_TEST",
+            "row.focus",
+            "row focus rebuild test",
+        );
+    }
+
+    #[test]
+    #[ignore = "internal runner for the list row subprocess"]
+    fn rows_runner() {
+        match std::env::var("VIBEPANEL_ROWS_UI_REGRESSION_TEST").as_deref() {
+            Ok("row_menu.rebuild") => run_test_row_menu_survives_list_rebuild(),
+            Ok("row.activate") => run_test_row_activation_runs_action(),
+            Ok("row.focus") => run_test_row_focus_survives_list_rebuild(),
+            Ok(other) => panic!("unknown list row test: {other}"),
+            Err(_) => eprintln!("skipping list row test: no test case selected"),
         }
+    }
+
+    /// Rebuilding a list returns focus to the row for the same item, or to
+    /// its menu if that row can't take focus, and leaves focus that survived.
+    fn run_test_row_focus_survives_list_rebuild() {
+        if !crate::ui_regression_test_support::init_gtk_or_skip("row focus rebuild test") {
+            return;
+        }
+        let clickable_row = |key: &str| {
+            let row = ListRow::builder().title(key).on_activate(|| {}).build().row;
+            row.set_widget_name(key);
+            row
+        };
+        let list_box = create_qs_list_box();
+        let (first, second) = (clickable_row("a"), clickable_row("b"));
+        set_list_rows(&list_box, &[first, second.clone()]);
+        let window = gtk4::Window::builder().child(&list_box).build();
+        window.present();
+        run_until(|| second.is_mapped());
+        let focus = || gtk4::prelude::RootExt::focus(&window);
+
+        // The focused row is replaced by a new row for the same item.
+        second.grab_focus();
+        let focused = focused_row_key(&list_box);
+        assert_eq!(focused.as_deref(), Some("b"));
+        let (new_first, new_second) = (clickable_row("a"), clickable_row("b"));
+        set_list_rows(&list_box, &[new_first.clone(), new_second.clone()]);
+        restore_row_focus(&list_box, Some(&new_second));
+        assert_eq!(
+            focus(),
+            Some(new_second.clone().upcast()),
+            "same item's row"
+        );
+
+        // The replacement can't take focus (e.g. while connecting): its menu does.
+        let menu = gtk4::Button::new();
+        let busy = ListRow::builder()
+            .title("b")
+            .trailing_widget(menu.clone().upcast())
+            .build()
+            .row;
+        set_list_rows(&list_box, &[new_first.clone(), busy.clone()]);
+        restore_row_focus(&list_box, Some(&busy));
+        assert_eq!(focus(), Some(menu.clone().upcast()), "busy row's menu");
+
+        // Focus still in the list is left alone.
+        restore_row_focus(&list_box, Some(&new_first));
+        assert_eq!(focus(), Some(menu.upcast()), "surviving focus stays");
+
+        window.close();
+    }
+
+    /// Activating a row runs its action once, unless it can't be activated.
+    fn run_test_row_activation_runs_action() {
+        if !crate::ui_regression_test_support::init_gtk_or_skip("row activation test") {
+            return;
+        }
+        let runs = Rc::new(std::cell::Cell::new(0));
+        let runs_for_action = Rc::clone(&runs);
+        let row = ListRow::builder()
+            .title("Network")
+            .on_activate(move || runs_for_action.set(runs_for_action.get() + 1))
+            .build()
+            .row;
+        let list_box = create_qs_list_box();
+        list_box.append(&row);
+        let window = gtk4::Window::builder().child(&list_box).build();
+        window.present();
+        run_until(|| row.is_mapped());
+
+        row.emit_activate();
+        assert_eq!(runs.get(), 1, "activation runs the action once");
+
+        row.set_activatable(false);
+        row.emit_activate();
+        assert_eq!(runs.get(), 1, "a row that can't be activated runs nothing");
+
+        window.close();
     }
 
     /// #300: a list rebuild while a row menu is open closed the menu.

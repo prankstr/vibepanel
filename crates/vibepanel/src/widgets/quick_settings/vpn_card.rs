@@ -18,14 +18,14 @@ use tracing::debug;
 use super::components::ListRow;
 use super::ui_helpers::{
     ExpandableCard, ExpandableCardBase, add_placeholder_row, build_accent_subtitle, clear_list_box,
-    collapse_revealer_instant, create_qs_list_box, create_row_action_label, set_icon_active,
-    set_subtitle_active,
+    collapse_revealer_instant, create_qs_list_box, focused_row_key, restore_row_focus,
+    set_icon_active, set_subtitle_active,
 };
 use super::window::QuickSettingsWindow;
 use crate::services::icons::IconsService;
 use crate::services::nm_secret_agent::VpnAuthRequest;
 use crate::services::surfaces::SurfaceStyleManager;
-use crate::services::vpn::{VpnConnection, VpnService, VpnSnapshot};
+use crate::services::vpn::{VpnService, VpnSnapshot};
 use crate::styles::{button, color, icon, qs, row, state};
 use crate::widgets::layer_shell_popover::animate_reveal;
 
@@ -325,6 +325,8 @@ pub fn populate_vpn_list(state: &Rc<VpnCardState>, list_box: &ListBox, snapshot:
         auth_box.unparent();
     }
 
+    let focused = focused_row_key(list_box);
+    let mut focus_target = None;
     clear_list_box(list_box);
 
     if !snapshot.is_ready {
@@ -372,13 +374,12 @@ pub fn populate_vpn_list(state: &Rc<VpnCardState>, list_box: &ListBox, snapshot:
         let icon_handle = icons.create_icon("network-vpn", &[icon::TEXT, row::QS_ICON, icon_color]);
         let leading_icon = icon_handle.widget();
 
-        let right_widget = create_vpn_action_widget(state, conn);
-
+        let uuid = conn.uuid.clone();
         let mut row_builder = ListRow::builder()
             .title(&conn.name)
             .leading_widget(leading_icon)
-            .trailing_widget(right_widget)
-            .css_class(qs::VPN_ROW);
+            .css_class(qs::VPN_ROW)
+            .on_activate(move || toggle_connection(&uuid));
 
         if conn.active {
             // Active: accent "Active" + muted extras
@@ -393,12 +394,12 @@ pub fn populate_vpn_list(state: &Rc<VpnCardState>, list_box: &ListBox, snapshot:
             row_builder = row_builder.subtitle(&subtitle);
         }
 
-        let row_result = row_builder.build();
-
-        // Note: Click handling is done by the action widget's gesture,
-        // not by row activation, to avoid double-triggering.
-
-        list_box.append(&row_result.row);
+        let row = row_builder.build().row;
+        if focused.as_deref() == Some(conn.uuid.as_str()) {
+            focus_target = Some(row.clone());
+        }
+        row.set_widget_name(&conn.uuid);
+        list_box.append(&row);
 
         // Insert auth row directly under the matching connection row
         if let Some(ref target) = target_uuid
@@ -429,29 +430,25 @@ pub fn populate_vpn_list(state: &Rc<VpnCardState>, list_box: &ListBox, snapshot:
         auth_row.set_child(Some(auth_box));
         list_box.append(&auth_row);
     }
+
+    restore_row_focus(list_box, focus_target.as_ref());
 }
 
-/// Create the action widget for a VPN connection row.
-fn create_vpn_action_widget(_state: &Rc<VpnCardState>, conn: &VpnConnection) -> gtk4::Widget {
-    let uuid = conn.uuid.clone();
-    let is_active = conn.active;
-
-    // Single action: "Disconnect" or "Connect" as accent-colored text
-    let action_text = if is_active {
-        tr!("Disconnect")
-    } else {
-        tr!("Connect")
+/// A connection row's primary action: connect or disconnect it.
+fn toggle_connection(uuid: &str) {
+    let vpn = VpnService::global();
+    let Some(active) = vpn
+        .snapshot()
+        .connections
+        .iter()
+        .find(|conn| conn.uuid == uuid)
+        .map(|conn| conn.active)
+    else {
+        return;
     };
-    let action_label = create_row_action_label(&action_text);
-
-    action_label.connect_clicked(move |_| {
-        let vpn = VpnService::global();
-        let target_active = !is_active;
-        track_toggle_action(&uuid, target_active);
-        vpn.set_connection_state(&uuid, target_active);
-    });
-
-    action_label.upcast()
+    let target_active = !active;
+    track_toggle_action(uuid, target_active);
+    vpn.set_connection_state(uuid, target_active);
 }
 
 /// Handle VPN state changes from VpnService.
@@ -812,7 +809,7 @@ fn on_vpn_auth_connect_clicked(state: &Rc<VpnCardState>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::services::vpn::VpnState;
+    use crate::services::vpn::{VpnConnection, VpnState};
 
     fn test_snapshot(uuid: &str, state: VpnState) -> VpnSnapshot {
         VpnSnapshot {

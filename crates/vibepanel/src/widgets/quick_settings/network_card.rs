@@ -14,7 +14,7 @@ use std::time::Duration;
 use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4::{
-    ApplicationWindow, Box as GtkBox, Button, CheckButton, Label, ListBox, ListBoxRow, Orientation,
+    ApplicationWindow, Box as GtkBox, CheckButton, Label, ListBox, ListBoxRow, Orientation,
     Overlay, PasswordEntry, Popover, ScrolledWindow, Switch,
 };
 use tr::tr;
@@ -24,8 +24,8 @@ use super::components::ListRow;
 use super::ui_helpers::{
     ExpandableCard, ExpandableCardBase, KeptRow, OpenRowMenu, ScanButton, add_disabled_placeholder,
     add_placeholder_row, build_accent_subtitle, build_error_subtitle, clear_list_box,
-    close_row_menu_popover, create_qs_list_box, create_row_action_label, create_row_menu_action,
-    create_row_menu_button, present_row_menu_popover, set_icon_active, set_list_rows,
+    close_row_menu_popover, create_qs_list_box, create_row_menu_action, create_row_menu_button,
+    focused_row_key, present_row_menu_popover, restore_row_focus, set_icon_active, set_list_rows,
 };
 use super::window::current_quick_settings_window;
 use crate::services::icons::{IconHandle, IconsService};
@@ -343,12 +343,12 @@ pub struct EthernetRowWidgets {
 /// Grouped in a single `RefCell<Option<…>>` (in [`MobileRowState`]) to avoid per-field borrow overhead.
 pub struct MobileRowWidgets {
     pub switch: Switch,
-    pub action_button: Button,
+    pub list_row: ListBoxRow,
     pub status_label: Label,
     pub accent_label: Label,
     pub details_label: Label,
     pub icon_handle: IconHandle,
-    pub connection_row: GtkBox,
+    pub connection_list: ListBox,
     pub title_label: Label,
 }
 
@@ -829,7 +829,12 @@ fn set_mobile_subtitle(widgets: &MobileRowWidgets, snapshot: &NetworkSnapshot) {
     }
 }
 
-/// Build a standalone Mobile section widget (not in a ListBox).
+/// The mobile row connects or disconnects unless the modem is off or busy.
+fn mobile_row_activatable(snapshot: &NetworkSnapshot) -> bool {
+    snapshot.mobile_enabled().unwrap_or(false) && !snapshot.mobile_connecting()
+}
+
+/// Build a standalone Mobile section widget.
 fn build_mobile_row(state: &Rc<NetworkCardState>, snapshot: &NetworkSnapshot) -> GtkBox {
     let icons = IconsService::global();
 
@@ -914,51 +919,39 @@ fn build_mobile_row(state: &Rc<NetworkCardState>, snapshot: &NetworkSnapshot) ->
     details_label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
     subtitle_box.append(&details_label);
 
-    let action_button = create_row_action_label(&if mobile_active {
-        tr!("Disconnect")
-    } else {
-        tr!("Connect")
-    });
-    action_button.set_sensitive(!snapshot.mobile_connecting() && mobile_enabled);
-    action_button.connect_clicked(move |_| {
-        let service = NetworkService::global();
-        let snap = service.snapshot();
-        if snap.mobile_active() {
-            service.disconnect_mobile();
-        } else {
-            service.connect_mobile();
-        }
-    });
-
     let row_result = ListRow::builder()
         .title(title)
         .subtitle_widget(subtitle_box.clone().upcast())
         .leading_widget(icon_handle.widget())
-        .trailing_widget(action_button.clone().upcast())
         .css_class(qs::NETWORK_ROW)
+        .on_activate(|| {
+            let service = NetworkService::global();
+            if service.snapshot().mobile_active() {
+                service.disconnect_mobile();
+            } else {
+                service.connect_mobile();
+            }
+        })
         .build();
+    let list_row = row_result.row;
+    list_row.add_css_class(qs::NETWORK_CONNECTION_ROW);
+    list_row.set_activatable(mobile_row_activatable(snapshot));
 
-    let connection_row = GtkBox::new(Orientation::Vertical, 0);
-    connection_row.add_css_class(row::QS);
-    connection_row.add_css_class(qs::NETWORK_CONNECTION_ROW);
-    connection_row.set_visible(mobile_enabled);
+    let connection_list = create_qs_list_box();
+    connection_list.set_visible(mobile_enabled);
+    connection_list.append(&list_row);
 
-    if let Some(child) = row_result.row.child() {
-        row_result.row.set_child(None::<&gtk4::Widget>);
-        connection_row.append(&child);
-    }
-
-    container.append(&connection_row);
+    container.append(&connection_list);
     container.set_visible(snapshot.mobile_supported());
 
     let widgets = MobileRowWidgets {
         switch: mobile_switch,
-        action_button,
+        list_row,
         status_label,
         accent_label,
         details_label,
         icon_handle,
-        connection_row,
+        connection_list,
         title_label: row_result.title,
     };
     set_mobile_subtitle(&widgets, snapshot);
@@ -1028,7 +1021,7 @@ pub fn update_mobile_row(state: &NetworkCardState, snapshot: &NetworkSnapshot) {
     }
 
     // Hide the connection details row when modem is disabled (only header+switch remain)
-    w.connection_row.set_visible(enabled);
+    w.connection_list.set_visible(enabled);
 
     if w.switch.is_active() != enabled {
         w.switch.set_active(enabled);
@@ -1036,13 +1029,7 @@ pub fn update_mobile_row(state: &NetworkCardState, snapshot: &NetworkSnapshot) {
     w.switch
         .set_sensitive(snapshot.available() && snapshot.has_modem_device());
 
-    w.action_button.set_label(&if snapshot.mobile_active() {
-        tr!("Disconnect")
-    } else {
-        tr!("Connect")
-    });
-    w.action_button
-        .set_sensitive(!snapshot.mobile_connecting() && enabled);
+    w.list_row.set_activatable(mobile_row_activatable(snapshot));
 
     set_mobile_subtitle(w, snapshot);
 
@@ -1127,6 +1114,8 @@ pub fn populate_wifi_list(
     let can_read_wifi_password = matches!(snapshot, NetworkSnapshot::NetworkManager(_));
     let mut inserted_password_row = false;
     let mut rows = Vec::new();
+    let focused = focused_row_key(list_box);
+    let mut focus_target = None;
 
     for net in snapshot.networks() {
         // Check if this network is currently being connected to
@@ -1195,17 +1184,18 @@ pub fn populate_wifi_list(
             icon_handle.widget()
         };
 
-        // Create action widget with click handler (or placeholder if connecting)
+        // Saved or active networks get a menu with their other actions
         let menu_key = wifi_menu_key(net, connecting_ssid);
         let open_row_menu = &state.base.open_row_menu;
-        let right_widget = match menu_key.clone() {
-            Some(key) if is_connecting => create_connecting_action_widget(open_row_menu, key),
-            key => {
+        let right_widget = menu_key.clone().map(|key| {
+            if is_connecting {
+                create_connecting_action_widget(open_row_menu, key)
+            } else {
                 let can_share =
                     net.active && (!net.security.is_secured() || can_read_wifi_password);
-                create_network_action_widget(net, can_share, open_row_menu, key)
+                create_network_menu_widget(net, can_share, open_row_menu, key)
             }
-        };
+        });
 
         // Check if this network has a non-password failure to show inline
         let is_failed = failed_ssid == Some(net.ssid.as_str());
@@ -1214,8 +1204,17 @@ pub fn populate_wifi_list(
         let mut row_builder = ListRow::builder()
             .title(&net.ssid)
             .leading_widget(leading_icon)
-            .trailing_widget(right_widget)
             .css_class(qs::NETWORK_ROW);
+        if let Some(right_widget) = right_widget {
+            row_builder = row_builder.trailing_widget(right_widget);
+        }
+        // The connected network's actions are in its menu, and the network
+        // being connected only offers Cancel, from its menu.
+        if !is_connecting && !net.active {
+            let ssid = net.ssid.clone();
+            let security = net.security;
+            row_builder = row_builder.on_activate(move || activate_network(&ssid, security));
+        }
 
         if net.active && !is_connecting {
             // Active network: accent "Connected" + muted extras
@@ -1236,34 +1235,14 @@ pub fn populate_wifi_list(
 
         let row_result = row_builder.build();
 
-        // Disable row activation if this network is currently connecting.
-        // Only set activatable to false — setting sensitive to false would
-        // dim the row and prevent the spinner DrawingArea from redrawing.
-        if is_connecting {
-            row_result.row.set_activatable(false);
-        }
-
-        // Connect row activation to the primary network action
-        if !is_connecting {
-            let ssid = net.ssid.clone();
-            let security = net.security;
-            let known = net.known;
-            let active = net.active;
-            row_result.row.connect_activate(move |_| {
-                let service = NetworkService::global();
-                if active {
-                    service.disconnect();
-                } else if !security.is_secured() || known {
-                    let path = current_network(&ssid, security).and_then(|net| net.path);
-                    service.connect_to_network(&ssid, None, path.as_deref());
-                }
-                // Secured, unknown networks: handled by the "Connect" button gesture
-            });
-        }
-
         let row = keep
             .take_if(|kept| menu_key.as_deref() == Some(kept.key.as_str()))
             .map_or(row_result.row, |kept| kept.row.clone());
+        let row_id = wifi_row_id(net);
+        if focused.as_deref() == Some(row_id.as_str()) {
+            focus_target = Some(row.clone());
+        }
+        row.set_widget_name(&row_id);
         rows.push(row);
 
         // Insert password row directly under the matching network row
@@ -1299,11 +1278,17 @@ pub fn populate_wifi_list(
     }
 
     set_list_rows(list_box, &rows);
+    restore_row_focus(list_box, focus_target.as_ref());
+}
+
+/// Row identity: SSIDs alone can repeat across security types.
+fn wifi_row_id(net: &WifiNetwork) -> String {
+    format!("{}|{:?}", net.ssid, net.security)
 }
 
 /// Row menu key: the network plus the state its menu actions depend on.
 fn wifi_menu_key(net: &WifiNetwork, connecting_ssid: Option<&str>) -> Option<String> {
-    let id = format!("{}|{:?}", net.ssid, net.security);
+    let id = wifi_row_id(net);
     if connecting_ssid == Some(net.ssid.as_str()) {
         Some(format!("{id}|connecting"))
     } else {
@@ -1371,47 +1356,41 @@ fn create_connecting_action_widget(
     menu_btn.upcast()
 }
 
-/// Create the action widget for a network row.
-fn create_network_action_widget(
+/// A network row's primary action: connect, asking for a password first if
+/// the network is secured and not saved. The connected network has none.
+fn activate_network(ssid: &str, security: SecurityType) {
+    let Some(net) = current_network(ssid, security).filter(|net| !net.active) else {
+        return;
+    };
+    let service = NetworkService::global();
+    if net.security.is_secured() && !net.known {
+        // Backend-specific: IWD uses connect-then-prompt (agent callback
+        // shows password dialog), NM uses prompt-then-connect. These flows
+        // are fundamentally different and cannot be unified.
+        if matches!(service.snapshot(), NetworkSnapshot::Iwd(_)) {
+            debug!("wifi_connect_from_row ssid={}", ssid);
+            service.connect_to_network(ssid, None, net.path.as_deref());
+        } else if let Some(qs) = current_quick_settings_window() {
+            debug!("wifi_password_prompt_from_row ssid={}", ssid);
+            qs.show_wifi_password_dialog(ssid);
+        }
+    } else {
+        debug!("wifi_connect_from_row ssid={}", ssid);
+        service.connect_to_network(ssid, None, net.path.as_deref());
+    }
+}
+
+/// Create the menu of a known or active network's row.
+fn create_network_menu_widget(
     net: &WifiNetwork,
     can_share: bool,
     open_row_menu: &Rc<OpenRowMenu>,
-    menu_key: Option<String>,
+    menu_key: String,
 ) -> gtk4::Widget {
     let ssid = net.ssid.clone();
     let is_active = net.active;
     let is_known = net.known;
 
-    // Only active or known networks have a menu (multiple actions)
-    let Some(menu_key) = menu_key else {
-        // Single action: just "Connect" as accent-colored text
-        let action_label = create_row_action_label(&tr!("Connect"));
-        let ssid_clone = ssid.clone();
-        let is_secured = net.security.is_secured();
-        let path = net.path.clone();
-        action_label.connect_clicked(move |_| {
-            let service = NetworkService::global();
-            if is_secured {
-                // IWD: connect first, agent callback shows password dialog.
-                // NM: show password dialog first, then connect.
-                let snapshot = service.snapshot();
-                // Backend-specific: IWD uses connect-then-prompt (agent callback
-                // shows password dialog), NM uses prompt-then-connect. These flows
-                // are fundamentally different and cannot be unified.
-                if matches!(snapshot, NetworkSnapshot::Iwd(_)) {
-                    service.connect_to_network(&ssid_clone, None, path.as_deref());
-                } else if let Some(qs) = current_quick_settings_window() {
-                    qs.show_wifi_password_dialog(&ssid_clone);
-                }
-            } else {
-                // Open network: connect directly without password
-                service.connect_to_network(&ssid_clone, None, path.as_deref());
-            }
-        });
-        return action_label.upcast();
-    };
-
-    // Known or active networks: hamburger menu with multiple actions.
     let (menu_btn, menu_icon) = create_row_menu_button();
 
     let is_active_clone = is_active;
