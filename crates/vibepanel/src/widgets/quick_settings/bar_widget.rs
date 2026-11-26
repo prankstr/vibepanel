@@ -446,7 +446,7 @@ impl QuickSettingsWidget {
                         tr!("Connecting to {ssid}", ssid)
                     } else if snapshot.wifi_device_connecting() {
                         tr!("Connecting...")
-                    } else if snapshot.wifi_enabled() == Some(false) {
+                    } else if snapshot.has_wifi_device() && snapshot.wifi_enabled() == Some(false) {
                         tr!("Wi-Fi Off")
                     } else if snapshot.scanning() {
                         tr!("Wi-Fi: Scanning...")
