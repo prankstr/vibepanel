@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.0](https://github.com/prankstr/vibepanel/compare/v0.17.2...v0.18.0) (2026-11-27)
+
+
+### Features
+
+* **popovers:** add hjkl as navigation keys and improve pathing ([#282](https://github.com/prankstr/vibepanel/issues/282)) ([b3468e3](https://github.com/prankstr/vibepanel/commit/b3468e3d4bec15802eda1130b0e9d0ed45fa68e5))
+* **quick_settings:** execute the primary action on row click instead of separate button ([#302](https://github.com/prankstr/vibepanel/issues/302)) ([681a282](https://github.com/prankstr/vibepanel/commit/681a2828e21217356de3b664c5dbda6c18f8bb7b))
+* **quick_settings:** make the wifi icon signal aware ([#304](https://github.com/prankstr/vibepanel/issues/304)) ([6768c6f](https://github.com/prankstr/vibepanel/commit/6768c6ff7765f7c4b9d4ff0495eeee2f19441f28))
+* **taskbar:** full support for hyprland ([#290](https://github.com/prankstr/vibepanel/issues/290)) ([2be59aa](https://github.com/prankstr/vibepanel/commit/2be59aa148205826852bc8ec21296c30fa211c71))
+* **taskbar:** full support for sway ([#289](https://github.com/prankstr/vibepanel/issues/289)) ([41ad537](https://github.com/prankstr/vibepanel/commit/41ad53749ce92f42b1c3be7283b959c3e885c817))
+* **taskbar:** support more compositors via wlr-foreign-toplevel ([#288](https://github.com/prankstr/vibepanel/issues/288)) ([6febf8c](https://github.com/prankstr/vibepanel/commit/6febf8c16efbd1d0c1c623206cab84ea0a9912f4))
+* **wayland:** add support for the ext-workspace protocol ([#284](https://github.com/prankstr/vibepanel/issues/284)) ([dae23cf](https://github.com/prankstr/vibepanel/commit/dae23cf249416557901015b54e156dd74aa4a837))
+* **wayland:** add window titles via wlr-foreign-toplevel ([#285](https://github.com/prankstr/vibepanel/issues/285)) ([0cf7448](https://github.com/prankstr/vibepanel/commit/0cf7448ee9ffb1359d03c59c7723ded025b8c22b))
+* **workspaces:** add option to show open windows in workspace widget ([#287](https://github.com/prankstr/vibepanel/issues/287)) ([1b620e2](https://github.com/prankstr/vibepanel/commit/1b620e2737b705b5dc82f0c23c9b83563a51a3d4))
+* **workspaces:** new sliding animation when using index or name labels ([1b620e2](https://github.com/prankstr/vibepanel/commit/1b620e2737b705b5dc82f0c23c9b83563a51a3d4))
+
+
+### Bug Fixes
+
+* **config:** treat spacers with unusable widths as flexible ([30357dc](https://github.com/prankstr/vibepanel/commit/30357dc64c3ffce2187784ec32552e6c5b5e6da1))
+* **keyboard-layout:** show US/UK for English layout variants ([30357dc](https://github.com/prankstr/vibepanel/commit/30357dc64c3ffce2187784ec32552e6c5b5e6da1))
+* **lint:** satisfy clippy 1.100 ([1668fcc](https://github.com/prankstr/vibepanel/commit/1668fccad134b05a5347a2bca2899548392ba036))
+* **media:** keep a separator when a middle template token is missing ([30357dc](https://github.com/prankstr/vibepanel/commit/30357dc64c3ffce2187784ec32552e6c5b5e6da1))
+* **notifications:** free toasts after they close ([#286](https://github.com/prankstr/vibepanel/issues/286)) ([efffcfe](https://github.com/prankstr/vibepanel/commit/efffcfe3deca2248cc0ae392df77e54a05c5bf02))
+* **notifications:** rebuild links so GTK accepts them ([30357dc](https://github.com/prankstr/vibepanel/commit/30357dc64c3ffce2187784ec32552e6c5b5e6da1))
+* popover sizing and placement ([#299](https://github.com/prankstr/vibepanel/issues/299)) ([30ad768](https://github.com/prankstr/vibepanel/commit/30ad768220f91419aae80ace4bbbe886ac42fe90))
+* **quick_settings:** hide Wi-Fi controls when there is no Wi-Fi adapter ([#303](https://github.com/prankstr/vibepanel/issues/303)) ([7be438e](https://github.com/prankstr/vibepanel/commit/7be438e2297e1c82717150c6e0d64f9b6a32c659))
+* **quick_settings:** keep device and network menus open while scanning([#301](https://github.com/prankstr/vibepanel/issues/301)) ([f4fd77a](https://github.com/prankstr/vibepanel/commit/f4fd77aed893e7786388f8363ccd65341ed98f77))
+* **quick_settings:** use Wayland idle-inhibit protocol for inhibitor ([#298](https://github.com/prankstr/vibepanel/issues/298)) ([da74733](https://github.com/prankstr/vibepanel/commit/da74733604f9136d702d9f3c4d53a8f4e948dbc0))
+* **tray:** open right-click menus for tray icons without a built-in menu ([#292](https://github.com/prankstr/vibepanel/issues/292)) ([8f55520](https://github.com/prankstr/vibepanel/commit/8f55520ffedc70d991cf92aa62e839fc4fe528b9))
+* **updates:** fall back to the default for a negative check_interval ([30357dc](https://github.com/prankstr/vibepanel/commit/30357dc64c3ffce2187784ec32552e6c5b5e6da1))
+* **updates:** skip ignored packages from pacman and paru ([30357dc](https://github.com/prankstr/vibepanel/commit/30357dc64c3ffce2187784ec32552e6c5b5e6da1))
+
 ## [0.17.2](https://github.com/prankstr/vibepanel/compare/v0.17.1...v0.17.2) (2026-10-25)
 
 
