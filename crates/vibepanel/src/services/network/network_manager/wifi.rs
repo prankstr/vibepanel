@@ -16,6 +16,7 @@ use super::{
 };
 use crate::services::network::{
     SecurityType, WifiAuthentication, WifiCredentials, WifiNetwork, objpath_to_string,
+    wifi_strength_change_significant,
 };
 use crate::services::nm_secret_agent::NmSecretAgent;
 
@@ -237,9 +238,135 @@ impl NmService {
     }
 
     pub(super) fn update_state(&self) {
+        self.sync_active_ap_watch();
         // Reconcile immediately; list I/O must not delay clearing a disconnected row.
         self.notify_snapshot(|_| {});
         self.refresh_networks_async();
+    }
+
+    // ── Active AP strength watch ─────────────────────────────────────
+    //
+    // NM refreshes the active AccessPoint's `Strength` every few seconds while
+    // connected, independent of scans. Watching it keeps the bar icon live.
+
+    /// Rebind the AccessPoint watch to the device's current `ActiveAccessPoint`.
+    fn sync_active_ap_watch(&self) {
+        let (active_ap, connection) = {
+            let proxy = self.wifi.proxy.borrow();
+            let Some(proxy) = proxy.as_ref() else {
+                self.clear_active_ap_watch();
+                return;
+            };
+            let active_ap = proxy
+                .cached_property("ActiveAccessPoint")
+                .and_then(|value| objpath_to_string(&value))
+                .filter(|path| path != "/");
+            (active_ap, proxy.connection())
+        };
+
+        if *self.wifi.active_ap_path.borrow() == active_ap {
+            return;
+        }
+        self.clear_active_ap_watch();
+        let Some(ap_path) = active_ap else {
+            return;
+        };
+        self.wifi.active_ap_path.replace(Some(ap_path.clone()));
+
+        let this_weak = Rc::downgrade(&NmService::global());
+        let object_path = ap_path.clone();
+        gio::DBusProxy::new(
+            &connection,
+            gio::DBusProxyFlags::NONE,
+            None::<&gio::DBusInterfaceInfo>,
+            Some(NM_SERVICE),
+            &object_path,
+            IFACE_AP,
+            None::<&gio::Cancellable>,
+            move |res| {
+                let Some(this) = this_weak.upgrade() else {
+                    return;
+                };
+                // The active AP may have changed while the proxy was being created.
+                if this.wifi.active_ap_path.borrow().as_deref() != Some(ap_path.as_str()) {
+                    return;
+                }
+                let proxy = match res {
+                    Ok(proxy) => proxy,
+                    Err(e) => {
+                        debug!("Failed to watch active AP {ap_path}: {e}");
+                        // Let the next device update retry.
+                        this.wifi.active_ap_path.replace(None);
+                        return;
+                    }
+                };
+
+                let this_weak = Rc::downgrade(&this);
+                let watched_path = ap_path.clone();
+                proxy.connect_local("g-properties-changed", false, move |values| {
+                    let strength = values
+                        .get(1)
+                        .and_then(|value| value.get::<Variant>().ok())
+                        .and_then(|changed| changed.get::<HashMap<String, Variant>>())
+                        .and_then(|changed| changed.get("Strength").and_then(|v| v.get::<u8>()));
+                    if let (Some(strength), Some(this)) = (strength, this_weak.upgrade()) {
+                        this.apply_active_ap_strength(&watched_path, i32::from(strength));
+                    }
+                    None
+                });
+
+                // Pick up any change between the last list refresh and now.
+                if let Some(strength) = proxy
+                    .cached_property("Strength")
+                    .and_then(|value| value.get::<u8>())
+                {
+                    this.apply_active_ap_strength(&ap_path, i32::from(strength));
+                }
+                this.wifi.active_ap_proxy.replace(Some(proxy));
+            },
+        );
+    }
+
+    pub(super) fn clear_active_ap_watch(&self) {
+        self.wifi.active_ap_path.replace(None);
+        self.wifi.active_ap_proxy.replace(None);
+        self.wifi.active_ap_strength.set(None);
+    }
+
+    /// Store a live strength reading for the watched AP and publish it when
+    /// [`wifi_strength_change_significant`] says the UI would change.
+    fn apply_active_ap_strength(&self, ap_path: &str, strength: i32) {
+        if self.wifi.active_ap_path.borrow().as_deref() != Some(ap_path) {
+            return;
+        }
+        self.wifi.active_ap_strength.set(Some(strength));
+        self.overlay_active_ap_strength();
+        // Before the connection completes nothing shows the active strength yet;
+        // the stored reading is published with the next state change.
+        // Compare against the published value so slow drift still surfaces.
+        self.notify_snapshot_if(|s| {
+            s.wifi.ssid.is_some() && wifi_strength_change_significant(s.wifi.strength, strength)
+        });
+    }
+
+    /// Write the latest live reading into the watched AP's list entry. List
+    /// refreshes read strengths before they finish, so theirs may be older.
+    pub(super) fn overlay_active_ap_strength(&self) {
+        let (Some(ap_path), Some(strength)) = (
+            self.wifi.active_ap_path.borrow().clone(),
+            self.wifi.active_ap_strength.get(),
+        ) else {
+            return;
+        };
+        if let Some(network) = self
+            .wifi
+            .networks
+            .borrow_mut()
+            .iter_mut()
+            .find(|network| network.path.as_deref() == Some(ap_path.as_str()))
+        {
+            network.strength = strength;
+        }
     }
 
     pub(super) fn reconcile_wifi_state(&self, state: &mut super::WifiState) {
@@ -1489,6 +1616,80 @@ mod tests {
         assert_eq!(state.ssid.as_deref(), Some("test"));
         state.reconcile_connection(Some(120), Some("/unknown"), &networks);
         assert!(!state.connected && state.ssid.is_none());
+    }
+
+    #[test]
+    fn live_ap_strength_survives_older_list_refreshes() {
+        let ap = |strength| WifiNetwork {
+            strength,
+            ..test_network("/ap")
+        };
+        let cases = [
+            (
+                "refresh after a live reading",
+                vec![ap(70)],
+                Some(("/ap", 35)),
+                35,
+            ),
+            (
+                "live reading before the AP is listed",
+                vec![],
+                Some(("/ap", 35)),
+                35,
+            ),
+            ("refresh without a live reading", vec![ap(70)], None, 72),
+            (
+                "reading from another AP",
+                vec![ap(70)],
+                Some(("/old", 35)),
+                72,
+            ),
+        ];
+        for (name, listed, live, expected) in cases {
+            let service = test_service();
+            service.wifi.networks.replace(listed);
+            service.wifi.active_ap_path.replace(Some("/ap".into()));
+            if let Some((path, strength)) = live {
+                service.apply_active_ap_strength(path, strength);
+            }
+            service.apply_update(NmUpdate::NetworksRefreshed {
+                generation: service.wifi.refresh_generation.get(),
+                networks: vec![ap(72)],
+                last_scan: None,
+            });
+            assert_eq!(
+                service.wifi.networks.borrow()[0].strength,
+                expected,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn live_ap_strength_publishes_only_once_connected() {
+        use std::cell::Cell;
+        let service = test_service();
+        service.wifi.networks.replace(vec![test_network("/ap")]);
+        service.wifi.active_ap_path.replace(Some("/ap".into()));
+        let published = Rc::new(Cell::new(0));
+        let counter = Rc::clone(&published);
+        service
+            .callbacks
+            .register(move |_| counter.set(counter.get() + 1));
+
+        // Still connecting: the reading is kept for later but not published.
+        service.apply_active_ap_strength("/ap", 35);
+        assert_eq!(published.get(), 0);
+        assert_eq!(service.wifi.networks.borrow()[0].strength, 35);
+
+        // Connected: the published snapshot shows the active network.
+        {
+            let mut snapshot = service.snapshot.borrow_mut();
+            snapshot.wifi.ssid = Some("test".into());
+            snapshot.wifi.strength = 35;
+        }
+        service.apply_active_ap_strength("/ap", 60);
+        assert_eq!(published.get(), 1);
     }
 
     #[test]

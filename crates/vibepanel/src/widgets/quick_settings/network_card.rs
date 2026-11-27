@@ -31,7 +31,7 @@ use super::window::current_quick_settings_window;
 use crate::services::icons::{IconHandle, IconsService};
 use crate::services::network::{
     AUTH_FAILURE_REASON, CONNECTION_FAILURE_REASON, NetworkConnectionState, NetworkService,
-    NetworkSnapshot, SecurityType, WifiNetwork,
+    NetworkSnapshot, SecurityType, WifiNetwork, wifi_strength_icon,
 };
 use crate::services::surfaces::SurfaceStyleManager;
 use crate::styles::{button, color, icon, qs, row, state, surface};
@@ -107,21 +107,6 @@ pub fn network_icon_name(ctx: &NetworkIconContext) -> &'static str {
         "network-wireless-signal-excellent-symbolic"
     } else {
         "network-wireless-offline-symbolic"
-    }
-}
-
-/// Return a Wi-Fi icon name based on signal strength percentage.
-pub fn wifi_strength_icon(level: i32) -> &'static str {
-    if level >= 70 {
-        "network-wireless-signal-excellent-symbolic"
-    } else if level >= 60 {
-        "network-wireless-signal-good-symbolic"
-    } else if level >= 40 {
-        "network-wireless-signal-ok-symbolic"
-    } else if level >= 20 {
-        "network-wireless-signal-weak-symbolic"
-    } else {
-        "network-wireless-signal-none-symbolic"
     }
 }
 
