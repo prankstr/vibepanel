@@ -484,20 +484,21 @@ pub fn build_wifi_details(state: &Rc<NetworkCardState>) -> NetworkDetailsResult 
     *state.mobile.row.borrow_mut() = Some(mobile_row);
 
     // Wi-Fi header row: "Wi-Fi" label + spacer + scan button + switch
-    // The label+switch are only visible when a non-WiFi device is present and the
-    // scan button only while Wi-Fi is enabled; the row hides when all are hidden.
+    // The label+switch are only visible when a Wi-Fi device sits alongside a non-WiFi
+    // device and the scan button only while Wi-Fi is enabled on a Wi-Fi device; the
+    // row hides when all are hidden.
     let wifi_switch_row = GtkBox::new(Orientation::Horizontal, 8);
     wifi_switch_row.add_css_class(qs::NETWORK_SECTION_ROW);
     wifi_switch_row.set_visible(wifi_header_visible(&snapshot));
     // Disable baseline alignment to prevent GTK baseline issues with Switch widget
     wifi_switch_row.set_baseline_position(gtk4::BaselinePosition::Center);
 
-    // Wi-Fi label (only visible when a non-WiFi device is present)
+    // Wi-Fi label (see wifi_switch_visible)
     let wifi_label = Label::new(Some(&tr!("Wi-Fi")));
     wifi_label.add_css_class(color::PRIMARY);
     wifi_label.add_css_class(qs::NETWORK_SECTION_LABEL);
     wifi_label.set_valign(gtk4::Align::Center);
-    wifi_label.set_visible(snapshot.has_non_wifi_device());
+    wifi_label.set_visible(wifi_switch_visible(&snapshot));
     wifi_switch_row.append(&wifi_label);
 
     // Spacer to push scan button and switch to the right
@@ -505,17 +506,17 @@ pub fn build_wifi_details(state: &Rc<NetworkCardState>) -> NetworkDetailsResult 
     spacer.set_hexpand(true);
     wifi_switch_row.append(&spacer);
 
-    // Scan button (visible while Wi-Fi is enabled, see update_scan_ui)
+    // Scan button (see scan_button_visible and update_scan_ui)
     let scan_button = ScanButton::new("Scan", || {
         NetworkService::global().scan();
     });
     wifi_switch_row.append(scan_button.widget());
 
-    // Wi-Fi switch (only visible when a non-WiFi device is present)
+    // Wi-Fi switch (see wifi_switch_visible)
     let wifi_switch = Switch::new();
     wifi_switch.set_valign(gtk4::Align::Center);
     wifi_switch.set_active(snapshot.wifi_enabled().unwrap_or(false));
-    wifi_switch.set_visible(snapshot.has_non_wifi_device());
+    wifi_switch.set_visible(wifi_switch_visible(&snapshot));
     wifi_switch_row.append(&wifi_switch);
 
     container.append(&wifi_switch_row);
@@ -1743,20 +1744,31 @@ pub fn update_subtitle(state: &NetworkCardState, snapshot: &NetworkSnapshot) {
     }
 }
 
-/// Whether the Wi-Fi header row has any visible content: the label and switch
-/// (shown with a non-WiFi device) or the scan button (shown while Wi-Fi is on).
-/// Hiding it otherwise keeps the row's min-height from leaving an empty gap.
+/// Whether the Wi-Fi label and switch are shown. They only matter when Wi-Fi
+/// hardware sits alongside another device; on Wi-Fi-only systems the card
+/// toggle controls Wi-Fi.
+fn wifi_switch_visible(snapshot: &NetworkSnapshot) -> bool {
+    snapshot.has_wifi_device() && snapshot.has_non_wifi_device()
+}
+
+/// Whether the scan button is shown. NM's `WirelessEnabled` can be true
+/// without any Wi-Fi hardware, so the device check is required.
+fn scan_button_visible(snapshot: &NetworkSnapshot) -> bool {
+    snapshot.has_wifi_device() && snapshot.wifi_enabled().unwrap_or(false)
+}
+
+/// Whether the Wi-Fi header row has any visible content. Hiding it otherwise
+/// keeps the row's min-height from leaving an empty gap.
 fn wifi_header_visible(snapshot: &NetworkSnapshot) -> bool {
-    snapshot.has_non_wifi_device() || snapshot.wifi_enabled().unwrap_or(false)
+    wifi_switch_visible(snapshot) || scan_button_visible(snapshot)
 }
 
 /// Update the scan button UI and animate while scanning.
 pub fn update_scan_ui(state: &NetworkCardState, snapshot: &NetworkSnapshot) {
     let scanning = snapshot.scanning();
-    let wifi_enabled = snapshot.wifi_enabled().unwrap_or(false);
 
     if let Some(scan_btn) = state.scan_button.borrow().as_ref() {
-        scan_btn.set_visible(wifi_enabled);
+        scan_btn.set_visible(scan_button_visible(snapshot));
         scan_btn.set_sensitive(!scanning);
         scan_btn.set_scanning(scanning);
     }
@@ -2002,15 +2014,15 @@ pub fn on_network_changed(
         );
     }
 
-    // Update Wi-Fi label and switch visibility (only show when alternative network device present)
+    // Update Wi-Fi header visibility (re-evaluated on every network snapshot)
     if let Some(row) = state.wifi_switch_row.borrow().as_ref() {
         row.set_visible(wifi_header_visible(snapshot));
     }
     if let Some(wifi_label) = state.wifi_label.borrow().as_ref() {
-        wifi_label.set_visible(snapshot.has_non_wifi_device());
+        wifi_label.set_visible(wifi_switch_visible(snapshot));
     }
     if let Some(wifi_switch) = state.wifi_switch.borrow().as_ref() {
-        wifi_switch.set_visible(snapshot.has_non_wifi_device());
+        wifi_switch.set_visible(wifi_switch_visible(snapshot));
         if wifi_switch.is_active() != enabled {
             wifi_switch.set_active(enabled);
         }
@@ -2644,6 +2656,100 @@ mod tests {
                 is_network_subtitle_active(&case.snapshot),
                 case.active,
                 "{}: active",
+                case.name
+            );
+        }
+    }
+
+    #[test]
+    fn wifi_header_controls_follow_devices() {
+        struct Case {
+            name: &'static str,
+            snapshot: NetworkSnapshot,
+            switch: bool,
+            scan: bool,
+            header: bool,
+        }
+
+        let cases = [
+            Case {
+                name: "wifi only",
+                snapshot: nm(|_| {}),
+                switch: false,
+                scan: true,
+                header: true,
+            },
+            Case {
+                name: "iwd wifi only",
+                snapshot: iwd(|_| {}),
+                switch: false,
+                scan: true,
+                header: true,
+            },
+            // NM can report the Wi-Fi radio as enabled without any Wi-Fi hardware.
+            Case {
+                name: "ethernet only",
+                snapshot: nm(|s| {
+                    s.wifi.has_device = false;
+                    s.wired.has_device = true;
+                }),
+                switch: false,
+                scan: false,
+                header: false,
+            },
+            Case {
+                name: "ethernet and wifi",
+                snapshot: nm(|s| s.wired.has_device = true),
+                switch: true,
+                scan: true,
+                header: true,
+            },
+            Case {
+                name: "wifi radio off",
+                snapshot: nm(|s| s.wifi.enabled = Some(false)),
+                switch: false,
+                scan: false,
+                header: false,
+            },
+            Case {
+                name: "ethernet and wifi, radio off",
+                snapshot: nm(|s| {
+                    s.wired.has_device = true;
+                    s.wifi.enabled = Some(false);
+                }),
+                switch: true,
+                scan: false,
+                header: true,
+            },
+            Case {
+                name: "modem only",
+                snapshot: nm(|s| {
+                    s.wifi.has_device = false;
+                    s.mobile.has_device = true;
+                }),
+                switch: false,
+                scan: false,
+                header: false,
+            },
+        ];
+
+        for case in cases {
+            assert_eq!(
+                wifi_switch_visible(&case.snapshot),
+                case.switch,
+                "{}: switch",
+                case.name
+            );
+            assert_eq!(
+                scan_button_visible(&case.snapshot),
+                case.scan,
+                "{}: scan",
+                case.name
+            );
+            assert_eq!(
+                wifi_header_visible(&case.snapshot),
+                case.header,
+                "{}: header",
                 case.name
             );
         }
