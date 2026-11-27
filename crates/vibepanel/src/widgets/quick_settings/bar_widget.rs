@@ -14,7 +14,9 @@ use tracing::{debug, warn};
 use super::QuickSettingsWindowHandle;
 use super::audio_card::volume_icon_name;
 use super::bluetooth_card::bt_icon_name;
-use super::network_card::{NetworkIconContext, mobile_state_icon_name, network_icon_name};
+use super::network_card::{
+    NetworkIconContext, WifiSignalIcon, mobile_state_icon_name, network_icon_name,
+};
 use super::vpn_card::vpn_icon_name;
 use super::window::{QuickSettingsEdgeToggle, bar_widget_anchor};
 use crate::services::audio::{AudioService, AudioSnapshot};
@@ -379,56 +381,56 @@ impl QuickSettingsWidget {
             let wired_connected = snapshot.wired_connected();
 
             let ctx = NetworkIconContext::for_bar(&snapshot);
-            let wifi_icon = base.add_icon(network_icon_name(&ctx), &[icon::ICON, icon::TEXT]);
+            let icon_name = network_icon_name(&ctx);
+            let wifi_icon = WifiSignalIcon::create(icon_name, &[icon::ICON, icon::TEXT]);
+            // Same self-centering as `BaseWidget::add_icon`, on the stack instead.
+            wifi_icon.widget().set_halign(gtk4::Align::Center);
+            wifi_icon.widget().set_hexpand(true);
+            base.content().append(wifi_icon.widget());
 
             if !wifi_enabled && !wired_connected {
-                wifi_icon.widget().add_css_class(qs::WIFI_DISABLED_ICON);
+                wifi_icon.add_css_class(qs::WIFI_DISABLED_ICON);
             }
             let wifi_connecting = snapshot.wifi_connecting();
-            if wifi_connecting {
-                wifi_icon.set_spinning(true);
-            }
+            wifi_icon.update(icon_name, wifi_connecting);
 
             if (wifi_enabled && snapshot.connected()) || wired_connected || wifi_connecting {
-                wifi_icon.widget().add_css_class(state::ICON_ACTIVE);
+                wifi_icon.add_css_class(state::ICON_ACTIVE);
             }
 
             let wifi_icon_handle = wifi_icon.clone();
             network_wifi_callback_id = Some(NetworkService::global().connect(
                 move |snapshot: &NetworkSnapshot| {
-                    let widget = wifi_icon_handle.widget();
+                    let widget = wifi_icon_handle.widget().clone();
 
                     if !snapshot.available() {
-                        widget.add_css_class(state::SERVICE_UNAVAILABLE);
-                        widget.remove_css_class(qs::WIFI_DISABLED_ICON);
-                        widget.remove_css_class(state::ICON_ACTIVE);
-                        wifi_icon_handle.set_spinning(false);
-                        wifi_icon_handle.set_icon("network-wireless-offline-symbolic");
+                        wifi_icon_handle.add_css_class(state::SERVICE_UNAVAILABLE);
+                        wifi_icon_handle.remove_css_class(qs::WIFI_DISABLED_ICON);
+                        wifi_icon_handle.remove_css_class(state::ICON_ACTIVE);
+                        wifi_icon_handle.update("network-wireless-offline-symbolic", false);
                         set_tooltip(&widget, Some(&tr!("Wi-Fi: Service unavailable")));
                         return;
                     }
-                    widget.remove_css_class(state::SERVICE_UNAVAILABLE);
+                    wifi_icon_handle.remove_css_class(state::SERVICE_UNAVAILABLE);
 
                     let enabled = snapshot.wifi_enabled().unwrap_or(false);
                     let connected = snapshot.connected();
                     let wired_connected = snapshot.wired_connected();
 
                     let ctx = NetworkIconContext::for_bar(snapshot);
-                    wifi_icon_handle.set_icon(network_icon_name(&ctx));
-
                     let wifi_connecting = snapshot.wifi_connecting();
-                    wifi_icon_handle.set_spinning(wifi_connecting);
+                    wifi_icon_handle.update(network_icon_name(&ctx), wifi_connecting);
 
                     if !enabled && !wired_connected {
-                        widget.add_css_class(qs::WIFI_DISABLED_ICON);
+                        wifi_icon_handle.add_css_class(qs::WIFI_DISABLED_ICON);
                     } else {
-                        widget.remove_css_class(qs::WIFI_DISABLED_ICON);
+                        wifi_icon_handle.remove_css_class(qs::WIFI_DISABLED_ICON);
                     }
 
                     if (enabled && connected) || wired_connected || wifi_connecting {
-                        widget.add_css_class(state::ICON_ACTIVE);
+                        wifi_icon_handle.add_css_class(state::ICON_ACTIVE);
                     } else {
-                        widget.remove_css_class(state::ICON_ACTIVE);
+                        wifi_icon_handle.remove_css_class(state::ICON_ACTIVE);
                     }
 
                     let tooltip = if snapshot.wired_connected() {
@@ -436,8 +438,7 @@ impl QuickSettingsWidget {
                     } else if snapshot.connected() {
                         let connected_label = tr!("Connected");
                         let ssid = snapshot.active_ssid().unwrap_or(&connected_label);
-                        let strength = snapshot.active_strength();
-                        if strength > 0 {
+                        if let Some(strength) = snapshot.active_strength() {
                             tr!("{ssid}\nSignal: {strength}%", ssid, strength)
                         } else {
                             ssid.to_string()

@@ -317,6 +317,13 @@ pub(super) struct WifiInternal {
     /// Proxy for the base `org.freedesktop.NetworkManager.Device` interface,
     /// used to monitor the `State` property for connecting states (40-90).
     pub(super) device_proxy: RefCell<Option<gio::DBusProxy>>,
+    /// Path of the AccessPoint currently watched for live `Strength` updates.
+    pub(super) active_ap_path: RefCell<Option<String>>,
+    /// Proxy for the active AccessPoint; NM refreshes its `Strength` between scans.
+    pub(super) active_ap_proxy: RefCell<Option<gio::DBusProxy>>,
+    /// Latest live `Strength` of the watched AP; reapplied over list refreshes
+    /// that read the AP before this value arrived.
+    pub(super) active_ap_strength: Cell<Option<i32>>,
     pub(super) scan_in_progress: Cell<bool>,
     pub(super) last_scan_value: Cell<Option<i64>>,
     pub(super) known_ssids: Arc<Mutex<HashSet<String>>>,
@@ -352,6 +359,9 @@ impl WifiInternal {
             activation_task: RefCell::new(None),
             proxy: RefCell::new(None),
             device_proxy: RefCell::new(None),
+            active_ap_path: RefCell::new(None),
+            active_ap_proxy: RefCell::new(None),
+            active_ap_strength: Cell::new(None),
             scan_in_progress: Cell::new(false),
             last_scan_value: Cell::new(None),
             known_ssids: Arc::new(Mutex::new(HashSet::new())),
@@ -537,6 +547,7 @@ impl NmService {
                 let connecting_ssid = self.wifi.connecting_ssid.borrow().clone();
                 let failed_ssid = self.wifi.failed_ssid.borrow().clone();
                 self.wifi.networks.replace(networks);
+                self.overlay_active_ap_strength();
                 self.notify_snapshot(|s| {
                     s.wifi.is_ready = true;
                     s.wifi.scanning = scanning;
@@ -942,6 +953,7 @@ impl NmService {
         // Keep the main proxy: its name-owner watcher detects NM coming back.
         self.wifi.proxy.replace(None);
         self.wifi.device_proxy.replace(None);
+        self.clear_active_ap_watch();
         self.notify_snapshot(|s| *s = NmSnapshot::unknown());
     }
 

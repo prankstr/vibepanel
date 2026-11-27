@@ -86,6 +86,11 @@ window.qs-wifi-qr-window {{
     color: var(--color-foreground-disabled);
 }}
 
+/* Unlit bars behind a partial Wi-Fi signal; keeps the front icon's colour */
+.qs-wifi-dim {{
+    opacity: 0.28;
+}}
+
 /* Bluetooth disabled state override */
 .qs-bt-disabled-icon {{
     color: var(--color-foreground-disabled);

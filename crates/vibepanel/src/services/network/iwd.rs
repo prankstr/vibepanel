@@ -2236,14 +2236,12 @@ fn send_network_update(update: IwdUpdate) {
 /// Convert IWD signal strength (dBm * 100) to percentage (0-100).
 ///
 /// IWD reports signal strength as dBm multiplied by 100 (e.g., -5000 = -50 dBm).
-/// This function uses a linear approximation:
-/// - -100 dBm (very weak) maps to 0%
-/// - -50 dBm (excellent) maps to 100%
-///
-/// The formula is: percent = 2 * (dBm + 100), clamped to [0, 100].
+/// Uses NetworkManager's scale (`nm_wifi_utils_level_to_quality`): linear from
+/// -100 dBm (0%) to -40 dBm (100%), so both backends show the same percentage
+/// and icon level for the same signal.
 fn dbm_to_percent(dbm_times_100: i16) -> i32 {
-    let dbm = dbm_times_100 as f64 / 100.0;
-    ((2.0 * (dbm + 100.0)) as i32).clamp(0, 100)
+    let dbm = (f64::from(dbm_times_100) / 100.0).clamp(-100.0, -40.0);
+    100 - (100.0 * (-40.0 - dbm) / 60.0) as i32
 }
 
 #[cfg(test)]
@@ -2254,18 +2252,16 @@ mod tests {
     fn test_dbm_to_percent() {
         let cases = [
             ("-100 dBm floor", -10000, 0),
-            ("-50 dBm ceiling", -5000, 100),
-            ("-75 dBm midpoint", -7500, 50),
-            ("-60 dBm", -6000, 80),
-            ("-90 dBm", -9000, 20),
-            ("-40 dBm clamps high", -4000, 100),
+            ("-40 dBm ceiling", -4000, 100),
+            ("-70 dBm midpoint", -7000, 50),
+            ("-64 dBm full bars", -6400, 60),
+            ("-76 dBm two bars", -7600, 40),
+            ("-50 dBm rounds like NM", -5000, 84),
+            ("-75 dBm rounds like NM", -7500, 42),
             ("-30 dBm clamps high", -3000, 100),
             ("0 dBm clamps high", 0, 100),
             ("-110 dBm clamps low", -11000, 0),
             ("-150 dBm clamps low", -15000, 0),
-            ("-55 dBm good", -5500, 90),
-            ("-70 dBm fair", -7000, 60),
-            ("-85 dBm weak", -8500, 30),
         ];
 
         for (name, dbm_times_100, expected) in cases {

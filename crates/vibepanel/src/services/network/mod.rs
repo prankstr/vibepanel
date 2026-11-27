@@ -365,28 +365,16 @@ impl NetworkSnapshot {
         }
     }
 
-    /// Signal strength of the active network, or 0 if not connected.
-    pub fn active_strength(&self) -> i32 {
+    /// Signal strength of the active network, or `None` if not connected or
+    /// not yet known.
+    pub fn active_strength(&self) -> Option<i32> {
         match self {
-            Self::NetworkManager(inner) => {
-                if inner.wifi.connected {
-                    inner.wifi.strength
-                } else {
-                    0
-                }
-            }
-            Self::Iwd(inner) => {
-                if inner.connected() {
-                    inner
-                        .networks
-                        .iter()
-                        .find(|n| n.active)
-                        .map(|n| n.strength)
-                        .unwrap_or(0)
-                } else {
-                    0
-                }
-            }
+            // `ssid` and `strength` come from the same active-network lookup.
+            Self::NetworkManager(inner) => inner.wifi.ssid.as_ref().map(|_| inner.wifi.strength),
+            Self::Iwd(inner) => inner
+                .connected()
+                .then(|| inner.networks.iter().find(|n| n.active).map(|n| n.strength))
+                .flatten(),
         }
     }
 
@@ -673,6 +661,32 @@ fn detect_backend() -> NetworkBackend {
     NetworkBackend::NetworkManager(NmService::global())
 }
 
+/// Return a Wi-Fi icon name based on signal strength percentage.
+pub fn wifi_strength_icon(level: i32) -> &'static str {
+    if level >= 80 {
+        "network-wireless-signal-excellent-symbolic"
+    } else if level >= 60 {
+        "network-wireless-signal-good-symbolic"
+    } else if level >= 40 {
+        "network-wireless-signal-ok-symbolic"
+    } else if level >= 20 {
+        "network-wireless-signal-weak-symbolic"
+    } else {
+        "network-wireless-signal-none-symbolic"
+    }
+}
+
+/// Minimum change in signal percentage worth publishing within one icon level.
+const WIFI_STRENGTH_NOTIFY_DELTA: i32 = 5;
+
+/// Whether a live strength update should be published. Small fluctuations that
+/// keep the same icon are ignored to avoid redraw churn.
+pub(crate) fn wifi_strength_change_significant(old: i32, new: i32) -> bool {
+    old != new
+        && (wifi_strength_icon(old) != wifi_strength_icon(new)
+            || (new - old).abs() >= WIFI_STRENGTH_NOTIFY_DELTA)
+}
+
 /// Extract a D-Bus object path (`type o`) from a [`glib::Variant`] as a `String`.
 pub(super) fn objpath_to_string(v: &glib::Variant) -> Option<String> {
     v.get::<glib::variant::ObjectPath>()
@@ -701,5 +715,27 @@ mod tests {
         assert_eq!(credentials.authentication, WifiAuthentication::Open);
         assert!(active_open_wifi_credentials(&[network(SecurityType::Secured)]).is_err());
         assert!(active_open_wifi_credentials(&[]).is_err());
+    }
+
+    #[test]
+    fn wifi_strength_change_significance() {
+        let cases = [
+            ("unchanged", 50, 50, false),
+            ("small drift within a level", 50, 53, false),
+            ("small drift down within a level", 53, 50, false),
+            ("large drift within a level", 80, 90, true),
+            ("crossing a level boundary", 79, 80, true),
+            ("crossing a level boundary down", 40, 39, true),
+            ("small drift from a measured 0", 0, 2, false),
+            ("small drift to a measured 0", 3, 0, false),
+            ("from a measured 0 to a new level", 0, 60, true),
+        ];
+        for (name, old, new, expected) in cases {
+            assert_eq!(
+                wifi_strength_change_significant(old, new),
+                expected,
+                "{name}"
+            );
+        }
     }
 }

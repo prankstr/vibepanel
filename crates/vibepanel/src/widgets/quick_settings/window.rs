@@ -46,12 +46,12 @@ use super::audio_card::{
 use super::bar_widget::{PowerCommandsConfig, QuickSettingsCardsConfig, QuickSettingsConfig};
 use super::bluetooth_card::{self, BluetoothCardState, bt_icon_name, build_bluetooth_details};
 use super::brightness_card::{self, BrightnessCardState, build_brightness_row};
-use super::components::ToggleCard;
+use super::components::{TOGGLE_ICON_CLASSES, ToggleCard};
 use super::idle_inhibitor_card::{self, IdleInhibitorCardState};
 use super::mic_card::{self, MicCardState, build_mic_details, build_mic_hint_label, build_mic_row};
 use super::network_card::{
-    self, NetworkCardState, build_network_subtitle, build_wifi_details, is_material_unified,
-    resolve_material_network_icon,
+    self, NetworkCardState, WifiSignalIcon, build_network_subtitle, build_wifi_details,
+    is_material_unified, resolve_material_network_icon,
 };
 use super::power_card::{self, PowerCardExpanderState};
 use super::ui_helpers::{AccordionManager, ExpandableCard, collapse_revealer_instant};
@@ -682,24 +682,32 @@ impl QuickSettingsWindow {
             network_card.toggle.set_sensitive(false);
         }
 
+        // Stack the header icon on a dimmed full-signal copy (see WifiSignalIcon).
+        let icon_parent = network_card
+            .icon_handle
+            .widget()
+            .parent()
+            .and_downcast::<gtk4::Box>()
+            .expect("toggle card icon lives in its content box");
+        icon_parent.remove(&network_card.icon_handle.widget());
+        let signal_icon =
+            WifiSignalIcon::new(network_card.icon_handle.clone(), &TOGGLE_ICON_CLASSES);
+        signal_icon.set_active(icon_active);
+        icon_parent.prepend(signal_icon.widget());
+
         if !wifi_enabled && !wired_connected && !snapshot.mobile_active() {
             // Only apply wifi-disabled styling when actually showing a wifi icon
             let showing_wifi_icon = !is_material_unified(&snapshot)
                 || (!snapshot.mobile_active() && !snapshot.mobile_connecting());
             if showing_wifi_icon {
-                network_card
-                    .icon_handle
-                    .widget()
-                    .add_css_class(qs::WIFI_DISABLED_ICON);
+                signal_icon.add_css_class(qs::WIFI_DISABLED_ICON);
             }
         }
 
         // Show spinner when wifi or cellular is connecting/scanning
         let wifi_connecting = snapshot.wifi_connecting();
         let is_connecting = wifi_connecting || snapshot.mobile_connecting();
-        if is_connecting {
-            network_card.icon_handle.set_spinning(true);
-        }
+        signal_icon.update(icon_name, is_connecting);
 
         {
             let toggle = network_card.toggle.clone();
@@ -714,7 +722,7 @@ impl QuickSettingsWindow {
         }
 
         *qs.network.base.toggle.borrow_mut() = Some(network_card.toggle.clone());
-        *qs.network.base.card_icon.borrow_mut() = Some(network_card.icon_handle.clone());
+        *qs.network.signal_icon.borrow_mut() = Some(signal_icon);
         *qs.network.base.arrow.borrow_mut() = network_card.expander_icon.clone();
         *qs.network.title_label.borrow_mut() = Some(network_card.title.clone());
         *qs.network.subtitle_label.borrow_mut() = Some(subtitle_result.label);
