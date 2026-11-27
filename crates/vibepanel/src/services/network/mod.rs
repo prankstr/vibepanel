@@ -663,7 +663,7 @@ fn detect_backend() -> NetworkBackend {
 
 /// Return a Wi-Fi icon name based on signal strength percentage.
 pub fn wifi_strength_icon(level: i32) -> &'static str {
-    if level >= 70 {
+    if level >= 80 {
         "network-wireless-signal-excellent-symbolic"
     } else if level >= 60 {
         "network-wireless-signal-good-symbolic"
@@ -724,7 +724,7 @@ mod tests {
             ("small drift within a level", 50, 53, false),
             ("small drift down within a level", 53, 50, false),
             ("large drift within a level", 80, 90, true),
-            ("crossing a level boundary", 69, 70, true),
+            ("crossing a level boundary", 79, 80, true),
             ("crossing a level boundary down", 40, 39, true),
             ("small drift from a measured 0", 0, 2, false),
             ("small drift to a measured 0", 3, 0, false),

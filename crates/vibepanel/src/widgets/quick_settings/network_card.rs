@@ -201,7 +201,7 @@ impl WifiSignalIcon {
 
 /// Map cellular signal quality (0–100%) to a symbolic icon name.
 ///
-/// Thresholds (75/55/35/15) are higher than Wi-Fi (70/60/40/20) because
+/// Thresholds (75/55/35/15) are lower than Wi-Fi (80/60/40/20) because
 /// ModemManager reports a coarser, already-processed percentage where
 /// values below ~15% typically mean no usable signal, whereas Wi-Fi
 /// RSSI-derived percentages spread more evenly across the range.
@@ -2457,8 +2457,8 @@ mod tests {
         let wifi_cases = [
             ("wifi 100 excellent", 100, "excellent"),
             ("wifi 80 excellent", 80, "excellent"),
-            ("wifi 70 excellent", 70, "excellent"),
-            ("wifi 69 good", 69, "good"),
+            ("wifi 79 good", 79, "good"),
+            ("wifi 70 good", 70, "good"),
             ("wifi 60 good", 60, "good"),
             ("wifi 59 ok", 59, "ok"),
             ("wifi 40 ok", 40, "ok"),
