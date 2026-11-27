@@ -479,11 +479,8 @@ pub mod qs {
     /// Network row shared by Wi-Fi, Ethernet, and Mobile sections (`.qs-network-row`).
     pub const NETWORK_ROW: &str = "qs-network-row";
 
-    /// Wi-Fi base signal icon (dimmed, full bars) (`.qs-wifi-base`).
-    pub const WIFI_BASE: &str = "qs-wifi-base";
-
-    /// Wi-Fi overlay signal icon (highlighted, actual bars) (`.qs-wifi-overlay`).
-    pub const WIFI_OVERLAY: &str = "qs-wifi-overlay";
+    /// Dimmed full-signal copy behind a partial Wi-Fi icon (`.qs-wifi-dim`).
+    pub const WIFI_DIM: &str = "qs-wifi-dim";
 
     /// Row menu content container (`.qs-row-menu-content`).
     pub const ROW_MENU_CONTENT: &str = "qs-row-menu-content";

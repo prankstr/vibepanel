@@ -541,6 +541,13 @@ pub struct ToggleCardResult {
     pub expander_icon: Option<IconHandle>,
 }
 
+/// Classes a toggle card's icon is created with, before any active styling.
+pub const TOGGLE_ICON_CLASSES: [&str; 3] = [
+    crate::styles::icon::TEXT,
+    crate::styles::qs::TOGGLE_ICON,
+    crate::styles::color::PRIMARY,
+];
+
 /// Builder for toggle cards (Wi-Fi, Bluetooth, VPN, etc.).
 ///
 /// Creates a card with a toggle button, icon, label, optional subtitle,
@@ -643,7 +650,7 @@ impl ToggleCard {
 
     /// Build the toggle card.
     pub fn build(self) -> ToggleCardResult {
-        use crate::styles::{button, card, color, icon, qs};
+        use crate::styles::{button, card, color, qs};
         use crate::widgets::base::trigger_ripple_from_gesture;
         use gtk4::{Align, ToggleButton};
 
@@ -668,10 +675,7 @@ impl ToggleCard {
 
         // Icon
         let icons = IconsService::global();
-        let icon_handle = icons.create_icon(
-            &self.icon_name,
-            &[icon::TEXT, qs::TOGGLE_ICON, color::PRIMARY],
-        );
+        let icon_handle = icons.create_icon(&self.icon_name, &TOGGLE_ICON_CLASSES);
         if self.icon_active {
             icon_handle.add_css_class(crate::styles::state::ICON_ACTIVE);
             icon_handle.remove_css_class(color::PRIMARY);

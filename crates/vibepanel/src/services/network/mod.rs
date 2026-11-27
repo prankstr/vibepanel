@@ -365,28 +365,16 @@ impl NetworkSnapshot {
         }
     }
 
-    /// Signal strength of the active network, or 0 if not connected.
-    pub fn active_strength(&self) -> i32 {
+    /// Signal strength of the active network, or `None` if not connected or
+    /// not yet known.
+    pub fn active_strength(&self) -> Option<i32> {
         match self {
-            Self::NetworkManager(inner) => {
-                if inner.wifi.connected {
-                    inner.wifi.strength
-                } else {
-                    0
-                }
-            }
-            Self::Iwd(inner) => {
-                if inner.connected() {
-                    inner
-                        .networks
-                        .iter()
-                        .find(|n| n.active)
-                        .map(|n| n.strength)
-                        .unwrap_or(0)
-                } else {
-                    0
-                }
-            }
+            // `ssid` and `strength` come from the same active-network lookup.
+            Self::NetworkManager(inner) => inner.wifi.ssid.as_ref().map(|_| inner.wifi.strength),
+            Self::Iwd(inner) => inner
+                .connected()
+                .then(|| inner.networks.iter().find(|n| n.active).map(|n| n.strength))
+                .flatten(),
         }
     }
 

@@ -28,7 +28,7 @@ use super::ui_helpers::{
     focused_row_key, present_row_menu_popover, restore_row_focus, set_icon_active, set_list_rows,
 };
 use super::window::current_quick_settings_window;
-use crate::services::icons::{IconHandle, IconsService};
+use crate::services::icons::{IconHandle, IconsService, material_symbol_name};
 use crate::services::network::{
     AUTH_FAILURE_REASON, CONNECTION_FAILURE_REASON, NetworkConnectionState, NetworkService,
     NetworkSnapshot, SecurityType, WifiNetwork, wifi_strength_icon,
@@ -47,6 +47,8 @@ pub struct NetworkIconContext {
     pub mobile_is_primary: bool,
     pub has_modem_device: bool,
     pub mobile_signal_quality: Option<u32>,
+    /// Signal strength of the active Wi-Fi network, if known.
+    pub wifi_strength: Option<i32>,
 }
 
 impl NetworkIconContext {
@@ -61,6 +63,7 @@ impl NetworkIconContext {
             mobile_is_primary: snapshot.mobile_is_primary(),
             has_modem_device: snapshot.has_modem_device(),
             mobile_signal_quality: snapshot.mobile_signal_quality(),
+            wifi_strength: snapshot.active_strength(),
         }
     }
 
@@ -78,6 +81,7 @@ impl NetworkIconContext {
             mobile_is_primary: false,
             has_modem_device: false,
             mobile_signal_quality: None,
+            wifi_strength: snapshot.active_strength(),
         }
     }
 }
@@ -104,9 +108,94 @@ pub fn network_icon_name(ctx: &NetworkIconContext) -> &'static str {
     } else if !ctx.wifi_enabled {
         "network-wireless-offline-symbolic"
     } else if ctx.connected {
-        "network-wireless-signal-excellent-symbolic"
+        // Unknown strength (e.g. a fresh connection) shows full bars, not "no signal".
+        ctx.wifi_strength.map_or(
+            "network-wireless-signal-excellent-symbolic",
+            wifi_strength_icon,
+        )
     } else {
         "network-wireless-offline-symbolic"
+    }
+}
+
+const WIFI_FULL_ICON: &str = "network-wireless-signal-excellent-symbolic";
+
+/// Whether the dimmed full-signal copy behind a Wi-Fi icon should show.
+///
+/// Material glyphs can only be one colour, so partial levels are drawn on top
+/// of a dimmed full-signal glyph. GTK themes already dim the missing bars.
+fn wifi_dim_visible(uses_material: bool, icon_name: &str, spinning: bool) -> bool {
+    uses_material
+        && !spinning
+        && icon_name.starts_with("network-wireless-signal-")
+        && material_symbol_name(icon_name) != material_symbol_name(WIFI_FULL_ICON)
+}
+
+/// A network icon stacked on a dimmed full-signal Wi-Fi copy.
+///
+/// The dimmed copy carries the same classes as the front icon, so it follows
+/// its colour (accent, disabled, custom CSS) and only adds opacity.
+#[derive(Clone)]
+pub struct WifiSignalIcon {
+    overlay: Overlay,
+    front: IconHandle,
+    dim: IconHandle,
+}
+
+impl WifiSignalIcon {
+    /// Create the front icon and its dimmed copy with the same classes.
+    pub fn create(icon_name: &str, classes: &[&str]) -> Self {
+        Self::new(
+            IconsService::global().create_icon(icon_name, classes),
+            classes,
+        )
+    }
+
+    /// Wrap an existing `front`; `classes` must be the classes it was created with.
+    pub fn new(front: IconHandle, classes: &[&str]) -> Self {
+        let dim = IconsService::global().create_icon(WIFI_FULL_ICON, classes);
+        // Root only: classes on both root and backend would compound the opacity.
+        dim.widget().add_css_class(qs::WIFI_DIM);
+        dim.widget().set_visible(false);
+
+        let overlay = Overlay::new();
+        overlay.set_child(Some(&dim.widget()));
+        overlay.add_overlay(&front.widget());
+        overlay.set_measure_overlay(&front.widget(), true);
+        Self {
+            overlay,
+            front,
+            dim,
+        }
+    }
+
+    pub fn widget(&self) -> &Overlay {
+        &self.overlay
+    }
+
+    pub fn add_css_class(&self, class: &str) {
+        self.front.add_css_class(class);
+        self.dim.add_css_class(class);
+    }
+
+    pub fn remove_css_class(&self, class: &str) {
+        self.front.remove_css_class(class);
+        self.dim.remove_css_class(class);
+    }
+
+    pub fn set_active(&self, active: bool) {
+        set_icon_active(&self.front, active);
+        set_icon_active(&self.dim, active);
+    }
+
+    /// Show `icon_name` (or the spinner) and decide whether the dimmed copy shows.
+    pub fn update(&self, icon_name: &str, spinning: bool) {
+        self.front.set_icon(icon_name);
+        self.front.set_spinning(spinning);
+        let uses_material = IconsService::global().uses_material();
+        self.dim
+            .widget()
+            .set_visible(wifi_dim_visible(uses_material, icon_name, spinning));
     }
 }
 
@@ -357,6 +446,8 @@ pub struct NetworkCardState {
     pub base: ExpandableCardBase,
     pub title_label: RefCell<Option<Label>>,
     pub subtitle_label: RefCell<Option<Label>>,
+    /// Card header icon; used instead of `base.card_icon`.
+    pub signal_icon: RefCell<Option<WifiSignalIcon>>,
     pub scan_button: RefCell<Option<Rc<ScanButton>>>,
     pub password_box: RefCell<Option<GtkBox>>,
     pub password_label: RefCell<Option<Label>>,
@@ -393,6 +484,7 @@ impl NetworkCardState {
             base: ExpandableCardBase::new(),
             title_label: RefCell::new(None),
             subtitle_label: RefCell::new(None),
+            signal_icon: RefCell::new(None),
             scan_button: RefCell::new(None),
             password_box: RefCell::new(None),
             password_label: RefCell::new(None),
@@ -1092,7 +1184,6 @@ pub fn populate_wifi_list(
         return;
     }
 
-    let icons = IconsService::global();
     let target_ssid = state.password_target_ssid.borrow().clone();
     let connecting_ssid = snapshot.connecting_ssid();
     let failed_ssid = snapshot.failed_ssid();
@@ -1121,54 +1212,18 @@ pub fn populate_wifi_list(
         }
         extra_parts.push(format!("{}%", net.strength));
 
-        // Create signal strength icon
         let strength_icon_name = wifi_strength_icon(net.strength);
-
-        // Check if this is a partial signal that needs the overlay treatment
-        let needs_overlay = matches!(
-            strength_icon_name,
-            "network-wireless-signal-none-symbolic"
-                | "network-wireless-signal-weak-symbolic"
-                | "network-wireless-signal-ok-symbolic"
-                | "network-wireless-signal-good-symbolic"
-        );
-
         let icon_color = if net.active || is_connecting {
             color::ACCENT
         } else {
             color::PRIMARY
         };
 
-        let leading_icon: gtk4::Widget = if is_connecting {
-            // Connecting: show a spinner in place of the signal icon.
-            let icon_handle =
-                icons.create_icon(strength_icon_name, &[icon::TEXT, row::QS_ICON, icon_color]);
-            icon_handle.set_spinning(true);
-            icon_handle.widget()
-        } else if icons.uses_material() && needs_overlay {
-            // Create base icon (full signal, dimmed)
-            let base_handle = icons.create_icon(
-                "network-wireless-signal-excellent-symbolic",
-                &[icon::TEXT, row::QS_ICON, qs::WIFI_BASE, color::DISABLED],
-            );
-
-            // Create overlay icon (actual signal level, highlighted)
-            let overlay_handle = icons.create_icon(
-                strength_icon_name,
-                &[icon::TEXT, row::QS_ICON, qs::WIFI_OVERLAY, icon_color],
-            );
-
-            // Stack them using Overlay
-            let overlay = Overlay::new();
-            overlay.set_child(Some(&base_handle.widget()));
-            overlay.add_overlay(&overlay_handle.widget());
-            overlay.upcast()
-        } else {
-            // Simple single icon for full signal or non-Material themes
-            let icon_handle =
-                icons.create_icon(strength_icon_name, &[icon::TEXT, row::QS_ICON, icon_color]);
-            icon_handle.widget()
-        };
+        // Connecting rows show a spinner in place of the signal icon.
+        let signal_icon =
+            WifiSignalIcon::create(strength_icon_name, &[icon::TEXT, row::QS_ICON, icon_color]);
+        signal_icon.update(strength_icon_name, is_connecting);
+        let leading_icon: gtk4::Widget = signal_icon.widget().clone().upcast();
 
         // Saved or active networks get a menu with their other actions
         let menu_key = wifi_menu_key(net, connecting_ssid);
@@ -2030,11 +2085,10 @@ pub fn on_network_changed(
     }
 
     // Update Wi-Fi card icon and its active state class
-    if let Some(icon_handle) = state.base.card_icon.borrow().as_ref() {
+    if let Some(icon_handle) = state.signal_icon.borrow().as_ref() {
         // Service unavailable - use warning styling
         if !snapshot.available() {
-            icon_handle.set_icon("network-wireless-offline-symbolic");
-            icon_handle.set_spinning(false);
+            icon_handle.update("network-wireless-offline-symbolic", false);
             icon_handle.add_css_class(state::SERVICE_UNAVAILABLE);
             icon_handle.remove_css_class(qs::WIFI_DISABLED_ICON);
             icon_handle.remove_css_class(state::ICON_ACTIVE);
@@ -2042,7 +2096,6 @@ pub fn on_network_changed(
             icon_handle.remove_css_class(state::SERVICE_UNAVAILABLE);
 
             let material_unified = is_material_unified(snapshot);
-            icon_handle.set_icon(resolve_material_network_icon(snapshot));
 
             // Spinner: show when wifi or cellular is connecting, but only
             // when the expanded details aren't visible (they have their own
@@ -2055,12 +2108,15 @@ pub fn on_network_changed(
                 .borrow()
                 .as_ref()
                 .is_some_and(|r| r.reveals_child());
-            icon_handle.set_spinning(is_connecting && !expanded);
+            icon_handle.update(
+                resolve_material_network_icon(snapshot),
+                is_connecting && !expanded,
+            );
 
             let icon_active = (enabled && snapshot.connected())
                 || snapshot.wired_connected()
                 || snapshot.mobile_active();
-            set_icon_active(icon_handle, icon_active);
+            icon_handle.set_active(icon_active);
 
             // Disabled styling: only when actually showing a wifi icon, not
             // when displaying a cellular or combined icon.
@@ -2159,6 +2215,7 @@ mod tests {
             mobile_is_primary: false,
             has_modem_device: false,
             mobile_signal_quality: None,
+            wifi_strength: None,
         }
     }
 
@@ -2171,9 +2228,46 @@ mod tests {
                 "wifi connected",
                 NetworkIconContext {
                     connected: true,
+                    wifi_strength: Some(85),
                     ..test_icon_ctx()
                 },
                 "network-wireless-signal-excellent-symbolic",
+            ),
+            (
+                "wifi connected at 45%",
+                NetworkIconContext {
+                    connected: true,
+                    wifi_strength: Some(45),
+                    ..test_icon_ctx()
+                },
+                "network-wireless-signal-ok-symbolic",
+            ),
+            (
+                "wifi connected at a measured 0%",
+                NetworkIconContext {
+                    connected: true,
+                    wifi_strength: Some(0),
+                    ..test_icon_ctx()
+                },
+                "network-wireless-signal-none-symbolic",
+            ),
+            (
+                "wifi connected with unknown strength",
+                NetworkIconContext {
+                    connected: true,
+                    ..test_icon_ctx()
+                },
+                "network-wireless-signal-excellent-symbolic",
+            ),
+            (
+                "wired beats weak wifi",
+                NetworkIconContext {
+                    connected: true,
+                    wired_connected: true,
+                    wifi_strength: Some(25),
+                    ..test_icon_ctx()
+                },
+                wired,
             ),
             ("wifi disconnected", test_icon_ctx(), wireless_offline),
             (
@@ -2294,6 +2388,67 @@ mod tests {
 
         for (name, ctx, expected) in cases {
             assert_eq!(network_icon_name(&ctx), expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn wifi_dim_copy_only_behind_partial_material_signal() {
+        let weak = "network-wireless-signal-weak-symbolic";
+        let cases = [
+            ("material weak", true, weak, false, true),
+            (
+                "material ok",
+                true,
+                "network-wireless-signal-ok-symbolic",
+                false,
+                true,
+            ),
+            (
+                "material none",
+                true,
+                "network-wireless-signal-none-symbolic",
+                false,
+                true,
+            ),
+            // Material draws "good" with the full glyph.
+            (
+                "material good",
+                true,
+                "network-wireless-signal-good-symbolic",
+                false,
+                false,
+            ),
+            (
+                "material full",
+                true,
+                "network-wireless-signal-excellent-symbolic",
+                false,
+                false,
+            ),
+            ("gtk theme", false, weak, false, false),
+            ("connecting spinner", true, weak, true, false),
+            (
+                "wifi off or unavailable",
+                true,
+                "network-wireless-offline-symbolic",
+                false,
+                false,
+            ),
+            ("wired", true, "network-wired-symbolic", false, false),
+            (
+                "cellular",
+                true,
+                "network-cellular-signal-weak-symbolic",
+                false,
+                false,
+            ),
+        ];
+        for (name, material, icon_name, spinning, expected) in cases {
+            assert_eq!(
+                wifi_dim_visible(material, icon_name, spinning),
+                expected,
+                "{name}"
+            );
         }
     }
 
